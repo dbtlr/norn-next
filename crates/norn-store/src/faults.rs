@@ -9,7 +9,7 @@
 //!
 //! So the seam lives here. [`induced_failure`] is the arming surface a suite
 //! calls, and the rest of this file is what the store's own paths read: the
-//! thread-local and process-wide arms, the two abort points the increment
+//! thread-local and process-wide arms, the abort points the increment
 //! checks, and the condition a store schema's statement list meets. **Two
 //! arrangements are met at the driver seam rather than here** — the page cap an
 //! open applies, and the busy a pinned-scalar read reports — so the arms behind
@@ -66,12 +66,13 @@ use crate::store::Store;
 /// The whole module lives behind the `induced-failure` feature, off by
 /// default, so a shipped build carries none of the hooks these arrangements
 /// reach: the out-of-band executor here, the busy-injection a pinned-scalar
-/// read checks on every call, the two tears the increment checks — between two
-/// entries and at a changeset's own boundaries — the page cap an open applies,
+/// read checks on every call, the tears the increment checks — between two
+/// entries, at a changeset's own boundaries, and between two chunks of its
+/// link-health re-decision — the page cap an open applies,
 /// the damage the store schema's statement list meets, and the write a feed
 /// page read checks for.
 ///
-/// **Three of the arrangements are per-thread and the rest are per-process**, and
+/// **Some of the arrangements are per-thread and the rest are per-process**, and
 /// the split is not incidental. A tear armed and met on one thread is the
 /// store's own suite arranging its own call. An arrangement a *host* has to
 /// meet is armed by a suite thread and fires on a worker thread the host owns,

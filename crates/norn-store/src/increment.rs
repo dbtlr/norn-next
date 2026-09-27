@@ -147,8 +147,8 @@ pub struct IncrementOutcome {
     /// the store's path order selects — raw where its root tells spellings
     /// apart, folded by ASCII case where it folds — which is the space every
     /// finding in the store is filed in. This is the resolution axis of the
-    /// findings maintenance this changeset implies, and what a caller re-records
-    /// against.
+    /// findings maintenance this changeset implies: the classes whose
+    /// suffix-addressed links the store re-decided the link health of.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
@@ -160,7 +160,8 @@ pub struct IncrementOutcome {
     /// death of the old path beside a write of the new. This is the path axis
     /// of the findings maintenance this changeset implies — a finding keyed by
     /// the exact path a path-addressed link spells is reached here and by no
-    /// class.
+    /// class, and the store re-decided the link health of the path-addressed
+    /// links spelling each.
     pub affected_paths: BTreeSet<PathKey>,
     /// The findings the changeset discarded on every axis — those recorded
     /// about a changed path, those in [`IncrementOutcome::affected_classes`],

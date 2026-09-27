@@ -56,12 +56,16 @@
 //! anchors of the links naming one document, and the suffixes of the
 //! candidates the findings carry. A statement with nothing to read is not run.
 //!
-//! **A dormant carrier.** Its consuming layer is the re-decision
-//! [ADR 0027] rules into the changeset: after every entry of a changeset is
-//! written, the store judges the links the changeset reaches and files these
-//! findings in the same transaction. That re-decision is not built, so no
-//! write reaches this module yet: [`crate::Request::judge_selected_links`] is
-//! its one door, and the plan seam bars each statement it runs.
+//! # The changeset re-decides what it reaches
+//!
+//! After every entry of a changeset is written, the store judges the links
+//! the changeset reaches and files these findings in the same transaction
+//! ([`redecide`], [ADR 0027]): the links its written documents hold, read a
+//! chunk at a time off the generation the write stamped them with, then the
+//! links each class and each path key it changed selects, read a chunk at a
+//! time too. [`crate::Request::judge_selected_links`] is the door that judges
+//! a selection and files nothing, and the plan seam bars each statement
+//! either runs.
 //!
 //! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 

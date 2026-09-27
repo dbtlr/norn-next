@@ -283,12 +283,12 @@ impl<'a> Request<'a> {
     ///   write — and the findings keyed by any of those paths go with it. No
     ///   class range reaches these: a path key is matched by equality alone.
     ///
-    /// The three axes are what make **discard-then-record** total. The store
-    /// discards and never records: minting a finding is a reading of the vault
-    /// the caller performs, so [`IncrementOutcome::affected_classes`] and
-    /// [`IncrementOutcome::affected_paths`] report the class and path scopes,
-    /// and the subject scope needs no report because it is the changeset the
-    /// caller just built, entry by entry.
+    /// The three axes are what make **discard-then-record** total. Every
+    /// finding the host files is a reading of the vault the host performs and
+    /// hands over beside the entries; [`IncrementOutcome::affected_classes`]
+    /// and [`IncrementOutcome::affected_paths`] report the class and path
+    /// scopes, and the subject scope needs no report because it is the
+    /// changeset the caller just built, entry by entry.
     ///
     /// A finding in no class and keyed by no path — a vault-schema violation,
     /// say — is reachable on the subject axis alone: it dies when the
@@ -297,6 +297,31 @@ impl<'a> Request<'a> {
     /// from `findings`, so a finding about a path no document has is recordable
     /// and no row-existence ordering matters; what takes a finding is a
     /// statement the store runs and counts.
+    ///
+    /// # Link health is re-decided and recorded by the store itself
+    ///
+    /// **Link-health findings are the one family the store judges and
+    /// records** ([ADR 0027]): broken, ambiguous and missing an anchor, each
+    /// about one link. After every entry is written, the three discards have
+    /// run and the findings handed over are recorded, the store re-decides
+    /// every link the changeset reaches — each link a written document holds,
+    /// each suffix-addressed link whose keys fall in an affected class, and
+    /// each path-addressed link spelling an affected path — under the
+    /// ambiguity-ignore globs `declared` names, and records a finding for
+    /// each that is unhealthy, in the same transaction. Every finding it
+    /// replaces is already gone when it records one: the subject discard took
+    /// the findings at each written path, and every link-health finding
+    /// carries all its link's class and path keys, so the class or path
+    /// discard that reached any of them took it. Each link is judged once
+    /// however many ways the changeset reaches it.
+    ///
+    /// The re-decision reads, judges and records a chunk of links at a time,
+    /// resolving each distinct key once for the whole changeset, so what it
+    /// holds is a chunk and one summary per key resolved; its work is the
+    /// links it reaches plus the candidates they resolve against. A hub stem
+    /// many links name costs those links inside the transaction.
+    ///
+    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     ///
     /// # Streaming, and what a changeset holds
     ///
@@ -307,7 +332,8 @@ impl<'a> Request<'a> {
     /// scalars, and [`IncrementOutcome::affected_classes`] and
     /// [`IncrementOutcome::affected_paths`] — the two changeset-sized
     /// accumulations, holding a key per distinct stem and per distinct path
-    /// among the changed paths.
+    /// among the changed paths — and, once the entries are written, the
+    /// link-health re-decision's chunk and key summaries.
     ///
     /// **The write lock is held across the caller's whole iterator.** A
     /// changeset is atomic because it is one transaction, so however long the
@@ -1295,12 +1321,12 @@ impl<'a> Request<'a> {
     /// key once across them ([`KeySummaries`]). A class or path key spelled
     /// outside the store's key space is refused.
     ///
-    /// **A dormant carrier.** Its consuming layer is the re-decision
-    /// [ADR 0027] rules into [`Request::apply_increment`], which selects the
-    /// links a changeset reaches — its written documents' links, and the links
-    /// held under the classes and paths it changes — and files these findings
-    /// in its transaction. That re-decision is not built, so only the suite
-    /// calls this.
+    /// The re-decision [ADR 0027] rules into [`Request::apply_increment`]
+    /// runs this judgment over the links a changeset reaches — its written
+    /// documents' links, and the links held under the classes and paths it
+    /// changes — and files what it finds in the changeset's transaction. This
+    /// door judges and files nothing; a class or a path key is read here a
+    /// chunk at a time, as the re-decision reads it.
     ///
     /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     pub fn judge_selected_links(

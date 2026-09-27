@@ -48,8 +48,8 @@
 //! whole of it.
 //!
 //! [`Counter::FrontmatterProjections`] is the only counter here that names a
-//! computation, and **canonical-JSON projection is storage encoding rather than
-//! recomputation.** A value tree is what the caller
+//! computation over what the caller handed over, and **canonical-JSON
+//! projection is storage encoding rather than recomputation.** A value tree is what the caller
 //! supplied; projecting it to canonical JSON is how a value tree is written into
 //! a `TEXT` column, the same act as binding a length to an integer column and
 //! only larger. It learns nothing about the document that the caller did not
@@ -58,11 +58,21 @@
 //! the bar for every document with frontmatter regardless of where its facts
 //! came from.
 //!
+//! The link-health counters — [`Counter::LinksRedecided`],
+//! [`Counter::LinkHealthKeysResolved`], [`Counter::LinkHealthCandidatesRead`]
+//! — name the store's own judgment, which no applier composes: the store
+//! judges the links a changeset reaches against the documents it holds
+//! ([ADR 0027]) and files what it finds, identically under either mark. They
+//! count its work, so a write-work bar reads how far a write's re-decision
+//! reached rather than a clock.
+//!
 //! So the bar binds where the two marks could differ, and today they do not:
 //! **the same changeset reads the same counters under either mark.** That is the
 //! statement the store makes true by composing supplied facts under both and
 //! re-deriving under neither, and it is what a suite asserts rather than a
 //! promise a reviewer has to take.
+//!
+//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 
 /// One derivation counter.
 ///
