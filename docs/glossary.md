@@ -172,6 +172,10 @@ _Avoid_: Event queue, event bus
 **Store epoch**:
 The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
+**Cursor envelope**:
+A typed continuation position — where a page stopped, and what it was read against — rendered as one opaque string on the wire. A client holds the string unchanged and never decodes or branches on what it carries.
+_Avoid_: Cursor (unqualified) — elsewhere in this glossary "cursor" names a change-feed position, a different concept from the wire continuation
+
 **Watermark**:
 How far an engine has drained one feed: how many writes the store had committed when the engine last read that feed to its end, qualified by the store epoch that count was taken in. Freshness is how many committed writes a reader's view of the store holds past the watermark.
 _Avoid_: Cursor (a cursor is a feed position, not a store generation)

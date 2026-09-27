@@ -461,6 +461,7 @@
       "binding": {
         "status": "bound",
         "tests": [
+          "crates/norn-host/tests/counter_gate.rs::a_bounded_find_costs_the_same_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_hub_writes_link_health_work_follows_its_in_links_at_both_scales",
           "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
@@ -789,16 +790,13 @@
       "name": "parse-failure-is-not-absence",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A parse failure is a distinct, propagated state and is never collapsed into absence. Every consumer surfaces the diagnostic before treating fields as missing, an unparseable document is never silently dropped from a query result, and no two mutation arms disagree about whether one document is legible.",
+      "property": "A parse failure is a distinct, propagated state and is never collapsed into absence: it is carried into derived state rather than dropping the document, and it is never silently dropped from a query result. A validate answers a finding for it, which is the state's surfacing — a field part or a field sort that judges the document as missing the key adds nothing beyond it, because a find carries the same finding beside the row, in its findings column and through has_finding. Carve-out: a frontmatter tag string the grammar does not describe yields no tag and no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
       "sources": ["NRN-42"],
       "binding": {
-        "status": "dormant",
-        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. A query result exists now, and it does not drop the document: crates/norn-store/src/find/mod.rs pages every document a part admits. It does collapse the state, and that is a known violation carried to the filed task NORN-247: a document whose frontmatter did not read holds no field, so a field part or a field sort judges it as missing the key, and the diagnostic that says why is carried beside it only in the row's findings column, or reached through a separate has_finding part. The consumers that could collapse the state have no verb to do it through, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
-        "grounds": [
-          { "present": "crates/norn-text/src/diagnostic.rs" },
-          { "present": "crates/norn-host/src/production.rs" },
-          { "present": "crates/norn-store/src/find/mod.rs" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/derivation.rs::an_unread_block_plans_an_upsert_and_a_finding_naming_the_spelling_it_read",
+          "crates/norn-host/src/production.rs::every_wholly_unread_block_derives_its_body_facts_and_names_its_cause"
         ]
       }
     },
@@ -1164,7 +1162,7 @@
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
         "status": "dormant",
-        "reason": "the shape this forbids is refused by construction: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another, and what those reads serialize on is that handle's connection rather than the write. One write-side operation does reach the read surface: a schema reload withdraws that entry's reader for the length of the reload, and the same hold that withdraws it takes the entry out of Ready, so a read asked for inside that window is refused with the warming state the reload runs under rather than queued behind the write. What has no subject is the contention this property is stated against. A read's wait for its entry's connection is reported, on the host's own read account rather than by the read — a read carries no wait of its own — and is bounded nowhere; and the long apply that would hold the surface is the host's single applier, which is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "reason": "the shape this forbids is refused by construction on the write side: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another. What has no subject on the write side is the contention this property is stated against: the long apply that would hold the surface is the host's single applier, which is not built, so there is no write path to test a read's wait against. The read side is not carried either at this head: begin_read's first hold of the entry gate and its retake inside a contended acquisition are an ordinary mutex lock, unbounded on their own terms — only the wait for a held connection inside that hold runs to a declared deadline — so a read's wait is not yet bounded end to end. The name the applier takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
         "grounds": [
           { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
@@ -1318,7 +1316,8 @@
           "crates/norn-store/tests/store/find_rows.rs::a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table",
           "crates/norn-store/tests/store/get.rs::a_whole_record_holds_each_collection_and_the_body_to_the_row_ceiling",
           "crates/norn-store/tests/store/find_rows.rs::a_row_cut_by_a_ceiling_says_how_much_the_whole_held",
-          "crates/norn-host/tests/memory.rs::reading_the_gate_profile_holds_the_process_near_its_attach_peak"
+          "crates/norn-host/tests/memory.rs::reading_the_gate_profile_holds_the_process_near_its_attach_peak",
+          "crates/norn-host/tests/memory.rs::the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile"
         ]
       }
     },

@@ -782,6 +782,23 @@ fn a_sidecar_row_the_snapshot_lacks_is_never_answered() {
     )));
 }
 
+/// **A search selecting the vector rung on an entry that is not Ready is
+/// refused before any rung runs.** The read seam serves ready, or settling
+/// once it has derived the facts the read met; an entry that has done
+/// neither — never attached, here — answers no rung at all, so the refusal
+/// is the ordinary answer-reading one rather than a rung composed through the
+/// vector rung's own refusal table.
+#[test]
+fn a_search_over_an_entry_that_is_not_ready_is_refused_before_any_rung_runs() {
+    let (_sandbox, vault) = a_vault("search-not-ready", Some("[engine.semantic]\n"));
+    let host = vault.host();
+
+    let refused = host
+        .search(&searching(&vault, "alpha").with_rungs(exactly([Rung::Vector])))
+        .expect_err("an unattached vault answered a search");
+    assert_eq!(refused.code(), &ReasonCode::HostEntryNotReady);
+}
+
 /// **A host that composes no engine answers no vector rung, over a vault
 /// whose section enables one**: nothing was delivered to it, so the vault's
 /// enabled set holds the lexical floor alone. A bare search answers the floor

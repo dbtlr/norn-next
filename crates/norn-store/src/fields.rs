@@ -361,10 +361,13 @@ impl ContentModel {
     ///
     /// # Panics
     ///
-    /// On a declaration with no schema: [`ContentModel::none`] declares
-    /// nothing, and everything is declared [`ContentModel::under`] the
-    /// schema that declares it. Every method that declares something panics
-    /// alike.
+    /// In a debug build, on a declaration with no schema: [`ContentModel::none`]
+    /// declares nothing, and everything is declared [`ContentModel::under`]
+    /// the schema that declares it. Every method that declares something is
+    /// checked alike. Every caller of a declare method outside this
+    /// invariant's own regression test builds over [`ContentModel::under`]
+    /// first, so the check is debug-only rather than a refusal every build
+    /// pays for.
     pub fn declare(self, key: impl Into<String>) -> Self {
         self.declare_field(key, FieldDeclaration::text())
     }
@@ -426,8 +429,14 @@ impl ContentModel {
         self
     }
 
+    /// The invariant every declare method holds to: a declaration built over
+    /// [`ContentModel::under`] before anything is declared on it, so `schema`
+    /// is `Some` here. Debug-checked rather than refused, because every
+    /// caller outside this invariant's own regression test already
+    /// guarantees it by construction and a declaration is a hot builder
+    /// chain, not a request boundary.
     fn schema_declares(&self, named: &str) {
-        assert!(
+        debug_assert!(
             self.schema.is_some(),
             "`{named}` is declared on a declaration no schema makes"
         );

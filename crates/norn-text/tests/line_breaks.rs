@@ -659,11 +659,24 @@ fn the_scan_sees_a_line_rule_however_it_is_spelled() {
 /// passing. Walking the declarations transitively is what closes that.
 #[test]
 fn the_pinned_sources_are_every_module_the_crate_declares() {
+    /// `line` with a trailing `//` comment cut off and the cut end retrimmed.
+    /// A declaration followed by a comment is still a declaration; neither
+    /// reader below sees past the `//` on its own. The `//` an attribute's own
+    /// string carries, `#[doc = "see a//b"] mod foo;`, is not a comment, so
+    /// the search shares [`attribute_close`]'s quote tracking rather than
+    /// matching blind.
+    fn strip_trailing_comment(line: &str) -> &str {
+        match find_outside_a_string(line, "//") {
+            Some(at) => line[..at].trim_end(),
+            None => line,
+        }
+    }
+
     /// The module names a file declares. Rust source is `\n`-terminated here,
     /// and this file is not one the scan above reads.
     fn declared(file: &str, source: &str) -> Vec<String> {
         let mut modules = Vec::new();
-        for line in source.lines().map(str::trim) {
+        for line in source.lines().map(str::trim).map(strip_trailing_comment) {
             let read = line
                 .strip_prefix("mod ")
                 .or_else(|| line.strip_prefix("pub mod "))
@@ -698,7 +711,7 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
     /// then `mod`, a name, and the semicolon that makes it a file rather than a
     /// block.
     fn declares_a_module(line: &str) -> bool {
-        let Some(rest) = line.strip_suffix(';') else {
+        let Some(rest) = strip_trailing_comment(line).strip_suffix(';') else {
             return false;
         };
         let Some(at) = rest.find("mod ") else {
@@ -710,7 +723,10 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
         }
         let mut before = rest[..at].trim();
         while let Some(attribute) = before.strip_prefix("#[") {
-            let Some(close) = attribute.find(']') else {
+            // The attribute's own closing `]`, not the first one met — a
+            // string an attribute carries, `#[doc = "x]y"]`, holds one of its
+            // own that names no boundary here.
+            let Some(close) = attribute_close(attribute) else {
                 return false;
             };
             before = attribute[close + 1..].trim();
@@ -719,6 +735,76 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
             || before == "pub"
             || (before.starts_with("pub(") && before.ends_with(')'))
     }
+
+    /// The byte offset of `attribute`'s own closing `]`: [`find_outside_a_string`]
+    /// over `]`, so one inside a `"..."` string, `#[doc = "x]y"]`, names no
+    /// boundary here.
+    fn attribute_close(attribute: &str) -> Option<usize> {
+        find_outside_a_string(attribute, "]")
+    }
+
+    /// The byte offset of `needle`'s first match in `text` that stands
+    /// outside a `"..."` string, with `\"` and `\\` read as escapes so a
+    /// quote a string carries does not end it early. Shared by
+    /// [`strip_trailing_comment`] and [`attribute_close`], so a `//` or a `]`
+    /// a string carries is never read as the boundary either search for.
+    fn find_outside_a_string(text: &str, needle: &str) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut in_string = false;
+        let mut at = 0;
+        while at < bytes.len() {
+            // Compared as bytes: `at` walks bytes and can stand inside a
+            // multi-byte character, where a `str` slice would panic.
+            if !in_string && bytes[at..].starts_with(needle.as_bytes()) {
+                return Some(at);
+            }
+            match bytes[at] {
+                b'\\' if in_string => at += 1,
+                b'"' => in_string = !in_string,
+                _ => {}
+            }
+            at += 1;
+        }
+        None
+    }
+
+    // A declaration followed by a line comment: both readers used to read
+    // past the `;` and miss it, `declares_a_module` failing open — the walk
+    // silently drops the file `x` names — and `declared` reading no module at
+    // all.
+    assert!(
+        declares_a_module("mod x; // reason"),
+        "a trailing comment hid a real module declaration from the loose reader"
+    );
+    assert_eq!(
+        declared("test", "mod x; // reason\n"),
+        vec!["x".to_string()],
+        "a trailing comment hid a real module declaration from the strict reader"
+    );
+    // An attribute whose string carries a `]`: the loose reader used to stop
+    // at the bracket inside the string rather than the attribute's own,
+    // leaving `before` non-empty and the line unrecognized.
+    assert!(
+        declares_a_module(r#"#[doc = "x]y"] mod foo;"#),
+        "a `]` inside an attribute's string hid a real module declaration"
+    );
+    // An attribute whose string carries a `//`: a naive trailing-comment cut
+    // would have taken it for one and truncated the line before `mod foo;`
+    // ever appeared.
+    assert!(
+        declares_a_module(r#"#[doc = "see a//b"] mod foo;"#),
+        "a `//` inside an attribute's string was read as a trailing comment"
+    );
+    // A non-ASCII character outside any string: the scan walks bytes, and a
+    // lead byte must not leave it slicing inside the character it begins.
+    assert!(
+        declares_a_module("mod café; // é"),
+        "a non-ASCII character before a trailing comment was not read past"
+    );
+    assert!(
+        !declares_a_module("/* é */ let x = 1;"),
+        "a non-ASCII line that declares nothing was read as a declaration"
+    );
     let text = |file: &str| {
         SOURCES
             .iter()

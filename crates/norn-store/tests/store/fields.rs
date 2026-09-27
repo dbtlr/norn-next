@@ -641,3 +641,14 @@ fn a_documents_rows_are_the_rows_its_frontmatter_derives() {
     assert_eq!(facts.frontmatter(), None);
     assert!(facts.fields().is_empty());
 }
+
+/// **A declare method holds a declaration with no schema to its own
+/// invariant.** [`ContentModel::none`] declares nothing, and a caller that
+/// declares a field on it anyway builds over an invariant no caller in this
+/// workspace actually violates — checked here in a debug build, the profile
+/// every test runs under.
+#[test]
+#[should_panic(expected = "is declared on a declaration no schema makes")]
+fn a_field_declared_on_no_schema_panics() {
+    let _ = ContentModel::none().declare_field("rank", FieldDeclaration::number(integer_order()));
+}
