@@ -155,7 +155,8 @@ pub use read::{
 // rung whichever database met it.
 pub use norn_db::{ColumnRead, EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
-    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixKey, SuffixProbe, suffix_probe,
+    ClassKey, DirectoryPrefix, DocumentPath, PathKey, RENDERED_MARKER, SuffixKey, SuffixProbe,
+    suffix_probe,
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,

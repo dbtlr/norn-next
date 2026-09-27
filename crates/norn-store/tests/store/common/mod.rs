@@ -12,8 +12,8 @@ use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
     HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
-    Provenance, ReadFilter, Request, Span, Store, StoredFacts, StoredPathOrder, SuffixKey, TagFact,
-    TagSource, TypedOrder, suffix_probe,
+    PathKey, Provenance, ReadFilter, Request, Span, Store, StoredFacts, StoredPathOrder, SuffixKey,
+    TagFact, TagSource, TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -488,6 +488,7 @@ pub fn ambiguity_for_target(
         class_keys: suffix_probe(target)
             .unwrap_or_else(|problem| panic!("`{target}` is a suffix target: {problem}"))
             .class_keys(),
+        path_keys: BTreeSet::new(),
         target: Some(target.to_string()),
         span: Some(span(2, 1, 10)),
         ordinal: None,
@@ -512,6 +513,7 @@ pub fn unread_block(at: &str) -> FindingFacts {
         severity: Severity::Error,
         path: path(at),
         class_keys: BTreeSet::new(),
+        path_keys: BTreeSet::new(),
         target: None,
         span: None,
         ordinal: None,
@@ -522,6 +524,31 @@ pub fn unread_block(at: &str) -> FindingFacts {
     }
 }
 
+/// A path key, or a panic naming what was wrong with it.
+pub fn path_key(text: &str) -> PathKey {
+    PathKey::new(text).unwrap_or_else(|problem| panic!("`{text}` is a path key: {problem}"))
+}
+
+/// A finding about the first link in the document at `at`, a path-addressed
+/// one, keyed by the exact paths `keys` and by no class: the shape a broken
+/// `[x](dir/t.md)` is filed in.
+pub fn broken_path_link(at: &str, keys: &[&str]) -> FindingFacts {
+    FindingFacts {
+        kind: FindingKind::Broken,
+        severity: Severity::Warning,
+        path: path(at),
+        class_keys: BTreeSet::new(),
+        path_keys: keys.iter().copied().map(path_key).collect(),
+        target: keys.first().map(|key| key.to_string()),
+        span: Some(span(1, 1, 0)),
+        ordinal: Some(0),
+        candidates: Vec::new(),
+        candidates_total: 0,
+        message: format!("a link in `{at}` names no document"),
+        detail: None,
+    }
+}
+
 /// A finding with no ambiguity class — the shape a vault-schema violation takes.
 pub fn violation(at: &str) -> FindingFacts {
     FindingFacts {
@@ -529,6 +556,7 @@ pub fn violation(at: &str) -> FindingFacts {
         severity: Severity::Error,
         path: path(at),
         class_keys: BTreeSet::new(),
+        path_keys: BTreeSet::new(),
         target: None,
         span: None,
         ordinal: None,

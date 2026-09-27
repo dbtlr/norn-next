@@ -39,7 +39,7 @@ use norn_wire::{CaseFold, FindingKind, Severity};
 
 use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
-use crate::path::{ClassKey, DocumentPath};
+use crate::path::{ClassKey, DocumentPath, PathKey};
 
 /// A position in a document body: 1-based line and column, 0-based byte offset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,6 +680,14 @@ pub struct FindingFacts {
     /// maintenance that names the other. Validated keys, because a key no probe's
     /// range opens is the same invisibility by another route.
     pub class_keys: BTreeSet<ClassKey>,
+    /// Every exact vault path this finding is maintained by: the paths a
+    /// path-addressed link spells — one for a path, one per reduction for a
+    /// rooted name — and empty for a finding about no such link.
+    ///
+    /// The other key space from [`FindingFacts::class_keys`]: a change reaches
+    /// a finding here only by writing or killing one of these paths exactly,
+    /// never by sharing a class with one.
+    pub path_keys: BTreeSet<PathKey>,
     /// What the finding is about **inside** its subject, as written, and
     /// `None` where the subject is the whole of what it is about.
     ///
@@ -736,6 +744,9 @@ pub struct StoredFinding {
     /// Every ambiguity class the finding is in, and empty for a finding that is
     /// not about resolution. Any one of them reaches it.
     pub class_keys: BTreeSet<ClassKey>,
+    /// Every exact vault path the finding is maintained by, and empty for a
+    /// finding about no path-addressed link. Any one of them reaches it.
+    pub path_keys: BTreeSet<PathKey>,
     pub target: Option<String>,
     pub span: Option<Span>,
     /// The ordinal of the link the finding is about, and `None` for a finding

@@ -14,8 +14,8 @@ use crate::common::{
     write_document, write_documents, written_tags,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, Store, StoreError,
-    induced_failure, suffix_probe,
+    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
+    StoreError, induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
 
@@ -795,7 +795,10 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::WriteGeneration => {
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
         }
-        ExplainedStatement::FindingCandidates(_) | ExplainedStatement::FindingClasses(_) => {
+        ExplainedStatement::PathDiscard(_) => "the_path_discard_seeks_finding_paths_path_key",
+        ExplainedStatement::FindingCandidates(_)
+        | ExplainedStatement::FindingClasses(_)
+        | ExplainedStatement::FindingPaths(_) => {
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
         }
     }
@@ -818,17 +821,18 @@ const FEEDS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::TombstoneFeedPage,
 ];
 
-/// The two statements a findings read collects each finding's detail through,
-/// once per chunk of ids, named once so the plan bar and the census judge the
-/// same pair. Each is spelled by how many ids its chunk holds.
+/// The three statements a findings read collects each finding's detail
+/// through, once per chunk of ids, named once so the plan bar and the census
+/// judge the same set. Each is spelled by how many ids its chunk holds.
 const FINDING_DETAIL: &[fn(NonZeroUsize) -> ExplainedStatement<'static>] = &[
     ExplainedStatement::FindingCandidates,
     ExplainedStatement::FindingClasses,
+    ExplainedStatement::FindingPaths,
 ];
 
-/// The seek a findings delete fires into one of the two detail tables.
+/// The seek a findings delete fires into one of the three detail tables.
 ///
-/// Both tables reference `findings(id)` with `ON DELETE CASCADE` and lead their
+/// Each table references `findings(id)` with `ON DELETE CASCADE` and lead their
 /// primary key with that reference, so a deleted finding's detail rows are one
 /// equality seek of the key away. The plan reports the cascade as a search of
 /// the detail table, and a cascade that fell to reading the table end to end
@@ -1019,6 +1023,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     class_discard.assert_searches_through("findings", Access::RowId);
     assert_cascade_seeks_the_primary_key(&class_discard, "finding_candidates");
     assert_cascade_seeks_the_primary_key(&class_discard, "finding_classes");
+    assert_cascade_seeks_the_primary_key(&class_discard, "finding_paths");
 
     // The subject-scoped discard an increment runs once per changed path seeks
     // `findings_path`, so a changeset of fifty thousand entries is that many
@@ -1036,6 +1041,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     subject_discard.assert_searches_through("findings", Access::Index("findings_path"));
     assert_cascade_seeks_the_primary_key(&subject_discard, "finding_candidates");
     assert_cascade_seeks_the_primary_key(&subject_discard, "finding_classes");
+    assert_cascade_seeks_the_primary_key(&subject_discard, "finding_paths");
 
     // Naming kinds narrows what the discard takes and not how it reaches it: the
     // path is the seek in both forms and the kinds filter the rows it reached,
@@ -1053,6 +1059,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     kind_discard.assert_searches_through("findings", Access::Index("findings_path"));
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_candidates");
     assert_cascade_seeks_the_primary_key(&kind_discard, "finding_classes");
+    assert_cascade_seeks_the_primary_key(&kind_discard, "finding_paths");
 
     // **The walked-scope prune's page is one ordered pass over `findings_path`,
     // and the bar it carries is the findings table's rather than the vault's.**
@@ -1124,11 +1131,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         .target_class("glossary", &norn_store::AmbiguityIgnore::none())
         .expect("a suffix target");
     let subject = path("one/glossary.md");
+    let path_key = PathKey::new("one/glossary.md").expect("a path key");
     let width = NonZeroUsize::MIN;
     let judged: Vec<ExplainedStatement<'_>> = [
         ExplainedStatement::SuffixCandidates(&resolution),
         ExplainedStatement::FindingsInClass(&probe),
         ExplainedStatement::ClassDiscard(&probe),
+        ExplainedStatement::PathDiscard(&path_key),
         ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
         ExplainedStatement::TypedValueDiscard,
         ExplainedStatement::FindingSubjectsWithoutRows(
@@ -1167,9 +1176,63 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+            "the_path_discard_seeks_finding_paths_path_key",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<&str>>()
+    );
+}
+
+/// **The path discard is one equality seek of `finding_paths_path_key`.** An
+/// increment runs it once per path its changeset writes or kills, so a path it
+/// does not name costs nothing, and a discard that read the membership table
+/// end to end would make every changed path cost every path-keyed finding the
+/// store holds. The bar is judged on the row that searches `finding_paths`: the
+/// index it runs through and its equality constraint, which is what separates
+/// the seek from a range over the same index. Each finding is then reached by
+/// row id, and its detail rows go by the cascades' own primary-key seeks.
+///
+/// Control: with `finding_paths_path_key` dropped, the same statement no longer
+/// seeks it, and the bar says so.
+#[test]
+fn the_path_discard_seeks_finding_paths_path_key() {
+    let scratch = Scratch::new("path-discard-plan");
+    let mut store = scratch.open();
+    let key = PathKey::new("dir/t.md").expect("a path key");
+    let judge = |store: &mut Store| {
+        let discard = plan(
+            store
+                .begin_request()
+                .emitted_plan(ExplainedStatement::PathDiscard(&key))
+                .expect("a query plan for the path discard"),
+        );
+        discard.assert_no_full_scan_of("findings");
+        discard.assert_no_full_scan_of("finding_paths");
+        // The cascade into `finding_paths` searches it too, by `finding`, so
+        // the seek is judged on the one step that runs through the index.
+        assert!(
+            discard.searches_of("finding_paths").iter().any(|row| {
+                row.access() == Some(Access::Index("finding_paths_path_key"))
+                    && row.constraint() == Some("(path_key=?)")
+            }),
+            "no step seeks `finding_paths_path_key` by equality on `path_key`: {:?}\n\
+             emitted SQL: {}",
+            discard.rows(),
+            discard.sql()
+        );
+        discard.assert_searches_through("findings", Access::RowId);
+        assert_cascade_seeks_the_primary_key(&discard, "finding_candidates");
+        assert_cascade_seeks_the_primary_key(&discard, "finding_classes");
+        assert_cascade_seeks_the_primary_key(&discard, "finding_paths");
+    };
+    judge(&mut store);
+
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX finding_paths_path_key")
+        .expect("dropping the path-key index");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| judge(&mut store)));
+    assert!(
+        failed.is_err(),
+        "the bar held with `finding_paths_path_key` dropped"
     );
 }
 
@@ -1273,7 +1336,15 @@ fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
     let resolution = request
         .target_class("glossary", &norn_store::AmbiguityIgnore::none())
         .expect("a suffix target");
-    let every = ExplainedStatement::all(&subject, &resolution, &probe, &kinds, NonZeroUsize::MIN);
+    let path_key = PathKey::new("one/glossary.md").expect("a path key");
+    let every = ExplainedStatement::all(
+        &subject,
+        &resolution,
+        &probe,
+        &path_key,
+        &kinds,
+        NonZeroUsize::MIN,
+    );
     assert_eq!(every.len(), norn_store::STATEMENTS);
     for (position, statement) in every.iter().enumerate() {
         assert_eq!(
@@ -1400,7 +1471,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::DocumentFeedPage
         | ExplainedStatement::TombstoneFeedPage
         | ExplainedStatement::FindingCandidates(_)
-        | ExplainedStatement::FindingClasses(_) => None,
+        | ExplainedStatement::FindingClasses(_)
+        | ExplainedStatement::PathDiscard(_)
+        | ExplainedStatement::FindingPaths(_) => None,
     }
 }
 
@@ -1548,6 +1621,7 @@ fn a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead() {
         let table = match detail(NonZeroUsize::MIN) {
             ExplainedStatement::FindingCandidates(_) => "finding_candidates",
             ExplainedStatement::FindingClasses(_) => "finding_classes",
+            ExplainedStatement::FindingPaths(_) => "finding_paths",
             other => panic!("`FINDING_DETAIL` names {other:?}, which is not a detail read"),
         };
         for ids in 1..=norn_store::FINDING_ID_CHUNK {

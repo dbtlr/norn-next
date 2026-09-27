@@ -199,6 +199,33 @@
 //! seeks through; the primary key is the finding direction, and being `WITHOUT
 //! ROWID` is what makes the pair the row rather than a payload beside one.
 //!
+//! # Path keys are the other key space, in a table of their own
+//!
+//! A path-addressed link — `[x](dir/t.md)`, `[[vault://Notes]]` — reaches
+//! documents through the exact paths it spells, and no class range reaches it:
+//! deleting `dir/t.md` changes the class `t/`, and `dir/t.md` is not in that
+//! range. So a finding about such a link is maintained by those paths:
+//! `finding_paths` holds one row per `(finding, path)` pair, each a validated
+//! [`crate::PathKey`] spelled as the link index holds the link's path, in the
+//! key space the store's path order selects. A changeset discards every
+//! finding holding the path key of a path it writes or kills — one equality
+//! seek of `finding_paths_path_key` per path, joined back by finding id — and
+//! a rename is a death of the old path and a write of the new, so both paths'
+//! findings go.
+//!
+//! **The two key spaces never share a table.** A class discard is a prefix
+//! range, and the path key `glossary/x.md` sorts inside the range the class
+//! `glossary/` opens, so a single membership table would let a class discard
+//! take a finding no member of its class can change. `finding_paths` is
+//! reached by equality alone, and a path key never ends in the separator, so
+//! no path key is a class key either.
+//!
+//! The path-keyed findings are a dormant carrier on the same terms as the
+//! class-keyed ones: their producer is the link-health unit of Layer 3, filing
+//! a finding about a path-addressed link under the paths it spells. Every
+//! finding the host files today carries no path key, so this table is reached
+//! by its maintenance and its tests alone.
+//!
 //! A tombstone keeps the same class computable for the same reason: a deletion
 //! changes a class, and the class has to stay derivable after the document row
 //! is gone. It carries the `path` and nothing derived from it — the class is
@@ -215,14 +242,15 @@
 //!
 //! # Findings outlive their subject, and the class owns their lifecycle
 //!
-//! A finding is keyed by **path and class**, never by a document row. It has to
-//! be: the finding a resolution failure produces is about a path no document
-//! has, and a class is invalidated by documents joining or leaving it rather
-//! than by the document that cited it changing. So nothing here references
-//! `documents` and no document delete reaches a finding — one whose subject was
-//! deleted is exactly as live as one whose subject was never there, and both are
-//! resolved the same way. The cascades that do exist run the other way, from a
-//! finding to the candidate and class rows that are parts of it.
+//! A finding is keyed by **path, class and path key**, never by a document row.
+//! It has to be: the finding a resolution failure produces is about a path no
+//! document has, and a class is invalidated by documents joining or leaving it
+//! rather than by the document that cited it changing. So nothing here
+//! references `documents` and no document delete reaches a finding — one whose
+//! subject was deleted is exactly as live as one whose subject was never there,
+//! and both are resolved the same way. The cascades that do exist run the other
+//! way, from a finding to the candidate, class and path rows that are parts of
+//! it.
 //!
 //! The way is class-scoped maintenance, in both directions:
 //! [`crate::Request::findings_in_class`] reads the class and
@@ -300,6 +328,12 @@ const STATEMENTS: &[&str] = &[
     PRIMARY KEY (finding, class_key)
 ) WITHOUT ROWID",
     "CREATE INDEX finding_classes_class_key ON finding_classes(class_key)",
+    "CREATE TABLE finding_paths (
+    finding  INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    path_key TEXT    NOT NULL,
+    PRIMARY KEY (finding, path_key)
+) WITHOUT ROWID",
+    "CREATE INDEX finding_paths_path_key ON finding_paths(path_key)",
 ];
 
 /// The bounded head, with its rank bound taken from the constant the API states
