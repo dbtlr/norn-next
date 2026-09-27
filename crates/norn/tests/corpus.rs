@@ -38,8 +38,8 @@
 //! [`Corpus::rulings_for`](norn_testkit::corpus::Corpus::rulings_for)
 //! returns the ones that come up for re-judgment when a command is
 //! activated. A ruling becomes contract only on an affirmative judgment
-//! against the re-derived surface. A command the verb charter deletes takes
-//! its rulings with it.
+//! against the re-derived surface. A command that is deleted takes its
+//! rulings with it.
 //!
 //! # The three categories
 //!
@@ -73,6 +73,11 @@
 //! [`activated_cases_reach_a_runner`] fails loudly for any case that is
 //! activated, naming what is missing. That is the honest failure: the gate is
 //! real, and what sits behind it is not built.
+//!
+//! **Activation is deferred to Layer 6.** A case judges rendered bytes, and
+//! the renderings land at Layer 6, so no command is activated before then.
+//! The corpus README records the deferral, and the rulings that activation
+//! re-judges are already in the ledger.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -244,9 +249,12 @@ fn every_recorded_entry_reconstructs_its_bytes() {
 /// prompted to judge them, so the set is pinned here: a change to it is a
 /// change somebody should see.
 ///
-/// `PD-134` is the whole set today — it describes a flag on `service`, which
-/// carries no behavior at the pin. Its disposition belongs to the verb
-/// charter, along with the command it describes.
+/// `PD-134` is the whole set today. It rules on a `--vault` flag local to
+/// `service`, which carries no behavior at the pin. `service` is re-derived at
+/// installation scope over the one host an installation supervises, with no
+/// per-vault form, so the flag has no successor. The ruling stays here until
+/// `service`'s recorded cases retire at Layer 6, and the corpus retires it
+/// with them.
 #[test]
 fn rulings_without_an_activation_path_are_known() {
     let corpus = corpus();
