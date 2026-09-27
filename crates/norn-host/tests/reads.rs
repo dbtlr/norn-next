@@ -1062,7 +1062,6 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
     let (_sandbox, vault) = a_vault("host-reads-after-an-edit");
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
-    let before = host.read_evidence();
     let committed_before = committed_generation(&vault);
 
     let folder = vault.path().join("zz-burst");
@@ -1129,14 +1128,10 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
         "the answer names generation {generation}, which is not one the burst committed \
          (the store stood at {committed_before} before it)"
     );
-    // Reads issued back to back cannot all miss the burst's reconcile, so at
-    // least one of them met the entry taking it in and waited.
-    let reads = host.read_evidence().since(before);
-    assert!(
-        reads.settle_waits >= 1,
-        "no read met the burst being indexed, so none was held to waiting for it"
-    );
-    assert_eq!(reads.settle_expiries, 0, "a read waited out its bound");
+    // Whether a read met the burst mid-reconcile, and so waited, depends on
+    // the watcher's schedule; the lifecycle's own tests hold the settle wait
+    // and its bound at a known point, so this one holds only what the read
+    // answered.
 }
 
 /// **A part a verb could not apply reaches the answer through the host.** A
