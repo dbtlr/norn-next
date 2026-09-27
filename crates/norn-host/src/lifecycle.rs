@@ -20281,6 +20281,67 @@ mod tests {
         );
     }
 
+    /// **A read's retake of the entry gate after the wait for the connection
+    /// ends at its bound.** Another read holds the entry's one connection, so
+    /// the read lets the gate go to wait for it, and in that instant another
+    /// holder takes the gate and keeps it far past the read's bound. The
+    /// connection wait runs out, and the retake meets that holder: the read
+    /// refuses as reader-unavailable for the held gate within its bound rather
+    /// than once the holder lets go, and its demand goes back with the next
+    /// hold of the gate.
+    #[test]
+    fn a_reads_retake_after_the_connection_wait_refuses_within_the_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(300);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        // The holder takes the gate in the instant the read lets it go for the
+        // connection, and keeps it until the case lets it go or ten seconds
+        // pass.
+        let (take, taken) = mpsc::channel::<()>();
+        let (holding, held) = mpsc::channel::<()>();
+        let (let_go, holder_released) = mpsc::channel::<()>();
+        let holder_entry = Arc::clone(&entry);
+        let holder = thread::spawn(move || {
+            taken.recv().expect("the read let the gate go");
+            let hold = holder_entry.gate.lock().expect("entry gate poisoned");
+            holding.send(()).expect("the read waits for the hold");
+            let _ = holder_released.recv_timeout(Duration::from_secs(10));
+            drop(hold);
+        });
+        entry.gate.when_a_read_lets_go(move || {
+            take.send(()).expect("the holder waits for the read");
+            held.recv().expect("the holder took the gate");
+        });
+
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read whose retake met a held gate was served");
+        let waited = started.elapsed();
+        // A holder that kept the gate its whole ten seconds has gone already.
+        let _ = let_go.send(());
+        holder.join().expect("the holder let the gate go");
+        drop(first);
+        assert!(
+            waited < bound + Duration::from_secs(2),
+            "the read waited {waited:?} for a gate held past its bound of {bound:?}"
+        );
+        assert_eq!(
+            refusal,
+            ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()),
+            "a read whose retake after the connection wait ran out its bound was refused as \
+             {refusal:?}"
+        );
+        assert_eq!(demand_leases(&entry), 0, "a read's demand outlived it");
+    }
+
     /// **A read's retake of the entry gate ends at its bound.** The read
     /// settles over a change, and in the instant it lets the gate go another
     /// holder takes the gate and keeps it far past the read's bound. The read's
