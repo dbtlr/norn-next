@@ -984,16 +984,19 @@ one nested collection. A collection's cursor names the collection it pages, and 
 another. A page of links resolves each link it holds as a find's links column does, below. A section runs to the start of the line holding the heading that ends it,
 so a container's prefix on that line is the next section's. The store parses no document, so a section and a block are read
 through the reader the caller hands a get — `norn-text`'s one section resolver and its one
-block reading — over the one document's heading rows and body. A heading anchor is matched
-by three readings, each tried only where the one before matched no heading, and a read and a
-write match through the same three: the heading's text with ASCII case and ASCII whitespace
-folded; the text of an ATX-shaped anchor (`## X` names the heading `X`), folded the same way;
-and the heading's slug, exactly. Headings the fold makes one are one anchor's matches, so a
-write of `dup` over `## Dup` and `## dup` refuses as ambiguous where a read takes the first.
-No index orders by the folded text, so matching an anchor reads the document's headings and
-costs them, a pass bounded by the one document; a get's work counts the heading rows the match
-was handed, at most that document's headings. A section or a
-block the document does not carry is answered in band beside the record of its path alone.
+block reading — over the one document's heading rows and body. An empty anchor, `note#` or
+`note#^`, names no place and answers the record. Any other heading anchor is percent-decoded
+once and matched by three readings, each tried only where the one before matched no heading,
+and a read and a write match through the same three: the anchor's text with ASCII case and
+ASCII whitespace folded, against each heading's text folded the same way; the heading text
+past the anchor's `#` markers — an ATX-shaped anchor's (`## X` names the heading `X`), or a
+heading chain's last heading (`Top#X` names `X`) — folded the same way; and the anchor against
+the heading's slug, exactly. Headings the fold makes one are one anchor's matches, so a write
+of `dup` over `## Dup` and `## dup` refuses as ambiguous where a read takes the first. A get
+matches an anchor over the document's headings in memory, a pass bounded by the one document;
+a get's work counts the heading rows the match was handed, at most that document's headings.
+A section or a block the document does not carry is answered in band beside the record of its
+path alone.
 It resolves its target through the find builder's class statements, the reads every
 resolution of a target runs, and names five statements of its own under the same
 discipline, each carrying a plan bar with a negative control and held by a census: the
@@ -1999,9 +2002,16 @@ outside the store's key space, or spelled as a class key, is refused where it is
 producer that files link-health findings under either kind of key, and the re-decision that
 files them again inside the changeset, are not built yet.
 
-The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
-and resolution runs at query time through this one grammar; resolved edges are never stored,
-and a materialized projection could only ever arrive as keyed, invalidated derived state.
+The links table stores **syntactic facts only** — raw target, family, protocol, title, anchor,
+span — beside two readings of them computed at the write, and resolution runs at query time
+through this one grammar; resolved edges are never stored, and a materialized projection could
+only ever arrive as keyed, invalidated derived state. The two readings are what judging a link
+reads without resolving it: its address kind — addressed elsewhere, naming an attachment, or
+naming a document — from the one addressing selector and its attachment test that a link's
+health reads, and its heading anchor's three readings, which the host takes from the section
+resolver. Each heading row carries its text's reading beside its slug, so whether a document
+holds the heading or block a link's anchor names is one predicate of equality seeks into that
+document: its headings by reading and by slug, and its blocks by identifier.
 Beside it, the link index holds each link under the keys its target spells in the
 documents' own key space — a function of the link and its document's path, never of what
 the vault holds — and backlinks are equality seeks of those keys, each link confirmed at the

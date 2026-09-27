@@ -44,9 +44,9 @@ use std::sync::Arc;
 
 use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
 use norn_store::{
-    BlockFact, Change, ContentModel, DerivationVersion, DiscardScope, DocumentFacts, DocumentPath,
-    FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, OffsetSpelling,
-    Provenance, Span, TagFact, TagSource, TypedOrder,
+    AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
+    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkFact,
+    LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
@@ -66,7 +66,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(5);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(6);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -697,6 +697,7 @@ pub(crate) fn map_document(
         .map(|h| HeadingFact {
             level: h.level,
             text: h.text.clone(),
+            reading: norn_text::heading_reading(&h.text),
             slug: h.slug.clone(),
             span: span(h.span),
             body_offset: h.body_offset as u64,
@@ -1032,6 +1033,15 @@ fn map_link(link: norn_text::Link) -> LinkFact {
         protocol: link.protocol,
         target: link.target,
         title: link.title,
+        anchor_readings: link
+            .anchor
+            .as_deref()
+            .and_then(norn_text::anchor_readings)
+            .map(|readings| AnchorReadings {
+                text: readings.text,
+                marked: readings.marked,
+                slug: readings.slug,
+            }),
         anchor: link.anchor,
         block_ref: link.block_ref,
         span: span(link.span),
@@ -1883,6 +1893,50 @@ paths:
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
         assert_eq!(facts.tags.len(), 2);
+    }
+
+    /// **Every heading and every heading anchor carries the readings the
+    /// text layer's section resolver matches them by**, so a store's predicate
+    /// over the stored readings and a get's section agree. A link with no
+    /// heading anchor, or an empty one, carries none.
+    #[test]
+    fn headings_and_anchors_carry_the_section_resolvers_readings() {
+        let source = b"# Design  Notes
+
+[[t#Top#Design%20Notes]] [[t#]] [[t#^b]] [[t]]
+";
+        let facts = map_document(
+            "note.md",
+            source,
+            norn_fs::ContentHash::of(source).to_string(),
+            &ContentModel::none(),
+        )
+        .unwrap()
+        .facts;
+        let readings: Vec<String> = facts
+            .headings
+            .iter()
+            .map(|heading| heading.reading.clone())
+            .collect();
+        assert_eq!(readings, ["design notes"]);
+        let anchors: Vec<Option<AnchorReadings>> = facts
+            .links
+            .iter()
+            .map(|link| link.anchor_readings.clone())
+            .collect();
+        assert_eq!(
+            anchors,
+            [
+                Some(AnchorReadings {
+                    text: "top#design notes".to_string(),
+                    marked: Some("design notes".to_string()),
+                    slug: "Top#Design Notes".to_string(),
+                }),
+                None,
+                None,
+                None,
+            ]
+        );
     }
 
     /// The count beside an absent frontmatter projection is what tells a

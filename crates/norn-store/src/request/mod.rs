@@ -75,10 +75,11 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
-    HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
-    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredLinkKey, StoredPathOrder,
-    StoredSuffixKeys, StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone,
+    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAddressKind, LinkFact, LinkFamily,
+    PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
+    TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
@@ -716,7 +717,7 @@ impl<'a> Request<'a> {
                 &self.read_work,
                 DOCUMENT_LINKS_SQL,
                 params![id],
-                stored_link,
+                stored_link_row,
                 "reading a document's links",
             )?,
             link_keys: Self::read_all_on(
@@ -1802,7 +1803,8 @@ fn stored_facts_document_sql() -> String {
 /// order the reader states and nothing sorts. The four fact statements below
 /// carry the same shape over their own tables.
 const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
-                        span_line, span_column, span_offset
+                        span_line, span_column, span_offset, anchor_text, anchor_marked,
+                        anchor_slug, address
                  FROM links WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's link keys with:
@@ -1814,7 +1816,7 @@ pub(crate) const DOCUMENT_LINK_KEYS_SQL: &str = "SELECT l.ordinal, k.key, k.fold
 /// The statement [`Request::stored_facts`] reads a document's headings with.
 pub(crate) const DOCUMENT_HEADINGS_SQL: &str =
     "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
-                        inside_container
+                        inside_container, reading
                  FROM headings WHERE document = ?1 ORDER BY ordinal";
 
 /// The statement [`Request::stored_facts`] reads a document's block ids with.
@@ -2608,6 +2610,16 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         Ok(span) => span,
         Err(damaged) => return Ok(Err(damaged)),
     };
+    let text: Option<String> = row.get(10)?;
+    let slug: Option<String> = row.get(12)?;
+    let anchor_readings = match (text, slug) {
+        (Some(text), Some(slug)) => Some(AnchorReadings {
+            text,
+            marked: row.get(11)?,
+            slug,
+        }),
+        _ => None,
+    };
     Ok(Ok(LinkFact {
         family,
         embed: row.get(1)?,
@@ -2615,20 +2627,37 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
         target: row.get(3)?,
         title: row.get(4)?,
         anchor: row.get(5)?,
+        anchor_readings,
         block_ref: row.get(6)?,
         span,
     }))
 }
 
+/// A link row as [`Request::stored_facts`] reads it: the link, and the address
+/// kind stored beside it after the columns [`stored_link`] reads.
+fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
+    let written: String = row.get(13)?;
+    let Some(address) = LinkAddressKind::from_str(&written) else {
+        return Ok(Err(unreadable("links.address", &written)));
+    };
+    Ok(stored_link(row)?.map(|fact| StoredLink { fact, address }))
+}
+
 pub(crate) fn stored_heading(row: &Row<'_>) -> Reading<HeadingFact> {
-    let (text, slug, level, inside_container) =
-        (row.get(0)?, row.get(1)?, row.get(2)?, row.get(7)?);
+    let (text, slug, level, inside_container, reading) = (
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(7)?,
+        row.get(8)?,
+    );
     let span = stored_span(row, 3, "headings")?;
     let body_offset = position(row.get(6)?, "headings.body_offset");
     Ok(span.and_then(|span| {
         body_offset.map(|body_offset| HeadingFact {
             level,
             text,
+            reading,
             slug,
             span,
             body_offset,

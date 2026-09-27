@@ -26,7 +26,9 @@ use norn_wire::{
     Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, document, planned_get_work, span, unread_block, write_documents};
+use crate::common::{
+    Scratch, anchor_readings, document, planned_get_work, span, unread_block, write_documents,
+};
 use crate::find::{failure_of, map, rows_of, string};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -97,6 +99,7 @@ fn parsed(at: &str, body: &str) -> DocumentFacts {
         .map(|heading| HeadingFact {
             level: heading.level,
             text: heading.text.clone(),
+            reading: norn_text::heading_reading(&heading.text),
             slug: heading.slug.clone(),
             span: span(
                 wide(heading.span.line),
@@ -941,6 +944,7 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
             target: format!("target-{at}"),
             title: None,
             anchor: (at == 1).then(|| "Heading".to_string()),
+            anchor_readings: (at == 1).then(|| anchor_readings("Heading")).flatten(),
             block_ref: (at == 2).then(|| "b0".to_string()),
             span: span(1, 1, at as u64),
         })

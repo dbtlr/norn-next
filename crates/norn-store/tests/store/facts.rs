@@ -6,15 +6,18 @@
 //! query that needed it. The fact types go in and come back, which is what makes
 //! the comparison a statement about the store rather than about the assertion.
 
+use std::collections::BTreeSet;
+
 use crate::common::{
     Scratch, document, document_with_every_fact, path, record_death, span, write_document,
-    written_tags,
+    written_links, written_tags,
 };
 use norn_store::{
     BlockFact, Change, ContentModel, DocumentFacts, FrontmatterValue, HeadingFact,
-    IncrementProvenance, LinkFact, LinkFamily, Provenance, StoreError, StoredLinkKey, TagFact,
-    TagSource, ddl, induced_failure,
+    IncrementProvenance, LinkAddressKind, LinkFact, LinkFamily, Provenance, StoreError,
+    StoredLinkKey, TagFact, TagSource, ddl, induced_failure,
 };
+use norn_wire::LinkHealth;
 
 /// One of every fact shape, written and read back unchanged — including the
 /// optional fields that are absent, which is where a column that quietly
@@ -41,7 +44,7 @@ fn every_fact_shape_survives_the_round_trip() {
         facts.frontmatter_diagnostic_count
     );
     assert_eq!(stored.body, facts.body);
-    assert_eq!(stored.links, facts.links);
+    assert_eq!(written_links(&stored), facts.links);
     assert_eq!(stored.headings, facts.headings);
     assert_eq!(stored.blocks, facts.blocks);
     assert_eq!(written_tags(&stored), facts.tags);
@@ -179,6 +182,7 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
     second.headings = vec![HeadingFact {
         level: 2,
         text: "Only one".to_string(),
+        reading: "only one".to_string(),
         slug: "only-one".to_string(),
         span: span(1, 1, 0),
         body_offset: 10,
@@ -225,9 +229,91 @@ fn link(family: LinkFamily, protocol: Option<&str>, target: &str) -> LinkFact {
         target: target.to_string(),
         title: None,
         anchor: None,
+        anchor_readings: None,
         block_ref: None,
         span: span(1, 1, 0),
     }
+}
+
+/// **A link's stored address kind is the reading its health is judged by.**
+/// Over both families, with and without a protocol, and targets that name a
+/// document, an attachment, a dotted name and a scheme, `links.address` is
+/// `elsewhere` exactly where [`LinkHealth::of_link`] never judges the link,
+/// `attachment` exactly where it leaves the link unjudged only when it
+/// resolves to nothing, and `document` exactly where a link resolving to
+/// nothing is broken. A document extension in any case is a document's, so
+/// `note.md` and `note.MD` are no attachments.
+#[test]
+fn a_links_address_column_agrees_with_link_health_of_link() {
+    let targets = [
+        "",
+        "note",
+        "note.md",
+        "note.MD",
+        "dir/note.md",
+        "pic.png",
+        "dir/pic.PNG",
+        ".hidden",
+        "dir/.hidden",
+        "v1.2",
+        "a.b/c",
+        "a.b/c.md",
+        "/rooted.md",
+        "/rooted.pdf",
+        "note.md?view=raw",
+        "pic.png?view=raw",
+        "?view=raw",
+        "notes%2Fx.md",
+        "mailto:hi@example.com",
+        "https://example.com/page.md",
+    ];
+    let protocols = [None, Some("vault"), Some("https"), Some("obsidian")];
+    let mut facts = document("holder.md", "hash-1", "");
+    for family in [LinkFamily::Wikilink, LinkFamily::Markdown] {
+        for protocol in protocols {
+            for target in targets {
+                facts.links.push(link(family, protocol, target));
+            }
+        }
+    }
+    let scratch = Scratch::new("address-kind");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_document(&mut request, &facts);
+    let stored = request
+        .stored_facts(&facts.path)
+        .expect("reading a document")
+        .expect("a document that was just written");
+
+    let mut seen = BTreeSet::new();
+    for stored in &stored.links {
+        let link = &stored.fact;
+        let health = |targets: u64| {
+            LinkHealth::of_link(
+                match link.family {
+                    LinkFamily::Wikilink => norn_wire::LinkFamily::Wikilink,
+                    LinkFamily::Markdown => norn_wire::LinkFamily::Markdown,
+                },
+                link.protocol.as_deref(),
+                &link.target,
+                targets,
+            )
+        };
+        let expected = match (health(0), health(1)) {
+            (LinkHealth::NotJudged, LinkHealth::NotJudged) => LinkAddressKind::Elsewhere,
+            (LinkHealth::NotJudged, LinkHealth::Healthy) => LinkAddressKind::Attachment,
+            (LinkHealth::Broken, LinkHealth::Healthy) => LinkAddressKind::Document,
+            other => panic!("{link:?} is judged {other:?}, which no address kind reads"),
+        };
+        assert_eq!(stored.address, expected, "{link:?}");
+        seen.insert(expected.as_str());
+    }
+    assert_eq!(
+        seen,
+        BTreeSet::from(["attachment", "document", "elsewhere"]),
+        "the links do not exercise every address kind"
+    );
+    store.verify_integrity().expect("a store just written to");
 }
 
 /// **A link is held under the keys a links-to seek reads**, derived from the
@@ -378,6 +464,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
             target: format!("target-{index}"),
             title: None,
             anchor: None,
+            anchor_readings: None,
             block_ref: None,
             span: span(1, 1, 0),
         })
@@ -389,7 +476,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
         .stored_facts(&facts.path)
         .expect("reading a document")
         .expect("a document");
-    assert_eq!(stored.links, facts.links);
+    assert_eq!(written_links(&stored), facts.links);
 
     // Writing the same document again produces the same rows rather than a
     // second copy of them.
@@ -398,7 +485,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
         .stored_facts(&facts.path)
         .expect("reading a document")
         .expect("a document");
-    assert_eq!(again.links, facts.links);
+    assert_eq!(written_links(&again), facts.links);
 }
 
 /// The guard behind that: every fact table declares its ordinal unique within a
@@ -641,9 +728,7 @@ fn a_derived_path_form_has_one_home() {
         "tombstones_stem",
         "tombstones_generation",
         "links_target",
-        "headings_document_slug",
         "headings_document_text",
-        "blocks_document_block_id",
         "findings_generation",
         "findings_document",
         "document_tags_name",
@@ -655,14 +740,16 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The twelve that stay, because a statement in this build reads each: the
+    // The fifteen that stay, because a statement in this build reads each: the
     // resolution ladder's range under either key, the order a heal's page seeks on a vault that
     // folds ASCII case, the class and path directions of findings maintenance, the
     // schema-key discard's two ranges, the two change feeds, each of which is
     // answered out of its own index without the row being read at all, the
     // documents a find's tag part names, the links a links-to part seeks under
-    // either key, and a link's own keys, which a links-to part reads beside
-    // the one it sought and a link row's discard cascades through.
+    // either key, a link's own keys, which a links-to part reads beside
+    // the one it sought and a link row's discard cascades through, and the
+    // heading readings, slugs and block identifiers the anchor predicate
+    // seeks in one document.
     for present in [
         "document_tags_folded_name",
         "documents_suffix_key",
@@ -676,6 +763,9 @@ fn a_derived_path_form_has_one_home() {
         "link_keys_link",
         "link_keys_key",
         "link_keys_folded_key",
+        "headings_document_reading",
+        "headings_document_slug",
+        "blocks_document_block_id",
     ] {
         assert!(
             declared

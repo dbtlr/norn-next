@@ -89,7 +89,9 @@ use norn_wire::{FindingKind, Severity};
 use crate::counters::SnapshotCounters;
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DerivationVersion, LinkFamily, Provenance, StoredPathOrder, TagSource};
+use crate::facts::{
+    DerivationVersion, LinkAddressKind, LinkFamily, Provenance, StoredPathOrder, TagSource,
+};
 use crate::hash;
 use crate::request::Request;
 
@@ -976,6 +978,11 @@ impl Store {
                 "links",
                 "family",
                 quoted(LinkFamily::ALL.iter().map(|value| value.as_str())),
+            ),
+            (
+                "links",
+                "address",
+                quoted(LinkAddressKind::ALL.iter().map(|value| value.as_str())),
             ),
             (
                 "document_tags",

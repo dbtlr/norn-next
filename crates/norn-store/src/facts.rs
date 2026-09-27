@@ -122,11 +122,14 @@ impl TagSource {
     }
 }
 
-/// One link token, as syntax.
+/// One link token, as syntax, beside the readings its heading anchor is
+/// matched by.
 ///
 /// There is no resolution field and no addressing mode: how this target
 /// resolves derives from `protocol` and `family`, protocol first, in the one
-/// place that derivation lives.
+/// place that derivation lives. The store derives the link's
+/// [`LinkAddressKind`] from those at the write, so it is read back
+/// ([`StoredLink`]) and never handed over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkFact {
     pub family: LinkFamily,
@@ -139,22 +142,100 @@ pub struct LinkFact {
     /// default extension.
     pub target: String,
     pub title: Option<String>,
-    /// A heading anchor after `#`. Mutually exclusive with `block_ref`.
+    /// A heading anchor after `#`, as written. Mutually exclusive with
+    /// `block_ref`.
     pub anchor: Option<String>,
-    /// A block reference after `#^`.
+    /// The readings `anchor` is matched against a heading by, which the host
+    /// takes from the text layer's section resolver: this crate reads no text.
+    /// `None` where the link carries no heading anchor, or an empty one, which
+    /// reads as no anchor.
+    pub anchor_readings: Option<AnchorReadings>,
+    /// A block reference after `#^`, as written. An empty one reads as no
+    /// anchor.
     pub block_ref: Option<String>,
     pub span: Span,
+}
+
+/// The three readings a heading anchor is matched by, first match winning: its
+/// text and the heading text past its `#` markers, each against a heading's
+/// [`HeadingFact::reading`], and its slug reading against a heading's slug,
+/// exactly.
+///
+/// Whether any heading of a document matches an anchor under the first
+/// reading that matches one is whether any heading matches it under one of
+/// the three, so a stored anchor's existence in a document is one predicate
+/// over these and the stored headings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorReadings {
+    /// The decoded anchor as a heading reading.
+    pub text: String,
+    /// The heading text past the decoded anchor's `#` markers, as a heading
+    /// reading, where it has such markers.
+    pub marked: Option<String>,
+    /// The decoded anchor, compared exactly with a heading's slug.
+    pub slug: String,
+}
+
+/// How a link's target reaches documents, as far as judging it goes: the one
+/// fact about a link's addressing that `links.address` stores.
+///
+/// Derived at the write from [`norn_wire::LinkAddress`] and
+/// [`norn_wire::LinkAddress::names_an_attachment`], so it agrees with
+/// [`norn_wire::LinkHealth::of_link`] over every link: a link addressed
+/// elsewhere is never judged, one naming an attachment is not judged where it
+/// resolves to no document, and every other link is judged by what it
+/// resolves to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkAddressKind {
+    /// The link addresses no document of the vault.
+    Elsewhere,
+    /// The link's target names an attachment.
+    Attachment,
+    /// The link's target can name only a document.
+    Document,
+}
+
+impl LinkAddressKind {
+    /// The whole vocabulary, which is what `links.address` is checked
+    /// against.
+    pub(crate) const ALL: &'static [LinkAddressKind] = &[
+        LinkAddressKind::Elsewhere,
+        LinkAddressKind::Attachment,
+        LinkAddressKind::Document,
+    ];
+
+    /// The kind as `links.address` holds it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LinkAddressKind::Elsewhere => "elsewhere",
+            LinkAddressKind::Attachment => "attachment",
+            LinkAddressKind::Document => "document",
+        }
+    }
+
+    pub(crate) fn from_str(stored: &str) -> Option<Self> {
+        match stored {
+            "elsewhere" => Some(LinkAddressKind::Elsewhere),
+            "attachment" => Some(LinkAddressKind::Attachment),
+            "document" => Some(LinkAddressKind::Document),
+            _ => None,
+        }
+    }
 }
 
 /// One heading.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeadingFact {
     pub level: u8,
-    /// The heading's text with inline markup flattened. A wikilink `#anchor`
-    /// addresses this.
+    /// The heading's text with inline markup flattened.
     pub text: String,
-    /// The anchor form, document-order dedupe suffix included. An inline
-    /// Markdown `#fragment` addresses this.
+    /// The heading's text as an anchor's text is compared with it, which the
+    /// host takes from the text layer's section resolver: this crate reads no
+    /// text. A heading anchor's text and marked readings
+    /// ([`AnchorReadings`]) match this.
+    pub reading: String,
+    /// The anchor form, document-order dedupe suffix included. A heading
+    /// anchor's slug reading matches this.
     pub slug: String,
     pub span: Span,
     /// Where the heading construct ends and the section body begins.
@@ -513,6 +594,15 @@ pub struct StoredLinkKey {
     pub segments: Option<u64>,
 }
 
+/// One stored link row: the link as written and its address kind beside it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredLink {
+    pub fact: LinkFact,
+    /// How the link's target reaches documents, as stored beside it. Derived
+    /// at the write from the link, so it is not a fact a caller hands over.
+    pub address: LinkAddressKind,
+}
+
 /// One stored tag row: the tag as written and its fold beside it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredTag {
@@ -528,7 +618,7 @@ pub struct StoredTag {
 pub struct StoredFacts {
     pub document: StoredDocument,
     pub body: String,
-    pub links: Vec<LinkFact>,
+    pub links: Vec<StoredLink>,
     /// The keys the link index holds the links under, in link order and then
     /// in key order.
     pub link_keys: Vec<StoredLinkKey>,

@@ -51,7 +51,7 @@
 
 use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
 
-use crate::facts::LinkFact;
+use crate::facts::{LinkAddressKind, LinkFact};
 use crate::path::{
     DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, spell_path_key, suffix_probe,
 };
@@ -88,6 +88,17 @@ impl<'a> Addressing<'a> {
                 Addressing::Paths(joined(Vec::new(), path).into_iter().collect())
             }
         }
+    }
+}
+
+/// How `link`'s target reaches documents as far as judging it goes, which
+/// `links.address` stores: elsewhere where the wire's address says so, an
+/// attachment where the address names one, and otherwise a document.
+pub(crate) fn address_kind(link: &LinkFact) -> LinkAddressKind {
+    match LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target) {
+        LinkAddress::Elsewhere => LinkAddressKind::Elsewhere,
+        address if address.names_an_attachment() => LinkAddressKind::Attachment,
+        _ => LinkAddressKind::Document,
     }
 }
 
@@ -276,6 +287,7 @@ mod tests {
             target: target.to_string(),
             title: None,
             anchor: None,
+            anchor_readings: None,
             block_ref: None,
             span: crate::facts::Span {
                 line: 1,

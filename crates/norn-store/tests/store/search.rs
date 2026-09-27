@@ -945,6 +945,7 @@ fn a_searchs_links_column_counts_the_candidates_its_links_carry() {
         target: target.to_string(),
         title: None,
         anchor: None,
+        anchor_readings: None,
         block_ref: None,
         span: span(1, 1, 0),
     };

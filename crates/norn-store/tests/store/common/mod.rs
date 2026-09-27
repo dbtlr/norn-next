@@ -271,10 +271,26 @@ pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
     }
 }
 
+/// The links a stored document carries as written, without the address kinds
+/// stored beside them.
+pub fn written_links(stored: &StoredFacts) -> Vec<LinkFact> {
+    stored.links.iter().map(|link| link.fact.clone()).collect()
+}
+
 /// The tags a stored document carries as written, without the folds stored
 /// beside them.
 pub fn written_tags(stored: &StoredFacts) -> Vec<TagFact> {
     stored.tags.iter().map(|tag| tag.fact.clone()).collect()
+}
+
+/// The readings the text layer gives a heading anchor, as the host hands them
+/// over: `None` for an empty anchor.
+pub fn anchor_readings(anchor: &str) -> Option<norn_store::AnchorReadings> {
+    norn_text::anchor_readings(anchor).map(|readings| norn_store::AnchorReadings {
+        text: readings.text,
+        marked: readings.marked,
+        slug: readings.slug,
+    })
 }
 
 /// A document with a body and nothing derived from it. Its body is the whole
@@ -301,6 +317,7 @@ pub fn narrowable() -> DocumentFacts {
         target: "a".to_string(),
         title: None,
         anchor: None,
+        anchor_readings: None,
         block_ref: None,
         span: span(1, 1, 0),
     });
@@ -401,7 +418,8 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             protocol: None,
             target: "glossary".to_string(),
             title: Some("The glossary".to_string()),
-            anchor: Some("Terms".to_string()),
+            anchor: Some("Glossary#Terms".to_string()),
+            anchor_readings: anchor_readings("Glossary#Terms"),
             block_ref: None,
             span: span(1, 1, 0),
         },
@@ -412,6 +430,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             target: "example.com/docs".to_string(),
             title: Some(String::new()),
             anchor: None,
+            anchor_readings: None,
             block_ref: Some("blk-1".to_string()),
             span: span(3, 5, 30),
         },
@@ -420,6 +439,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
         HeadingFact {
             level: 1,
             text: "Use norn".to_string(),
+            reading: "use norn".to_string(),
             slug: "use-norn".to_string(),
             span: span(1, 1, 0),
             body_offset: 12,
@@ -428,6 +448,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
         HeadingFact {
             level: 3,
             text: "Use norn".to_string(),
+            reading: "use norn".to_string(),
             slug: "use-norn-1".to_string(),
             span: span(9, 3, 120),
             body_offset: 134,

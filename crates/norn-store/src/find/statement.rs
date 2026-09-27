@@ -239,12 +239,13 @@ impl Nested {
             Nested::Tags => "n.name, n.source, n.span_line, n.span_column, n.span_offset",
             Nested::Headings => {
                 "n.text, n.slug, n.level, n.span_line, n.span_column, n.span_offset, \
-                 n.body_offset, n.inside_container"
+                 n.body_offset, n.inside_container, n.reading"
             }
             Nested::Blocks => "n.block_id, n.span_line, n.span_column, n.span_offset",
             Nested::Links => {
                 "n.family, n.embed, n.protocol, n.target, n.title, n.anchor, n.block_ref, \
-                 n.span_line, n.span_column, n.span_offset, n.id"
+                 n.span_line, n.span_column, n.span_offset, n.anchor_text, n.anchor_marked, \
+                 n.anchor_slug, n.id"
             }
         }
     }
@@ -254,7 +255,7 @@ impl Nested {
     pub(crate) const fn width(self) -> usize {
         match self {
             Nested::Tags => 5,
-            Nested::Headings => 8,
+            Nested::Headings => 9,
             Nested::Blocks => 4,
             Nested::Links => LINK_ID_COLUMN + 1,
         }
@@ -262,7 +263,7 @@ impl Nested {
 }
 
 /// Where a link's row id stands among [`Nested::columns`] of the links.
-pub(crate) const LINK_ID_COLUMN: usize = 10;
+pub(crate) const LINK_ID_COLUMN: usize = 13;
 
 /// Which way a page runs.
 ///
