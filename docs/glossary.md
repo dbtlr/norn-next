@@ -110,9 +110,6 @@ How a boundary invariant is currently carried: by a withheld dependency edge, an
 **Review-held invariant**:
 An invariant carried by an explicit human judgment because no executable rule currently expresses it.
 
-**Composition product**:
-A single outcome computed by matching a value against every combination of the inputs that determine it, with no wildcard arm, so a new combination fails to compile until the match names its own row.
-
 **Dormant carrier**:
 An unreached implementation path retained because the layer roadmap names its future consumer. A path with no named consumer is speculative, not dormant.
 _Avoid_: Dead code, speculative seam
