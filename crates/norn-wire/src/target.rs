@@ -22,7 +22,9 @@
 //! **Nothing is percent-decoded.** Percent-decoding belongs to resolving a
 //! Markdown link against a vault, where what was encoded is known; a target a
 //! client wrote is the literal text it wrote, and decoding it here would make
-//! `a%2Fb` and `a/b` one address when a person typed two.
+//! `a%2Fb` and `a/b` one address when a person typed two. A heading anchor is
+//! kept as written here too, and is decoded where a section is resolved, by
+//! the one section resolver a link's anchor is read by.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -68,6 +70,16 @@ impl Anchor {
     /// A block anchor for `id`.
     pub fn block(id: impl Into<String>) -> Self {
         Anchor::Block { id: id.into() }
+    }
+
+    /// Whether nothing is written after the anchor's marker — `note#`,
+    /// `note#^` — which names no place in the document: a reader reads such
+    /// an anchor as no anchor.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Anchor::Heading { text } => text.is_empty(),
+            Anchor::Block { id } => id.is_empty(),
+        }
     }
 
     /// The anchor as it is written, `#` included.

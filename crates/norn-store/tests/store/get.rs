@@ -694,6 +694,39 @@ fn a_heading_anchor_answers_the_section_it_names() {
     }
 }
 
+/// **A get reads an anchor as a link's anchor is read.** A percent-encoded
+/// anchor is decoded once, a heading chain answers its last heading, and an
+/// empty heading or block anchor reads as no anchor: the record answers, as
+/// it does for the target with no anchor, and a collection page takes it.
+#[test]
+fn a_get_decodes_an_anchor_reads_a_chain_by_its_last_heading_and_reads_an_empty_anchor_as_none() {
+    let body = "# Top\n\ntop\n\n## My Heading\n\nmine\n\n## Sub\n\nsub\n\npara ^p1\n";
+    let vault = Vault::holding(
+        "get-anchor-rulings",
+        Sensitive,
+        &[parsed("notes/r.md", body)],
+    );
+    assert_eq!(section(&vault, "r#My%20Heading").0, "My Heading");
+    assert_eq!(section(&vault, "r#Top#Sub").0, "Sub");
+    let bare = vault.get(&getting("r"));
+    for empty in ["r#", "r#^"] {
+        let gotten = vault.get(&getting(empty));
+        assert!(
+            gotten.unsatisfied.is_empty(),
+            "`{empty}`: {:?}",
+            gotten.unsatisfied
+        );
+        assert_eq!(
+            gotten.report, bare.report,
+            "`{empty}` answered another report"
+        );
+        let page = getting(empty)
+            .with_collection(CollectionSelector::Headings)
+            .with_limit(2);
+        vault.get(&page);
+    }
+}
+
 /// **A document broken by lone CR answers a section's bytes as written**: the
 /// heading offsets the store holds were read off the normalized parse, which
 /// moves no byte.
