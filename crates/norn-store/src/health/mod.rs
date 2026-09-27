@@ -97,9 +97,11 @@ const MISSING_ANCHOR: &str = "the document the link names holds no place its anc
 /// ways, and each is a selection here: the links a written document holds, the
 /// suffix-addressed links whose keys fall in the class of a changed path, and
 /// the path-addressed links whose key is a changed path. Each is read by an
-/// index seek ([`statement::links_sql`]), and whichever way a link is reached
-/// it is judged alike: the selection decides which links are read, and never
-/// what is found about them.
+/// index seek — [`crate::ExplainedStatement::LinkHealthLinks`],
+/// [`crate::ExplainedStatement::LinkHealthClassLinks`] and
+/// [`crate::ExplainedStatement::LinkHealthPathLinks`] — and whichever way a
+/// link is reached it is judged alike: the selection decides which links are
+/// read, and never what is found about them.
 ///
 /// A key is spelled in the key space the store's path order selects, as the
 /// changeset names its classes and paths
