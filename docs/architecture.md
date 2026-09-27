@@ -1748,7 +1748,11 @@ acquires the reader the entry serves now where it serves another, and refuses wi
 entry publishes where it neither settles nor serves. The wait for the connection ends when the
 connection comes back or when the read's bound runs out, whichever is first — so a holder that
 never ends, or a teardown that wakes no waiter, holds a read no longer than its bound — and a
-read that finds the connection still held past its bound refuses as reader-unavailable.
+read that finds the connection still held past its bound refuses as reader-unavailable. The
+retake of the gate after that wait ends at the same bound: a gate another holder keeps past it,
+a mint's open among them, refuses the read as reader-unavailable, and the demand the read
+recorded goes back with the next hold of the gate rather than holding the read until the gate
+is free.
 The priced cost of contention is that second reading, and measured contention is still what
 mints more readers through the carved pool seam. The reader is torn down before the store
 closes on every closing path, and a read's hold is demand on the entry: it holds the entry's
@@ -1796,7 +1800,9 @@ hold of the entry gate ends by recording whether trust has stood unbroken since 
 moves the gate's stance signal where the hold changed the stance or how far the entry has
 derived the facts it took in. The bound runs from the read's first hold of the entry gate and
 covers every wait the read takes, the wait for the connection and the wait for the change
-together. Every batch the entry takes in that carries a fact moves its position in its fact
+together, and the retake of the gate after each. A read whose retake after the wait for the
+change meets a gate held past the bound refuses as still indexing, with the demand it last
+read under the gate. Every batch the entry takes in that carries a fact moves its position in its fact
 stream, and a reconcile turn that commits records that it has derived through the position it took its facts
 at. A settling read records that position under the first hold that finds the entry settling,
 gives the gate back, waits outside it on the signal, takes the gate again and reads the stance
@@ -1921,7 +1927,7 @@ leaving the wait between them out. The connection's turn is taken under the gate
 connection runs on one thread at a time, so every statement SQLite runs on the read's
 connection under the gate is in the difference however it was composed, and an establishing
 statement moved before or after the hold is not. The entry gate counts every time it is taken,
-inside the lock and at the one lock site every holder goes through, and the acquisition reads
+inside the lock and in the gate's own takes, which every holder goes through, and the acquisition reads
 that count at the same two points: a continuous hold reads no retake, and a hold that let the
 gate go and took it back around the establishment reads one. Beside them the account keeps the
 widest reading any one acquisition produced, its mint and its establishment together, which is
