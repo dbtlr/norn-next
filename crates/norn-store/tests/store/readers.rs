@@ -295,7 +295,10 @@ fn a_wait_for_the_connection_ends_at_its_deadline() {
         "a wait took a connection another read holds"
     );
     let waited = started.elapsed();
-    assert!(waited >= bound, "the wait ended {waited:?} before its deadline");
+    assert!(
+        waited >= bound,
+        "the wait ended {waited:?} before its deadline"
+    );
     assert!(
         waited < Duration::from_secs(30),
         "the wait ran {waited:?} past its deadline"
@@ -313,7 +316,9 @@ fn a_wait_for_the_connection_ends_at_its_deadline() {
 
     drop(held);
     assert!(
-        reader.wait_for_the_connection_until(Instant::now()).is_some(),
+        reader
+            .wait_for_the_connection_until(Instant::now())
+            .is_some(),
         "a wait past its deadline refused a connection nothing holds"
     );
 }

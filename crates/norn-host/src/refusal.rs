@@ -20,9 +20,10 @@
 //! that crosses, not an envelope. What becomes an envelope is a state that
 //! polling does not walk out of: one standing until a re-heal, a client
 //! demanding one, or an environment that stops refusing retires it. A read
-//! answers from a warming entry no more than from an untrusted one — where it
-//! waits out a change, it answers from the `Ready` the change ends at — so
-//! what reads can do with a state is not the line; what retires the state is.
+//! answers from a warming entry no more than from an untrusted one, save where
+//! it waits out a change and the entry has derived every fact the read met —
+//! so what reads can do with a state is not the line; what retires the state
+//! is.
 //!
 //! **A refusal a request earns renders here; the host being gone does not.**
 //! [`ReloadRefusal::answer`] hands back an envelope for everything a reload

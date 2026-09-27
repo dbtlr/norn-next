@@ -1729,7 +1729,10 @@ afresh before it establishes, because the instant it first read is not the insta
 under; an entry that has stopped serving, or whose reader is no longer the one the acquisition
 waited for, takes the connection back, and the read then waits where the entry settles,
 acquires the reader the entry serves now where it serves another, and refuses with what the
-entry publishes where it neither settles nor serves.
+entry publishes where it neither settles nor serves. The wait for the connection ends when the
+connection comes back or when the read's bound runs out, whichever is first — so a holder that
+never ends, or a teardown that wakes no waiter, holds a read no longer than its bound — and a
+read that finds the connection still held past its bound refuses as reader-unavailable.
 The priced cost of contention is that second reading, and measured contention is still what
 mints more readers through the carved pool seam. The reader is torn down before the store
 closes on every closing path, and a read's hold is demand on the entry: it holds the entry's
@@ -1749,7 +1752,8 @@ read reaches a reader only through a hold. A name the serving set does not hold 
 at that lookup, before any entry gate is taken: the acquisition refuses as an unknown vault
 and records nothing against anything. Over an entry, the acquisition reads the published
 demand and the entry's retained reader fact under a hold of that entry's gate, and mints a
-hold only where the demand is a serving state and a reader stands beside it; what the hold
+hold only where the demand is a serving state — `Ready`, or the healing of an entry that has
+derived every fact a settling read met — and a reader stands beside it; what the hold
 carries with the handle is the published demand read in the gate hold that established its
 snapshot, never the trust label a park outranks. An acquisition over an entry that settles
 waits for it as the paragraph below states, and one that mints no hold serves nothing and
@@ -1773,18 +1777,27 @@ turn, a schema reload — settles, and every other state refuses at once with it
 including the warming of a recovery or a rebuild entered from untrusted, as above. The trust
 label does not say how warming was entered, so the entry's own state holds that fact: every
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
-moves the gate's stance signal where the hold changed the stance. The bound runs from the
-read's first hold of the entry gate and covers the wait for the connection and the wait for
-`Ready` together. A settling read gives the gate back,
-waits outside it on a signal that moves only when the stance changes, takes the gate again
-and reads the published demand afresh, and answers from the snapshot it establishes at the
-first `Ready` it observes after it began, never from the state before the change; where a
-schema reload minted a new reader once `Ready` returned, the read acquires that reader and
-answers from it, and it refuses only where the entry is no longer settling or `Ready`. Past a
-bound, a lifecycle policy value whose production value is the 5-second settle ceiling, it
-refuses as `host/entry-not-ready` with the message "this vault is still indexing a change". A
-teardown's publication wakes a waiting read, which takes the gate again and refuses with what
-the entry then publishes; no teardown waits for it. While a maintenance scan holds
+moves the gate's stance signal where the hold changed the stance or how far the entry has
+derived the facts it took in. The bound runs from the read's first hold of the entry gate and
+covers every wait the read takes, the wait for the connection and the wait for the change
+together. Every batch of facts the entry takes in moves its position in its fact stream, and a
+reconcile turn that commits records that it has derived through the position it took its facts
+at. A settling read records that position under the first hold that finds the entry settling,
+gives the gate back, waits outside it on the signal, takes the gate again and reads the stance
+afresh. It answers from the snapshot it establishes at the first of two things it observes:
+the entry derived through the position it recorded with a reader standing, or `Ready`. The
+answer carries what the entry then publishes, so a read answered while later facts are still
+being derived says so: its trust is the healing that stands, and its generation is the store's
+committed write generation. So a vault edited faster than one reconcile turn still answers, the
+wait never runs until the vault falls quiet, and no read answers from the state before the
+change it met. A schema reload closes the reader for its length, so a read it settles answers
+once it mints another with `Ready`, and from that reader; the read refuses only where the
+entry is no longer settling or serving. Past a bound, a lifecycle policy value whose
+production value is the 5-second settle ceiling, it refuses as `host/entry-not-ready` with the
+message "this vault is still indexing a change". A teardown's publication moves the stance and
+wakes every waiting read, which takes the gate again and refuses with what the entry then
+publishes, unless the entry has reached `Ready` again before that retake; no teardown waits for
+it. While a maintenance scan holds
 the entry, the entry stays `Ready` without yet seeing an edit made moments before, so a read
 in that window can miss it.
 

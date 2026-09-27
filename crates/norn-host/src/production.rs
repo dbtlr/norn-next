@@ -82,8 +82,8 @@ pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// measure its headroom; observations do not tune it automatically.
 pub const WATCH_SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 
-/// Longest a read waits for an entry taking in a change to reach `Ready`
-/// again, counted from the read's first hold of the entry gate.
+/// Longest a read waits for an entry taking in a change, counted from the
+/// read's first hold of the entry gate and covering every wait it takes.
 ///
 /// This is operational containment, not a performance threshold. It keeps a
 /// read from waiting on a change that does not converge; it states nothing

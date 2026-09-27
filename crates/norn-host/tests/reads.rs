@@ -28,7 +28,7 @@ use norn_wire::{
     FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, Predicate, ReasonCode,
     ResolutionTarget, Rung, RungSelection, RungSet, SearchParams, Sort, SortKey, TrustState,
     Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
-    VaultRoot,
+    VaultRoot, WarmingPhase,
 };
 
 /// The generated profile every case here attaches.
@@ -1083,7 +1083,21 @@ fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
         );
         std::thread::yield_now();
     };
-    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
+    // A read answers once every fact the entry had taken in when it arrived
+    // is derived, so it may answer while later facts of the burst are still
+    // being derived, and says so.
+    assert!(
+        matches!(
+            answered.answer.reading.trust,
+            TrustState::Ready
+                | TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                }
+        ),
+        "the read answered under {:?}",
+        answered.answer.reading.trust
+    );
     let GetReport::Record { document, .. } = &answered.answer.report else {
         panic!(
             "the burst's last document answered {:?}",

@@ -103,13 +103,14 @@ pub enum TrustState {
     /// is waiting for exactly that, on every entry and every path that reaches
     /// it.
     Unattached,
-    /// Attached and not readable. The entry is either working toward readable
-    /// derived state or giving up what it holds; `phase` says which, and the
-    /// counters say how far the counted work has come. Reads do not answer
-    /// from the entry in either case: a read that meets an entry healing a
-    /// change over state it has already served waits, bounded, and answers
-    /// from the `ready` the change ends at, and every other read is refused
-    /// under `host/entry-not-ready`.
+    /// Attached and not at `ready`. The entry is either working toward
+    /// readable derived state or giving up what it holds; `phase` says which, and the
+    /// counters say how far the counted work has come. A read that meets an
+    /// entry healing a change over state it has already served waits,
+    /// bounded, until the entry has derived every fact it had taken in when
+    /// the read met it, and answers under this state or `ready`, whichever
+    /// the entry then publishes; every other read is refused under
+    /// `host/entry-not-ready`.
     #[non_exhaustive]
     Warming {
         /// The kind of work the entry is doing.
