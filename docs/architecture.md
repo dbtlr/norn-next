@@ -2306,23 +2306,44 @@ sequenceDiagram
   participant D as SQLite (via norn-store)
   C->>S: HTTP (bearer; protocol shape)
   S->>H: verb params (wire)
-  H->>H: compile to typed plan (wire vocabulary)
-  H->>W: plan
-  W->>F: fingerprint → shadow → verify → swap (protocol owned by norn-fs)
-  Note over W,F: drift detected → refuse-and-refresh (fresh forecast, hash-CAS confirm)
-  W->>D: write-through increment, scoped to blast radius
+  H->>H: plan operations → one transition per file (before-hash, composed content, after-hash)
+  H->>W: resolved plan (a preview answers here and writes nothing)
+  W->>F: check and stage every target: precondition, schema, shadow (protocol owned by norn-fs)
+  Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh forecast)
+  W->>F: publish every staged target
+  W->>D: write-through increment, one changeset per plan, scoped to blast radius
   Note over W,D: mark-invariant — the same counters under either mark
   W-->>H: outcome
   H-->>S: report (wire)
   S-->>C: HTTP response
 ```
 
-`apply` is the same flow entered with an externally supplied plan. Repair is a planner over
-the findings table feeding the identical applier; its plans cite the finding generation they
-were planned against, and repair reads the live ambiguity class rather than a finding's
-snapshot.
+A write verb is a plan of one operation; `apply` is the same flow entered with an externally
+supplied plan, either an operation list or a resolved plan from a preview. Repair is a
+planner over the findings table feeding the identical applier; its plans cite the finding
+generation they were planned against, and repair reads the live ambiguity class rather than
+a finding's snapshot. A request states whether it previews or applies; the wire has no
+default mode.
 
-Two contracts inside that flow carry weight:
+A plan is a self-contained value naming its vault by address: the host holds no plan
+between requests. Applies to one vault run one at a time, and the request waits for the
+outcome; a caller that stops waiting does not abort the apply. Mutation preconditions are
+checked against the content hashes the plan carries, not against the snapshot a planner
+read through ([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
+
+Four contracts inside that flow carry weight:
+
+- **Stage everything, then publish.** No target is published until every target's
+  precondition holds, every composed result passes the vault schema, and every shadow is
+  staged. A refusal anywhere publishes nothing. A plan refuses only the schema violations it
+  introduces. Publication is still a window: a crash, an I/O failure, or a foreign edit
+  reaching a target between its staging and its swap can stop it part-way, the apply report
+  names every target that landed, and a move interrupted between its legs leaves both names
+  holding the document.
+- **Re-applying finishes a plan.** A target already holding its after-hash is landed, not
+  drifted, so re-sending a plan a crash or an I/O failure interrupted completes it with no
+  journal and no rollback; a target a foreign edit reached refuses as drift and is
+  re-planned.
 
 - **Write-through.** The worker composed the post-state, so the increment writes it —
   database updates scoped to the blast radius, composing supplied facts and re-deriving
