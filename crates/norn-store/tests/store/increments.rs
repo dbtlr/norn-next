@@ -1462,8 +1462,11 @@ fn a_class_range_does_not_catch_a_path_key_it_prefixes() {
 fn a_path_key_from_the_other_key_space_is_refused() {
     for spelling in ["glossary/", "glossary/norn/", "dir/"] {
         assert!(
-            matches!(PathKey::new(spelling), Err(StoreError::Path { .. })),
-            "`{spelling}` ends in the separator and was read as a path key"
+            matches!(
+                PathKey::new(spelling),
+                Err(StoreError::Path { problem, .. }) if problem.contains("class key")
+            ),
+            "`{spelling}` ends in the separator and was not refused as a class key's spelling"
         );
     }
     let class_key = class("glossary/norn/");
