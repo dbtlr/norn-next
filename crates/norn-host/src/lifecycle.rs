@@ -3310,8 +3310,9 @@ pub struct Host<O: EntryOps> {
 /// One read's hold on a vault entry.
 ///
 /// **The hold is the proof.** A handle is reachable only through one, and one
-/// is minted only over an entry whose published demand is `Ready`, so a read
-/// that skipped the adjudication is a read that has no handle to run on.
+/// is minted only where the entry's published demand is `Ready`, or where it
+/// is settling and has derived every fact the read met, so a read that
+/// skipped the adjudication is a read that has no handle to run on.
 ///
 /// The published demand, the handle and the snapshot come out of one hold of
 /// the entry gate lock, so the demand a read answers under and the snapshot it
