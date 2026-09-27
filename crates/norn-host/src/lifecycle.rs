@@ -5315,12 +5315,27 @@ fn poll_claimed_entry<O: EntryOps>(
                 Ok(None) => {
                     state.claim.end_poll(epoch);
                     state.coverage.park_by(epoch, attachment);
-                    if maintenance_due && !state.owes_a_rung() {
-                        schedule = Some(
-                            state
-                                .claim
-                                .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
-                        );
+                    if !state.owes_a_rung() {
+                        // Facts can stand pending over an entry nothing is
+                        // working: a teardown a leg scheduled over them and a
+                        // demand then withdrew. The watcher has nothing more
+                        // to report, so this poll is what schedules the
+                        // reconcile they are owed — behind due maintenance,
+                        // which hands that reconcile on when it ends.
+                        if maintenance_due {
+                            schedule = Some(
+                                state
+                                    .claim
+                                    .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
+                            );
+                        } else if !state.pending.is_empty() {
+                            state.publish_pending_reconcile();
+                            schedule = Some(
+                                state
+                                    .claim
+                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                            );
+                        }
                     }
                 }
                 Ok(Some(batch)) => {
@@ -19701,16 +19716,19 @@ mod tests {
 
     /// Run `leg` on this thread over an entry that is healing and due a
     /// teardown, with `pending` taken in, while the host's one worker is held
-    /// inside another vault's attach: the leg leaves nothing to derive and
-    /// schedules the teardown, which waits in the channel. A read then
-    /// withdraws the teardown, and it answers at once from the `Ready` the
-    /// leg published, rather than waiting its bound out over an entry left
-    /// healing with nothing owed.
-    fn a_read_withdrawing_a_teardown_after(leg: fn(VaultName, u64) -> Job, pending: Option<Batch>) {
-        let ops = Arc::new(FakeOps::default());
+    /// inside another vault's attach: the leg schedules the teardown, which
+    /// waits in the channel for a read to withdraw it. The dispatcher ticks
+    /// every `tick`. Answers the host, the entry the leg ran over, and the
+    /// lease on the vault holding the worker.
+    fn a_leg_ending_due_a_teardown(
+        ops: &Arc<FakeOps>,
+        leg: fn(VaultName, u64) -> Job,
+        pending: Option<Batch>,
+        bound: Duration,
+        tick: Duration,
+    ) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let bound = Duration::from_secs(2);
         let registry = RegistryRead::from_entries([&subject, &holding].map(|name| {
             RegistryEntry::new(
                 name.clone(),
@@ -19719,11 +19737,11 @@ mod tests {
         }));
         let host = Host::new(
             registry,
-            Arc::clone(&ops),
+            Arc::clone(ops),
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
+                watch_poll_interval: tick,
                 read_settle_bound: bound,
             },
         )
@@ -19757,6 +19775,19 @@ mod tests {
                 .detach_scheduled,
             "the leg scheduled no teardown for the read to withdraw"
         );
+        (host, subject, holding_lease)
+    }
+
+    /// A read that withdraws the teardown a leg left nothing to derive
+    /// behind answers at once from the `Ready` the leg published, rather than
+    /// waiting its bound out over an entry left healing with nothing owed.
+    fn a_read_withdrawing_a_teardown_after(leg: fn(VaultName, u64) -> Job, pending: Option<Batch>) {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_secs(2);
+        // The dispatcher does not tick inside the case, so nothing but the
+        // leg publishes over the entry before the read.
+        let (host, subject, holding_lease) =
+            a_leg_ending_due_a_teardown(&ops, leg, pending, bound, Duration::from_secs(60));
 
         let started = Instant::now();
         let hold = host
@@ -19775,6 +19806,51 @@ mod tests {
         drop(hold);
         assert_eq!(host.state(&subject), answered(TrustState::Ready));
         ops.attach_release.store(true, Ordering::SeqCst);
+        drop(holding_lease);
+    }
+
+    /// **A poll schedules the reconcile facts left pending are owed.** A
+    /// maintenance ends with a fact pending and a teardown due, so it
+    /// schedules the teardown and leaves the entry healing with the fact
+    /// owed. A read withdraws the teardown and waits; the watcher reports
+    /// nothing more, so the dispatcher's next poll is what schedules the
+    /// reconcile, and the read answers once that commits, well inside its
+    /// bound.
+    #[test]
+    fn a_poll_schedules_the_reconcile_that_facts_left_pending_are_owed() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, subject, holding_lease) = a_leg_ending_due_a_teardown(
+            &ops,
+            Job::Maintenance,
+            Some(a_fact()),
+            LONG_SETTLE,
+            Duration::from_millis(5),
+        );
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&subject));
+            // The worker goes free once the read has withdrawn the teardown,
+            // so the teardown it finds in the channel is one the entry has
+            // moved past.
+            wait_for_settle_waits(&host, before, 1);
+            ops.attach_release.store(true, Ordering::SeqCst);
+            reading.join().expect("the read finished")
+        })
+        .expect("a read over facts the next poll scheduled was refused");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "the read waited {:?} for facts nothing scheduled",
+            started.elapsed()
+        );
+        drop(hold);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the facts left pending were not reconciled once"
+        );
         drop(holding_lease);
     }
 
