@@ -136,7 +136,12 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
 
     let error = store
         .begin_request()
-        .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)], &[])
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(facts)],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
         .expect_err("a document whose frontmatter nests past the bound");
     let StoreError::Entry {
         index,
@@ -1020,7 +1025,12 @@ fn a_document_whose_numbers_do_not_add_up_is_refused() {
         facts.byte_length = byte_length;
         let error = store
             .begin_request()
-            .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)], &[])
+            .apply_increment(
+                IncrementProvenance::Derived,
+                [Change::Upsert(facts)],
+                &[],
+                &norn_store::ContentModel::none(),
+            )
             .expect_err("a document whose numbers do not add up");
         let StoreError::Entry { problem, .. } = &error else {
             panic!("the refusal does not say which entry it came from: {error:?}");

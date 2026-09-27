@@ -126,13 +126,11 @@
 //! as it stood. The scan is the one resolver's ([`crate::TargetClass`]), so a
 //! finding's class is the class a find's `resolves` part reads on that root.
 //!
-//! The class-bearing findings are a dormant carrier: their producer is the
-//! link-health findings the link-health unit of Layer 3 files, reading a link
-//! target's class and filing what it found under the class's keys. The current
-//! call graph files none, because no producer files a link-health finding yet
-//! — every finding the host files is about its own subject and carries no
-//! class key — so the class half of this table is reached by its maintenance
-//! and its tests alone.
+//! The class-bearing findings are the link-health findings the store judges
+//! inside every changeset ([`crate::health`]): a finding about a
+//! suffix-addressed link is filed under the classes its keys open, and a
+//! change to any of them discards it and re-decides the link. Every finding
+//! the host files is about its own subject and carries no class key.
 //!
 //! A finding's class keys are spelled in the key space its root probes, which
 //! the store's path order selects, and a changed path names its class in that
@@ -220,11 +218,10 @@
 //! reached by equality alone, and a path key never ends in the separator, so
 //! no path key is a class key either.
 //!
-//! The path-keyed findings are a dormant carrier on the same terms as the
-//! class-keyed ones: their producer is the link-health unit of Layer 3, filing
-//! a finding about a path-addressed link under the paths it spells. Every
-//! finding the host files today carries no path key, so this table is reached
-//! by its maintenance and its tests alone.
+//! The path-keyed findings are the link-health findings about a
+//! path-addressed link, filed under the paths it spells, which the store
+//! re-decides when a changeset writes or kills one of them. Every finding the
+//! host files carries no path key.
 //!
 //! A tombstone keeps the same class computable for the same reason: a deletion
 //! changes a class, and the class has to stay derivable after the document row
@@ -253,13 +250,15 @@
 //! it.
 //!
 //! The way is class-scoped maintenance, in both directions:
-//! [`crate::Request::findings_in_class`] reads the class and
-//! [`crate::Request::discard_findings_in_class`] empties it. **Discard-then-
-//! record is the idempotence story** — re-deriving a class discards it and
-//! records what holds now, so there is no dedupe rule to keep and no way for two
-//! derivations of one class to leave two copies. Every deletion goes through
-//! that verb, which is what makes findings leaving the table counted rather than
-//! a side effect of a cascade nobody billed.
+//! [`crate::Request::findings_in_class`] reads the class, and a changeset that
+//! changes a path in it empties it inside its link-health re-decision, a chunk
+//! of findings at a time by row id. **Discard-then-record is the idempotence
+//! story** — re-deriving a class discards it and records what holds now, so
+//! there is no dedupe rule to keep and no way for two derivations of one class
+//! to leave two copies. Every deletion is a counted discard — a changeset's
+//! subject, class and path discards, a caller's subject discard, and a schema
+//! pin's — which is what makes findings leaving the table counted rather than a
+//! side effect of a cascade nobody billed.
 //!
 //! Nothing here references `links` either. Fact rows are replaced wholesale on
 //! every re-derivation, so a reference into them would delete every finding

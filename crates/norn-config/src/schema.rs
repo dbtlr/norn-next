@@ -48,7 +48,7 @@
 //! Every section is optional. A schema that declares nothing — which is what
 //! `version: 1` alone is — is a valid schema that judges no document, and
 //! [`VaultSchema::rederives_documents`] is how a caller asks whether it is
-//! worth re-deriving anything under it.
+//! worth re-deriving any document under it.
 //!
 //! **A key this grammar does not hold is a refusal.** `tagz:` or
 //! `undecalred: report` would otherwise read as a valid schema that quietly
@@ -210,10 +210,9 @@ impl VaultSchema {
     /// The globs match under the store's recorded path order: with ASCII case
     /// folded on a root that folds it, bytewise on a root that does not.
     ///
-    /// Link-health findings are the dormant consumer of the same exclusion:
-    /// the link-health unit of Layer 3 files them, reading a link target's
-    /// class through that one resolver. The current call graph does not reach
-    /// them, because no producer files a link-health finding yet.
+    /// Link-health findings read the same exclusion: the store judges each
+    /// link a changeset reaches through that one resolver, under the
+    /// declaration derivation hands it.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }
@@ -223,7 +222,8 @@ impl VaultSchema {
     ///
     /// The re-derivation a schema change implies costs the vault, so the
     /// question is asked before it is paid. The answer is the disjunction over
-    /// the declarations some derived state reads, and that set holds two:
+    /// the declarations some per-document derived state reads — state a
+    /// document's own re-derivation derives again — and that set holds two:
     ///
     /// - **A tag facet that reports**, whose findings are derived per document.
     /// - **A field declared with a type that does not order as text**, whose
@@ -233,11 +233,27 @@ impl VaultSchema {
     ///   A field declared as text or tags orders as its raw text and fills
     ///   nothing.
     ///
-    /// A schema declaring neither leaves every row with the same derived state
-    /// under the new pin as under the old. **A declaration gaining a consumer
-    /// joins this disjunction in the same change**: a schema answering `false`
-    /// here while some derived state reads its declaration would leave that
-    /// state derived under a schema the vault no longer declares.
+    /// A schema declaring neither leaves every row with the same per-document
+    /// derived state under the new pin as under the old. **A declaration
+    /// gaining a per-document consumer joins this disjunction in the same
+    /// change**: a schema answering `false` here while some per-document state
+    /// reads its declaration would leave that state derived under a schema the
+    /// vault no longer declares.
+    ///
+    /// State the store judges across documents is not in it. Link health reads
+    /// [`VaultSchema::ambiguity_ignore`], and a link's finding is re-decided
+    /// by the store over stored facts, not derived again from the document's
+    /// bytes, so that declaration is no term here: what a pin owes link health
+    /// is the carrier below, whatever this answers.
+    ///
+    /// **A dormant carrier.** Its consuming layer is the host's heal after a
+    /// pin, once the store re-decides link health over every link at the pin
+    /// itself ([ADR 0027]). A pin discards every link-health finding whatever
+    /// the schema declares, and today only the re-derivation of the document
+    /// holding a link files its finding again, so the heal re-derives every
+    /// row below the pin and asks nothing of this.
+    ///
+    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     pub fn rederives_documents(&self) -> bool {
         self.tags.reports_undeclared()
             || self

@@ -211,10 +211,11 @@ impl Vault {
         found.remove(0)
     }
 
+    /// Stand `finding` at rest. The suite's findings are about links and
+    /// filed under link-health kinds, which are the store's own to file, so
+    /// they stand through the fenced door.
     fn stand(&mut self, finding: &FindingFacts) {
-        self.store
-            .begin_request()
-            .record_finding(finding)
+        induced_failure::record_finding_out_of_band(&mut self.store, finding)
             .expect("recording a finding");
     }
 
@@ -943,7 +944,13 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
             },
             embed: false,
             protocol: None,
-            target: format!("target-{at}"),
+            // A wikilink names its target by stem, and a Markdown link by
+            // its path.
+            target: if at % 2 == 0 {
+                format!("target-{at}")
+            } else {
+                format!("targets/target-{at}.md")
+            },
             title: None,
             anchor: match at {
                 1 => heading_anchor("Heading"),
@@ -968,6 +975,15 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
         document("a/twin.md", "hash-twin-a", "a\n"),
         document("b/twin.md", "hash-twin-b", "b\n"),
     ];
+    // Each link names a document holding the place its anchor names, so the
+    // store files no link-health finding and the findings `paged.md` holds
+    // are the ones stood below.
+    documents.extend((0..HELD).map(|at| {
+        parsed(
+            &format!("targets/target-{at}.md"),
+            "# Heading\n\npara ^b0\n",
+        )
+    }));
     documents.extend((0..bulk).map(|at| {
         document(
             &format!("bulk/{at:04}.md"),

@@ -68,13 +68,19 @@ pub enum StoreError {
         limit: usize,
         given: usize,
     },
-    /// A document's typed field values were derived under a schema other than
-    /// the one the store pins. Refused rather than written, because the typed
-    /// column holds only values the pinned schema derives: a value derived
-    /// under another would stand in an order no read can name.
+    /// Something a changeset hands over was read under a schema other than
+    /// the one the store pins. Refused rather than written: a document's typed
+    /// field values, because the typed column holds only values the pinned
+    /// schema derives and a value derived under another would stand in an
+    /// order no read can name; and the declaration a changeset's link health
+    /// is judged under, because a finding judged under another schema's
+    /// ambiguity-ignore globs is one a rebuild under the pinned schema would
+    /// not file.
     UnpinnedDeclaration {
-        /// The fingerprint of the schema the values were derived under, or
-        /// `None` for none.
+        /// What was read under the other schema.
+        what: &'static str,
+        /// The fingerprint of the schema it was read under, or `None` for
+        /// none.
         derived_under: Option<String>,
         /// The fingerprint the store pins, or `None` where it pins none.
         pinned: Option<String>,
@@ -89,6 +95,17 @@ pub enum StoreError {
         what: &'static str,
         /// The path order the store's rows were derived under.
         order: StoredPathOrder,
+    },
+    /// A caller handed over a finding only the store files, or a discard that
+    /// reaches one: a finding of a kind the store judges itself — link health
+    /// — or one about a link, which only such a finding is. Refused rather
+    /// than run: a finding the store judges is re-decided by the changeset
+    /// that reaches its link, so one a caller filed would stand beside it or
+    /// be discarded by a re-decision its caller never sees, and one a caller
+    /// discarded would stay gone until that changeset came.
+    StoreJudged {
+        /// What the finding was that only the store files.
+        what: &'static str,
     },
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
@@ -122,11 +139,12 @@ impl fmt::Display for StoreError {
                 write!(f, "{what} holds at most {limit}, and {given} were given")
             }
             StoreError::UnpinnedDeclaration {
+                what,
                 derived_under,
                 pinned,
             } => write!(
                 f,
-                "typed field values were derived under {}, and the store pins {}",
+                "{what} under {}, and the store pins {}",
                 schema_named(derived_under.as_deref()),
                 schema_named(pinned.as_deref())
             ),
@@ -134,6 +152,11 @@ impl fmt::Display for StoreError {
                 f,
                 "{what} is spelled in another key space than the store's `{}` path order selects",
                 order.as_str()
+            ),
+            StoreError::StoreJudged { what } => write!(
+                f,
+                "{what} is a finding the store judges and files itself, and no caller records or \
+                 discards one"
             ),
             StoreError::Entry {
                 index,
@@ -168,7 +191,8 @@ impl StoreError {
             | StoreError::Lifecycle { .. }
             | StoreError::Bound { .. }
             | StoreError::UnpinnedDeclaration { .. }
-            | StoreError::KeySpace { .. } => None,
+            | StoreError::KeySpace { .. }
+            | StoreError::StoreJudged { .. } => None,
         }
     }
 }

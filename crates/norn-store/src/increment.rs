@@ -15,12 +15,13 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
-use crate::fields::{FieldRow, OffsetSpelling};
+use crate::fields::{ContentModel, FieldRow, OffsetSpelling};
 use crate::hash;
+use crate::health::{self, Redecided};
 use crate::json;
 use crate::link::{address_kind, link_keys};
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
-use crate::request::{self, DiscardScope};
+use crate::request::{self, DiscardScope, ReadWork};
 use crate::store::Store;
 
 /// One entry in a changeset.
@@ -94,6 +95,11 @@ pub struct DerivedFinding<'a> {
     /// names needs none. What names a scope here is a producer filing at a
     /// subject the changeset does not name — a place holding no derivable
     /// document — where discard-then-record has no other door.
+    ///
+    /// A scope reaching a finding only the store files —
+    /// [`DiscardScope::EveryKind`], or a list naming a link-health kind — is
+    /// refused ([`crate::StoreError::StoreJudged`]) before the changeset takes
+    /// its lock, as [`crate::Request::discard_findings_about`] refuses it.
     pub replaces: Option<DiscardScope<'a>>,
 }
 
@@ -146,8 +152,10 @@ pub struct IncrementOutcome {
     /// the store's path order selects — raw where its root tells spellings
     /// apart, folded by ASCII case where it folds — which is the space every
     /// finding in the store is filed in. This is the resolution axis of the
-    /// findings maintenance this changeset implies, and what a caller re-records
-    /// against.
+    /// findings maintenance this changeset implies: the classes whose standing
+    /// findings the store discarded and whose suffix-addressed links it
+    /// re-decided the link health of, with every link one of those findings
+    /// was about.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
@@ -159,7 +167,8 @@ pub struct IncrementOutcome {
     /// death of the old path beside a write of the new. This is the path axis
     /// of the findings maintenance this changeset implies — a finding keyed by
     /// the exact path a path-addressed link spells is reached here and by no
-    /// class.
+    /// class, and the store re-decided the link health of the path-addressed
+    /// links spelling each.
     pub affected_paths: BTreeSet<PathKey>,
     /// The findings the changeset discarded on every axis — those recorded
     /// about a changed path, those in [`IncrementOutcome::affected_classes`],
@@ -178,8 +187,10 @@ pub struct IncrementOutcome {
 pub(crate) fn apply(
     store: &mut Store,
     counters: &mut DerivationCounters,
+    work: &ReadWork,
     changes: impl IntoIterator<Item = Change>,
     findings: &[DerivedFinding<'_>],
+    declared: &ContentModel,
 ) -> Result<IncrementOutcome, StoreError> {
     // The first entry is what decides whether the changeset half is an act at
     // all, so it is taken before anything is opened: an empty changeset writes
@@ -201,6 +212,10 @@ pub(crate) fn apply(
     // Every bound is read before the transaction, so a refused finding costs no
     // lock and leaves nothing half applied.
     for finding in findings {
+        request::check_callers_finding(&finding.facts)?;
+        if let Some(scope) = finding.replaces {
+            request::check_callers_discard(scope)?;
+        }
         request::check_finding_bounds(&finding.facts)?;
         request::check_finding_classes(&finding.facts, store.path_order())?;
         request::check_finding_paths(&finding.facts, store.path_order())?;
@@ -218,10 +233,16 @@ pub(crate) fn apply(
     // Every finding in this store is filed in the key space its order
     // selects, so that is the space a changed path names its class and its
     // path key in.
-    let class_space = SuffixKey::under(store.path_order());
+    let order = store.path_order();
+    let class_space = SuffixKey::under(order);
     let transaction = store
         .database
         .immediate_transaction("opening the increment transaction")?;
+    // The pin is read in the transaction every row is written in, so no pin
+    // lands between the comparisons below and the writes they admit.
+    let pinned: Option<String> =
+        norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+    refuse_a_declaration_the_store_does_not_pin(declared, pinned.as_deref())?;
 
     let mut tally = Tally::default();
     let mut generation = None;
@@ -237,7 +258,7 @@ pub(crate) fn apply(
             // them.
             let applied = match &change {
                 Change::Upsert(facts) => {
-                    refuse_typed_values_the_pin_does_not_derive(&transaction, facts).and_then(
+                    refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
                     )
                 }
@@ -271,15 +292,14 @@ pub(crate) fn apply(
             crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
         let discarded =
-            discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
-        tally.findings_discarded += discarded;
-        let discarded =
             discard_affected_paths(&mut statements.discard_path, &tally.affected_paths)?;
         tally.findings_discarded += discarded;
     }
 
     // The findings the same act derived, after the discards above so that a
-    // finding this act still concludes is not taken by them. Each one that
+    // finding this act still concludes is not taken by them; the class
+    // discard, which the re-decision below runs, passes every finding this
+    // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
     for DerivedFinding { facts, replaces } in findings {
@@ -289,6 +309,24 @@ pub(crate) fn apply(
         }
         request::write_finding(&transaction, facts)?;
     }
+
+    // Link health, re-decided last, so every fact it reads is the one this
+    // changeset leaves: the subject discard took the findings at each written
+    // path and the path discard every finding keyed by a path this changeset
+    // changed, and the re-decision discards the findings under each class it
+    // changed before it files one in that class.
+    let redecided = match generation {
+        Some(generation) => health::redecide(
+            &transaction,
+            work,
+            order,
+            declared.ambiguity_ignore(),
+            generation,
+            &tally.affected_classes,
+            &tally.affected_paths,
+        )?,
+        None => Redecided::default(),
+    };
 
     transaction
         .commit()
@@ -312,8 +350,15 @@ pub(crate) fn apply(
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
     counters.add(Counter::FieldRowsWritten, tally.field_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
+    tally.findings_discarded += redecided.discarded;
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
-    counters.add(Counter::FindingsWritten, findings.len() as u64);
+    counters.add(
+        Counter::FindingsWritten,
+        findings.len() as u64 + redecided.findings,
+    );
+    counters.add(Counter::LinksRedecided, redecided.links);
+    counters.add(Counter::LinkHealthKeysResolved, redecided.keys_resolved);
+    counters.add(Counter::LinkHealthCandidatesRead, redecided.candidates_read);
 
     Ok(IncrementOutcome {
         generation,
@@ -371,8 +416,6 @@ struct Statements<'t> {
     record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
     discard_subject: CachedStatement<'t>,
-    /// The class-scoped findings discard, over one class at a time.
-    discard_class: CachedStatement<'t>,
     /// The path-keyed findings discard, over one path key at a time.
     discard_path: CachedStatement<'t>,
 }
@@ -490,10 +533,6 @@ impl<'t> Statements<'t> {
             discard_subject: prepared(
                 request::SUBJECT_DISCARD_SQL,
                 "preparing a path's findings discard",
-            )?,
-            discard_class: prepared(
-                &request::class_discard_sql(1),
-                "preparing a class's findings discard",
             )?,
             discard_path: prepared(
                 request::PATH_DISCARD_SQL,
@@ -768,7 +807,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 }
 
 /// Refuse a document whose typed field values were derived under a schema the
-/// store does not pin.
+/// store does not pin, which is `pinned`.
 ///
 /// **The typed column holds only what the pinned schema derives.** A pin
 /// clears it in the pin's own transaction, and the walk refills it under the
@@ -782,7 +821,7 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 /// under no declaration, or under a stale one that types none of its keys,
 /// writes the typed column as a pin leaves it — empty — for the walk to fill.
 fn refuse_typed_values_the_pin_does_not_derive(
-    transaction: &Transaction<'_>,
+    pinned: Option<&str>,
     facts: &DocumentFacts,
 ) -> Result<(), StoreError> {
     let typed = facts
@@ -790,17 +829,35 @@ fn refuse_typed_values_the_pin_does_not_derive(
         .rows()
         .iter()
         .any(|row| matches!(row, FieldRow::Value { typed: Some(_), .. }));
-    if !typed {
-        return Ok(());
-    }
-    let pinned: Option<String> =
-        norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
-    if pinned.as_deref() == facts.fields_schema() {
+    if !typed || pinned == facts.fields_schema() {
         return Ok(());
     }
     Err(StoreError::UnpinnedDeclaration {
+        what: "typed field values were derived",
         derived_under: facts.fields_schema().map(str::to_string),
-        pinned,
+        pinned: pinned.map(str::to_string),
+    })
+}
+
+/// Refuse the declaration a changeset's link health is judged under where it
+/// was read from a schema the store does not pin, which is `pinned`.
+///
+/// **Link-health findings are judged under the pinned schema's
+/// ambiguity-ignore globs**, and filed under its fingerprint, so a finding
+/// judged under another declaration's globs is one a rebuild under the pinned
+/// schema would not file — and one a later pin's discard would not reach as
+/// the finding it is.
+fn refuse_a_declaration_the_store_does_not_pin(
+    declared: &ContentModel,
+    pinned: Option<&str>,
+) -> Result<(), StoreError> {
+    if declared.schema() == pinned {
+        return Ok(());
+    }
+    Err(StoreError::UnpinnedDeclaration {
+        what: "the declaration a changeset's link health is judged under was read",
+        derived_under: declared.schema().map(str::to_string),
+        pinned: pinned.map(str::to_string),
     })
 }
 
@@ -833,39 +890,15 @@ fn discard_the_subject(
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
 }
 
-/// Discard the findings in every class the changeset's paths affect, and report
-/// how many went.
-///
-/// One seek per class rather than one predicate over all of them: each class is
-/// a range over `finding_classes(class_key)`, and the statement that opens one
-/// is prepared once and run per class. The count is findings rather than rows,
-/// because a finding a previous range — or the subject axis — already took is
-/// found gone rather than counted twice.
-fn discard_affected_classes(
-    statement: &mut CachedStatement<'_>,
-    classes: &BTreeSet<ClassKey>,
-) -> Result<u64, StoreError> {
-    let mut discarded = 0_u64;
-    for class in classes {
-        // The statement was compiled for one range, and a class key is its
-        // own range's lower bound.
-        let (lower, upper) = class.bounds();
-        discarded += statement
-            .execute(params![lower, upper])
-            .map_err(|error| error::sql("discarding a class's findings", error))?
-            as u64;
-    }
-    Ok(discarded)
-}
-
 /// Discard the findings keyed by every path the changeset writes or kills, and
 /// report how many went.
 ///
 /// One equality seek of `finding_paths_path_key` per path, prepared once and
 /// run per key. A path key is matched exactly and never as a prefix, so the
 /// findings about links to `glossary/x.md` stand through a change to
-/// `glossary/x.md/y.md`. The count is findings rather than rows, for the reason
-/// [`discard_affected_classes`] states.
+/// `glossary/x.md/y.md`. The count is findings rather than rows, because a
+/// finding the subject axis already took is found gone rather than counted
+/// twice.
 fn discard_affected_paths(
     statement: &mut CachedStatement<'_>,
     paths: &BTreeSet<PathKey>,

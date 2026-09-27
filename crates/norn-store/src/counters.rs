@@ -48,8 +48,8 @@
 //! whole of it.
 //!
 //! [`Counter::FrontmatterProjections`] is the only counter here that names a
-//! computation, and **canonical-JSON projection is storage encoding rather than
-//! recomputation.** A value tree is what the caller
+//! computation over what the caller handed over, and **canonical-JSON
+//! projection is storage encoding rather than recomputation.** A value tree is what the caller
 //! supplied; projecting it to canonical JSON is how a value tree is written into
 //! a `TEXT` column, the same act as binding a length to an integer column and
 //! only larger. It learns nothing about the document that the caller did not
@@ -58,11 +58,21 @@
 //! the bar for every document with frontmatter regardless of where its facts
 //! came from.
 //!
+//! The link-health counters — [`Counter::LinksRedecided`],
+//! [`Counter::LinkHealthKeysResolved`], [`Counter::LinkHealthCandidatesRead`]
+//! — name the store's own judgment, which no applier composes: the store
+//! judges the links a changeset reaches against the documents it holds
+//! ([ADR 0027]) and files what it finds, identically under either mark. They
+//! count its work, so a write-work bar reads how far a write's re-decision
+//! reached rather than a clock.
+//!
 //! So the bar binds where the two marks could differ, and today they do not:
 //! **the same changeset reads the same counters under either mark.** That is the
 //! statement the store makes true by composing supplied facts under both and
 //! re-deriving under neither, and it is what a suite asserts rather than a
 //! promise a reviewer has to take.
+//!
+//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 
 /// One derivation counter.
 ///
@@ -87,6 +97,16 @@ pub(crate) enum Counter {
     /// Typed field values a schema pin cleared.
     TypedValuesDiscarded,
     VaultSchemaPins,
+    /// Links a changeset re-decided the link health of, each once however
+    /// many ways the changeset reached it.
+    LinksRedecided,
+    /// Keys the re-decision resolved: each once across a run of consecutive
+    /// chunks holding it, and once more for each later run.
+    LinkHealthKeysResolved,
+    /// Candidates the re-decision's resolution read: a filled key's whole
+    /// total the first time the changeset resolves it, and the head's rows at
+    /// every other resolution.
+    LinkHealthCandidatesRead,
 }
 
 impl Counter {
@@ -106,6 +126,9 @@ impl Counter {
         Counter::FindingsDiscarded,
         Counter::TypedValuesDiscarded,
         Counter::VaultSchemaPins,
+        Counter::LinksRedecided,
+        Counter::LinkHealthKeysResolved,
+        Counter::LinkHealthCandidatesRead,
     ];
 
     /// The name the counter is compared by. A harness matches readings on these
@@ -126,6 +149,9 @@ impl Counter {
             Counter::FindingsDiscarded => "findings_discarded",
             Counter::TypedValuesDiscarded => "typed_values_discarded",
             Counter::VaultSchemaPins => "vault_schema_pins",
+            Counter::LinksRedecided => "links_redecided",
+            Counter::LinkHealthKeysResolved => "link_health_keys_resolved",
+            Counter::LinkHealthCandidatesRead => "link_health_candidates_read",
         }
     }
 }

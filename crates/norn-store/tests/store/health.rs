@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_store::{
-    AnchorReadings, BlockFact, CANDIDATE_HEAD, ClassKey, ContentModel, DocumentFacts,
-    ExplainedStatement, FindingFacts, HeadingFact, KeySummaries, LinkAnchor, LinkFact, LinkFamily,
-    LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store, StoredPathOrder,
-    SuffixKey, Validation, induced_failure,
+    AnchorReadings, BlockFact, CANDIDATE_HEAD, Change, ClassKey, ContentModel, DocumentFacts,
+    ExplainedStatement, FindingFacts, HeadingFact, IncrementProvenance, KeySummaries, LinkAnchor,
+    LinkFact, LinkFamily, LinkSelection, PathKey, Request, Snapshot, SnapshotReader, Span, Store,
+    StoredPathOrder, SuffixKey, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -21,7 +21,7 @@ use norn_wire::{
     ResolutionTarget, Severity, ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, path, write_documents};
+use crate::common::{Scratch, path};
 use crate::find::failure_of;
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -41,7 +41,7 @@ fn declared() -> ContentModel {
 /// The document at `at` whose body is `body`, with the links, headings and
 /// blocks the text layer reads out of it, mapped onto the store's facts as the
 /// host maps them.
-fn derived(at: &str, body: &str) -> DocumentFacts {
+pub(crate) fn derived(at: &str, body: &str) -> DocumentFacts {
     let scan = norn_text::BodyScan::new(body);
     let mut facts = DocumentFacts::new(path(at), format!("hash-{at}"), body, body.len() as u64);
     let span = |value: norn_text::SourceSpan| Span {
@@ -102,7 +102,7 @@ fn derived(at: &str, body: &str) -> DocumentFacts {
 }
 
 /// A body holding each of `lines` as a paragraph of its own.
-fn body_of(lines: &[&str]) -> String {
+pub(crate) fn body_of(lines: &[&str]) -> String {
     lines.iter().map(|line| format!("{line}\n\n")).collect()
 }
 
@@ -122,7 +122,15 @@ impl Judging {
             .begin_request()
             .pin_vault_schema(SCHEMA.as_bytes(), SCHEMA)
             .expect("pinning the suite's schema");
-        write_documents(&mut store.begin_request(), documents);
+        store
+            .begin_request()
+            .apply_increment(
+                IncrementProvenance::Derived,
+                documents.iter().cloned().map(Change::Upsert),
+                &[],
+                &declared(),
+            )
+            .expect("writing the documents");
         let reader = Arc::new(store.open_reader().reader.expect("a reader"));
         Judging {
             _scratch: scratch,
@@ -526,14 +534,7 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
         !broken.class_keys.is_empty(),
         "a broken suffix link is keyed by the class it names"
     );
-    {
-        let mut request = judging.request();
-        for finding in &findings {
-            request
-                .record_finding(finding)
-                .unwrap_or_else(|refusal| panic!("recording {finding:?}: {refusal}"));
-        }
-    }
+    assert_filed(&judging.request(), "src/h.md", &findings);
 
     let rows = judging.validated();
     let by_target: BTreeMap<String, &FindingRow> = rows
@@ -594,7 +595,8 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
 /// `**/v1.2.md` and every `**/v1.md`, so over two of the first and one of the
 /// second it is ambiguous among three, its head merged across the two classes
 /// in the resolution ladder's order, as the links column reads it, and it is
-/// keyed by both classes.
+/// keyed by both classes, and by `v1.2.md/` and `v1.md/`, the classes its
+/// candidates' written leaves are named in.
 #[test]
 fn a_dotted_leaf_totals_both_reductions() {
     for order in [Sensitive, Folding] {
@@ -620,7 +622,7 @@ fn a_dotted_leaf_totals_both_reductions() {
                 .iter()
                 .map(|key| key.as_str())
                 .collect::<Vec<_>>(),
-            ["v1.2/", "v1/"],
+            ["v1.2.md/", "v1.2/", "v1.md/", "v1/"],
             "{order:?}"
         );
     }
@@ -771,11 +773,15 @@ fn a_missing_anchor_is_judged_by_the_stored_readings() {
     }
 }
 
-/// **A finding's keys are its link's keys.** On either root, each finding is
-/// keyed by exactly the keys the link index holds its link under, in the key
-/// space the root probes: a suffix address's classes, one per reduction; a
-/// path's exact path, or each path a rooted name's reductions spell; and none
-/// for a link that names no vault path. The store files each of them.
+/// **A finding's keys are its link's keys and its candidates' naming
+/// classes.** On either root, each finding is keyed by the keys the link
+/// index holds its link under, in the key space the root probes — a suffix
+/// address's classes, one per reduction; a path's exact path, or each path a
+/// rooted name's reductions spell; and none for a link that names no vault
+/// path — and by the classes each candidate it carries is named in: its
+/// stem's class and its leaf's, each with its reduction's. `V1.2.md` is named
+/// in `V1.2/`, `V1/` and `V1.2.md/`, and `V1.md` in `V1/` and `V1.md/`. The
+/// store files each of them.
 #[test]
 fn a_findings_keys_are_its_links_keys() {
     for order in [Sensitive, Folding] {
@@ -821,10 +827,28 @@ fn a_findings_keys_are_its_links_keys() {
                     (spelled, key.segments.is_some())
                 })
                 .collect();
+            let naming = |candidate: &str| -> &[&str] {
+                match candidate.rsplit('/').next() {
+                    Some("V1.2.md") => &["V1.2/", "V1/", "V1.2.md/"],
+                    Some("V1.md") => &["V1/", "V1.md/"],
+                    other => {
+                        panic!("{order:?}: a candidate the fixture holds no name of: {other:?}")
+                    }
+                }
+            };
+            let in_space = |class: &str| match space {
+                SuffixKey::Raw => class.to_string(),
+                SuffixKey::Folded => class.to_ascii_lowercase(),
+            };
             let expected_classes: BTreeSet<String> = keys
                 .iter()
                 .filter(|(_, class)| *class)
                 .map(|(key, _)| key.clone())
+                .chain(finding.candidates.iter().flat_map(|candidate| {
+                    naming(candidate.path.as_str())
+                        .iter()
+                        .map(|class| in_space(class))
+                }))
                 .collect();
             let expected_paths: BTreeSet<String> = keys
                 .iter()
@@ -846,18 +870,52 @@ fn a_findings_keys_are_its_links_keys() {
             classes = classes.max(filed_classes.len());
             paths = paths.max(filed_paths.len());
         }
-        assert_eq!((classes, paths), (2, 2), "{order:?}: the fixture's reach");
+        assert_eq!((classes, paths), (4, 2), "{order:?}: the fixture's reach");
         assert!(
             findings[&4].class_keys.is_empty() && findings[&4].path_keys.is_empty(),
             "{order:?}: a link naming no vault path is keyed by nothing"
         );
-        let mut request = judging.request();
-        for finding in findings.values() {
-            request
-                .record_finding(finding)
-                .unwrap_or_else(|refusal| panic!("{order:?}: recording {finding:?}: {refusal}"));
-        }
+        let judged: Vec<FindingFacts> = findings.into_values().collect();
+        assert_filed(&judging.request(), "Src/h.md", &judged);
     }
+}
+
+/// Assert the store filed, at `holder`, exactly the link-health findings
+/// `judged` holds: each written inside the changeset that wrote the holder.
+pub(crate) fn assert_filed(request: &Request<'_>, holder: &str, judged: &[FindingFacts]) {
+    let filed: Vec<_> = request
+        .stored_findings(&path(holder))
+        .expect("reading findings")
+        .into_iter()
+        .map(|finding| {
+            (
+                finding.kind,
+                finding.ordinal,
+                finding.target,
+                finding.class_keys,
+                finding.path_keys,
+                finding.candidates,
+                finding.candidates_total,
+                finding.message,
+            )
+        })
+        .collect();
+    let judged: Vec<_> = judged
+        .iter()
+        .map(|finding| {
+            (
+                finding.kind.as_str().to_string(),
+                finding.ordinal,
+                finding.target.clone(),
+                finding.class_keys.clone(),
+                finding.path_keys.clone(),
+                finding.candidates.clone(),
+                finding.candidates_total,
+                finding.message.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(filed, judged, "the findings the store filed at `{holder}`");
 }
 
 // ---- selecting the links judged ----
@@ -1107,7 +1165,7 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 7] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 12] = [
     ExplainedStatement::LinkHealthLinks,
     ExplainedStatement::LinkHealthClassLinks,
     ExplainedStatement::LinkHealthPathLinks,
@@ -1115,6 +1173,11 @@ pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 7] = [
     ExplainedStatement::LinkHealthTotals,
     ExplainedStatement::LinkHealthSuffixes,
     ExplainedStatement::LinkHealthAnchors,
+    ExplainedStatement::LinkHealthWrittenLinks,
+    ExplainedStatement::LinkHealthClassFindings,
+    ExplainedStatement::LinkHealthFoundLinks,
+    ExplainedStatement::LinkHealthDiscard,
+    ExplainedStatement::LinkHealthOccupied,
 ];
 
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -1147,12 +1210,13 @@ fn seek(alias: &'static str, access: Access<'static>, constraint: &str) -> Seek 
 
 /// The seeks each judgment statement is held to under `order`.
 fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek> {
-    let (class_index, key, path_index, link_index, link_key) = match order {
+    let (class_index, key, path_index, link_index, suffix_index, link_key) = match order {
         Sensitive => (
             "documents_suffix_key",
             "suffix_key",
             "documents_path",
             "link_keys_key",
+            "link_keys_suffix_key",
             "key",
         ),
         Folding => (
@@ -1160,18 +1224,22 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             "folded_suffix_key",
             "documents_path_nocase",
             "link_keys_folded_key",
+            "link_keys_folded_suffix_key",
             "folded_key",
         ),
     };
     let range = format!("({key}>? AND {key}<?)");
-    // A link a key reached, its holder, and every key it is held under.
-    let reached = |selected: Seek| {
-        vec![
-            selected,
-            seek("l", Access::RowId, "(rowid=?)"),
-            seek("d", Access::RowId, "(rowid=?)"),
-            seek("k", Access::Index("link_keys_link"), "(link=?)"),
-        ]
+    // A page's driver, then each link it reached, its holder, and every key
+    // it is held under.
+    let reached = |driver: Vec<Seek>| {
+        driver
+            .into_iter()
+            .chain([
+                seek("l", Access::RowId, "(rowid=?)"),
+                seek("d", Access::RowId, "(rowid=?)"),
+                seek("k", Access::Index("link_keys_link"), "(link=?)"),
+            ])
+            .collect()
     };
     match statement {
         ExplainedStatement::LinkHealthLinks => vec![
@@ -1179,16 +1247,61 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             seek("l", Access::Index("links_document_ordinal"), "(document=?)"),
             seek("k", Access::Index("link_keys_link"), "(link=?)"),
         ],
-        ExplainedStatement::LinkHealthClassLinks => reached(seek(
+        ExplainedStatement::LinkHealthClassLinks => reached(vec![seek(
+            "s",
+            Access::Index(suffix_index),
+            &format!("(({link_key},document,link)>(?,?,?) AND {link_key}<?)"),
+        )]),
+        ExplainedStatement::LinkHealthPathLinks => reached(vec![seek(
             "s",
             Access::Index(link_index),
-            &format!("({link_key}>? AND {link_key}<?)"),
-        )),
-        ExplainedStatement::LinkHealthPathLinks => reached(seek(
-            "s",
-            Access::Index(link_index),
-            &format!("({link_key}=?)"),
-        )),
+            &format!("({link_key}=? AND (document,link)>(?,?))"),
+        )]),
+        ExplainedStatement::LinkHealthWrittenLinks => reached(vec![
+            seek(
+                "dw",
+                Access::Index("documents_change_feed"),
+                "(generation=? AND path>?)",
+            ),
+            seek(
+                "lw",
+                Access::Index("links_document_ordinal"),
+                "(document=? AND ordinal>?)",
+            ),
+        ]),
+        ExplainedStatement::LinkHealthClassFindings => vec![
+            seek(
+                "s",
+                Access::Index("finding_classes_class_key"),
+                "((class_key,finding)>(?,?) AND class_key<?)",
+            ),
+            seek("f", Access::RowId, "(rowid=?)"),
+            seek("d", Access::Index("documents_path"), "(path=?)"),
+            seek(
+                "l",
+                Access::Index("links_document_ordinal"),
+                "(document=? AND ordinal=?)",
+            ),
+        ],
+        ExplainedStatement::LinkHealthFoundLinks => vec![
+            seek("l", Access::RowId, "(rowid=?)"),
+            seek("d", Access::RowId, "(rowid=?)"),
+            seek("k", Access::Index("link_keys_link"), "(link=?)"),
+        ],
+        ExplainedStatement::LinkHealthDiscard => vec![seek("findings", Access::RowId, "(rowid=?)")],
+        ExplainedStatement::LinkHealthOccupied => vec![
+            seek(
+                "sc",
+                Access::Index(suffix_index),
+                &format!("({link_key}>? AND {link_key}<?)"),
+            ),
+            seek(
+                "fc",
+                Access::Index("finding_classes_class_key"),
+                "(class_key>? AND class_key<?)",
+            ),
+            seek("sp", Access::Index(link_index), &format!("({link_key}=?)")),
+        ],
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),
@@ -1233,8 +1346,15 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     // by the path, which that index does not carry. So SQLite sorts only the
     // rows sharing one key — the last term of the order — and the head's limit
     // stops the read once it fills: a partial sort bounded by a run of equal
-    // keys, never the class. Every other statement sorts nothing.
-    if statement == ExplainedStatement::LinkHealthHeads {
+    // keys, never the class. A page of a write's links is read in path order
+    // off the change-feed index, which does not say a path is one document's,
+    // so SQLite sorts the links of one path by ordinal — the one document's
+    // own links, which the changeset wrote — and the page's limit stops the
+    // read. Every other statement sorts nothing.
+    if matches!(
+        statement,
+        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthWrittenLinks
+    ) {
         let sorts: Vec<&str> = read
             .rows()
             .iter()
@@ -1250,6 +1370,22 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
     } else {
         read.assert_no_temp_btree();
     }
+    // A page is cut in its driver, which runs once as the outer loop: a
+    // co-routine yielding a page, never a table of the whole selection.
+    let paged = matches!(
+        statement,
+        ExplainedStatement::LinkHealthClassLinks
+            | ExplainedStatement::LinkHealthPathLinks
+            | ExplainedStatement::LinkHealthWrittenLinks
+    );
+    let details: Vec<&str> = read.rows().iter().map(|row| row.detail.as_str()).collect();
+    assert!(
+        !details
+            .iter()
+            .any(|detail| detail.starts_with("MATERIALIZE"))
+            && details.contains(&"CO-ROUTINE p") == paged,
+        "{statement:?} under {order:?}: {details:?}"
+    );
     for Seek {
         alias,
         access,

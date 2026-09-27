@@ -1273,10 +1273,15 @@ fn the_feed_rows_past_a_generation_are_counted_in_rows_to_a_bound() {
             provenance: norn_store::Provenance::WatcherRemoval,
         })
         .collect();
-    searching_store
-        .store
-        .begin_request()
-        .apply_increment(norn_store::IncrementProvenance::Derived, deaths, &[])
+    let mut request = searching_store.store.begin_request();
+    let declared = crate::common::pinned_declaration(&request);
+    request
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            deaths,
+            &[],
+            &declared,
+        )
         .expect("five deaths in one write");
     let snapshot = searching_store.snapshot();
     let now = snapshot.reading().write_generation();

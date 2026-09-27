@@ -9,7 +9,7 @@
 //!
 //! So the seam lives here. [`induced_failure`] is the arming surface a suite
 //! calls, and the rest of this file is what the store's own paths read: the
-//! thread-local and process-wide arms, the two abort points the increment
+//! thread-local and process-wide arms, the abort points the increment
 //! checks, and the condition a store schema's statement list meets. **Two
 //! arrangements are met at the driver seam rather than here** — the page cap an
 //! open applies, and the busy a pinned-scalar read reports — so the arms behind
@@ -66,12 +66,13 @@ use crate::store::Store;
 /// The whole module lives behind the `induced-failure` feature, off by
 /// default, so a shipped build carries none of the hooks these arrangements
 /// reach: the out-of-band executor here, the busy-injection a pinned-scalar
-/// read checks on every call, the two tears the increment checks — between two
-/// entries and at a changeset's own boundaries — the page cap an open applies,
+/// read checks on every call, the tears the increment checks — between two
+/// entries, at a changeset's own boundaries, and between two chunks of its
+/// link-health re-decision — the page cap an open applies,
 /// the damage the store schema's statement list meets, and the write a feed
 /// page read checks for.
 ///
-/// **Three of the arrangements are per-thread and the rest are per-process**, and
+/// **Some of the arrangements are per-thread and the rest are per-process**, and
 /// the split is not incidental. A tear armed and met on one thread is the
 /// store's own suite arranging its own call. An arrangement a *host* has to
 /// meet is armed by a suite thread and fires on a worker thread the host owns,
@@ -155,6 +156,32 @@ pub mod induced_failure {
             .map_err(|error| error::sql("running SQL out of band", error))
     }
 
+    /// Record a finding through no caller's door: one the store judges and
+    /// files itself — a link-health finding, or one about a link — which
+    /// [`crate::Request::record_finding`] refuses
+    /// ([`StoreError::StoreJudged`]).
+    ///
+    /// The arrangement a reader's suite needs to stand such a finding exactly
+    /// where its order is under test — at a chosen ordinal, filed in a chosen
+    /// order — without the links a changeset would judge it from. It writes
+    /// through the one write every finding is filed by, its bounds and key
+    /// spaces checked as a caller's are, in a transaction of its own.
+    pub fn record_finding_out_of_band(
+        store: &mut Store,
+        finding: &crate::FindingFacts,
+    ) -> Result<(), StoreError> {
+        crate::request::check_finding_bounds(finding)?;
+        crate::request::check_finding_classes(finding, store.path_order())?;
+        crate::request::check_finding_paths(finding, store.path_order())?;
+        let transaction = store
+            .database
+            .immediate_transaction("opening the finding transaction")?;
+        crate::request::write_finding(&transaction, finding)?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("committing a finding out of band", error))
+    }
+
     /// Make the next read of a pinned `meta` scalar fail as though the database
     /// were held by somebody else.
     ///
@@ -192,6 +219,20 @@ pub mod induced_failure {
     /// is nothing to clear.
     pub fn abort_after_changeset_entries(entries: u64) {
         super::TEAR_CHANGESET_AFTER.set(Some(entries));
+    }
+
+    /// Kill this process inside the next changeset's link-health
+    /// re-decision, once `chunks` of its chunks have been judged and filed.
+    ///
+    /// **The re-decision runs inside the changeset's transaction**, after
+    /// every entry is written and every finding it replaces discarded, so a
+    /// process that ends here ends with the discard done, some findings
+    /// re-filed and nothing committed — the state a tear inside the
+    /// re-decision leaves, which only the rollback of the whole changeset
+    /// answers. Per-thread, like [`abort_after_changeset_entries`], and the
+    /// process does not survive it.
+    pub fn abort_after_link_health_chunks(chunks: u64) {
+        super::TEAR_REDECISION_AFTER.set(Some(chunks.max(1)));
     }
 
     /// Kill this process the moment `changesets` of them have committed.
@@ -383,6 +424,13 @@ std::thread_local! {
     static TEAR_CHANGESET_AFTER: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
 
+    /// How many more link-health chunks a re-decision files before this
+    /// process aborts. Set only by
+    /// [`induced_failure::abort_after_link_health_chunks`]; nothing clears it,
+    /// because nothing runs after the abort it arms.
+    static TEAR_REDECISION_AFTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+
     /// How many more feed pages this thread reads before the armed write runs,
     /// and the write. Set only by [`induced_failure::write_after_feed_pages`]
     /// and taken by the page read it fires after.
@@ -459,6 +507,20 @@ pub(crate) fn abort_if_the_changeset_is_torn(applied: u64) {
         record_arm(induced_failure::INCREMENT_SEAM, "boundary=entries");
         std::process::abort();
     }
+}
+
+/// End the process where an arrangement asked for a changeset's link-health
+/// re-decision to be torn once this many of its chunks were filed; each call
+/// is one chunk filed.
+pub(crate) fn abort_if_the_redecision_is_torn() {
+    let Some(remaining) = TEAR_REDECISION_AFTER.get() else {
+        return;
+    };
+    if remaining <= 1 {
+        record_arm(induced_failure::INCREMENT_SEAM, "boundary=redecision");
+        std::process::abort();
+    }
+    TEAR_REDECISION_AFTER.set(Some(remaining - 1));
 }
 
 /// End the process at a changeset's first statement, where the flushes before

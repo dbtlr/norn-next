@@ -223,22 +223,37 @@ pub fn document(text: &str, hash: &str, body: &str) -> DocumentFacts {
     DocumentFacts::new(path(text), hash, body, body.len() as u64)
 }
 
+/// The declaration of the schema `request`'s store pins, declaring nothing,
+/// or of no schema where it pins none: what a changeset's link health is
+/// judged under here.
+fn pinned_declaration(request: &norn_store::Request<'_>) -> norn_store::ContentModel {
+    request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(norn_store::ContentModel::none, |pin| {
+            norn_store::ContentModel::under(pin.fingerprint)
+        })
+}
+
 /// Write one document as a changeset of its own.
 pub fn write_document(store: &mut Store, facts: &DocumentFacts) {
-    store
-        .begin_request()
+    let mut request = store.begin_request();
+    let declared = pinned_declaration(&request);
+    request
         .apply_increment(
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
             &[],
+            &declared,
         )
         .expect("applying a document upsert");
 }
 
 /// Record one death as a changeset of its own.
 pub fn record_death(store: &mut Store, at: &str) {
-    store
-        .begin_request()
+    let mut request = store.begin_request();
+    let declared = pinned_declaration(&request);
+    request
         .apply_increment(
             IncrementProvenance::Derived,
             [Change::Death {
@@ -246,6 +261,7 @@ pub fn record_death(store: &mut Store, at: &str) {
                 provenance: Provenance::PlanDelete,
             }],
             &[],
+            &declared,
         )
         .expect("applying a death");
 }

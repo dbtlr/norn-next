@@ -66,7 +66,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(6);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(7);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -2148,7 +2148,12 @@ paths:
                 .collect();
             store
                 .begin_request()
-                .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                .apply_increment(
+                    norn_store::IncrementProvenance::Derived,
+                    changes,
+                    &[],
+                    declared.content_model(),
+                )
                 .expect("writing the derived documents");
             let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));
             DerivedVault {

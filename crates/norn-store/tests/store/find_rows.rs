@@ -8,7 +8,7 @@
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, FieldDeclaration, FindStatement, FindWork, Found,
     HeadingFact, LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal,
-    SnapshotReader, Span, Store, TagFact, TagSource, Validation,
+    SnapshotReader, Span, Store, TagFact, TagSource, Validation, induced_failure,
 };
 use norn_wire::{
     BlockRow, CollectionSelector, Column, Cursor, CursorKey, CursorOrderChanged, Direction,
@@ -967,15 +967,16 @@ fn a_row_carries_the_columns_it_names_read_off_the_projection() {
 fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
     let mut seeded = Seeded::new("find-findings-column");
     seeded.write(&[document("long/doc.md", "hash-long", "a body\n")]);
-    let mut writing = seeded.store.begin_request();
     // The link each finding at `notes/a.md` is about, by its kind; every
-    // other finding here is about its document.
+    // other finding here is about its document. A finding about a link is
+    // the store's own to file, so each stands through the fenced door.
     let about_links = [(FindingKind::Broken, 0), (FindingKind::Ambiguous, 1)];
     let about_link = |kind: FindingKind, ordinal: u64| {
         let mut finding = unread_block("notes/a.md");
         finding.kind = kind;
         finding.ordinal = Some(ordinal);
         finding.class_keys = classes(&["glossary/"]);
+        finding.target = Some("glossary".to_string());
         finding
     };
     for finding in [
@@ -990,10 +991,10 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         about_link(FindingKind::Broken, 0),
         unread_block("notes/a.md"),
     ] {
-        writing
-            .record_finding(&finding)
+        induced_failure::record_finding_out_of_band(&mut seeded.store, &finding)
             .expect("recording a finding");
     }
+    let mut writing = seeded.store.begin_request();
     for _ in 0..NESTED_ROW_CEILING + 3 {
         writing
             .record_finding(&violation("long/doc.md"))

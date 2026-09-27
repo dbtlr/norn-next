@@ -147,6 +147,18 @@ pub fn full_text_matches(store: &Store, expression: &str) -> Vec<String> {
         .collect()
 }
 
+/// The declaration of the schema `request`'s store pins, declaring nothing,
+/// or of no schema where it pins none: the declaration a changeset's link
+/// health is judged under in a case that declares no ambiguity-ignore glob.
+pub fn pinned_declaration(request: &Request<'_>) -> ContentModel {
+    request
+        .vault_schema_pin()
+        .expect("reading the pinned schema")
+        .map_or_else(ContentModel::none, |pin| {
+            ContentModel::under(pin.fingerprint)
+        })
+}
+
 /// Write one document as a changeset of its own.
 ///
 /// The store's one way in for document facts is a changeset, so a case that is
@@ -159,6 +171,7 @@ pub fn write_document(request: &mut Request<'_>, facts: &DocumentFacts) -> Incre
             IncrementProvenance::Derived,
             [Change::Upsert(facts.clone())],
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a document upsert")
 }
@@ -177,6 +190,7 @@ pub fn record_death(
                 provenance,
             }],
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a death")
 }
@@ -193,6 +207,7 @@ pub fn write_documents(request: &mut Request<'_>, facts: &[DocumentFacts]) -> In
                 .map(Change::Upsert)
                 .collect::<Vec<_>>(),
             &[],
+            &pinned_declaration(request),
         )
         .expect("applying a changeset")
 }
@@ -551,22 +566,23 @@ pub fn path_key(text: &str) -> PathKey {
     PathKey::new(text).unwrap_or_else(|problem| panic!("`{text}` is a path key: {problem}"))
 }
 
-/// A finding about the first link in the document at `at`, a path-addressed
-/// one, keyed by the exact paths `keys` and by no class: the shape a broken
-/// `[x](dir/t.md)` is filed in.
-pub fn broken_path_link(at: &str, keys: &[&str]) -> FindingFacts {
+/// A finding at `at` keyed by the exact paths `keys` and by no class — the
+/// key shape a path-addressed link's finding takes — filed under a caller's
+/// kind about the document, which is how a caller's door takes one: a
+/// finding about a link, and a link-health kind, are the store's alone.
+pub fn keyed_by_paths(at: &str, keys: &[&str]) -> FindingFacts {
     FindingFacts {
-        kind: FindingKind::Broken,
+        kind: FindingKind::PathNamesNoDocument,
         severity: Severity::Warning,
         path: path(at),
         class_keys: BTreeSet::new(),
         path_keys: keys.iter().copied().map(path_key).collect(),
         target: keys.first().map(|key| key.to_string()),
         span: Some(span(1, 1, 0)),
-        ordinal: Some(0),
+        ordinal: None,
         candidates: Vec::new(),
         candidates_total: 0,
-        message: format!("a link in `{at}` names no document"),
+        message: format!("a path `{at}` names holds no document"),
         detail: None,
     }
 }

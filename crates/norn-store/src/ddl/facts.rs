@@ -121,6 +121,14 @@
 //! key is the pair — the link and its document, which `links_id_document`
 //! makes a key of `links` — so a key held beside any other document is refused
 //! at rest.
+//!
+//! **A class's range reads suffix keys alone.** A class is a prefix range, and
+//! a path key spelled under a folder named like the class's stem —
+//! `hub/0001.md` against the class `hub/` — sorts inside it. So the ranges a
+//! class is walked by seek `link_keys_suffix_key` or
+//! `link_keys_folded_suffix_key`, the same columns held only where `segments`
+//! is set: a path key is not in them, and a folder note's class costs its own
+//! links however many links into the folder beside it stand.
 
 //! # `headings` is addressed two ways
 //!
@@ -231,8 +239,12 @@ const STATEMENTS: &[&str] = &[
     CHECK ((segments IS NULL) = (substr(key, -1) <> '/'))
 )",
     "CREATE UNIQUE INDEX link_keys_link ON link_keys(link, key)",
-    "CREATE INDEX link_keys_key ON link_keys(key, document)",
-    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document)",
+    "CREATE INDEX link_keys_key ON link_keys(key, document, link)",
+    "CREATE INDEX link_keys_folded_key ON link_keys(folded_key, document, link)",
+    "CREATE INDEX link_keys_suffix_key ON link_keys(key, document, link)
+    WHERE segments IS NOT NULL",
+    "CREATE INDEX link_keys_folded_suffix_key ON link_keys(folded_key, document, link)
+    WHERE segments IS NOT NULL",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

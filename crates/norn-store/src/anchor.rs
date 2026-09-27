@@ -23,8 +23,8 @@
 //! Both are spliced into one statement, the link-health judgment's
 //! ([`crate::health::statement::anchors_sql`]), which judges a missing anchor
 //! where a link carries one and resolves to one document that does not hold
-//! the place it names. That judgment is a dormant carrier until the changeset
-//! runs it ([`crate::health`]).
+//! the place it names — the judgment every changeset runs over the links it
+//! reaches ([`crate::health`]).
 
 /// The predicate that the `links` row aliased `link` carries an anchor: a
 /// heading anchor or a block reference.
@@ -311,6 +311,7 @@ mod tests {
                         Change::Upsert(holder),
                     ],
                     &[],
+                    &crate::fields::ContentModel::none(),
                 )
                 .expect("writing a case");
             let id = |at: &DocumentPath| -> i64 {
@@ -439,6 +440,7 @@ mod tests {
                     0,
                 ))],
                 &[],
+                &crate::fields::ContentModel::none(),
             )
             .expect("writing a document");
         let document: i64 = store

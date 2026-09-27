@@ -414,13 +414,11 @@ fn a_findings_position_is_its_ordinal_with_the_documents_first() {
             .map(|finding| finding.ordinal)
             .collect()
     };
-    {
-        let mut request = store.begin_request();
-        for ordinal in [None, None, Some(1)] {
-            request
-                .record_finding(&about(ordinal))
-                .expect("recording a finding");
-        }
+    // A finding about a link is the store's own to file, so it stands
+    // through the fenced door.
+    for ordinal in [None, None, Some(1)] {
+        induced_failure::record_finding_out_of_band(&mut store, &about(ordinal))
+            .expect("recording a finding");
     }
     assert_eq!(ordinals(&mut store), [None, None, Some(1)]);
 
@@ -464,14 +462,14 @@ fn a_second_finding_about_one_link_is_refused() {
         finding.ordinal = ordinal;
         finding
     };
-    let mut request = store.begin_request();
-    request
-        .record_finding(&about(FindingKind::Broken, Some(1)))
+    // A finding about a link is the store's own to file, so each stands
+    // through the fenced door, which writes it as the store files one.
+    induced_failure::record_finding_out_of_band(&mut store, &about(FindingKind::Broken, Some(1)))
         .expect("recording the first finding about link 1");
     for kind in [FindingKind::Ambiguous, FindingKind::Broken] {
-        let refused = request
-            .record_finding(&about(kind, Some(1)))
-            .expect_err("a second finding about link 1");
+        let refused =
+            induced_failure::record_finding_out_of_band(&mut store, &about(kind, Some(1)))
+                .expect_err("a second finding about link 1");
         let StoreError::Sql {
             operation, message, ..
         } = &refused
@@ -486,11 +484,11 @@ fn a_second_finding_about_one_link_is_refused() {
         about(FindingKind::BodyBytesNotUtf8, None),
         about(FindingKind::BodyBytesNotUtf8, None),
     ] {
-        request
-            .record_finding(&finding)
+        induced_failure::record_finding_out_of_band(&mut store, &finding)
             .expect("recording a finding");
     }
-    let stored: Vec<(String, Option<u64>)> = request
+    let stored: Vec<(String, Option<u64>)> = store
+        .begin_request()
         .stored_findings(&at)
         .expect("reading findings")
         .into_iter()
@@ -768,7 +766,6 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
             "a_class_read_seeks_the_suffix_key_its_root_probes"
         }
         ExplainedStatement::FindingsInClass(_)
-        | ExplainedStatement::ClassDiscard(_)
         | ExplainedStatement::SubjectDiscard(..)
         | ExplainedStatement::FindingSubjectsWithoutRows(..) => {
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for"
@@ -814,7 +811,12 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
-        | ExplainedStatement::LinkHealthAnchors => {
+        | ExplainedStatement::LinkHealthAnchors
+        | ExplainedStatement::LinkHealthWrittenLinks
+        | ExplainedStatement::LinkHealthClassFindings
+        | ExplainedStatement::LinkHealthFoundLinks
+        | ExplainedStatement::LinkHealthDiscard
+        | ExplainedStatement::LinkHealthOccupied => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
     }
@@ -1026,27 +1028,6 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     findings.assert_searches_through("findings", Access::RowId);
     findings.assert_no_temp_btree();
 
-    // The class-scoped discard reads the same membership range as the read
-    // beside it: an increment runs it once per affected class, so a class it
-    // does not name costs nothing.
-    let class_discard = plan(
-        request
-            .emitted_plan(ExplainedStatement::ClassDiscard(
-                &request.class_probe("glossary").expect("a class stem"),
-            ))
-            .expect("a query plan"),
-    );
-    class_discard.assert_no_full_scan_of("findings");
-    class_discard.assert_no_full_scan_of("finding_classes");
-    class_discard.assert_searches_through(
-        "finding_classes",
-        Access::Index("finding_classes_class_key"),
-    );
-    class_discard.assert_searches_through("findings", Access::RowId);
-    assert_cascade_seeks_the_primary_key(&class_discard, "finding_candidates");
-    assert_cascade_seeks_the_primary_key(&class_discard, "finding_classes");
-    assert_cascade_seeks_the_primary_key(&class_discard, "finding_paths");
-
     // The subject-scoped discard an increment runs once per changed path seeks
     // `findings_path`, so a changeset of fifty thousand entries is that many
     // seeks rather than that many reads of the table.
@@ -1158,7 +1139,6 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     let judged: Vec<ExplainedStatement<'_>> = [
         ExplainedStatement::SuffixCandidates(&resolution),
         ExplainedStatement::FindingsInClass(&probe),
-        ExplainedStatement::ClassDiscard(&probe),
         ExplainedStatement::PathDiscard(&path_key),
         ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
         ExplainedStatement::TypedValueDiscard,
@@ -1483,7 +1463,6 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         }
         ExplainedStatement::SuffixCandidates(_)
         | ExplainedStatement::FindingsInClass(_)
-        | ExplainedStatement::ClassDiscard(_)
         | ExplainedStatement::SubjectDiscard(..)
         | ExplainedStatement::TypedValueDiscard
         | ExplainedStatement::FindingSubjectsWithoutRows(..)
@@ -1504,7 +1483,12 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthHeads
         | ExplainedStatement::LinkHealthTotals
         | ExplainedStatement::LinkHealthSuffixes
-        | ExplainedStatement::LinkHealthAnchors => None,
+        | ExplainedStatement::LinkHealthAnchors
+        | ExplainedStatement::LinkHealthWrittenLinks
+        | ExplainedStatement::LinkHealthClassFindings
+        | ExplainedStatement::LinkHealthFoundLinks
+        | ExplainedStatement::LinkHealthDiscard
+        | ExplainedStatement::LinkHealthOccupied => None,
     }
 }
 
@@ -1915,6 +1899,7 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
                 provenance: Provenance::HealPrune,
             }),
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("recording two deaths in one changeset")
         .generation
@@ -2015,6 +2000,7 @@ fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed
                 norn_store::Change::Upsert(document(at.as_str(), "hash-2", "another body\n")),
             ],
             &[],
+            &norn_store::ContentModel::none(),
         )
         .expect("killing and rewriting one path in one changeset");
 
@@ -2975,15 +2961,18 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
             );
         }
 
-        // And the discard verb reaches it through the document's class, taking the
-        // whole finding — every membership row it had included, so no other class
-        // still holds it and nothing is left referencing a finding that is gone.
-        let invalidation = request
-            .discard_findings_in_class(&request.class_probe(subject.stem()).expect("a class stem"))
-            .expect("discarding a class");
+        // And a changeset writing the document reaches it through the
+        // document's class, taking the whole finding — every membership row it
+        // had included, so no other class still holds it and nothing is left
+        // referencing a finding that is gone.
+        let invalidation = write_document(
+            &mut request,
+            &document(subject.as_str(), "hash-2", "a body\n"),
+        )
+        .invalidated;
         assert_eq!(
             invalidation.findings_discarded, 1,
-            "re-deriving the class of `{at}` discarded nothing"
+            "a changeset writing `{at}` discarded nothing"
         );
         for key in probe.class_keys() {
             let stem = key.as_str().strip_suffix('/').expect("a class key");
@@ -3007,13 +2996,14 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         request.finish();
         store
             .verify_integrity()
-            .expect("a store whose findings left through the class verb");
+            .expect("a store whose findings left through a changeset's class discard");
     }
 }
 
 /// A finding in two of one probe's own classes is still one finding on both sides
-/// of maintenance: read once and discarded once. The unit is the finding, so a
-/// range that matched two membership rows has not found two findings.
+/// of maintenance: read once, and discarded once by a changeset changing both
+/// classes. The unit is the finding, so a range that matched two membership rows
+/// has not found two findings.
 #[test]
 fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
     let scratch = Scratch::new("both-classes");
@@ -3038,13 +3028,15 @@ fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
         1,
         "a finding in both of the probe's classes came back twice"
     );
-    assert_eq!(
-        request
-            .discard_findings_in_class(&probe)
-            .expect("discarding a class")
-            .findings_discarded,
-        1
+    let outcome = write_documents(
+        &mut request,
+        &[
+            document("v1.2.md", "hash-1", "a body\n"),
+            document("v1.md", "hash-1", "a body\n"),
+        ],
     );
+    assert_eq!(outcome.affected_classes, probe.class_keys());
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
     assert_eq!(request.counters().get("findings_discarded"), Some(1));
 }
 
@@ -3172,6 +3164,13 @@ fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
         .expect("a store whose findings left through maintenance");
 }
 
+/// The two kinds [`re_deriving_a_subject_is_a_discard_and_a_record`] records
+/// about its subject, which is what re-deriving that subject discards.
+const BOTH_KINDS: DiscardScope<'static> = DiscardScope::Kinds(&[
+    FindingKind::BodyBytesNotUtf8,
+    FindingKind::PathNamesNoDocument,
+]);
+
 /// The subject axis reached by a path rather than by a change: the door a
 /// producer whose subject no changeset can name needs in order to re-derive at
 /// all.
@@ -3197,10 +3196,10 @@ fn re_deriving_a_subject_is_a_discard_and_a_record() {
         .record_finding(&violation("two.md"))
         .expect("recording a finding");
 
-    // Everything about the subject goes, whichever axis put it there, and
-    // nothing about any other subject does.
+    // Everything of the kinds re-derived about the subject goes, whichever
+    // axis put it there, and nothing about any other subject does.
     let invalidation = request
-        .discard_findings_about(&path("one.md"), DiscardScope::EveryKind)
+        .discard_findings_about(&path("one.md"), BOTH_KINDS)
         .expect("discarding a subject");
     assert_eq!(invalidation.findings_discarded, 2);
     assert!(
@@ -3235,7 +3234,7 @@ fn re_deriving_a_subject_is_a_discard_and_a_record() {
     // ordinary first pass.
     assert_eq!(
         request
-            .discard_findings_about(&path("never/spoken.md"), DiscardScope::EveryKind)
+            .discard_findings_about(&path("never/spoken.md"), BOTH_KINDS)
             .expect("discarding an untouched subject")
             .findings_discarded,
         0
@@ -3511,9 +3510,10 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
 }
 
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
-/// the idempotence story.** Re-deriving a class empties it and records what holds
-/// now, so two derivations of one class cannot leave two copies — and every
-/// finding that left is counted.
+/// the idempotence story.** A changeset writing `glossary.md` changes the class
+/// `glossary/` and empties it, and recording what holds now after it means two
+/// derivations of one class cannot leave two copies — and every finding that
+/// left is counted.
 #[test]
 fn re_deriving_a_class_is_a_discard_and_a_record() {
     let scratch = Scratch::new("class-maintenance");
@@ -3552,9 +3552,8 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
 
     // The class discard takes the whole class, longer suffixes inside it
     // included, and nothing outside it.
-    let invalidation = request
-        .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
-        .expect("discarding a class");
+    let glossary = document("glossary.md", "hash-1", "a body\n");
+    let invalidation = write_document(&mut request, &glossary).invalidated;
     assert_eq!(invalidation.findings_discarded, 3);
     assert!(
         request
@@ -3581,9 +3580,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // Re-deriving the class twice leaves one copy, and nothing had to remember a
     // dedupe rule to make that true.
     for _ in 0..2 {
-        request
-            .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
-            .expect("discarding a class");
+        write_document(&mut request, &glossary);
         request
             .record_finding(&path_names_no_document_in_class(
                 "one.md",
@@ -3602,11 +3599,11 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
         1
     );
 
-    // Discarding a class that holds nothing is a no-op rather than an error.
+    // Changing a class that holds nothing discards nothing rather than
+    // refusing.
     assert_eq!(
-        request
-            .discard_findings_in_class(&request.class_probe("absent").expect("a class stem"))
-            .expect("discarding an empty class")
+        write_document(&mut request, &document("absent.md", "hash-1", "a body\n"))
+            .invalidated
             .findings_discarded,
         0
     );
@@ -3637,6 +3634,8 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
     assert_eq!(pin.fingerprint, "schema-1");
     assert_eq!(pin.generation, pinned.generation);
 
+    // The document's first link names no document, so the write files its
+    // broken-link finding beside the violation recorded after it.
     let facts = document_with_every_fact(subject.as_str(), "hash-1");
     write_document(&mut request, &facts);
     request
@@ -3647,7 +3646,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
             .stored_findings(&subject)
             .expect("reading findings")
             .len(),
-        1
+        2
     );
 
     // The schema moves, and exactly the schema-keyed table goes — reported by the
@@ -3657,7 +3656,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
         .expect("re-pinning a vault schema");
     assert!(repinned.repinned);
     assert!(repinned.generation > pinned.generation);
-    assert_eq!(repinned.invalidated.findings_discarded, 1);
+    assert_eq!(repinned.invalidated.findings_discarded, 2);
     assert_eq!(
         request
             .stored_findings(&subject)

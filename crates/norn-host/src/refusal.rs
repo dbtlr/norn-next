@@ -577,7 +577,8 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
             | StoreError::Lifecycle { .. }
             | StoreError::Bound { .. }
             | StoreError::UnpinnedDeclaration { .. }
-            | StoreError::KeySpace { .. }),
+            | StoreError::KeySpace { .. }
+            | StoreError::StoreJudged { .. }),
         ) => {
             let told = store_refusal_told(&error);
             return match error.damage() {
@@ -635,7 +636,9 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
         }
         // Rendered from schema fingerprints, a path order and the store's own
         // static words, none of which is a path.
-        StoreError::UnpinnedDeclaration { .. } | StoreError::KeySpace { .. } => error.to_string(),
+        StoreError::UnpinnedDeclaration { .. }
+        | StoreError::KeySpace { .. }
+        | StoreError::StoreJudged { .. } => error.to_string(),
         StoreError::Entry { index, problem, .. } => {
             format!("changeset entry {index}: {}", store_refusal_told(problem))
         }
@@ -1644,6 +1647,7 @@ mod page_refusal_tests {
                 | StoreError::Bound { .. }
                 | StoreError::UnpinnedDeclaration { .. }
                 | StoreError::KeySpace { .. }
+                | StoreError::StoreJudged { .. }
                 | StoreError::Entry { .. },
             ) => Shape::Store,
         }

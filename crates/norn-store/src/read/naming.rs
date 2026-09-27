@@ -35,7 +35,7 @@ use crate::find::{
     FindStatement, SpellingRange, compose_candidate_suffixes, compose_class_head,
     compose_class_total, compose_link_targets, wire_span,
 };
-use crate::path::DocumentPath;
+use crate::path::{ClassKey, DocumentPath};
 use crate::resolve::{AmbiguityIgnore, TargetClass};
 use crate::store::Snapshot;
 
@@ -324,6 +324,22 @@ impl<'a> SuffixSpellings<'a> {
             })
             .collect();
         compose_candidate_suffixes(&ranges, self.ignore, self.order)
+    }
+
+    /// The classes each candidate's suffix is read from, by its id: the class
+    /// ([`ClassKey::leading`]) of every key each of its spellings' classes
+    /// opens — the stem's class and its reductions'. The statement reads
+    /// documents inside those classes and nowhere else, so a change moves a
+    /// candidate's suffix only where it changes one of them.
+    pub(crate) fn naming_classes(&self) -> HashMap<i64, BTreeSet<ClassKey>> {
+        let mut classes: HashMap<i64, BTreeSet<ClassKey>> = HashMap::new();
+        for (document, _, class) in &self.spelled {
+            classes
+                .entry(*document)
+                .or_default()
+                .extend(class.class_keys().iter().map(ClassKey::leading));
+        }
+        classes
     }
 
     /// Each candidate's minimal disambiguating suffix, by its id, read off the

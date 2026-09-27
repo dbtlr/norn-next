@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use crate::ddl;
 use crate::facts::CANDIDATE_HEAD;
+use crate::health::LINK_HEALTH_CHUNK;
 use crate::health::statement::{self as health, Selected};
 use crate::path::ClassKey;
 use crate::read::SuffixSpellings;
@@ -38,12 +39,12 @@ use super::{
     FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
     STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
     SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
-    class_discard_sql, document_feed_sql, document_page_parameters, document_page_sql,
-    feed_page_parameters, finding_candidates_sql, finding_classes_sql, finding_id_parameters,
-    finding_page_parameters, finding_page_sql, finding_paths_sql, finding_subject_parameters,
-    finding_subjects_sql, findings_in_class_sql, probe_parameters, stored_document_sql,
-    stored_facts_document_sql, stored_findings_sql, subject_discard_parameters,
-    subject_discard_sql, suffix_candidates_sql, text_page_parameters, tombstone_feed_sql,
+    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
+    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
+    finding_page_sql, finding_paths_sql, finding_subject_parameters, finding_subjects_sql,
+    findings_in_class_sql, probe_parameters, stored_document_sql, stored_facts_document_sql,
+    stored_findings_sql, subject_discard_parameters, subject_discard_sql, suffix_candidates_sql,
+    text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -110,8 +111,7 @@ impl<'a> Request<'a> {
         // over, so a class or probe that reader refuses is refused here too.
         match statement {
             ExplainedStatement::SuffixCandidates(resolution) => self.check_class(resolution)?,
-            ExplainedStatement::FindingsInClass(probe)
-            | ExplainedStatement::ClassDiscard(probe) => self.check_probe(probe)?,
+            ExplainedStatement::FindingsInClass(probe) => self.check_probe(probe)?,
             ExplainedStatement::PathDiscard(path) => self.check_path_key(path)?,
             _ => {}
         }
@@ -124,7 +124,6 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingsInClass(probe) => {
                 findings_in_class_sql(probe.range_count())
             }
-            ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
             ExplainedStatement::PathDiscard(_) => PATH_DISCARD_SQL.to_string(),
             ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
             ExplainedStatement::TypedValueDiscard => TYPED_VALUE_DISCARD_SQL.to_string(),
@@ -161,14 +160,18 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
             ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
+            ExplainedStatement::LinkHealthWrittenLinks => health::links_sql(key, Selected::Written),
+            ExplainedStatement::LinkHealthClassFindings => health::class_findings_sql(),
+            ExplainedStatement::LinkHealthFoundLinks => health::links_sql(key, Selected::Links),
+            ExplainedStatement::LinkHealthDiscard => health::discard_sql(),
+            ExplainedStatement::LinkHealthOccupied => health::occupied_sql(key),
         };
         let database = &self.store.database;
         Ok(match statement {
             ExplainedStatement::SuffixCandidates(resolution) => {
                 database.emitted_plan(&sql, params_from_iter(resolution.parameters()))
             }
-            ExplainedStatement::FindingsInClass(probe)
-            | ExplainedStatement::ClassDiscard(probe) => {
+            ExplainedStatement::FindingsInClass(probe) => {
                 database.emitted_plan(&sql, probe_parameters(probe))
             }
             ExplainedStatement::PathDiscard(path) => {
@@ -280,17 +283,39 @@ impl<'a> Request<'a> {
                 &sql,
                 params_from_iter(health::documents_parameters(&[EXPLAINED_PAGE_CURSOR_LEAF])?),
             ),
-            ExplainedStatement::LinkHealthClassLinks => database.emitted_plan(
+            // A paged selection is explained resuming past a driver row
+            // inside its own range, for the reason a page's cursor is bound
+            // — see [`explained_page_cursor`] — at the bound a re-decision
+            // reads it by.
+            ExplainedStatement::LinkHealthClassLinks => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::class_parameters(
+                        &class,
+                        &explained_after(class.as_str()),
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            ExplainedStatement::LinkHealthPathLinks => {
+                let path = PathKey::new(EXPLAINED_PAGE_CURSOR_LEAF)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::path_parameters(
+                        &path,
+                        &explained_after(path.as_str()),
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            ExplainedStatement::LinkHealthWrittenLinks => database.emitted_plan(
                 &sql,
-                params_from_iter(health::class_parameters(&ClassKey::new(
-                    EXPLAINED_CLASS_KEY,
-                )?)),
-            ),
-            ExplainedStatement::LinkHealthPathLinks => database.emitted_plan(
-                &sql,
-                params_from_iter(health::path_parameters(&PathKey::new(
-                    EXPLAINED_PAGE_CURSOR_LEAF,
-                )?)),
+                params_from_iter(health::written_parameters(
+                    EXPLAINED_FEED_GENERATION,
+                    &explained_after(EXPLAINED_PAGE_CURSOR_LEAF),
+                    LINK_HEALTH_CHUNK,
+                )),
             ),
             ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => {
                 let head =
@@ -318,6 +343,39 @@ impl<'a> Request<'a> {
                     EXPLAINED_DOCUMENT_ROW,
                 )])?),
             ),
+            // A page of a class's findings resumes past a membership inside
+            // the class, for the reason a page's cursor is bound, at the bound
+            // a re-decision reads it by.
+            ExplainedStatement::LinkHealthClassFindings => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::class_findings_parameters(
+                        &class,
+                        &explained_after(class.as_str()),
+                        EXPLAINED_FEED_GENERATION,
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            // Both lists of row ids are explained over one id, which is bound
+            // as a fact read's id is.
+            ExplainedStatement::LinkHealthFoundLinks | ExplainedStatement::LinkHealthDiscard => {
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::ids_parameters(&[EXPLAINED_DOCUMENT_ROW])?),
+                )
+            }
+            // Both lists hold one key, so every arm is explained over a key
+            // it walks.
+            ExplainedStatement::LinkHealthOccupied => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                let path = PathKey::new(EXPLAINED_PAGE_CURSOR_LEAF)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::occupied_parameters(&[&class], &[&path])?),
+                )
+            }
         }?)
     }
 
@@ -385,10 +443,6 @@ pub enum ExplainedStatement<'a> {
     SuffixCandidates(&'a TargetClass),
     /// [`Request::findings_in_class`].
     FindingsInClass(&'a SuffixProbe),
-    /// The class-scoped discard: [`Request::discard_findings_in_class`] runs it
-    /// over a probe a caller named, and [`Request::apply_increment`] runs it
-    /// over each class its changed paths are in.
-    ClassDiscard(&'a SuffixProbe),
     /// The subject-scoped discard: [`Request::apply_increment`] runs it whole
     /// once per changed path, and [`Request::discard_findings_about`] runs it
     /// over the kinds a caller is re-deriving.
@@ -492,11 +546,14 @@ pub enum ExplainedStatement<'a> {
     /// them: every link a list of documents holds, beside the keys the link
     /// index holds each under.
     LinkHealthLinks,
-    /// The links a judgment judges selected by a class: every link held under
-    /// a key in one class's range, beside every key it is held under.
+    /// The links a judgment judges selected by a class: a page of the links
+    /// held under a key in one class's range, beside every key each is held
+    /// under — the second arm of the re-decision
+    /// [`Request::apply_increment`] runs.
     LinkHealthClassLinks,
-    /// The links a judgment judges selected by a path key: every link held
-    /// under exactly that key, beside every key it is held under.
+    /// The links a judgment judges selected by a path key: a page of the
+    /// links held under exactly that key, beside every key each is held under
+    /// — the re-decision's third arm.
     LinkHealthPathLinks,
     /// The head of what each distinct key a judgment's links hold names, at
     /// most [`crate::CANDIDATE_HEAD`] documents of a suffix key's class or at
@@ -513,6 +570,28 @@ pub enum ExplainedStatement<'a> {
     /// place that link's anchor names, for the links carrying an anchor: the
     /// anchor predicate over a list of links and their targets.
     LinkHealthAnchors,
+    /// The links the re-decision [`Request::apply_increment`] runs judges
+    /// first: a page of the links held by the documents its changeset wrote,
+    /// the documents stamped with its generation, beside every key each is
+    /// held under.
+    LinkHealthWrittenLinks,
+    /// The findings standing under one class the re-decision's second arm
+    /// discards first: a page of the class's memberships the changeset did
+    /// not file, each beside its finding's row id and the row id of the link
+    /// the finding is about.
+    LinkHealthClassFindings,
+    /// The links a page of discarded findings was about, read by their row
+    /// ids beside every key each is held under, so the second arm judges the
+    /// ones no key of the class reaches.
+    LinkHealthFoundLinks,
+    /// The discard of a page of findings by their row ids, which the second
+    /// arm runs over each page of a class's findings.
+    LinkHealthDiscard,
+    /// Which of a chunk of the classes and path keys a changeset changed the
+    /// re-decision's passes could read anything under: the one statement a
+    /// key no link and no finding is held under costs a share of, and no
+    /// pass beside it.
+    LinkHealthOccupied,
 }
 
 /// How many keyed point reads this seam names.
@@ -526,7 +605,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 36;
+pub const STATEMENTS: usize = 40;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -555,7 +634,6 @@ impl<'a> ExplainedStatement<'a> {
         [
             Self::SuffixCandidates(resolution),
             Self::FindingsInClass(probe),
-            Self::ClassDiscard(probe),
             Self::SubjectDiscard(subject, DiscardScope::EveryKind),
             Self::TypedValueDiscard,
             Self::FindingSubjectsWithoutRows(
@@ -593,6 +671,11 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthTotals,
             Self::LinkHealthSuffixes,
             Self::LinkHealthAnchors,
+            Self::LinkHealthWrittenLinks,
+            Self::LinkHealthClassFindings,
+            Self::LinkHealthFoundLinks,
+            Self::LinkHealthDiscard,
+            Self::LinkHealthOccupied,
         ]
     }
 
@@ -607,40 +690,44 @@ impl<'a> ExplainedStatement<'a> {
         let slot = match self {
             Self::SuffixCandidates(_) => 0,
             Self::FindingsInClass(_) => 1,
-            Self::ClassDiscard(_) => 2,
-            Self::SubjectDiscard(..) => 3,
-            Self::TypedValueDiscard => 4,
-            Self::FindingSubjectsWithoutRows(..) => 5,
-            Self::StoredDocumentPage(..) => 6,
-            Self::StoredFindingPage => 7,
-            Self::StoredTombstonePage => 8,
-            Self::StoredSuffixKeyPage => 9,
-            Self::IndexedTermPage => 10,
-            Self::DocumentFeedPage => 11,
-            Self::TombstoneFeedPage => 12,
-            Self::StoredDocument(_) => 13,
-            Self::StoredFactsDocument(_) => 14,
-            Self::DocumentLinks => 15,
-            Self::DocumentLinkKeys => 16,
-            Self::DocumentHeadings => 17,
-            Self::DocumentBlocks => 18,
-            Self::DocumentTags => 19,
-            Self::DocumentFields => 20,
-            Self::StoredTombstone(_) => 21,
-            Self::StoredFindings(_) => 22,
-            Self::VaultSchemaPin => 23,
-            Self::WriteGeneration => 24,
-            Self::FindingCandidates(_) => 25,
-            Self::FindingClasses(_) => 26,
-            Self::PathDiscard(_) => 27,
-            Self::FindingPaths(_) => 28,
-            Self::LinkHealthLinks => 29,
-            Self::LinkHealthClassLinks => 30,
-            Self::LinkHealthPathLinks => 31,
-            Self::LinkHealthHeads => 32,
-            Self::LinkHealthTotals => 33,
-            Self::LinkHealthSuffixes => 34,
-            Self::LinkHealthAnchors => 35,
+            Self::SubjectDiscard(..) => 2,
+            Self::TypedValueDiscard => 3,
+            Self::FindingSubjectsWithoutRows(..) => 4,
+            Self::StoredDocumentPage(..) => 5,
+            Self::StoredFindingPage => 6,
+            Self::StoredTombstonePage => 7,
+            Self::StoredSuffixKeyPage => 8,
+            Self::IndexedTermPage => 9,
+            Self::DocumentFeedPage => 10,
+            Self::TombstoneFeedPage => 11,
+            Self::StoredDocument(_) => 12,
+            Self::StoredFactsDocument(_) => 13,
+            Self::DocumentLinks => 14,
+            Self::DocumentLinkKeys => 15,
+            Self::DocumentHeadings => 16,
+            Self::DocumentBlocks => 17,
+            Self::DocumentTags => 18,
+            Self::DocumentFields => 19,
+            Self::StoredTombstone(_) => 20,
+            Self::StoredFindings(_) => 21,
+            Self::VaultSchemaPin => 22,
+            Self::WriteGeneration => 23,
+            Self::FindingCandidates(_) => 24,
+            Self::FindingClasses(_) => 25,
+            Self::PathDiscard(_) => 26,
+            Self::FindingPaths(_) => 27,
+            Self::LinkHealthLinks => 28,
+            Self::LinkHealthClassLinks => 29,
+            Self::LinkHealthPathLinks => 30,
+            Self::LinkHealthHeads => 31,
+            Self::LinkHealthTotals => 32,
+            Self::LinkHealthSuffixes => 33,
+            Self::LinkHealthAnchors => 34,
+            Self::LinkHealthWrittenLinks => 35,
+            Self::LinkHealthClassFindings => 36,
+            Self::LinkHealthFoundLinks => 37,
+            Self::LinkHealthDiscard => 38,
+            Self::LinkHealthOccupied => 39,
         };
         assert!(
             slot < STATEMENTS,
@@ -697,7 +784,6 @@ impl<'a> ExplainedStatement<'a> {
             | Self::WriteGeneration => true,
             Self::SuffixCandidates(_)
             | Self::FindingsInClass(_)
-            | Self::ClassDiscard(_)
             | Self::SubjectDiscard(..)
             | Self::TypedValueDiscard
             | Self::FindingSubjectsWithoutRows(..)
@@ -718,7 +804,12 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthHeads
             | Self::LinkHealthTotals
             | Self::LinkHealthSuffixes
-            | Self::LinkHealthAnchors => false,
+            | Self::LinkHealthAnchors
+            | Self::LinkHealthWrittenLinks
+            | Self::LinkHealthClassFindings
+            | Self::LinkHealthFoundLinks
+            | Self::LinkHealthDiscard
+            | Self::LinkHealthOccupied => false,
         }
     }
 }
@@ -727,6 +818,16 @@ impl<'a> ExplainedStatement<'a> {
 /// key, bound rather than null, for the reason [`explained_page_cursor`]
 /// states.
 const EXPLAINED_CLASS_KEY: &str = "explained/";
+
+/// The driver row a paged link selection is explained resuming past: `text`,
+/// with the row keys bound inside their table's range.
+fn explained_after(text: &str) -> health::After {
+    health::After {
+        text: text.to_string(),
+        first: EXPLAINED_DOCUMENT_ROW,
+        second: EXPLAINED_DOCUMENT_ROW,
+    }
+}
 
 /// The candidate-suffix statement a judgment runs, as its text and values,
 /// over one candidate: the statement a read names candidates by, spelled

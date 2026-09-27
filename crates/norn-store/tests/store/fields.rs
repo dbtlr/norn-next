@@ -5,7 +5,9 @@
 //! [`norn_store::Request::stored_facts`], so what is asserted is the rows at
 //! rest rather than the value the derivation handed over.
 
-use crate::common::{Scratch, dated_order, document, path, record_death, write_document};
+use crate::common::{
+    Scratch, dated_order, document, path, pinned_declaration, record_death, write_document,
+};
 use norn_store::{
     Change, ContentModel, DocumentFacts, FieldContainer, FieldDeclaration, FieldRow, FieldRows,
     FrontmatterValue, IncrementProvenance, OffsetSpelling, Provenance, StoreError, TypedOrder,
@@ -318,8 +320,12 @@ fn a_refused_field_row_leaves_no_document_row() {
         map(vec![("status", string("draft"))]),
         &ContentModel::none(),
     );
-    let refused =
-        request.apply_increment(IncrementProvenance::Derived, [Change::Upsert(fielded)], &[]);
+    let refused = request.apply_increment(
+        IncrementProvenance::Derived,
+        [Change::Upsert(fielded)],
+        &[],
+        &norn_store::ContentModel::none(),
+    );
     assert!(
         refused.is_err(),
         "a changeset whose field row was refused committed"
@@ -369,6 +375,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
                 IncrementProvenance::Derived,
                 [Change::Upsert(ranked(declared))],
                 &[],
+                &pinned_declaration(request),
             )
             .expect_err("typed values derived under a schema the store does not pin");
         assert!(
@@ -387,6 +394,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
     assert_eq!(
         refusal(&mut request, &typed_under("schema-1")),
         StoreError::UnpinnedDeclaration {
+            what: "typed field values were derived",
             derived_under: Some("schema-1".to_string()),
             pinned: None,
         }
@@ -398,6 +406,7 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
     assert_eq!(
         refusal(&mut request, &typed_under("schema-1")),
         StoreError::UnpinnedDeclaration {
+            what: "typed field values were derived",
             derived_under: Some("schema-1".to_string()),
             pinned: Some("schema-2".to_string()),
         }

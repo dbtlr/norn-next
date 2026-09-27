@@ -950,7 +950,12 @@ mod tests {
             for changes in [derived, dead] {
                 store
                     .begin_request()
-                    .apply_increment(norn_store::IncrementProvenance::Derived, changes, &[])
+                    .apply_increment(
+                        norn_store::IncrementProvenance::Derived,
+                        changes,
+                        &[],
+                        &norn_store::ContentModel::none(),
+                    )
                     .expect("one write");
             }
             let reader = std::sync::Arc::new(store.open_reader().reader.expect("a reader"));

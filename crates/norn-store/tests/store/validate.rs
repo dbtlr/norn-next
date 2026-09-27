@@ -203,11 +203,12 @@ impl Validating {
         }
     }
 
-    /// Record `finding` over the seeded vault.
+    /// Stand `finding` over the seeded vault. The suite orders findings about
+    /// links and of link-health kinds beside a caller's, and those are the
+    /// store's own to file, so every finding stands through the fenced door,
+    /// which writes each as the store files one.
     fn stand(&mut self, finding: &FindingFacts) {
-        self.store
-            .begin_request()
-            .record_finding(finding)
+        induced_failure::record_finding_out_of_band(&mut self.store, finding)
             .expect("recording a finding");
     }
 
