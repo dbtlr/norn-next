@@ -639,9 +639,9 @@ impl LinkHealth {
     /// kind ([`LinkAddress::kind`]). A link addressed elsewhere is not judged.
     /// Any other link is healthy where it resolved to one document and
     /// ambiguous where it resolved to more; one that resolved to none is not
-    /// judged where its target names an attachment, and broken otherwise. The count is the head's total rather than the candidates it
-    /// carries, so a head cut at its bound reports the health of the whole
-    /// class.
+    /// judged where its target names an attachment, and broken otherwise. The
+    /// count is the head's total rather than the candidates it carries, so a
+    /// head cut at its bound reports the health of the whole class.
     ///
     /// This is the whole of the derivation, so a producer cannot file one
     /// reading of a link and a consumer another.
@@ -744,7 +744,9 @@ pub struct LinkRow {
     /// The link's title, where its grammar carries one.
     pub title: Option<String>,
     /// The place inside the target the link names, where it names one: a
-    /// wikilink's as written, and a Markdown link's percent-decoded once.
+    /// wikilink's as written, and a Markdown link's percent-decoded once. An
+    /// empty anchor, `note#` or `note#^`, names no place, so its link row
+    /// shows no anchor.
     pub anchor: Option<Anchor>,
     /// Where the link stands in the document body.
     pub span: Span,

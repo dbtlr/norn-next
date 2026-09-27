@@ -243,9 +243,9 @@ pub(crate) fn joined(mut from: Vec<String>, path: &str) -> Option<String> {
 ///
 /// `norn-text` decodes a Markdown link's fragment by the same byte loop, in
 /// its own copy: this crate never depends on the text layer, and the text
-/// layer depends on no workspace crate, so no shared home reaches both. The two differ
-/// only where a decoding is not UTF-8: a segment here names no path, and a
-/// fragment there stands as written.
+/// layer depends on no workspace crate, so no shared home reaches both. The
+/// two differ only where a decoding is not UTF-8: a segment here names no
+/// path, and a fragment there stands as written.
 fn percent_decoded(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());

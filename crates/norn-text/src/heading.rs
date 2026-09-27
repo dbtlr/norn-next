@@ -19,9 +19,10 @@ pub struct Heading {
     /// space ending a heading is part of its text.
     pub text: String,
     /// The GFM anchor form of [`Heading::text`] — [`slugify`], plus the
-    /// document-order suffix that tells repeated headings apart. This is what
-    /// an inline Markdown link's `#fragment` addresses; a wikilink's addresses
-    /// [`Heading::text`] instead.
+    /// document-order suffix that tells repeated headings apart. The section
+    /// resolver matches an anchor as written against it, after the anchor's
+    /// readings against [`Heading::text`], whichever link family wrote the
+    /// anchor.
     pub slug: String,
     /// Where the heading construct begins — the `#` of an ATX heading, the
     /// first byte of a setext title line.

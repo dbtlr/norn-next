@@ -124,13 +124,16 @@
 
 //! # `headings` is addressed two ways
 //!
-//! A wikilink `#anchor` addresses a heading's **text**, which `reading` holds
+//! A heading anchor matches a heading by its **text**, which `reading` holds
 //! as an anchor's text compares it: ASCII case and ASCII whitespace folded, as
-//! the text layer's section resolver reads it. An inline Markdown `#fragment`
-//! addresses its **slug**, dedupe suffix included, as `norn-text` issued it in
-//! document order. Both lookups are inside one document, so each index leads
-//! with `document`: `headings_document_reading` and `headings_document_slug`,
-//! the two a link's anchor readings are sought through.
+//! the text layer's section resolver reads it. It also matches by its
+//! **slug**, dedupe suffix included, as `norn-text` issued it in document
+//! order. One resolver reads a wikilink's anchor and a Markdown link's
+//! fragment alike, by all three of its readings: its text and its marked text
+//! against `reading`, and the anchor as written against `slug`. Every lookup
+//! is inside one document, so each index leads with `document`:
+//! `headings_document_reading` and `headings_document_slug`, the two a link's
+//! anchor readings are sought through.
 //!
 //! `body_offset` is where the heading construct ends and the section's body
 //! begins, and `inside_container` says the heading sits inside a blockquote or
@@ -145,10 +148,10 @@
 //! `blocks_document_block_id`. `norn-text` names each definition's `^`-marker
 //! span, so a writer reading the text layer has a position to record; the
 //! columns are nullable because this table takes what a writer knows rather
-//! than forcing a position on one that lacks it. Nothing enforces uniqueness of `block_id`
-//! within a document — two lines defining the same id is a vault defect, and
-//! judging it is the findings pillar's job, not a constraint that would refuse
-//! to record what the file says.
+//! than forcing a position on one that lacks it. Nothing enforces uniqueness
+//! of `block_id` within a document — two lines defining the same id is a
+//! vault defect, and judging it is the findings pillar's job, not a constraint
+//! that would refuse to record what the file says.
 //!
 //! # `document_tags` records the tag as written, beside its fold
 //!
