@@ -1,6 +1,6 @@
 {
-  "note": "Behavior rulings recorded from the source file at the pin, their own wording included. Evidence with zero authority: a ruling becomes contract only when the command it attaches to is activated and the ruling is re-judged affirmatively against the re-derived surface. A command the verb charter deletes takes its rulings with it. Transcription is deliberately lossy: `source_file` and `source_decision` are paths inside the recording checkout, not this repository, and the source entries' divergence-extent counts and pinned comparison-binary version are dropped — both describe a comparison this line does not make.",
-  "ruling_count": 56,
+  "note": "Behavior rulings. Most are transcribed from the source file at the pin, their own wording included; the rest are recorded on this line, and each ruling's `source` says which. Evidence with zero authority: a ruling becomes contract only when the command it attaches to is activated and the ruling is re-judged affirmatively against the re-derived surface. A command that is deleted takes its rulings with it. `recorded_behavior` is the behavior a ruling records as decided and `prior_behavior` the behavior it replaces: a transcribed ruling's cases recorded the decided behavior, and a ruling recorded on this line cites cases that recorded the prior one. `source_file`, and a transcribed ruling's `source_decision`, are paths inside the recording checkout, not this repository; a ruling recorded on this line cites a path in this repository. Transcription is deliberately lossy: the source entries' divergence-extent counts and pinned comparison-binary version are dropped — both describe a comparison this line does not make.",
+  "ruling_count": 63,
   "rulings": [
     {
       "cases": [
@@ -1132,6 +1132,202 @@
       },
       "source_decision": "docs/decisions/0018-greenfield-rewrite-oracle-parity.md",
       "surface": "target-resolution refusal wording (set / edit / get / mcp vault.set — records, json, and mcp frames)"
+    },
+    {
+      "cases": [
+        "help-bare",
+        "help-count",
+        "help-edit",
+        "help-find",
+        "help-get",
+        "help-validate"
+      ],
+      "commands": [
+        "apply",
+        "audit",
+        "cache",
+        "completions",
+        "config",
+        "count",
+        "delete",
+        "describe",
+        "edit",
+        "find",
+        "get",
+        "init",
+        "manpage",
+        "mcp",
+        "move",
+        "new",
+        "repair",
+        "rewrite-wikilink",
+        "self-update",
+        "serve",
+        "service",
+        "set",
+        "top-level",
+        "validate",
+        "vault"
+      ],
+      "id": "CR-help-reads-no-vault",
+      "prior_behavior": "the help standard the recorded pages were rendered under gives `find --help` a `LIVE EXAMPLES` block: a runnable query generated from the vault in scope, with the number of documents it matches, shown when a vault is in scope, its index loads and one of its frontmatter fields is enum-like. The binary at the pin carries the block's renderer but wires no generator, so no recorded page carries one. Every recorded help page ran with a fixture vault as its working directory",
+      "reason": "class-ruling",
+      "recorded_behavior": "a help page never reads a vault. It is rendered from the command's declaration alone, so it is the same inside a vault, outside one, and with no vault registered. The `LIVE EXAMPLES` block, and every instruction to generate help from a vault's contents, are struck on every command and in every section. Canned examples stay hand-authored and vault-independent. The fixture tree a recorded help case ran against is incidental to it",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "crates/norn/tests/corpus/README.md",
+      "surface": "every command's help pages (`-h` and `--help`)"
+    },
+    {
+      "cases": [
+        "help-find",
+        "read-find-json-zoo",
+        "read-find-jsonl-zoo",
+        "read-find-paths-zoo",
+        "read-find-records-zoo",
+        "read-find-sort-limit-json-zoo",
+        "read-find-starts-at-zero-indexed-zoo",
+        "read-find-limit-nolimit-last-wins-zoo",
+        "err-repeated-limit-last-wins-zoo"
+      ],
+      "commands": [
+        "find"
+      ],
+      "id": "SR-find",
+      "prior_behavior": "`find` pages by offset: `--limit N` bounds a page, 10 by default; `--starts-at N` skips N matches; `--no-limit` returns every match, and the last of `--limit` and `--no-limit` wins. `--all` is required to match with no predicate, and without any predicate `find` prints its help page. A JSON page carries `documents`, `returned`, `starts_at` and the match `total`, and a truncated page notes `showing N of M (--no-limit for all)` on stderr. A row projects the frontmatter by default. `--format` selects paths, records, json or jsonl",
+      "reason": "shape-changed",
+      "recorded_behavior": "`find` pages by keyset cursor. A page carries its `rows`; `next`, the opaque cursor to continue from, `null` on the last page; and `moved`, what changed under the cursor since it was minted. A request continues by passing `next` back as `after`. The cursor key is the sort value and the path together, and the cursor names the order its page was read in: a continuation under another sort key or direction, or under another schema for a typed order, is refused as an order that changed, and a continuation over later writes or a rebuild answers and reports `generation` or `epoch` in `moved`. `limit` bounds the rows a page holds, the ceiling is the host's where the request names none, and a bound outside the store's range is refused, never clamped. There is no offset, no page number, no total and no unbounded page: `--starts-at`, `--no-limit` and `--all` have no counterpart, and an empty conjunction matches every document. The default order is path ascending, and a document missing the sort field orders first ascending and last descending. An empty projection carries the path alone. Paths, records, JSON and JSON lines are renderings of this one page, and the renderings land at Layer 6",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "docs/architecture.md",
+      "surface": "find (paging, the page's shape, projection and formats)"
+    },
+    {
+      "cases": [
+        "help-get",
+        "read-get-alpha-records-zoo",
+        "read-get-alpha-zoo",
+        "read-get-alpha-markdown-zoo",
+        "read-get-alpha-all-cols-json-zoo",
+        "read-get-section-json-zoo",
+        "read-get-section-records-zoo",
+        "read-get-ambiguous-json-zoo",
+        "read-get-not-found-json-zoo"
+      ],
+      "commands": [
+        "get"
+      ],
+      "id": "SR-get",
+      "prior_behavior": "`get` answers one or more targets, each resolved by path, then stem. `--format` selects records (the default), json (an array of records, `[]` when nothing resolved) or markdown (the document's source text, frontmatter included). `--section <HEADING>` adds a `sections` map from heading text to the section's source. `--col` and `--all-cols` project the record. An ambiguous stem answers one candidate with a warning naming the others and exits 0; an unresolved target answers an error note beside an empty array and exits 1",
+      "reason": "shape-changed",
+      "recorded_behavior": "`get` answers exactly one document, addressed by one resolution target, and its report takes one of four shapes tagged `shape`: `record`, the document projected onto the named columns, or the whole record under the per-row ceiling where none is named; `section`, the heading row and section body that a `#Heading` anchor on the target names; `block`, the block row and block body that a `#^block` anchor names; and `collection`, one page of one nested collection (links, headings, blocks, tags or findings), paged by position in the document with a cursor of its own that names the collection and is refused on another. A target naming several documents is refused `vault/ambiguous-target`, carrying at most five candidates in resolution order, their total, and a hint naming the `find` that enumerates the class; a target naming none is refused `vault/unknown-target`. The body is a projected column that carries its whole byte length beside any cut at the per-row ceiling. There is no multi-target request and no array answer. Records, JSON and Markdown are renderings of this report, and the renderings land at Layer 6",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "docs/architecture.md",
+      "surface": "get (one target, the report's shapes, and formats)"
+    },
+    {
+      "cases": [
+        "help-count",
+        "read-count-clean",
+        "read-count-eq-zoo",
+        "read-count-by-status-clean",
+        "read-count-by-multi-json-clean",
+        "read-count-group-by-alias-clean"
+      ],
+      "commands": [
+        "count"
+      ],
+      "id": "SR-count",
+      "prior_behavior": "`count` answers a `total` alone without `--by`. With `--by F1,F2` (alias `--group-by`) it adds a flat distribution for one field, or a map nested one level per field for several, keyed by value with `(missing)` for a document without the field. The answer is unpaged, and `--format` selects records or json",
+      "reason": "shape-changed",
+      "recorded_behavior": "`count` answers a page of tallies. Each tally is `group`, one member per group key in the request's order, and `count`, the documents in that group. A member is `null` where the document carries no scalar value under its key, or, under a key declared with a typed order, none that reads as that type. Several keys answer their cross product as flat tuples, not a nested map, and a request naming no key answers one tally over the whole match. A group key is a frontmatter field or `tag`. A key holding a set groups a document once per element, and a tag grouping once per tag with case folded, so tallies can sum past the documents matched; a key declared with a typed order groups by typed equality. Tallies page by keyset: the cursor key is the grouping tuple, `limit` bounds the tallies a page holds, and `next` and `moved` continue a page as they do on every paged verb. No document row is hydrated and no projection is carried. A `resolves` part is answered around and reported as the unsatisfied part `resolves_not_applicable`. Finding tallies are `validate`'s summary, not a grouping here. Every format is a rendering, and the renderings land at Layer 6",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "docs/architecture.md",
+      "surface": "count (the grouped tally and its paging)"
+    },
+    {
+      "cases": [
+        "help-validate",
+        "validate-code-filter-zoo",
+        "validate-jsonl-code-zoo",
+        "validate-list-allowed-values-elementwise",
+        "validate-paths-zoo",
+        "validate-severity-summary-zoo",
+        "validate-summary-clean",
+        "validate-summary-records-zoo",
+        "validate-summary-zoo"
+      ],
+      "commands": [
+        "validate"
+      ],
+      "id": "SR-validate",
+      "prior_behavior": "`validate` judges the vault against the rules in `.norn/config.yaml` and its graph facts. A finding carries a `code` (`frontmatter-required-field-missing`, `value-not-allowed`, `link-target-missing`, `link-ambiguous` and others), `severity`, `path`, `message`, and `rule` and `field` where a rule decided it. `--code` takes globs, `--severity` narrows by severity, and `--format` selects json, jsonl, paths or records. The answer is unpaged. `--summary` answers a total beside tallies by code, severity, rule, field and disallowed value. The exit code is 1 when any finding is an error",
+      "reason": "shape-changed",
+      "recorded_behavior": "`validate` reads the findings standing under the active schema; it runs no rule and emits no plan. Its report is tagged `shape`: `findings`, a page of finding rows, each carrying `id`, `kind`, `severity`, `path`, `target`, `span`, a candidate head of at most five with its total, a `hint` naming the `find` that enumerates an ambiguous class, `message`, and the `generation` it was derived at; or `summary`, one tally per kind and severity, which is unpaged and refuses a cursor. A kind is a namespaced code from the one registry (`document/…`, `link/broken`, `link/ambiguous`, `link/missing-anchor`). A request narrows by exact kinds, by a severity floor, and by the shared predicate grammar, where a path part judges the path a finding stands at and every other part judges the document row at that path. Rows page by keyset in `(kind, path, position, id)` order, with `limit`, `next` and `moved` as on every paged verb. Standing findings are part of a full answer and set no exit status of their own. A `resolves` part is reported as the unsatisfied part `resolves_not_applicable`. Every format is a rendering, and the renderings land at Layer 6",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "docs/architecture.md",
+      "surface": "validate (finding rows, the summary, narrowing and paging)"
+    },
+    {
+      "cases": [
+        "describe-zoo",
+        "describe-json-zoo",
+        "describe-data-zoo",
+        "describe-data-clean",
+        "describe-stats-zoo",
+        "describe-by-clean"
+      ],
+      "commands": [
+        "describe"
+      ],
+      "id": "SR-describe",
+      "prior_behavior": "a bare `describe` prints four structure counts: `folders`, `path rules`, `creatable` and `inbox`. `--format json` projects those counts. `--schema` dumps the declared config. `--data`, `--stats` and `--by` add a contents summary of the document total, date ranges and per-field value distributions",
+      "reason": "shape-changed",
+      "recorded_behavior": "`describe` answers a page of facets in `(kind, key)` order. The declared facets are read from the content model the snapshot pins: each declared field with its type, whether it is required, and its closed set; the declared tags; the tag patterns; the declared folders; the path rules; and the stance on an undeclared tag. The observed facets are one per frontmatter key some document carries, each listing every container the key is held in. It answers keys and declarations only: it reports no count of folders or rules and no config dump, and values and cardinalities are `count`'s, so `--data`, `--stats` and `--by` have no counterpart here. Runtime state is `vault status`'s. A request narrows to facet kinds, and facets page by keyset with the cursor key `(kind, key)`, judged by position under no schema fingerprint. Every format is a rendering, and the renderings land at Layer 6",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "docs/architecture.md",
+      "surface": "describe (the declared and observed content model, paged)"
+    },
+    {
+      "cases": [
+        "help-bare"
+      ],
+      "commands": [
+        "top-level"
+      ],
+      "id": "SR-top-level",
+      "prior_behavior": "the page lists 23 commands: `find`, `count`, `describe`, `get`, `set`, `edit`, `new`, `init`, `move`, `delete`, `apply`, `repair`, `rewrite-wikilink`, `validate`, `completions`, `cache`, `config`, `self-update`, `mcp`, `serve`, `service`, `audit` and `vault`. Canned EXAMPLES follow, then GLOBAL OPTIONS: `-C/--cwd` (defaulting to `$NORN_ROOT`), `--verbose`, `--no-cache-refresh`, `--color` and `--vault <NAME>`. Every subcommand page repeats the global block in full",
+      "reason": "shape-changed",
+      "recorded_behavior": "the page lists the commands this line carries: the reads `find`, `search`, `get`, `count`, `validate` and `describe`; `doctor`; the `vault` namespace (`register`, `unregister`, `list`, `set`, `resolve`, `status`, `reload` and `migrate`); `model` (`model fetch`); and the installation commands `service`, `completions`, `manpage` and `self-update`. `config`, `cache` and `serve` are gone: `config show` is `describe` and `vault status`, `config validate` is `vault reload --dry-run`, and `config migrate` is `vault migrate`; a rebuild is a heal the host reaches on damage, and state is reclaimed by `vault unregister`; the host is started by its supervisor. The mutation commands, `init`, `audit`, `repair` and `mcp` join the list as each is re-derived. The global block keeps `--vault` and its address forms, `-C`, `--verbose`, `--color`, and `--config`, the machine configuration path; `--no-cache-refresh` goes with the cache. The full global reference appears once, on this page, and each subcommand page carries a pointer to it",
+      "source": {
+        "branch": "main",
+        "commit": "c75ed32a",
+        "line": "norn"
+      },
+      "source_decision": "crates/norn/tests/corpus/README.md",
+      "surface": "bare `norn` (the top-level help page's command list and global block)"
     }
   ],
   "source": {

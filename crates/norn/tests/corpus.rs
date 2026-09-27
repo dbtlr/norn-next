@@ -262,6 +262,109 @@ fn rulings_without_an_activation_path_are_known() {
     );
 }
 
+/// The line this repository records rulings on. A ruling whose source names
+/// it was judged here, against this repository's surface; every other ruling
+/// was transcribed from the recording checkout.
+const THIS_LINE: &str = "norn";
+
+/// The class ruling that strikes help generated from a vault.
+const HELP_CLASS_RULING: &str = "CR-help-reads-no-vault";
+
+/// Whether this repository holds a file at `relative`, a path from its root.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: a ledger citation checked against this repository's own tree.
+fn repository_holds(relative: &str) -> bool {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative)
+        .is_file()
+}
+
+/// The rulings recorded on this line are pinned, and each one cites a
+/// decision this repository holds.
+///
+/// Two namespaces share one field. A transcribed ruling's `source_decision`
+/// is a path inside the recording checkout, whose decision records are
+/// numbered from `0001` as this repository's are, so it resolves here to the
+/// wrong document or to none. A ruling recorded on this line names this
+/// repository in its `source` and cites a path that resolves here. A ruling
+/// whose source names neither is refused, so a reader always knows which
+/// namespace a path is read in.
+#[test]
+fn rulings_recorded_on_this_line_are_known_and_cite_this_repository() {
+    let corpus = corpus();
+    let recording = &corpus.ledger.source;
+    let mut recorded_here = Vec::new();
+    for ruling in &corpus.ledger.rulings {
+        let source = &ruling.source;
+        if source.line == THIS_LINE {
+            assert!(
+                repository_holds(&ruling.source_decision),
+                "ruling `{}` is recorded on this line but cites `{}`, which this repository does not hold",
+                ruling.id,
+                ruling.source_decision
+            );
+            recorded_here.push(ruling.id.as_str());
+        } else {
+            assert!(
+                source.line == recording.line
+                    && source.branch == recording.branch
+                    && source.commit == recording.commit,
+                "ruling `{}` names neither this line nor the recording checkout as its source",
+                ruling.id
+            );
+        }
+    }
+    assert_eq!(
+        recorded_here,
+        vec![
+            HELP_CLASS_RULING,
+            "SR-find",
+            "SR-get",
+            "SR-count",
+            "SR-validate",
+            "SR-describe",
+            "SR-top-level",
+        ],
+        "the set of rulings recorded on this line changed"
+    );
+}
+
+/// The help class ruling is swept across every command, as a class ruling
+/// is, and covers every recorded help page.
+///
+/// A help page never reads a vault, on any command, so the ruling attaches to
+/// the whole command universe rather than to the commands whose pages happen
+/// to be recorded; and every recorded `--help` or `-h` invocation is one of
+/// the cases it re-judges.
+#[test]
+fn the_help_class_ruling_sweeps_every_command() {
+    let corpus = corpus();
+    let ruling = corpus
+        .ledger
+        .rulings
+        .iter()
+        .find(|ruling| ruling.id == HELP_CLASS_RULING)
+        .unwrap_or_else(|| panic!("the ledger records no ruling `{HELP_CLASS_RULING}`"));
+
+    let swept: BTreeSet<&str> = ruling.commands.iter().map(String::as_str).collect();
+    assert_eq!(
+        swept,
+        corpus.command_universe(),
+        "the help class ruling does not attach to every command"
+    );
+
+    let covered: BTreeSet<&str> = ruling.cases.iter().map(String::as_str).collect();
+    let help_pages: BTreeSet<&str> = corpus
+        .all_cases()
+        .filter(|case| case.argv.iter().any(|arg| arg == "--help" || arg == "-h"))
+        .map(|case| case.id.as_str())
+        .collect();
+    assert_eq!(
+        covered, help_pages,
+        "the help class ruling does not cover exactly the recorded help pages"
+    );
+}
+
 /// Every activated case must reach a runner. None is activated, so nothing
 /// runs; the first command to be activated meets the missing execution seam
 /// here rather than in a silent skip.
