@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, assert_covers_every_driving_shape,
-    document, driving_parts, narrowable, reads_of, unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, document, driving_parts,
+    narrowable, path_names_no_document_for_target, path_names_no_document_in_class, reads_of,
+    unread_block, violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
@@ -86,14 +87,14 @@ fn seed(store: &mut Store) {
     for finding in [
         violation("broken.md"),
         unread_block("notes/d.md"),
-        ambiguity(
+        path_names_no_document_in_class(
             "notes/c.md",
             "glossary",
             "glossary/",
             &["g/1.md", "g/2.md", "g/3.md", "g/4.md", "g/5.md"],
             7,
         ),
-        ambiguity_for_target("a.md", "v1.2", &["v/v1.2.md"], 1),
+        path_names_no_document_for_target("a.md", "v1.2", &["v/v1.2.md"], 1),
         undeclared("a.md", "draft"),
         undeclared("a.md", "idea"),
         undeclared("b.md", "other"),
@@ -792,7 +793,7 @@ fn a_finding_row_carries_its_bounded_head_its_total_and_its_hint() {
     for (target, mut finding) in [
         (
             "glossary",
-            ambiguity(
+            path_names_no_document_in_class(
                 "notes/d.md",
                 "glossary",
                 "glossary/",
@@ -802,7 +803,7 @@ fn a_finding_row_carries_its_bounded_head_its_total_and_its_hint() {
         ),
         (
             "v1.2",
-            ambiguity_for_target("notes/d.md", "v1.2", &["v/v1.2.md", "v/v1.md"], 2),
+            path_names_no_document_for_target("notes/d.md", "v1.2", &["v/v1.2.md", "v/v1.md"], 2),
         ),
     ] {
         finding.kind = FindingKind::Ambiguous;

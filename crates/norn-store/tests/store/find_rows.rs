@@ -18,7 +18,8 @@ use norn_wire::{
 };
 
 use crate::common::{
-    Scratch, ambiguity, classes, document, unread_block, violation, write_documents,
+    Scratch, classes, document, path_names_no_document_in_class, unread_block, violation,
+    write_documents,
 };
 use crate::find::{
     SEED_SCHEMA, Seeded, declared, integer_order, map, order_of, request, sorted, string,
@@ -979,7 +980,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
     };
     for finding in [
         about_link(FindingKind::Ambiguous, 1),
-        ambiguity(
+        path_names_no_document_in_class(
             "notes/a.md",
             "glossary",
             "glossary/",

@@ -281,7 +281,7 @@ fn discarding_a_class_counts_the_findings_it_removed() {
     let mut request = store.begin_request();
     for at in ["one.md", "two.md"] {
         request
-            .record_finding(&crate::common::ambiguity(
+            .record_finding(&crate::common::path_names_no_document_in_class(
                 at,
                 "glossary",
                 "glossary/",
@@ -291,7 +291,7 @@ fn discarding_a_class_counts_the_findings_it_removed() {
             .expect("recording a finding");
     }
     request
-        .record_finding(&crate::common::ambiguity(
+        .record_finding(&crate::common::path_names_no_document_in_class(
             "one.md",
             "index",
             "index/",

@@ -9,9 +9,9 @@
 //! fingerprint that a schema edit invalidates by.
 
 use crate::common::{
-    Scratch, ambiguity, ambiguity_for_target, class, class_named, classes, document,
-    document_with_every_fact, drained, full_text_matches, path, record_death, violation,
-    write_document, write_documents, written_links, written_tags,
+    Scratch, class, class_named, classes, document, document_with_every_fact, drained,
+    full_text_matches, path, path_names_no_document_for_target, path_names_no_document_in_class,
+    record_death, violation, write_document, write_documents, written_links, written_tags,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
@@ -192,7 +192,7 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
         );
         store
             .begin_request()
-            .record_finding(&ambiguity(
+            .record_finding(&path_names_no_document_in_class(
                 subject.as_str(),
                 "glossary",
                 "glossary/",
@@ -354,7 +354,7 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
         &mut request,
         &document(citing.as_str(), "hash-1", "a body\n"),
     );
-    let finding = ambiguity(
+    let finding = path_names_no_document_in_class(
         citing.as_str(),
         "glossary",
         "glossary/",
@@ -513,7 +513,8 @@ fn a_second_finding_about_one_link_is_refused() {
 fn a_candidate_head_beyond_the_bound_is_refused() {
     let scratch = Scratch::new("bound");
     let mut store = scratch.open();
-    let mut finding = ambiguity("docs/index.md", "glossary", "glossary/", &[], 6);
+    let mut finding =
+        path_names_no_document_in_class("docs/index.md", "glossary", "glossary/", &[], 6);
     finding.candidates = (0..6)
         .map(|index| CandidateFact {
             path: path(&format!("dir{index}/glossary.md")),
@@ -539,7 +540,7 @@ fn a_candidate_head_beyond_the_bound_is_refused() {
 fn a_candidate_total_below_the_head_it_heads_is_refused() {
     let scratch = Scratch::new("total");
     let mut store = scratch.open();
-    let finding = ambiguity(
+    let finding = path_names_no_document_in_class(
         "docs/index.md",
         "glossary",
         "glossary/",
@@ -579,7 +580,13 @@ fn a_finding_cannot_carry_a_class_key_no_probe_opens() {
     let mut store = scratch.open();
     let mut request = store.begin_request();
     request
-        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "one.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     assert_eq!(
         request
@@ -991,7 +998,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     );
     for at in ["one/glossary.md", "two/glossary.md"] {
         request
-            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 2))
+            .record_finding(&path_names_no_document_in_class(
+                at,
+                "glossary",
+                "glossary/",
+                &[],
+                2,
+            ))
             .expect("recording a finding");
     }
 
@@ -1279,7 +1292,7 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
         ],
     );
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             "one/glossary.md",
             "glossary",
             "glossary/",
@@ -1690,7 +1703,13 @@ fn an_enumeration_drained_a_page_at_a_time_reaches_every_row() {
     );
     for at in ["one/glossary.md", "two/glossary.md", "nowhere/absent.md"] {
         request
-            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 3))
+            .record_finding(&path_names_no_document_in_class(
+                at,
+                "glossary",
+                "glossary/",
+                &[],
+                3,
+            ))
             .expect("recording a finding");
     }
     for at in ["three/gone.md", "four/gone.md"] {
@@ -2759,7 +2778,7 @@ fn seed_a_drainable_store(request: &mut norn_store::Request<'_>, rows: usize) {
     write_documents(request, &documents);
     for n in 0..rows {
         request
-            .record_finding(&ambiguity(
+            .record_finding(&path_names_no_document_in_class(
                 &format!("unresolved/{n:04}.md"),
                 &format!("target{n:04}"),
                 &format!("target{n:04}/"),
@@ -2793,13 +2812,25 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     // Two findings about the same class, written in different documents, plus
     // one about a longer suffix in the same class and one about another class.
     request
-        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "one.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity("two.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "two.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             "two.md",
             "norn/glossary",
             "glossary/norn/",
@@ -2808,7 +2839,13 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
         ))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity("three.md", "index", "index/", &[], 4))
+        .record_finding(&path_names_no_document_in_class(
+            "three.md",
+            "index",
+            "index/",
+            &[],
+            4,
+        ))
         .expect("recording a finding");
     // And one with no class at all: a schema violation is not about resolution,
     // and a synthetic class would put it in the blast radius of every rename
@@ -2893,7 +2930,12 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         // The finding is recorded from the probe, as a resolution reading mints
         // it, and a schema violation with no class sits beside it.
         request
-            .record_finding(&ambiguity_for_target("docs/index.md", target, &[at], 1))
+            .record_finding(&path_names_no_document_for_target(
+                "docs/index.md",
+                target,
+                &[at],
+                1,
+            ))
             .expect("recording a finding");
         request
             .record_finding(&violation("docs/index.md"))
@@ -2981,7 +3023,12 @@ fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
     assert_eq!(probe.range_count(), 2);
 
     request
-        .record_finding(&ambiguity_for_target("docs/index.md", "v1.2", &[], 2))
+        .record_finding(&path_names_no_document_for_target(
+            "docs/index.md",
+            "v1.2",
+            &[],
+            2,
+        ))
         .expect("recording a finding");
     assert_eq!(
         request
@@ -3026,7 +3073,13 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
 
     // And that class reaches the findings a deletion has to revisit.
     request
-        .record_finding(&ambiguity("other.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "other.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     assert_eq!(
         request
@@ -3066,7 +3119,7 @@ fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
         &document(subject.as_str(), "hash-1", "a body\n"),
     );
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             subject.as_str(),
             "glossary",
             "glossary/",
@@ -3075,7 +3128,7 @@ fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
         ))
         .expect("a finding about a stored document");
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             never_derived.as_str(),
             "notes",
             "notes/",
@@ -3132,7 +3185,13 @@ fn re_deriving_a_subject_is_a_discard_and_a_record() {
         .record_finding(&violation("one.md"))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "one.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     request
         .record_finding(&violation("two.md"))
@@ -3201,7 +3260,13 @@ fn re_deriving_some_of_a_subjects_kinds_leaves_the_rest_standing() {
         .record_finding(&violation("one.md"))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "one.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
 
     let invalidation = request
@@ -3225,7 +3290,13 @@ fn re_deriving_some_of_a_subjects_kinds_leaves_the_rest_standing() {
     // Recording the kind that was discarded leaves one copy of each, which is
     // discard-then-record holding per kind rather than per subject.
     request
-        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "one.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     assert_eq!(
         request
@@ -3302,7 +3373,13 @@ fn the_walked_scope_page_names_the_subjects_no_document_row_stands_at() {
             .expect("recording a finding");
     }
     request
-        .record_finding(&ambiguity("one/gone.md", "glossary", "glossary/", &[], 2))
+        .record_finding(&path_names_no_document_in_class(
+            "one/gone.md",
+            "glossary",
+            "glossary/",
+            &[],
+            2,
+        ))
         .expect("recording a finding");
 
     // The vault scope holds every subject no row stands at, once however many
@@ -3445,11 +3522,17 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
 
     for at in ["one.md", "two.md"] {
         request
-            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 3))
+            .record_finding(&path_names_no_document_in_class(
+                at,
+                "glossary",
+                "glossary/",
+                &[],
+                3,
+            ))
             .expect("recording a finding");
     }
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             "one.md",
             "norn/glossary",
             "glossary/norn/",
@@ -3458,7 +3541,13 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
         ))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity("three.md", "index", "index/", &[], 4))
+        .record_finding(&path_names_no_document_in_class(
+            "three.md",
+            "index",
+            "index/",
+            &[],
+            4,
+        ))
         .expect("recording a finding");
 
     // The class discard takes the whole class, longer suffixes inside it
@@ -3496,7 +3585,13 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
             .discard_findings_in_class(&request.class_probe("glossary").expect("a class stem"))
             .expect("discarding a class");
         request
-            .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 2))
+            .record_finding(&path_names_no_document_in_class(
+                "one.md",
+                "glossary",
+                "glossary/",
+                &[],
+                2,
+            ))
             .expect("recording a finding");
     }
     assert_eq!(

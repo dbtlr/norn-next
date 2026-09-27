@@ -13,9 +13,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, broken_path_link, class, classes, document, document_with_every_fact,
-    drained, full_text_matches, path, path_key, snapshot, unread_block, violation, write_document,
-    write_documents,
+    Scratch, broken_path_link, class, classes, document, document_with_every_fact, drained,
+    full_text_matches, path, path_key, path_names_no_document_in_class, snapshot, unread_block,
+    violation, write_document, write_documents,
 };
 use norn_wire::{CaseFold, Pattern};
 
@@ -913,10 +913,16 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
     // In the class a changed `**/glossary.md` affects — including one about a
     // longer suffix inside that class, which the same range reaches.
     request
-        .record_finding(&ambiguity("docs/index.md", "glossary", "glossary/", &[], 3))
+        .record_finding(&path_names_no_document_in_class(
+            "docs/index.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
         .expect("recording a finding");
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             "docs/index.md",
             "norn/glossary",
             "glossary/norn/",
@@ -926,7 +932,13 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
         .expect("recording a finding");
     // In another class, and in no class at all.
     request
-        .record_finding(&ambiguity("docs/index.md", "notes", "notes/", &[], 4))
+        .record_finding(&path_names_no_document_in_class(
+            "docs/index.md",
+            "notes",
+            "notes/",
+            &[],
+            4,
+        ))
         .expect("recording a finding");
     request
         .record_finding(&violation("docs/index.md"))
@@ -1037,7 +1049,7 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
     // also pins the finding_candidates FK cascade.
     for at in ["re/derived.md", "about/to/die.md", "untouched.md"] {
         let finding = if at == "about/to/die.md" {
-            ambiguity(
+            path_names_no_document_in_class(
                 at,
                 "glossary",
                 "glossary/",
@@ -1045,7 +1057,7 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
                 2,
             )
         } else {
-            ambiguity(at, "glossary", "glossary/", &[], 3)
+            path_names_no_document_in_class(at, "glossary", "glossary/", &[], 3)
         };
         request
             .record_finding(&finding)
@@ -1173,7 +1185,7 @@ fn a_finding_both_axes_reach_is_counted_once() {
         &document("docs/glossary.md", "hash-1", "a body\n"),
     );
     request
-        .record_finding(&ambiguity(
+        .record_finding(&path_names_no_document_in_class(
             "docs/glossary.md",
             "glossary",
             "glossary/",
@@ -1211,7 +1223,7 @@ fn a_changeset_counts_a_finding_in_two_of_its_classes_once() {
     // `notes.tar` reduces two ways, and the two prefixes are disjoint under
     // `BINARY`, so the finding is in both `notes.tar/` and `notes/`.
     request
-        .record_finding(&crate::common::ambiguity_for_target(
+        .record_finding(&crate::common::path_names_no_document_for_target(
             "docs/index.md",
             "notes.tar",
             &[],
@@ -1774,7 +1786,13 @@ fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
     // Written in the first document and about the third one's class, so both
     // axes of the refused changeset's findings maintenance would reach it.
     request
-        .record_finding(&ambiguity("notes/one.md", "three", "three/", &[], 2))
+        .record_finding(&path_names_no_document_in_class(
+            "notes/one.md",
+            "three",
+            "three/",
+            &[],
+            2,
+        ))
         .expect("recording a finding");
     // A committed changeset immediately before, so the generation the refused
     // one would have taken is known exactly.
@@ -1947,7 +1965,13 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
     // A finding in a class the torn changeset affects, so the discard it folds
     // in is observable by its absence.
     request
-        .record_finding(&ambiguity("notes/two.md", "one", "one/", &[], 2))
+        .record_finding(&path_names_no_document_in_class(
+            "notes/two.md",
+            "one",
+            "one/",
+            &[],
+            2,
+        ))
         .expect("recording a finding");
     request.finish();
     store.verify_integrity().expect("a store just written to");

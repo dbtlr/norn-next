@@ -479,23 +479,25 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
     facts
 }
 
-/// An ambiguity finding over `target`, in the one class `class_key` names, with
-/// `candidates` as its bounded head out of `total`.
-pub fn ambiguity(
+/// A `document/path-names-no-document` finding over `target`, in the one class
+/// `class_key` names, with `candidates` as its bounded head out of `total`:
+/// a kind outside link health that carries a class and a head.
+pub fn path_names_no_document_in_class(
     at: &str,
     target: &str,
     class_key: &str,
     candidates: &[&str],
     total: u64,
 ) -> FindingFacts {
-    let mut finding = ambiguity_for_target(at, target, candidates, total);
+    let mut finding = path_names_no_document_for_target(at, target, candidates, total);
     finding.class_keys = classes(&[class_key]);
     finding
 }
 
-/// The same finding with its classes taken from the probe `target` opens, which
-/// is how a resolution reading mints them: one class per reduction.
-pub fn ambiguity_for_target(
+/// The same `document/path-names-no-document` finding with its classes taken
+/// from the probe `target` opens, which is how a resolution reading mints
+/// them: one class per reduction.
+pub fn path_names_no_document_for_target(
     at: &str,
     target: &str,
     candidates: &[&str],
