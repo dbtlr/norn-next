@@ -149,7 +149,7 @@ const READ_SHAPES: [&str; 8] = [
 /// rather than read, reports a number other than its own.
 fn pinned_answers(profile: &str) -> [usize; 8] {
     match profile {
-        "ambiguous" => [200, 6, 1, 10, 10, 18, 25, 15],
+        "ambiguous" => [200, 6, 1, 10, 10, 25, 25, 15],
         "realistic" => [200, 6, 1, 5, 5, 25, 25, 15],
         other => panic!("no read answers are pinned for the `{other}` profile"),
     }
@@ -159,10 +159,10 @@ fn pinned_answers(profile: &str) -> [usize; 8] {
 /// schema and a tag vocabulary that leaves two of the generated tags out and
 /// reports them.
 ///
-/// The generated tree carries no document a finding stands over, so under the
-/// minimal schema a validate answers nothing. The undeclared tags are what give
-/// the validate shape findings to page, the way a vault with a vocabulary it
-/// has outgrown carries them. The attach-only child of the ratio attaches
+/// Under the minimal schema a generated tree's only other findings are the
+/// link-health findings its links raise. The undeclared tags give the validate
+/// shape findings to page over either tree, the way a vault with a vocabulary
+/// it has outgrown carries them. The attach-only child of the ratio attaches
 /// under the same schema, so the ratio still cancels the attach.
 const READ_SCHEMA: &[u8] = b"version: 1\ntags:\n  declared: [research, writing, infra, reading, \
 personal, planning, review, reference]\n  undeclared: report\n";
