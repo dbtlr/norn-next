@@ -24,8 +24,8 @@ use norn_wire::{
 };
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, document, planned_get_work, reads_of, span, violation,
-    write_documents,
+    DOCUMENT_PAYLOAD, Scratch, document, heading_anchor, planned_get_work, reads_of, span,
+    violation, write_documents,
 };
 use crate::find::{failure_of, rows_of};
 
@@ -68,8 +68,7 @@ fn link(
         protocol: protocol.map(str::to_string),
         target: target.to_string(),
         title: None,
-        anchor: anchor.map(str::to_string),
-        block_ref: None,
+        anchor: anchor.and_then(heading_anchor),
         span: span(1, 1, 0),
     }
 }

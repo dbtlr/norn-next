@@ -51,17 +51,18 @@ use std::path::Path;
 
 use norn_host::DERIVATION_VERSION;
 use norn_store::{
-    DerivationVersion, FieldContainer, FieldRow, LinkFamily, OffsetSpelling, OpenOutcome, TagSource,
+    DerivationVersion, FieldContainer, FieldRow, LinkAnchor, LinkFact, LinkFamily, OffsetSpelling,
+    OpenOutcome, TagSource,
 };
 use norn_testkit::equivalence::{DerivedRows, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
-use norn_wire::FindingKind;
+use norn_wire::{FindingKind, LinkAddressKind};
 
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(5),
-    "987f716ce8a81347fe67eadf6af829f739bee95aaa72d54e870e25a6fdc134bc",
+    DerivationVersion::new(6),
+    "2aa8920a88f1164b3d209af8e3c49573f89358e01d1cf3425730aaa7491b6c2a",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -223,7 +224,8 @@ setext title
 /// one naming an attachment, a rooted one, one opening with a URI scheme, one
 /// carrying a query and one an encoded separator, a dotted wikilink, a
 /// same-document anchor, a wikilink no suffix address reads, `vault://` links
-/// of both families, body and frontmatter tags, declared and not, block ids, a
+/// of both families, a percent-encoded anchor, a heading chain, an ATX-shaped
+/// anchor and empty anchors, body and frontmatter tags, declared and not, block ids, a
 /// frontmatter wikilink carrying an alias and an anchor, a tag whose name
 /// carries a combining mark, and tags written in another case than an earlier
 /// spelling of them, one folding outside ASCII.
@@ -280,6 +282,7 @@ A wikilink with a protocol: [[https://example.com/wiki|external]].
 A Markdown link climbing out of the vault: [outside](../outside.md), and one to an attachment: [the picture](assets/pic.png).
 A dotted wikilink [[v1.2]], a same-document anchor [[#Repeated]], a wikilink no suffix address reads [[../relative]] and vault wikilinks [[vault://notes/Deep Note.md]] and [[vault://v1.2]].
 A rooted [rooted](/Notes.md), a scheme [mail](mailto:hi@example.com), a query [query](Notes.md?view=raw) and an encoded separator [slash](notes%2FDeep%20Note.md?x=1).
+Anchors read three ways: an encoded fragment [encoded](Glossary.md#Sub%20Setext), a heading chain [[Glossary#Glossary#Repeated]], an ATX-shaped anchor [[Notes### Setext]], and empty anchors [[Notes#]] and [[Notes#^]].
 
 A paragraph closing on a block id. ^glossary-block
 
@@ -414,23 +417,25 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         let links: Vec<_> = glossary
             .links
             .iter()
-            .filter(|link| link.family == family)
+            .filter(|link| link.fact.family == family)
             .collect();
         assert!(
-            links.iter().any(|link| link.protocol.is_some()),
+            links.iter().any(|link| link.fact.protocol.is_some()),
             "{family:?}: no protocol"
         );
         assert!(
-            links.iter().any(|link| link.anchor.is_some()),
+            links.iter().any(|link| link.fact.anchor.is_some()),
             "{family:?}: no anchor"
         );
         assert!(
-            links.iter().any(|link| link.block_ref.is_some()),
+            links
+                .iter()
+                .any(|link| matches!(link.fact.anchor, Some(LinkAnchor::Block { .. }))),
             "{family:?}: no block reference"
         );
     }
     assert!(
-        glossary.links.iter().any(|link| link.title.is_some()),
+        glossary.links.iter().any(|link| link.fact.title.is_some()),
         "no link title is exercised"
     );
     // The link index: the keys every read of what a link names seeks,
@@ -441,7 +446,9 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         let at = document
             .links
             .iter()
-            .position(|link| link.protocol.as_deref() == protocol && link.target == target)
+            .position(|link| {
+                link.fact.protocol.as_deref() == protocol && link.fact.target == target
+            })
             .unwrap_or_else(|| {
                 panic!(
                     "`{}` holds no link to {protocol:?} `{target}`",
@@ -588,7 +595,7 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
     // A wikilink embed is the one embed the text layer records; the Markdown
     // image beside it is not a link, and the digest pins that it is not.
     assert!(
-        glossary.links.iter().any(|link| link.embed),
+        glossary.links.iter().any(|link| link.fact.embed),
         "no embed is exercised"
     );
     // A frontmatter string value written as a wikilink, alias and anchor
@@ -597,10 +604,70 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         glossary
             .links
             .iter()
-            .any(|link| link.family == LinkFamily::Wikilink
-                && link.title.as_deref() == Some("see here")
-                && link.anchor.as_deref() == Some("Setext")),
+            .any(|link| link.fact.family == LinkFamily::Wikilink
+                && link.fact.title.as_deref() == Some("see here")
+                && written_anchor(&link.fact) == Some("Setext")),
         "no frontmatter wikilink carrying an alias and an anchor is exercised"
+    );
+    // The readings a heading and a heading anchor are matched by, and the
+    // address kind a link is judged by.
+    assert!(
+        glossary
+            .headings
+            .iter()
+            .any(|heading| heading.reading != heading.text),
+        "no heading whose reading folds its text is exercised"
+    );
+    let readings = |anchor: &str| {
+        glossary
+            .links
+            .iter()
+            .find_map(|link| match &link.fact.anchor {
+                Some(LinkAnchor::Heading { written, readings }) if written == anchor => {
+                    Some(readings.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the glossary holds no link anchored `{anchor}`"))
+    };
+    assert_eq!(
+        readings("Sub Setext").text,
+        "sub setext",
+        "an encoded fragment is not recorded decoded"
+    );
+    for (anchor, marked) in [("Glossary#Repeated", "repeated"), ("## Setext", "setext")] {
+        assert_eq!(
+            readings(anchor).marked.as_deref(),
+            Some(marked),
+            "`{anchor}` is not read past its markers"
+        );
+    }
+    assert_eq!(
+        glossary
+            .links
+            .iter()
+            .filter(|link| link.fact.family == LinkFamily::Wikilink
+                && link.fact.target == "Notes"
+                && link.fact.anchor.is_none())
+            .count(),
+        3,
+        "`[[Notes]]`, `[[Notes#]]` and `[[Notes#^]]` are not all stored with no anchor"
+    );
+    let kinds: BTreeSet<&str> = glossary
+        .links
+        .iter()
+        .map(|link| link.address.as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            LinkAddressKind::Attachment,
+            LinkAddressKind::Document,
+            LinkAddressKind::Elsewhere
+        ]
+        .map(LinkAddressKind::as_str)
+        .into(),
+        "the glossary's links do not exercise every address kind"
     );
     assert!(
         glossary.blocks.len() >= 2,
@@ -843,5 +910,13 @@ fn assert_the_allowing_vault_exercises_its_stance(rows: &DerivedRows) {
                 .any(|tag| tag.fact.name == name && tag.fact.source == source),
             "no undeclared {source:?} tag `{name}` is exercised"
         );
+    }
+}
+
+/// The heading anchor `link` was written with, where it carries one.
+fn written_anchor(link: &LinkFact) -> Option<&str> {
+    match &link.anchor {
+        Some(LinkAnchor::Heading { written, .. }) => Some(written),
+        _ => None,
     }
 }

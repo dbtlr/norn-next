@@ -1134,6 +1134,7 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
         .map(|index| HeadingFact {
             level: 2,
             text: format!("heading {index}"),
+            reading: format!("heading {index}"),
             slug: format!("heading-{index}"),
             span: Span {
                 line: index as u64 + 1,
@@ -1160,7 +1161,6 @@ fn a_row_cut_by_a_ceiling_says_how_much_the_whole_held() {
             target: format!("example.com/{index:03}"),
             title: Some(String::new()),
             anchor: None,
-            block_ref: None,
             span: Span {
                 line: 1,
                 column: 1,

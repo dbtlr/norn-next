@@ -78,10 +78,13 @@
 //! prefix shadows the family, because the family says which grammar the author
 //! wrote and the protocol says what the address is; a protocol-free target
 //! falls through to its family, where a wikilink stem is a path suffix and a
-//! Markdown one a path relative to the containing document. Fragments follow
-//! the family either way: a wikilink `#anchor` addresses heading *text*, a
-//! Markdown `#fragment` addresses a heading *slug* ([`Heading::slug`]). All of
-//! it is recorded raw; none of it is matched here.
+//! Markdown one a path relative to the containing document. A wikilink
+//! `#anchor` is written as heading *text* and a Markdown `#fragment` as a
+//! heading *slug* ([`Heading::slug`]), and the one section resolver reads
+//! either by all its readings ([`anchor_readings`]). A Markdown fragment is
+//! percent-decoded once where the link is parsed, because that family encodes
+//! it; everything else is recorded raw on the link, and none of it is matched
+//! there.
 //!
 //! A `protocol://` prefix is recognized, and only recognized: `[[x]]` and
 //! `[[vault://x]]` are distinct facts, nothing supplies a default protocol,
@@ -146,7 +149,10 @@ pub use link::{
     BlockId, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
     splice_wikilinks_in_text, wikilink_target_is_representable,
 };
-pub use section::{Duplicates, SectionAddress, SectionError, SectionSpan, resolve_section};
+pub use section::{
+    AnchorReadings, Duplicates, SectionAddress, SectionError, SectionSpan, anchor_readings,
+    heading_reading, resolve_section,
+};
 pub use span::SourceSpan;
 pub use tag::Tag;
 pub use value::{Mapping, Value};

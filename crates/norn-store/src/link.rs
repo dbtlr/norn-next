@@ -49,7 +49,7 @@
 //! the separator and a path never does, so the two kinds share one key column
 //! and no key of one kind equals a key of the other.
 
-use norn_wire::{DOCUMENT_EXTENSION, LinkAddress};
+use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind};
 
 use crate::facts::LinkFact;
 use crate::path::{
@@ -89,6 +89,12 @@ impl<'a> Addressing<'a> {
             }
         }
     }
+}
+
+/// How `link`'s address stands to judging it, which `links.address` stores:
+/// the wire's one classification ([`LinkAddress::kind`]).
+pub(crate) fn address_kind(link: &LinkFact) -> LinkAddressKind {
+    LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target).kind()
 }
 
 /// One key the link index holds a link under.
@@ -234,6 +240,12 @@ pub(crate) fn joined(mut from: Vec<String>, path: &str) -> Option<String> {
 /// `text` with every `%` followed by two hexadecimal digits read as the byte
 /// they spell, or `None` where the bytes that makes are not UTF-8. A `%` not
 /// followed by two hexadecimal digits is itself.
+///
+/// `norn-text` decodes a Markdown link's fragment by the same byte loop, in
+/// its own copy: this crate never depends on the text layer, and the text
+/// layer depends on no workspace crate, so no shared home reaches both. The
+/// two differ only where a decoding is not UTF-8: a segment here names no
+/// path, and a fragment there stands as written.
 fn percent_decoded(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -276,7 +288,6 @@ mod tests {
             target: target.to_string(),
             title: None,
             anchor: None,
-            block_ref: None,
             span: crate::facts::Span {
                 line: 1,
                 column: 1,

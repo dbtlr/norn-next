@@ -23,6 +23,7 @@ use norn_db::EmittedPlan;
 use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
 
+use crate::anchor::link_anchor_held_sql;
 use crate::ddl;
 
 use super::{
@@ -143,6 +144,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
             ExplainedStatement::FindingPaths(ids) => finding_paths_sql(ids.get()),
+            ExplainedStatement::LinkAnchorHeld => link_anchor_held_sql(),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -255,6 +257,12 @@ impl<'a> Request<'a> {
                 let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
                 database.emitted_plan(&sql, finding_id_parameters(&chunk))
             }
+            // The link and its target are keyed by row ids no caller above
+            // this crate holds, so both are bound as a fact read's id is.
+            ExplainedStatement::LinkAnchorHeld => database.emitted_plan(
+                &sql,
+                params![EXPLAINED_DOCUMENT_ROW, 0, EXPLAINED_DOCUMENT_ROW],
+            ),
         }?)
     }
 
@@ -424,6 +432,12 @@ pub enum ExplainedStatement<'a> {
     /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
     /// and spelled by a nonzero width for the same reason.
     FindingPaths(NonZeroUsize),
+    /// Whether one document holds the place one link's anchor names: the
+    /// predicate the link-health judgment embeds, over the link a document's
+    /// row id and an ordinal name and the target document's row id. The store
+    /// judges no finding yet, so no reader runs it; it is named here so the
+    /// indexes it seeks are barred until the judgment runs it.
+    LinkAnchorHeld,
 }
 
 /// How many keyed point reads this seam names.
@@ -437,7 +451,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 29;
+pub const STATEMENTS: usize = 30;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -497,6 +511,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingClasses(ids),
             Self::PathDiscard(path_key),
             Self::FindingPaths(ids),
+            Self::LinkAnchorHeld,
         ]
     }
 
@@ -538,6 +553,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingClasses(_) => 26,
             Self::PathDiscard(_) => 27,
             Self::FindingPaths(_) => 28,
+            Self::LinkAnchorHeld => 29,
         };
         assert!(
             slot < STATEMENTS,
@@ -608,7 +624,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::FindingCandidates(_)
             | Self::FindingClasses(_)
             | Self::PathDiscard(_)
-            | Self::FindingPaths(_) => false,
+            | Self::FindingPaths(_)
+            | Self::LinkAnchorHeld => false,
         }
     }
 }

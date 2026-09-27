@@ -33,18 +33,42 @@
 //! A link row is the token as it was written: its family, the `protocol://`
 //! prefix if it carried one, the raw target text, the title, and the fragment
 //! split into an anchor or a block reference. Resolution is **not** here —
-//! not as a resolved edge, and not as a mode column either.
+//! not as a resolved edge, and not as an addressing mode either.
 //!
-//! **There is deliberately no addressing-mode column.** How a target resolves
-//! derives from the fact protocol-first and family-second: the wire's
-//! `LinkAddress` is the one selector, which [`crate::link`] reads the family,
-//! protocol and target columns through, and `norn-text`'s syntax-only
-//! `Link::resolution` agrees with it. A column beside
-//! `family` and `protocol` would be a second answer to a question those two
-//! already settle, and a stored answer that disagreed with them would be
-//! believed. For the same reason the store never re-derives emission order
+//! **There is no addressing-mode column.** How a target resolves derives from
+//! the fact protocol-first and family-second: the wire's `LinkAddress` is the
+//! one selector, which [`crate::link`] reads the family, protocol and target
+//! columns through, and `norn-text`'s syntax-only `Link::resolution` agrees
+//! with it. For the same reason the store never re-derives emission order
 //! from spans: link ranges of the two families may overlap and nest, so a
 //! span comparison is not a total order and `ordinal` is.
+//!
+//! **`address` is what judging a link reads of that selector**, and nothing
+//! more: `elsewhere`, where the link addresses no document of the vault;
+//! `attachment`, where its target names one, so resolving to no document
+//! leaves it unjudged; and `document` otherwise. It is the wire's
+//! `LinkAddress::kind`, computed at the write, which is the one classification
+//! a link's read-time health (`LinkHealth::of_link`) is judged by too, so the
+//! two cannot disagree, and a predicate over links reads it as a column rather
+//! than re-running the selector per row.
+//!
+//! **A link names at most one place, and "no place" has one stored form.**
+//! `anchor` is a heading anchor as the text layer records it and `block_ref` a
+//! block reference; at most one of them is set, and neither is ever empty: a
+//! link written with an empty fragment, `note#` or `note#^`, names no place
+//! and stores `NULL` in both, as a link written with no fragment does.
+//! Whether a link carries an anchor is therefore whether either is set, which
+//! is the store's one spelling of that test (`carries_anchor`).
+//!
+//! **`anchor_text` and `anchor_marked` are the readings a heading anchor is
+//! matched by** ([`crate::AnchorReadings`]): its text and the heading text
+//! past its `#` markers, each compared with a heading's `reading`; `anchor`
+//! itself is compared with a heading's `slug`. The host takes the readings
+//! from the text layer's one section resolver — this crate reads no text —
+//! and hands them over inside the anchor ([`crate::LinkAnchor`]). The readings
+//! stand exactly where a heading anchor does, so none sits beside a block
+//! reference, and `anchor_marked` is `NULL` too where the anchor has no `#`
+//! markers. The table's `CHECK`s hold every link row to those shapes.
 //!
 //! **`target` is stored raw**, and compared under `BINARY`: no normalization,
 //! no percent-decoding, no case folding. What a link's target names is
@@ -100,11 +124,16 @@
 
 //! # `headings` is addressed two ways
 //!
-//! A wikilink `#anchor` addresses a heading's **text**; an inline Markdown
-//! `#fragment` addresses its **slug**, dedupe suffix included, as `norn-text`
-//! issued it in document order. Both lookups are inside one document, so an
-//! index for either leads with `document` — and both arrive with the builder
-//! that emits them.
+//! A heading anchor matches a heading by its **text**, which `reading` holds
+//! as an anchor's text compares it: ASCII case and ASCII whitespace folded, as
+//! the text layer's section resolver reads it. It also matches by its
+//! **slug**, dedupe suffix included, as `norn-text` issued it in document
+//! order. One resolver reads a wikilink's anchor and a Markdown link's
+//! fragment alike, by all three of its readings: its text and its marked text
+//! against `reading`, and the anchor as written against `slug`. Every lookup
+//! is inside one document, so each index leads with `document`:
+//! `headings_document_reading` and `headings_document_slug`, the two a link's
+//! anchor readings are sought through.
 //!
 //! `body_offset` is where the heading construct ends and the section's body
 //! begins, and `inside_container` says the heading sits inside a blockquote or
@@ -115,13 +144,14 @@
 //! # `blocks` is the target side of `links.block_ref`
 //!
 //! A block-id definition trailing a line is what a `[[Note#^id]]` reference
-//! points at. `norn-text` names each definition's `^`-marker span, so a writer
-//! reading the text layer has a position to record; the columns are nullable
-//! because this table takes what a writer knows rather than forcing a
-//! position on one that lacks it. Nothing enforces uniqueness of `block_id`
-//! within a document — two lines defining the same id is a vault defect, and
-//! judging it is the findings pillar's job, not a constraint that would refuse
-//! to record what the file says.
+//! points at, matched by its identifier exactly and sought through
+//! `blocks_document_block_id`. `norn-text` names each definition's `^`-marker
+//! span, so a writer reading the text layer has a position to record; the
+//! columns are nullable because this table takes what a writer knows rather
+//! than forcing a position on one that lacks it. Nothing enforces uniqueness
+//! of `block_id` within a document — two lines defining the same id is a
+//! vault defect, and judging it is the findings pillar's job, not a constraint
+//! that would refuse to record what the file says.
 //!
 //! # `document_tags` records the tag as written, beside its fold
 //!
@@ -166,19 +196,27 @@ pub(crate) const WHOLE_SPAN: &str = "CHECK ((span_line IS NULL) = (span_column I
 
 const STATEMENTS: &[&str] = &[
     "CREATE TABLE links (
-    id          INTEGER PRIMARY KEY,
-    document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    ordinal     INTEGER NOT NULL,
-    family      TEXT    NOT NULL,
-    embed       INTEGER NOT NULL,
-    protocol    TEXT,
-    target      TEXT    NOT NULL,
-    title       TEXT,
-    anchor      TEXT,
-    block_ref   TEXT,
-    span_line   INTEGER NOT NULL,
-    span_column INTEGER NOT NULL,
-    span_offset INTEGER NOT NULL
+    id            INTEGER PRIMARY KEY,
+    document      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    ordinal       INTEGER NOT NULL,
+    family        TEXT    NOT NULL,
+    embed         INTEGER NOT NULL,
+    protocol      TEXT,
+    target        TEXT    NOT NULL,
+    title         TEXT,
+    anchor        TEXT,
+    anchor_text   TEXT,
+    anchor_marked TEXT,
+    block_ref     TEXT,
+    address       TEXT    NOT NULL,
+    span_line     INTEGER NOT NULL,
+    span_column   INTEGER NOT NULL,
+    span_offset   INTEGER NOT NULL,
+    CHECK (anchor IS NULL OR block_ref IS NULL),
+    CHECK (anchor <> ''),
+    CHECK (block_ref <> ''),
+    CHECK ((anchor IS NULL) = (anchor_text IS NULL)),
+    CHECK (anchor_text IS NOT NULL OR anchor_marked IS NULL)
 )",
     "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
     "CREATE UNIQUE INDEX links_id_document ON links(id, document)",
@@ -200,6 +238,7 @@ const STATEMENTS: &[&str] = &[
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal          INTEGER NOT NULL,
     text             TEXT    NOT NULL,
+    reading          TEXT    NOT NULL,
     slug             TEXT    NOT NULL,
     level            INTEGER NOT NULL,
     span_line        INTEGER NOT NULL,
@@ -209,6 +248,8 @@ const STATEMENTS: &[&str] = &[
     inside_container INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX headings_document_ordinal ON headings(document, ordinal)",
+    "CREATE INDEX headings_document_reading ON headings(document, reading)",
+    "CREATE INDEX headings_document_slug ON headings(document, slug)",
 ];
 
 /// The two tables whose span triple is nullable, with the `CHECK` appended so
@@ -228,6 +269,7 @@ fn nullable_span_tables() -> Vec<String> {
 )"
         ),
         "CREATE UNIQUE INDEX blocks_document_ordinal ON blocks(document, ordinal)".to_string(),
+        "CREATE INDEX blocks_document_block_id ON blocks(document, block_id)".to_string(),
         format!(
             "CREATE TABLE document_tags (
     id          INTEGER PRIMARY KEY,

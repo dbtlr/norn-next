@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, DocumentFacts, DocumentText, FindStatement,
-    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkFact,
-    LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt, Snapshot,
-    SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity, Validation,
-    induced_failure,
+    FindingFacts, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, HeadingFact, LinkAnchor,
+    LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, PageRefusal, ReadStatement, SectionAt,
+    Snapshot, SnapshotReader, Store, StoredPathOrder, TagFact, TagSource, TargetAmbiguity,
+    Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_text::{BodyScan, Heading, SectionAddress, SourceSpan};
@@ -26,7 +26,9 @@ use norn_wire::{
     Unsatisfied, ValidateParams, VaultAddress, VaultName,
 };
 
-use crate::common::{Scratch, document, planned_get_work, span, unread_block, write_documents};
+use crate::common::{
+    Scratch, document, heading_anchor, planned_get_work, span, unread_block, write_documents,
+};
 use crate::find::{failure_of, map, rows_of, string};
 
 use StoredPathOrder::{AsciiCaseInsensitive as Folding, Sensitive};
@@ -97,6 +99,7 @@ fn parsed(at: &str, body: &str) -> DocumentFacts {
         .map(|heading| HeadingFact {
             level: heading.level,
             text: heading.text.clone(),
+            reading: norn_text::heading_reading(&heading.text),
             slug: heading.slug.clone(),
             span: span(
                 wide(heading.span.line),
@@ -694,6 +697,41 @@ fn a_heading_anchor_answers_the_section_it_names() {
     }
 }
 
+/// **A get reads an anchor as a link's anchor is read.** A target's anchor is
+/// literal, as a wikilink's is, so `r#100%25` names `## 100%25`; a heading
+/// chain answers its last heading; and an empty heading or block anchor reads
+/// as no anchor: the record answers, as it does for the target with no
+/// anchor, and a collection page takes it.
+#[test]
+fn a_get_reads_an_anchor_as_written_a_chain_by_its_last_heading_and_an_empty_anchor_as_none() {
+    let body =
+        "# Top\n\ntop\n\n## 100%\n\npercent\n\n## 100%25\n\nencoded\n\n## Sub\n\nsub\n\npara ^p1\n";
+    let vault = Vault::holding(
+        "get-anchor-rulings",
+        Sensitive,
+        &[parsed("notes/r.md", body)],
+    );
+    assert_eq!(section(&vault, "r#100%25").0, "100%25");
+    assert_eq!(section(&vault, "r#Top#Sub").0, "Sub");
+    let bare = vault.get(&getting("r"));
+    for empty in ["r#", "r#^"] {
+        let gotten = vault.get(&getting(empty));
+        assert!(
+            gotten.unsatisfied.is_empty(),
+            "`{empty}`: {:?}",
+            gotten.unsatisfied
+        );
+        assert_eq!(
+            gotten.report, bare.report,
+            "`{empty}` answered another report"
+        );
+        let page = getting(empty)
+            .with_collection(CollectionSelector::Headings)
+            .with_limit(2);
+        vault.get(&page);
+    }
+}
+
 /// **A document broken by lone CR answers a section's bytes as written**: the
 /// heading offsets the store holds were read off the normalized parse, which
 /// moves no byte.
@@ -907,8 +945,13 @@ fn paged_vault_under(label: &str, bulk: usize, order: StoredPathOrder) -> Vault 
             protocol: None,
             target: format!("target-{at}"),
             title: None,
-            anchor: (at == 1).then(|| "Heading".to_string()),
-            block_ref: (at == 2).then(|| "b0".to_string()),
+            anchor: match at {
+                1 => heading_anchor("Heading"),
+                2 => Some(LinkAnchor::Block {
+                    id: "b0".to_string(),
+                }),
+                _ => None,
+            },
             span: span(1, 1, at as u64),
         })
         .collect();

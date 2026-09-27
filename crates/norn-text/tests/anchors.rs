@@ -164,14 +164,15 @@ fn a_wikilink_anchor_is_never_slugged() {
     }
 }
 
-/// A Markdown fragment is recorded raw too. Recording the slug form is what
-/// the author wrote, not a normalization this crate applied, and an
-/// unsluggable fragment is reported as written rather than corrected.
+/// A Markdown fragment is recorded as written but for its percent-encoding,
+/// which is decoded once. Recording the slug form is what the author wrote,
+/// not a normalization this crate applied, and an unsluggable fragment is
+/// reported as written rather than corrected.
 #[test]
-fn a_markdown_fragment_is_recorded_as_written() {
+fn a_markdown_fragment_is_recorded_as_written_and_decoded() {
     for (body, anchor) in [
         ("[t](./note.md#what-really)\n", "what-really"),
-        ("[t](./note.md#What%20Really)\n", "What%20Really"),
+        ("[t](./note.md#What%20Really)\n", "What Really"),
         ("[t](./note.md#日本語)\n", "日本語"),
     ] {
         assert_eq!(

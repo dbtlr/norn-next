@@ -131,7 +131,6 @@ pub(crate) fn seed(store: &mut Store) {
         target: "glossary".to_string(),
         title: None,
         anchor: None,
-        block_ref: None,
         span: Span {
             line: 1,
             column: 1,
@@ -1116,6 +1115,7 @@ fn judge_hydration(mut seeded: Seeded) {
         .map(|index| HeadingFact {
             level: 2,
             text: format!("heading {index}"),
+            reading: format!("heading {index}"),
             slug: format!("heading-{index}"),
             span: Span {
                 line: index as u64 + 1,
@@ -1142,7 +1142,6 @@ fn judge_hydration(mut seeded: Seeded) {
             target: format!("example.com/{index}"),
             title: Some(String::new()),
             anchor: None,
-            block_ref: None,
             span: Span {
                 line: 1,
                 column: 1,

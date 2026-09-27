@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
     DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
-    HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily, OffsetSpelling,
-    PathKey, Provenance, ReadFilter, Request, Span, Store, StoredFacts, StoredPathOrder, SuffixKey,
-    TagFact, TagSource, TypedOrder, suffix_probe,
+    HeadingFact, IncrementOutcome, IncrementProvenance, LinkAnchor, LinkFact, LinkFamily,
+    OffsetSpelling, PathKey, Provenance, ReadFilter, Request, Span, Store, StoredFacts,
+    StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::explain::StatementReads;
@@ -271,10 +271,29 @@ pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
     }
 }
 
+/// The links a stored document carries as written, without the address kinds
+/// stored beside them.
+pub fn written_links(stored: &StoredFacts) -> Vec<LinkFact> {
+    stored.links.iter().map(|link| link.fact.clone()).collect()
+}
+
 /// The tags a stored document carries as written, without the folds stored
 /// beside them.
 pub fn written_tags(stored: &StoredFacts) -> Vec<TagFact> {
     stored.tags.iter().map(|tag| tag.fact.clone()).collect()
+}
+
+/// A heading anchor written `written`, beside the readings the text layer
+/// gives it, as the host hands it over: `None` for an empty anchor, which
+/// names no place.
+pub fn heading_anchor(written: &str) -> Option<LinkAnchor> {
+    norn_text::anchor_readings(written).map(|readings| LinkAnchor::Heading {
+        written: written.to_string(),
+        readings: norn_store::AnchorReadings {
+            text: readings.text,
+            marked: readings.marked,
+        },
+    })
 }
 
 /// A document with a body and nothing derived from it. Its body is the whole
@@ -301,7 +320,6 @@ pub fn narrowable() -> DocumentFacts {
         target: "a".to_string(),
         title: None,
         anchor: None,
-        block_ref: None,
         span: span(1, 1, 0),
     });
     facts
@@ -401,8 +419,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             protocol: None,
             target: "glossary".to_string(),
             title: Some("The glossary".to_string()),
-            anchor: Some("Terms".to_string()),
-            block_ref: None,
+            anchor: heading_anchor("Glossary#Terms"),
             span: span(1, 1, 0),
         },
         LinkFact {
@@ -411,8 +428,9 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
             protocol: Some("https".to_string()),
             target: "example.com/docs".to_string(),
             title: Some(String::new()),
-            anchor: None,
-            block_ref: Some("blk-1".to_string()),
+            anchor: Some(LinkAnchor::Block {
+                id: "blk-1".to_string(),
+            }),
             span: span(3, 5, 30),
         },
     ];
@@ -420,6 +438,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
         HeadingFact {
             level: 1,
             text: "Use norn".to_string(),
+            reading: "use norn".to_string(),
             slug: "use-norn".to_string(),
             span: span(1, 1, 0),
             body_offset: 12,
@@ -428,6 +447,7 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
         HeadingFact {
             level: 3,
             text: "Use norn".to_string(),
+            reading: "use norn".to_string(),
             slug: "use-norn-1".to_string(),
             span: span(9, 3, 120),
             body_offset: 134,

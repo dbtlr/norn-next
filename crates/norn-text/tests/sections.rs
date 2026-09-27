@@ -2,8 +2,9 @@
 //! stops, how it is addressed, and what a replace leaves alone.
 
 use norn_text::{
-    BodyScan, Document, EditError, Heading, SectionAddress, SectionError, SectionSpan, Value,
-    resolve_section as resolve_section_over, slugify,
+    AnchorReadings, BodyScan, Document, EditError, Heading, SectionAddress, SectionError,
+    SectionSpan, Value, anchor_readings, heading_reading, resolve_section as resolve_section_over,
+    slugify,
 };
 
 /// A section resolved against a bare body, through the one public entry point
@@ -470,6 +471,11 @@ fn an_atx_prefixed_anchor_resolves_by_its_text() {
         resolve_section(DOC, "## Alpha ##"),
         resolve_section(DOC, "Alpha")
     );
+    // A tab after the opening is an ATX opening, as it is for a heading.
+    assert_eq!(
+        resolve_section(DOC, "#\tAlpha"),
+        resolve_section(DOC, "Alpha")
+    );
 }
 
 #[test]
@@ -875,4 +881,194 @@ fn replacing_a_section_leaves_the_frontmatter_untouched() {
             .map(|map| map.keys().collect::<Vec<_>>()),
         Some(vec!["title", "tags"])
     );
+}
+
+// ── The readings an anchor and a heading are compared by ─────────────────
+
+/// **A heading's reading is its text as an anchor compares it**: trimmed, each
+/// run of ASCII space one space, ASCII case folded, and nothing outside ASCII
+/// touched.
+#[test]
+fn a_headings_reading_folds_ascii_case_and_space_alone() {
+    assert_eq!(heading_reading("  Design \t Notes "), "design notes");
+    assert_eq!(heading_reading("ÉMILE"), "Émile".to_ascii_lowercase());
+    assert_eq!(heading_reading("Intro\u{a0}"), "intro\u{a0}");
+    assert_eq!(heading_reading(""), "");
+}
+
+/// **An anchor's readings are its text as a heading reading and the heading
+/// text past its `#` markers**; its slug reading is the anchor itself.
+#[test]
+fn an_anchor_is_read_as_its_text_and_past_its_markers() {
+    let readings = |anchor: &str| anchor_readings(anchor).expect("an anchor");
+    assert_eq!(
+        readings("Design  NOTES"),
+        AnchorReadings {
+            text: "design notes".into(),
+            marked: None,
+        }
+    );
+    assert_eq!(
+        readings("## State ##"),
+        AnchorReadings {
+            text: "## state ##".into(),
+            marked: Some("state".into()),
+        },
+        "an ATX anchor is marked by its opening"
+    );
+    assert_eq!(
+        readings("Top#Sub Part"),
+        AnchorReadings {
+            text: "top#sub part".into(),
+            marked: Some("sub part".into()),
+        },
+        "a heading chain is marked by its last heading"
+    );
+}
+
+/// **An empty anchor reads as no anchor.** `[[note#]]` names the note, and so
+/// does a target written `note#`.
+#[test]
+fn an_empty_anchor_reads_as_no_anchor() {
+    assert_eq!(anchor_readings(""), None);
+    let body = "#\nempty heading\n## Alpha\na\n";
+    assert_eq!(
+        resolve_section(body, ""),
+        Err(SectionError::HeadingNotFound { heading: "".into() }),
+        "an empty anchor names no heading, the empty one included"
+    );
+}
+
+/// The heading anchor the one link `link` records, as the text layer parses
+/// it.
+fn anchor_of(link: &str) -> &'static str {
+    let mut links = BodyScan::new(link).links().into_iter();
+    let parsed = links.next().expect("one link");
+    assert!(links.next().is_none(), "one link in {link:?}");
+    parsed.anchor.expect("a heading anchor").leak()
+}
+
+/// **A wikilink anchor is literal, and a Markdown fragment is decoded once.**
+/// Only a Markdown link percent-encodes its fragment, so the text layer
+/// decodes it where the link is parsed and the resolver reads every anchor as
+/// written: `[[n#100%25]]` and `[x](n.md#100%2525)` both reach `## 100%25`,
+/// and `[x](n.md#My%20Heading)` reaches `## My Heading` where the wikilink
+/// `[[n#My%20Heading]]` does not.
+#[test]
+fn a_wikilink_anchor_is_literal_and_a_markdown_fragment_is_decoded_once() {
+    let body = "## 100%25\nencoded\n## My Heading\nmine\n## Über uns\nabout\n";
+    let encoded = resolve_section(body, "100%25").expect("the heading by its text");
+    assert_eq!(
+        resolve_section(body, anchor_of("[[n#100%25]]")),
+        Ok(encoded)
+    );
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#100%2525)")),
+        Ok(encoded)
+    );
+    let mine = resolve_section(body, "My Heading").expect("the heading by its text");
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#My%20Heading)")),
+        Ok(mine)
+    );
+    assert_eq!(
+        resolve_section(body, anchor_of("[[n#My%20Heading]]")),
+        Err(SectionError::HeadingNotFound {
+            heading: "My%20Heading".into()
+        }),
+        "a wikilink anchor is not decoded"
+    );
+    let about = resolve_section(body, "Über uns").expect("the heading by its text");
+    for fragment in ["%C3%BCber-uns", "%c3%bcber-uns"] {
+        assert_eq!(
+            resolve_section(body, anchor_of(&format!("[x](n.md#{fragment})"))),
+            Ok(about),
+            "{fragment} reaches the heading by its slug, decoded in either case"
+        );
+    }
+}
+
+/// **A decoded `%23` in a Markdown fragment is a `#` as a written one is**:
+/// the resolver reads the anchor by its whole text first, so `C%23` reaches
+/// `## C#`, and as a heading chain only where no heading's text is the whole
+/// anchor, so `Top%23Sub` reaches `## Sub` as `Top#Sub` does. A wikilink's
+/// `%23` is three literal characters and never a chain's `#`.
+#[test]
+fn a_decoded_hash_in_a_markdown_fragment_is_read_as_a_written_one() {
+    let body = "## C#\nsharp\n# Top\nt\n## Sub\nsub\n";
+    let sharp = resolve_section(body, "C#").expect("the heading whose text holds a hash");
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#C%23)")),
+        Ok(sharp)
+    );
+    let sub = resolve_section(body, "Sub").expect("the last heading");
+    assert_eq!(
+        resolve_section(body, anchor_of("[x](n.md#Top%23Sub)")),
+        Ok(sub)
+    );
+    assert_eq!(
+        resolve_section(body, anchor_of("[[n#Top%23Sub]]")),
+        Err(SectionError::HeadingNotFound {
+            heading: "Top%23Sub".into()
+        }),
+        "a wikilink's `%23` is no chain separator"
+    );
+}
+
+/// **A get's anchor is literal**, as a wikilink's is: `100%25` names the
+/// heading `100%25` and never `100%`.
+#[test]
+fn a_targets_anchor_is_read_as_written() {
+    let body = "## 100%\npercent\n## 100%25\nencoded\n";
+    let encoded = resolve_section(body, "100%25").expect("a section");
+    assert_eq!(
+        &body[encoded.content_start..encoded.content_end],
+        "encoded\n"
+    );
+    assert_eq!(
+        anchor_readings("a%FFb").map(|readings| readings.text),
+        Some("a%ffb".into()),
+        "an anchor is read as written"
+    );
+}
+
+/// **A heading chain matches on its last heading**, as `[[note#Top#Sub]]` is
+/// written, where no heading's own text is the whole anchor: a heading whose
+/// text holds a `#` is still reached by that text first.
+#[test]
+fn a_heading_chain_matches_on_its_last_heading() {
+    let body = "# Top\nt\n## Sub\nsub\n## Other\no\n";
+    let sub = resolve_section(body, "Sub").expect("the last heading");
+    assert_eq!(resolve_section(body, "Top#Sub"), Ok(sub));
+    assert_eq!(resolve_section(body, "Anything#sub"), Ok(sub));
+    let three = "# A\na\n## B\nb\n### C\nc\n## D\nd\n";
+    let c = resolve_section(three, "C").expect("the last heading");
+    assert_eq!(
+        resolve_section(three, "A#B#C"),
+        Ok(c),
+        "a chain of three is read as its last heading"
+    );
+    let encoded = "# Top\nt\n## My Sub\nmine\n";
+    assert_eq!(
+        resolve_section(encoded, anchor_of("[x](n.md#Top#My%20Sub)")),
+        resolve_section(encoded, "My Sub"),
+        "a Markdown fragment's chain is read after it is decoded"
+    );
+
+    let body = "## C# tips\ntips\n## tips\nplain\n";
+    let tips = resolve_section(body, "C# tips").expect("the heading whose text holds a hash");
+    assert_eq!(&body[tips.content_start..tips.content_end], "tips\n");
+
+    // A chain names a heading on both sides of a `#`: a hash run opening the
+    // anchor is not a chain, and a chain ending in a `#` names no last heading.
+    let body = "## Alpha\na\n";
+    for anchor in ["#Alpha", "####### Alpha", "Alpha#", "Alpha# "] {
+        assert_eq!(
+            resolve_section(body, anchor),
+            Err(SectionError::HeadingNotFound {
+                heading: anchor.into()
+            }),
+            "for {anchor:?}"
+        );
+    }
 }

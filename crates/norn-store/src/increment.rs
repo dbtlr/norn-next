@@ -14,11 +14,11 @@ use norn_wire::fold_tag;
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
-use crate::facts::{DocumentFacts, FindingFacts, Invalidation, Provenance};
+use crate::facts::{DocumentFacts, FindingFacts, Invalidation, LinkAnchor, Provenance};
 use crate::fields::{FieldRow, OffsetSpelling};
 use crate::hash;
 use crate::json;
-use crate::link::link_keys;
+use crate::link::{address_kind, link_keys};
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::request::{self, DiscardScope};
 use crate::store::Store;
@@ -430,8 +430,9 @@ impl<'t> Statements<'t> {
             insert_link: prepared(
                 "INSERT INTO links (
                      document, ordinal, family, embed, protocol, target, title, anchor,
-                     block_ref, span_line, span_column, span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     anchor_text, anchor_marked, block_ref, address, span_line, span_column,
+                     span_offset
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  RETURNING id",
                 "preparing a link write",
             )?,
@@ -442,9 +443,9 @@ impl<'t> Statements<'t> {
             )?,
             insert_heading: prepared(
                 "INSERT INTO headings (
-                     document, ordinal, text, slug, level, span_line, span_column,
+                     document, ordinal, text, reading, slug, level, span_line, span_column,
                      span_offset, body_offset, inside_container
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 "preparing a heading write",
             )?,
             insert_block: prepared(
@@ -553,6 +554,13 @@ fn upsert(
     }
 
     for (ordinal, link) in facts.links.iter().enumerate() {
+        let (anchor, readings, block_ref) = match &link.anchor {
+            Some(LinkAnchor::Heading { written, readings }) => {
+                (Some(written), Some(readings), None)
+            }
+            Some(LinkAnchor::Block { id }) => (None, None, Some(id)),
+            None => (None, None, None),
+        };
         let row: i64 = statements
             .insert_link
             .query_row(
@@ -564,8 +572,11 @@ fn upsert(
                     link.protocol,
                     link.target,
                     link.title,
-                    link.anchor,
-                    link.block_ref,
+                    anchor,
+                    readings.map(|readings| &readings.text),
+                    readings.and_then(|readings| readings.marked.as_ref()),
+                    block_ref,
+                    address_kind(link).as_str(),
                     link.span.line,
                     link.span.column,
                     link.span.byte_offset,
@@ -594,6 +605,7 @@ fn upsert(
                 document,
                 ordinal as i64,
                 heading.text,
+                heading.reading,
                 heading.slug,
                 heading.level,
                 heading.span.line,

@@ -99,6 +99,7 @@
 
 pub mod ddl;
 
+mod anchor;
 mod count;
 mod counters;
 mod describe;
@@ -127,11 +128,11 @@ pub use counters::{DerivationCounters, SnapshotCounters};
 pub use describe::{DESCRIBE_STATEMENTS, DescribePlan, DescribeStatement, DescribeWork, Described};
 pub use error::StoreError;
 pub use facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts, FeedDocument,
-    FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily,
-    PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, TagFact,
-    TagSource, VaultSchemaPin,
+    AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts,
+    FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor,
+    LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
+    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;

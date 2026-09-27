@@ -38,7 +38,8 @@
 //!
 //! # A record is a find's row
 //!
-//! A target with no anchor answers the document's row, projected onto the
+//! A target with no anchor, or with an empty one, which names no place,
+//! answers the document's row, projected onto the
 //! columns the request names — or onto every column a find projects, where it
 //! names none — through the hydration a find's rows are read through
 //! ([`Snapshot::find`]): each column costs what it costs on a find's row, a
@@ -54,10 +55,10 @@
 //! and its one block reading — over the rows the store holds of the one
 //! document: its headings, read in document order by one range seek, and its
 //! body, read by row id. **Matching a heading anchor costs the document's
-//! headings**: the anchor's text reading compares text with case and
-//! whitespace folded, which no index the store holds orders by, so the lookup
-//! is a seek of the document's heading rows and a pass over them, bounded by
-//! the one document rather than by an index of its own. That pass is the one
+//! headings**: the section a match answers runs to the next heading at its
+//! level or above, so the resolver is handed the document's heading rows in
+//! document order, one seek of them, and passes over them, bounded by the one
+//! document rather than by a seek of the matched reading. That pass is the one
 //! in-memory match a get runs over more rows than it answers, and
 //! [`GetWork::anchor_headings`] counts the rows it is handed: at most the
 //! named document's headings, each once. A block definition is
@@ -311,10 +312,14 @@ impl<'a> Shape<'a> {
     /// this build does not know classifies as no answer, so it is refused
     /// ([`PageRefusal::UnknownPart`]) ahead of any other part the request
     /// carries.
+    ///
+    /// An empty anchor ([`Anchor::is_empty`]) names no place, so it is read as
+    /// no anchor.
     fn of(params: &'a GetParams) -> Result<Self, PageRefusal> {
         let not_taken = |part, answer| Err(PageRefusal::PartNotTaken { part, answer });
+        let anchor = params.target.anchor().filter(|anchor| !anchor.is_empty());
         if let Some(selector) = params.collection {
-            if params.target.anchor().is_some() {
+            if anchor.is_some() {
                 return not_taken(RequestPart::Anchor, AnswerShape::CollectionPage);
             }
             if !params.columns.is_empty() {
@@ -322,7 +327,7 @@ impl<'a> Shape<'a> {
             }
             return Ok(Shape::Collection(selector));
         }
-        let (answer, anchored) = match params.target.anchor() {
+        let (answer, anchored) = match anchor {
             None => (AnswerShape::Record, None),
             Some(Anchor::Heading { text, .. }) => {
                 (AnswerShape::Section, Some(Shape::Section(text.as_str())))

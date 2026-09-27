@@ -91,8 +91,8 @@ use std::fmt::Write as _;
 use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
-    LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding, StoredLinkKey,
-    StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
+    LinkAnchor, LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -138,7 +138,9 @@ pub struct ProjectedDocument {
     pub frontmatter: Option<String>,
     pub frontmatter_diagnostic_count: u32,
     pub body: String,
-    pub links: Vec<LinkFact>,
+    /// Each link as written, with its anchor's readings and the address kind
+    /// stored beside it.
+    pub links: Vec<StoredLink>,
     /// The keys the link index holds the links under: a function of each link
     /// and the document's path, and what a links-to seek reads.
     pub link_keys: Vec<StoredLinkKey>,
@@ -1121,18 +1123,37 @@ trait StoredColumns {
     fn columns(&self) -> Vec<(&'static str, String)>;
 }
 
-impl StoredColumns for LinkFact {
+/// A link row: the link as written, its anchor's readings, and the address
+/// kind stored beside it.
+impl StoredColumns for StoredLink {
     fn columns(&self) -> Vec<(&'static str, String)> {
+        let link: &LinkFact = &self.fact;
+        let (anchor, readings, block_ref) = match &link.anchor {
+            Some(LinkAnchor::Heading { written, readings }) => {
+                (Some(written.as_str()), Some(readings), None)
+            }
+            Some(LinkAnchor::Block { id }) => (None, None, Some(id.as_str())),
+            None => (None, None, None),
+        };
         let mut columns = vec![
-            ("family", quoted(self.family.as_str())),
-            ("embed", flag(self.embed)),
-            ("protocol", optional_text(self.protocol.as_deref())),
-            ("target", quoted(&self.target)),
-            ("title", optional_text(self.title.as_deref())),
-            ("anchor", optional_text(self.anchor.as_deref())),
-            ("block_ref", optional_text(self.block_ref.as_deref())),
+            ("family", quoted(link.family.as_str())),
+            ("embed", flag(link.embed)),
+            ("protocol", optional_text(link.protocol.as_deref())),
+            ("target", quoted(&link.target)),
+            ("title", optional_text(link.title.as_deref())),
+            ("anchor", optional_text(anchor)),
+            (
+                "anchor_text",
+                optional_text(readings.map(|readings| readings.text.as_str())),
+            ),
+            (
+                "anchor_marked",
+                optional_text(readings.and_then(|readings| readings.marked.as_deref())),
+            ),
+            ("block_ref", optional_text(block_ref)),
+            ("address", quoted(self.address.as_str())),
         ];
-        columns.extend(span_columns(Some(self.span)));
+        columns.extend(span_columns(Some(link.span)));
         columns
     }
 }
@@ -1156,6 +1177,7 @@ impl StoredColumns for HeadingFact {
     fn columns(&self) -> Vec<(&'static str, String)> {
         let mut columns = vec![
             ("text", quoted(&self.text)),
+            ("reading", quoted(&self.reading)),
             ("slug", quoted(&self.slug)),
             ("level", self.level.to_string()),
         ];
@@ -1398,19 +1420,23 @@ mod tests {
     #[test]
     fn a_row_renders_by_its_column_names_and_stored_values() {
         let mut linked = projection();
-        linked.documents[0].links.push(LinkFact {
-            family: norn_store::LinkFamily::Wikilink,
-            embed: true,
-            protocol: None,
-            target: "Notes".to_string(),
-            title: None,
-            anchor: None,
-            block_ref: Some("para".to_string()),
-            span: Span {
-                line: 1,
-                column: 2,
-                byte_offset: 1,
+        linked.documents[0].links.push(StoredLink {
+            fact: LinkFact {
+                family: norn_store::LinkFamily::Wikilink,
+                embed: true,
+                protocol: None,
+                target: "Notes".to_string(),
+                title: None,
+                anchor: Some(LinkAnchor::Block {
+                    id: "para".to_string(),
+                }),
+                span: Span {
+                    line: 1,
+                    column: 2,
+                    byte_offset: 1,
+                },
             },
+            address: norn_wire::LinkAddressKind::Document,
         });
         let entries = linked.entries();
         let at = |column: &str| {
@@ -1426,7 +1452,9 @@ mod tests {
         assert_eq!(at("span_offset"), "1");
 
         let mut moved = linked.clone();
-        moved.documents[0].links[0].block_ref = Some("other".to_string());
+        moved.documents[0].links[0].fact.anchor = Some(LinkAnchor::Block {
+            id: "other".to_string(),
+        });
         let divergence = linked
             .compare(&moved)
             .divergence

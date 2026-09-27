@@ -18,15 +18,19 @@
 //! path *relative to the containing document*.
 //!
 //! None of those readings happens here. Matching a target to a document —
-//! suffix resolution, path joining, ambiguity, containment, percent-decoding —
-//! is **resolution**, and a [`Link`] carries no vault knowledge to do it with.
+//! suffix resolution, path joining, ambiguity, containment, a path's
+//! percent-decoding — is **resolution**, and a [`Link`] carries no vault
+//! knowledge to do it with. A Markdown link's fragment is the one part decoded
+//! here, once ([`Link::anchor`]), because that family percent-encodes it and
+//! decoding it needs no vault.
 //!
 //! # Recognition is lossless
 //!
 //! `[[x]]` and `[[vault://x]]` are two different facts and stay two different
 //! facts: the protocol is recorded where it was written and never supplied,
 //! never dropped, and never normalized away. The same holds of the raw bytes
-//! and the span, which is what lets a rewrite put new bytes over the stem and
+//! — a decoded fragment included, which [`Link::raw`] keeps as written — and
+//! the span, which is what lets a rewrite put new bytes over the stem and
 //! leave every other byte of the token alone.
 
 use std::ops::Range;
@@ -147,9 +151,12 @@ pub struct Link {
     /// for a Markdown link. A Markdown link always has one, `Some("")`
     /// included, because its brackets are always written.
     pub title: Option<String>,
-    /// A heading anchor after `#`. Mutually exclusive with `block_ref`.
+    /// A heading anchor after `#`. Mutually exclusive with `block_ref`. A
+    /// wikilink's is as written; a Markdown link's is percent-decoded once,
+    /// because that family percent-encodes its fragment.
     pub anchor: Option<String>,
-    /// A block reference after `#^`.
+    /// A block reference after `#^`, as written for a wikilink and
+    /// percent-decoded once for a Markdown link, as [`Link::anchor`] is.
     pub block_ref: Option<String>,
     /// Where the whole token begins.
     pub span: SourceSpan,
@@ -280,8 +287,14 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
 /// parse resolves `\#` to a hash, and a split over its answer reads the real
 /// filename `note\#draft.md` as a note with a `draft.md` anchor. An escaped
 /// hash is a literal; an unescaped one opens a fragment, inside `<…>` as well
-/// as outside it. Percent-encoding is resolved nowhere, so `note%23draft.md`
-/// names a file and carries no anchor.
+/// as outside it. Percent-encoding is not read before the split, so
+/// `note%23draft.md` names a file and carries no anchor.
+///
+/// **The fragment is percent-decoded once, after the split** ([`decoded`]):
+/// a Markdown link is the family that percent-encodes its fragment, so this
+/// is the one place the family and the encoding are both known. A `%23` it
+/// decodes is a `#` in the anchor like a written one. The target is recorded
+/// as written; reading it as a path is resolution's.
 pub(crate) fn markdown_link(
     raw: &str,
     destination: &str,
@@ -321,10 +334,44 @@ pub(crate) fn markdown_link(
         stem_range: stem_start.map(|start| start..start + target.len()),
         target,
         title: Some(text.trim().to_string()),
-        anchor: anchor.map(str::to_string),
-        block_ref: block_ref.map(str::to_string),
+        anchor: anchor.map(decoded),
+        block_ref: block_ref.map(decoded),
         span,
     }
+}
+
+/// `fragment` with every `%` followed by two hexadecimal digits, in either
+/// case, read as the byte they spell, or `fragment` as written where the
+/// bytes that makes are not UTF-8. A `%` not followed by two hexadecimal
+/// digits is itself.
+///
+/// `norn-store` decodes a Markdown target's path segments by the same rule
+/// with its own copy of this loop: the store depends on no text layer, and a
+/// segment that decodes to no UTF-8 names no document there rather than
+/// standing as written.
+fn decoded(fragment: &str) -> String {
+    let bytes = fragment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let spelled = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .filter(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
+        match spelled {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| fragment.to_string())
 }
 
 /// A Markdown destination as it was written, inside the link token's bytes.
@@ -499,10 +546,9 @@ fn is_scheme_identifier(candidate: &str) -> bool {
 /// A protocol prefix stays with the returned target; [`Link::protocol`] is
 /// where recognition happens.
 ///
-/// What an anchor *addresses* is the family's business rather than this
-/// function's: a wikilink anchor is heading text, a Markdown fragment is a
-/// heading slug, and the raw fragment recorded here is what both readings
-/// start from.
+/// What an anchor *addresses* is the section resolver's business rather than
+/// this function's ([`crate::anchor_readings`]). The fragment returned here is
+/// as written; a Markdown link's parse decodes it afterwards.
 pub(crate) fn split_fragment(raw: &str) -> (&str, Option<&str>, Option<&str>) {
     split_at_hash(raw, raw.find('#'))
 }

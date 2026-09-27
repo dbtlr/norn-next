@@ -85,7 +85,7 @@ use std::time::Instant;
 use norn_db::rusqlite::types::Value;
 use norn_db::rusqlite::{self, Connection};
 use norn_db::{Adoption, Database, OpenOutcome, RebuildReason, meta};
-use norn_wire::{FindingKind, Severity};
+use norn_wire::{FindingKind, LinkAddressKind, Severity};
 
 use crate::counters::SnapshotCounters;
 use crate::ddl;
@@ -993,6 +993,11 @@ impl Store {
                 "links",
                 "family",
                 quoted(LinkFamily::ALL.iter().map(|value| value.as_str())),
+            ),
+            (
+                "links",
+                "address",
+                quoted(LinkAddressKind::ALL.iter().map(|value| value.as_str())),
             ),
             (
                 "document_tags",

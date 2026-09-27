@@ -35,7 +35,7 @@
 
 use std::collections::BTreeSet;
 
-use norn_wire::{CaseFold, FindingKind, Severity};
+use norn_wire::{CaseFold, FindingKind, LinkAddressKind, Severity};
 
 use crate::fields::{ContentModel, FieldRows};
 use crate::json::FrontmatterValue;
@@ -122,11 +122,15 @@ impl TagSource {
     }
 }
 
-/// One link token, as syntax.
+/// One link token, as syntax, beside the readings its heading anchor is
+/// matched by.
 ///
 /// There is no resolution field and no addressing mode: how this target
 /// resolves derives from `protocol` and `family`, protocol first, in the one
-/// place that derivation lives.
+/// place that derivation lives. The store derives the link's
+/// [`LinkAddressKind`] from those at the write, through the wire's
+/// [`norn_wire::LinkAddress::kind`], so it is read back ([`StoredLink`]) and
+/// never handed over.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkFact {
     pub family: LinkFamily,
@@ -139,22 +143,61 @@ pub struct LinkFact {
     /// default extension.
     pub target: String,
     pub title: Option<String>,
-    /// A heading anchor after `#`. Mutually exclusive with `block_ref`.
-    pub anchor: Option<String>,
-    /// A block reference after `#^`.
-    pub block_ref: Option<String>,
+    /// The place inside the target the link names, and `None` where it names
+    /// none: a link written with no fragment, or with an empty one — `note#`,
+    /// `note#^` — which names no place.
+    pub anchor: Option<LinkAnchor>,
     pub span: Span,
+}
+
+/// The place inside its target a link names.
+///
+/// Neither text is empty: an empty anchor names no place, so it is no
+/// anchor ([`LinkFact::anchor`]), and a write refuses an empty one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkAnchor {
+    /// A heading anchor after `#`, as the text layer records it, beside the
+    /// readings it is matched by, which the host takes from the text layer's
+    /// section resolver: this crate reads no text.
+    Heading {
+        written: String,
+        readings: AnchorReadings,
+    },
+    /// A block reference after `#^`, as the text layer records it.
+    Block { id: String },
+}
+
+/// The readings a heading anchor is matched by beside the anchor itself, first
+/// match winning: its text and the heading text past its `#` markers, each
+/// against a heading's [`HeadingFact::reading`], and then the anchor as
+/// written against a heading's slug, exactly.
+///
+/// Whether any heading of a document matches an anchor under the first
+/// reading that matches one is whether any heading matches it under one of
+/// the three, so a stored anchor's existence in a document is one predicate
+/// over these and the stored headings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorReadings {
+    /// The anchor as a heading reading.
+    pub text: String,
+    /// The heading text past the anchor's `#` markers, as a heading reading,
+    /// where it has such markers.
+    pub marked: Option<String>,
 }
 
 /// One heading.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeadingFact {
     pub level: u8,
-    /// The heading's text with inline markup flattened. A wikilink `#anchor`
-    /// addresses this.
+    /// The heading's text with inline markup flattened.
     pub text: String,
-    /// The anchor form, document-order dedupe suffix included. An inline
-    /// Markdown `#fragment` addresses this.
+    /// The heading's text as an anchor's text is compared with it, which the
+    /// host takes from the text layer's section resolver: this crate reads no
+    /// text. A heading anchor's text and marked readings
+    /// ([`AnchorReadings`]) match this.
+    pub reading: String,
+    /// The anchor form, document-order dedupe suffix included. A heading
+    /// anchor as written matches this.
     pub slug: String,
     pub span: Span,
     /// Where the heading construct ends and the section body begins.
@@ -513,6 +556,15 @@ pub struct StoredLinkKey {
     pub segments: Option<u64>,
 }
 
+/// One stored link row: the link as written and its address kind beside it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredLink {
+    pub fact: LinkFact,
+    /// How the link's target reaches documents, as stored beside it. Derived
+    /// at the write from the link, so it is not a fact a caller hands over.
+    pub address: LinkAddressKind,
+}
+
 /// One stored tag row: the tag as written and its fold beside it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredTag {
@@ -528,7 +580,7 @@ pub struct StoredTag {
 pub struct StoredFacts {
     pub document: StoredDocument,
     pub body: String,
-    pub links: Vec<LinkFact>,
+    pub links: Vec<StoredLink>,
     /// The keys the link index holds the links under, in link order and then
     /// in key order.
     pub link_keys: Vec<StoredLinkKey>,

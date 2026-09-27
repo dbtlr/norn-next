@@ -13,24 +13,39 @@
 //!
 //! # How an anchor matches a heading
 //!
-//! Three readings, each tried only where the one before matched no heading:
+//! An empty anchor is no anchor and matches no heading. Any other anchor is
+//! read as written — a Markdown link's fragment arrives here already decoded,
+//! because the link's parse decodes it ([`crate::Link::anchor`]), and a
+//! wikilink's anchor and a get target's are literal — and it is read three
+//! ways, each tried only where the one before matched no heading:
 //!
-//! 1. **The heading's text**, both sides trimmed, each run of ASCII
-//!    whitespace collapsed to one space, and ASCII case folded. This is what
-//!    a wikilink `#anchor` addresses, and what a person types. The fold is
-//!    ASCII's alone, case and whitespace alike: a no-break space or an
-//!    ideographic space is text, as a letter outside ASCII keeps its case.
-//! 2. **The text of an ATX-shaped anchor** (`## State`), read by the same
-//!    CommonMark pass that produced the document's headings, then matched as
-//!    the first reading matches.
-//! 3. **The heading's slug, exactly**, dedupe suffix included. This is what an
-//!    inline Markdown `#fragment` addresses.
+//! 1. **Its text**, compared with each heading's [`heading_reading`]: both
+//!    sides trimmed, each run of ASCII whitespace collapsed to one space, and
+//!    ASCII case folded. This is what a wikilink `#anchor` addresses, and what
+//!    a person types. The fold is ASCII's alone, case and whitespace alike: a
+//!    no-break space or an ideographic space is text, as a letter outside
+//!    ASCII keeps its case.
+//! 2. **The heading text past its `#` markers**, compared as the first
+//!    reading compares. An ATX-shaped anchor (`## State`) is read by the same
+//!    CommonMark pass that produced the document's headings. A heading chain
+//!    (`Top#Sub`, as `[[note#Top#Sub]]` writes it) is read as its last
+//!    heading: the text after its last `#`, where text stands on both sides of
+//!    the chain's `#`s.
+//! 3. **Its slug reading, exactly**: the anchor against each heading's slug,
+//!    dedupe suffix included. This is what an inline Markdown `#fragment`
+//!    addresses.
 //!
-//! The text readings come first, so an anchor that names a heading by its
-//! text is never reinterpreted as another heading's slug. A read and a write
-//! match through the same three readings, so headings the first reading folds
-//! together are one anchor's matches for both: a write of `dup` over `## Dup`
-//! and `## dup` refuses as ambiguous, and an occurrence reaches either one.
+//! [`anchor_readings`] is the one place an anchor's first two readings are
+//! made, and a stored link carries them beside the anchor, so a store's
+//! predicate over stored readings and this resolver agree about which
+//! headings an anchor matches.
+//!
+//! The text reading comes first, so an anchor that names a heading by its
+//! whole text is never reinterpreted as another heading's marked text or slug.
+//! A read and a write match through the same three readings, so headings the
+//! first reading folds together are one anchor's matches for both: a write of
+//! `dup` over `## Dup` and `## dup` refuses as ambiguous, and an occurrence
+//! reaches either one.
 //!
 //! # Separator-aware ranges
 //!
@@ -281,15 +296,16 @@ fn content_bounds(body: &str, body_start: usize, end: usize) -> (usize, usize) {
 /// Every heading `anchor` matches, in document order, under the first of the
 /// three readings the module states that matches any.
 fn matching_indices(headings: &[Heading], anchor: &str) -> Vec<usize> {
-    let by_text = |text: &str| {
-        let wanted = normalized(text);
-        indices(headings, |heading| normalized(&heading.text) == wanted)
+    let Some(readings) = anchor_readings(anchor) else {
+        return Vec::new();
     };
-    let mut matches = by_text(anchor);
+    let by_reading =
+        |wanted: &str| indices(headings, |heading| heading_reading(&heading.text) == wanted);
+    let mut matches = by_reading(&readings.text);
     if matches.is_empty()
-        && let Some(text) = atx_anchor_text(anchor)
+        && let Some(marked) = &readings.marked
     {
-        matches = by_text(&text);
+        matches = by_reading(marked);
     }
     if matches.is_empty() {
         matches = indices(headings, |heading| heading.slug == anchor);
@@ -307,15 +323,79 @@ fn indices(headings: &[Heading], matches: impl Fn(&Heading) -> bool) -> Vec<usiz
         .collect()
 }
 
+/// The two readings an anchor is matched by beside itself, as the module
+/// states them: its third reading is the anchor as written, against a
+/// heading's slug.
+///
+/// A heading's side of both is its [`heading_reading`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchorReadings {
+    /// The anchor as a heading reading.
+    pub text: String,
+    /// The heading text past the anchor's `#` markers, as a heading reading:
+    /// an ATX-shaped anchor's heading text, or a heading chain's last heading.
+    /// `None` where the anchor has no such markers.
+    pub marked: Option<String>,
+}
+
+/// The readings `anchor` is matched by, or `None` for an empty anchor, which
+/// reads as no anchor.
+pub fn anchor_readings(anchor: &str) -> Option<AnchorReadings> {
+    if anchor.is_empty() {
+        return None;
+    }
+    Some(AnchorReadings {
+        text: heading_reading(anchor),
+        marked: marked_text(anchor).map(|text| heading_reading(&text)),
+    })
+}
+
 /// Heading text as an anchor compares it: trimmed, each run of ASCII space one
 /// space, and ASCII case folded. A letter outside ASCII keeps its case, and a
 /// space outside ASCII — a no-break space, an ideographic space — is text.
-fn normalized(text: &str) -> String {
+pub fn heading_reading(text: &str) -> String {
     text.split(is_ascii_space)
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<String>>()
         .join(" ")
+}
+
+/// The heading text past `anchor`'s `#` markers: an ATX-shaped anchor's
+/// heading text, a heading chain's last heading, or `None` where it is
+/// neither.
+///
+/// An anchor carrying a line break is not one heading and has no marked text.
+/// Reading the first heading out of it would answer a question about `## a`
+/// when the caller asked about `## a\n## b`, and address the wrong section by
+/// a margin nothing in the result reports.
+fn marked_text(anchor: &str) -> Option<String> {
+    if anchor.contains(['\n', '\r']) {
+        return None;
+    }
+    if opens_atx(anchor) {
+        atx_anchor_text(anchor)
+    } else {
+        chain_leaf(anchor).map(str::to_string)
+    }
+}
+
+/// Whether `anchor` opens with CommonMark's ATX opening: one to six `#`
+/// followed by a space or tab.
+fn opens_atx(anchor: &str) -> bool {
+    let hashes = anchor.bytes().take_while(|byte| *byte == b'#').count();
+    (1..=6).contains(&hashes) && matches!(anchor.as_bytes().get(hashes), Some(b' ' | b'\t'))
+}
+
+/// The last heading of a heading chain — the text after its last `#` — where
+/// `anchor` is one: text that is not blank stands before its first `#` and
+/// after its last. A hash run opening an anchor is no chain, and neither is an
+/// anchor ending in a `#`.
+fn chain_leaf(anchor: &str) -> Option<&str> {
+    let (first, _) = anchor.split_once('#')?;
+    let (_, last) = anchor.rsplit_once('#')?;
+    let blank = |text: &str| text.trim_matches(is_ascii_space).is_empty();
+    (!blank(first) && !blank(last)).then_some(last)
 }
 
 /// Whether `ch` is one of the six ASCII whitespace characters CommonMark
@@ -326,30 +406,13 @@ pub(crate) fn is_ascii_space(ch: char) -> bool {
     matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{c}' | '\u{b}')
 }
 
-/// The heading text of an ATX-shaped anchor, or `None` when the anchor is not
-/// one.
+/// The heading text of an anchor [`opens_atx`] recognizes.
 ///
-/// The anchor must open with one to six `#` followed by a space or tab —
-/// CommonMark's ATX opening — and its text is read by the same CommonMark pass
-/// that produced the document's headings, so a trailing closer (`## X ##`) and
-/// inline markup are handled identically to a real heading and a `#` that is
-/// part of the text (`## C#`) is preserved.
-///
-/// An anchor carrying a line break is not one heading and is refused. Reading
-/// the first heading out of it would answer a question about `## a` when the
-/// caller asked about `## a\n## b`, and address the wrong section by a margin
-/// nothing in the result reports.
+/// The text is read by the same CommonMark pass that produced the document's
+/// headings, so a trailing closer (`## X ##`) and inline markup are handled
+/// identically to a real heading and a `#` that is part of the text (`## C#`)
+/// is preserved.
 fn atx_anchor_text(anchor: &str) -> Option<String> {
-    if anchor.contains(['\n', '\r']) {
-        return None;
-    }
-    let hashes = anchor.bytes().take_while(|byte| *byte == b'#').count();
-    if !(1..=6).contains(&hashes) {
-        return None;
-    }
-    if !matches!(anchor.as_bytes().get(hashes), Some(b' ') | Some(b'\t')) {
-        return None;
-    }
     BodyScan::new(anchor)
         .headings()
         .first()
