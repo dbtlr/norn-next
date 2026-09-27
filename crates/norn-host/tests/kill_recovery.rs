@@ -1,9 +1,11 @@
 #![cfg(feature = "induced-failure")]
 #![allow(clippy::disallowed_methods)] // subprocess and filesystem acceptance fixture.
 
-// Compiled for one item: the budget every wait on a published label obeys. How
-// long one such look may take is a fact about this crate's host and not about
-// this suite, so it is composed where the other suites read it from.
+// Compiled for two items: the budget every wait on a published label obeys,
+// and the declaration the attached store pins. How long one such look may take
+// is a fact about this crate's host and not about this suite, and the
+// declaration a changeset is judged under is the pinned one in every suite, so
+// both are composed where the other suites read them from.
 mod attach;
 
 use std::fs;
@@ -16,9 +18,11 @@ use norn_config::registry::{Entry, VaultRoot};
 use norn_host::{
     AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
 };
+use norn_store::induced_failure::{ARM_HITS, INCREMENT_SEAM};
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
+use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::scratch::Scratch;
 use norn_testkit::wait::{Observed, wait_until};
@@ -52,6 +56,9 @@ fn next_attach_converges_after_process_death_mid_increment() {
     fixture.write("a.md", "real a after crash\n");
     fixture.write("b.md", "real b after crash\n");
     fixture.write("c.md", "real c after crash\n");
+    // The record file exists before the child starts, so an absent record is
+    // a fact about the seam rather than about a sink nothing could write.
+    fs::write(&fixture.hits, "").expect("create the arm record file");
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
@@ -61,6 +68,7 @@ fn next_attach_converges_after_process_death_mid_increment() {
         .env(CHILD_ENV, "1")
         .env(DATABASE_ENV, &fixture.database)
         .env(VAULT_ENV, &fixture.vault)
+        .env(ARM_HITS, &fixture.hits)
         .output()
         .expect("run torn-increment subprocess");
     assert!(
@@ -69,6 +77,15 @@ fn next_attach_converges_after_process_death_mid_increment() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    // A child that ends any other way than at the tear — a refused changeset
+    // that panics, for one — also fails, and leaves the store as the tear
+    // would. The record is what says the changeset was open when it ended.
+    let torn = Attestation::read(&fixture.hits);
+    torn.assert_reached(
+        "a process ended between two entries of a changeset",
+        &[(SEAM, INCREMENT_SEAM), ("boundary", "entries")],
+    );
+    torn.assert_count("a process ended between two entries of a changeset", 1);
 
     // No prefix of the false changeset and no generation belonging to it is at
     // rest. This is checked before healing so convergence cannot hide a tear.
@@ -140,13 +157,16 @@ fn tear_increment() -> ! {
             28,
         ))
     });
-    let _ = store.begin_request().apply_increment(
+    // The attach pinned the vault schema, and a changeset judged under any
+    // other declaration is refused before its first entry is written.
+    let declared = attach::read::the_pinned_declaration(&mut store);
+    let returned = store.begin_request().apply_increment(
         IncrementProvenance::Derived,
         changes,
         &[],
-        &norn_store::ContentModel::none(),
+        &declared,
     );
-    panic!("induced abort did not fire")
+    panic!("the changeset returned instead of tearing: {returned:?}")
 }
 
 fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
@@ -206,6 +226,8 @@ struct Fixture {
     root: Scratch,
     vault: PathBuf,
     database: PathBuf,
+    // Where the child's changeset tear records that it fired.
+    hits: PathBuf,
     name: VaultName,
     // Both attaches below go through production entry operations, and each
     // installs a real platform watcher. The lease covers the fixture's whole
@@ -230,10 +252,12 @@ impl Fixture {
         let dirs =
             ConfigDirs::new(root.join("config"), root.join("data")).expect("config directories");
         let database = dirs.derived_dir(&name).join("store.sqlite3");
+        let hits = root.join("arm-hits");
         Self {
             root,
             vault,
             database,
+            hits,
             name,
             _watcher_lease: lease,
         }
