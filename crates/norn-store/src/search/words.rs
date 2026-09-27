@@ -39,8 +39,9 @@ pub(crate) fn holds_word(term: &str) -> bool {
 /// read past.** A double-quoted string is one phrase, its content read
 /// between the quotes with a doubled `""` read as one literal quote. Outside
 /// quotes, the expression splits into tokens at ASCII whitespace — the space
-/// FTS5's own parser splits at, narrower than [`char::is_whitespace`] — `(`
-/// and `)`; the case-sensitive keywords `AND`, `OR` and `NOT` are always
+/// FTS5's own parser splits at, narrower than [`char::is_whitespace`] — `(`,
+/// `)` and `,`; the number after a comma is a `NEAR` group's distance and
+/// names no phrase; the case-sensitive keywords `AND`, `OR` and `NOT` are always
 /// operators and name no phrase, `NEAR` is one only where the next
 /// non-whitespace character after it is `(`, and every other token is a
 /// phrase, read past a trailing `*` (a prefix match) and a `column:`
@@ -62,6 +63,9 @@ pub(crate) fn expression_holds_word(expression: &str) -> bool {
 /// documents.
 fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
     let mut rest = expression;
+    // A comma stands only inside a `NEAR( ... , N)` group, so the bare
+    // number after one is the group's distance: syntax, not a phrase.
+    let mut after_comma = false;
     std::iter::from_fn(move || {
         loop {
             rest = rest.trim_start_matches(|character: char| {
@@ -70,9 +74,15 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
             if rest.is_empty() {
                 return None;
             }
+            if let Some(after) = rest.strip_prefix(',') {
+                rest = after;
+                after_comma = true;
+                continue;
+            }
             if let Some(after_quote) = rest.strip_prefix('"') {
                 let (content, after) = read_quoted(after_quote);
                 rest = after;
+                after_comma = false;
                 return Some(content);
             }
             let end = rest
@@ -81,10 +91,16 @@ fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
                         || character == '('
                         || character == ')'
                         || character == '"'
+                        || character == ','
                 })
                 .unwrap_or(rest.len());
             let (token, after) = rest.split_at(end);
             rest = after;
+            let distance = after_comma && token.bytes().all(|byte| byte.is_ascii_digit());
+            after_comma = false;
+            if distance {
+                continue;
+            }
             if let Some(phrase) = phrase_of(token, rest) {
                 return Some(phrase.to_string());
             }
@@ -779,6 +795,26 @@ mod tests {
             assert!(
                 !expression_holds_word(expression),
                 "{expression:?} was read as holding a word"
+            );
+        }
+    }
+
+    /// **A `NEAR` group's distance is syntax, not a phrase.** In
+    /// `NEAR(phrases, N)` the `N` after the comma names no token FTS5 reads,
+    /// so a group whose phrases hold no word holds none with or without its
+    /// distance; a number standing anywhere else is a word.
+    #[test]
+    fn a_near_groups_distance_is_not_a_phrase() {
+        for expression in ["NEAR(\"!!!\" \"???\", 5)", "NEAR(\"!!!\" \"???\",5)"] {
+            assert!(
+                !expression_holds_word(expression),
+                "{expression:?} was read as holding a word"
+            );
+        }
+        for expression in ["NEAR(alpha beta, 5)", "5", "\"!!!\" 5"] {
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
             );
         }
     }
