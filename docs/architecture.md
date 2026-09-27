@@ -816,9 +816,11 @@ silent where such a comparison decided the answer; a part that matches nothing e
 answer without comparing, and no advisory is raised beside it; and it costs one probe per
 compared dated key. Every builder that compiles a conjunction raises it through the one read
 machinery. **A part on a predicate key outside the field universe matches no document**, on
-every builder that compiles a conjunction, as a part that cannot be applied does: no document
-carries the key, so none satisfies a part on it, an absence or an inequality included, and the
-answer is empty beside an in-band report naming the key and the keys near it. A page with no filter reads its order index in page order, and
+every builder that compiles a conjunction, as a part that cannot be applied does: a key neither
+declared nor carried by any document is read as a likely misspelling and not applied, so a typo
+never widens an answer, an absence or an inequality included, which over such a key would
+otherwise match every document; the answer is empty beside an in-band report naming the key and
+the keys near it. A page with no filter reads its order index in page order, and
 sorts nothing: the path page and a field sort's valued section seek it and stop at the
 page's bound. A field sort's missing section passes every document that carries the key to
 reach one that does not, so an ascending first page, which reads the missing section first,
@@ -1807,12 +1809,14 @@ moves the gate's stance signal where the hold changed the stance or how far the 
 derived the facts it took in. The bound runs from the read's first take of the entry gate and
 covers the waits the read takes to establish its snapshot or to refuse: that first take, the
 wait for the connection and the wait for the change together, and the retake of the gate after
-each. Three takes of the entry gate on a read's path are plain locks outside the bound, so a
-gate held past it holds the read there for as long as it is held: `dispatch_pending`'s take in
-`begin_read`'s branch that schedules the entry's owed work and refuses, taken after the read
-gives the gate back and before it answers; `withdraw_for_read_damage`'s take, where a read
-that met damage in the store publishes it after its query work returned; and `ReadHold`'s
-drop, through `lock_in_a_drop`, which unpins the entry after the snapshot has ended. A first take that finds the
+each. The other takes of the entry gate on a read's path are plain locks outside the bound, so
+a gate held past it holds the read there for as long as it is held: `dispatch_pending`'s take
+in `begin_read`'s branch that schedules the entry's owed work and refuses, taken after the
+read gives the gate back and before it answers, and its second take in `release_queue_slot`
+where the dispatch finds the work channel full or shutting down; `withdraw_for_read_damage`'s
+takes, where a read that met damage in the store publishes it after its query work returned,
+the second through the dispatch of the rebuild it owes; and `ReadHold`'s drop, through
+`lock_in_a_drop`, which unpins the entry after the snapshot has ended. A first take that finds the
 gate held past the bound refuses as reader-unavailable before the read records any demand,
 and a read whose retake after the wait for the change meets a gate held past the bound
 refuses as still indexing, with the demand it last read under the gate. Every batch the entry takes in that carries a fact moves its position in its fact

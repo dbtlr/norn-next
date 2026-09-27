@@ -160,9 +160,11 @@ impl Snapshot {
     /// Every read that filters by a conjunction compiles it here, so a part
     /// means one thing on every verb. A part whose key is outside the field
     /// universe is reported with the keys near it and matches no document,
-    /// as a part that cannot be applied is reported and matches nothing: no
-    /// document carries the key, so none satisfies a part on it, an absence
-    /// or an inequality included. A `resolves` part is compiled into a
+    /// as a part that cannot be applied is reported and matches nothing: a
+    /// key neither declared nor carried by any document is read as a likely
+    /// misspelling and not applied, so a typo never widens an answer. That
+    /// holds for an absence or an inequality too, which over a key no
+    /// document carries would otherwise match every document. A `resolves` part is compiled into a
     /// filter where `resolves` answers it, and reported as not applicable,
     /// filtering nothing, where it does not.
     pub(crate) fn compile_conjunction(
