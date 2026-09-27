@@ -1244,8 +1244,25 @@ impl<'a> Request<'a> {
     }
 
     /// The link-health findings about every link the documents at
-    /// `documents` hold, judged against the documents this store holds now
-    /// under the ambiguity-ignore globs `declared` names.
+    /// `documents` hold — broken, ambiguous, or missing the place its anchor
+    /// names — judged against the documents this store holds now under the
+    /// ambiguity-ignore globs `declared` names, in the order of the holding
+    /// path, then the link's ordinal. A path no document stands at holds no
+    /// link. Nothing is written: the findings are handed back.
+    ///
+    /// Each finding is a warning at the link's ordinal and span, carrying the
+    /// link as written as its target and keyed by exactly the link's keys. An
+    /// ambiguous finding carries a head of at most [`crate::CANDIDATE_HEAD`]
+    /// candidates beside the exact total, and a missing anchor's the one
+    /// document it names. The work is a cost per link plus a cost per
+    /// candidate: each distinct key the links hold is resolved once.
+    ///
+    /// **A dormant carrier.** Its consuming layer is the re-decision
+    /// [ADR 0027] rules into [`Request::apply_increment`], which judges the
+    /// links a changeset reaches and files these findings in its transaction.
+    /// That re-decision is not built, so only the suite calls this.
+    ///
+    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     pub fn judge_link_health(
         &self,
         documents: &[DocumentPath],

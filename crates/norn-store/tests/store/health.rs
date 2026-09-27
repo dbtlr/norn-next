@@ -142,9 +142,10 @@ impl Judging {
     }
 
     /// The findings judged about the links the document at `at` holds, by
-    /// the ordinal of the link each is about.
+    /// the ordinal of the link each is about. The document is named twice,
+    /// which judges its links once.
     fn by_ordinal(&mut self, at: &str) -> BTreeMap<u64, FindingFacts> {
-        let (findings, _) = self.judged(&[at]);
+        let (findings, _) = self.judged(&[at, at]);
         let mut by_ordinal = BTreeMap::new();
         for finding in findings {
             assert_eq!(
@@ -515,13 +516,14 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
         !broken.class_keys.is_empty(),
         "a broken suffix link is keyed by the class it names"
     );
-    let mut request = judging.request();
-    for finding in &findings {
-        request
-            .record_finding(finding)
-            .unwrap_or_else(|refusal| panic!("recording {finding:?}: {refusal}"));
+    {
+        let mut request = judging.request();
+        for finding in &findings {
+            request
+                .record_finding(finding)
+                .unwrap_or_else(|refusal| panic!("recording {finding:?}: {refusal}"));
+        }
     }
-    drop(request);
 
     let rows = judging.validated();
     let by_target: BTreeMap<String, &FindingRow> = rows

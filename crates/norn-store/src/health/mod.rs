@@ -247,7 +247,13 @@ fn held_links(
     key: SuffixKey,
     documents: &[DocumentPath],
 ) -> Result<Vec<Held>, StoreError> {
-    let paths: Vec<&str> = documents.iter().map(DocumentPath::as_str).collect();
+    // Each document once, so a path named twice reads its links once.
+    let paths: Vec<&str> = documents
+        .iter()
+        .map(DocumentPath::as_str)
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .collect();
     let rows = Request::read_all_on(
         connection,
         work,
