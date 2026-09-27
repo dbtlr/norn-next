@@ -534,7 +534,8 @@ impl ClassKey {
 /// The spelling is the one the link index holds the link's path under — see
 /// the store's `link` module — and a store files it in the key space its path
 /// order selects: the path as written where the root tells spellings apart,
-/// and with ASCII case folded where it folds ([`SuffixKey::holds_path`]). A
+/// and with ASCII case folded where it folds, where a key holding an
+/// upper-case ASCII letter is refused wherever it is filed or explained. A
 /// changed path names its own path key in that same space
 /// ([`crate::IncrementOutcome::affected_paths`]).
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
