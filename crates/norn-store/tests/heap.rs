@@ -4,7 +4,8 @@
 //!
 //! **This binary is its own measurement.** Its global allocator counts the
 //! live heap ([`norn_testkit::heap`]), which is process-wide, so the binary
-//! holds this one case and nothing allocates beside it. What the count sees is
+//! runs its cases one after another, in one case, and nothing allocates
+//! beside them. What the count sees is
 //! the Rust heap: the rows a statement hands back once they are read, the
 //! links a chunk holds, the findings it files. SQLite's own page cache is
 //! taken from `malloc` directly and is not in it; that is the store's, bounded
@@ -30,9 +31,10 @@ const LINKS_PER_HOLDER: usize = 100;
 /// past this bound, and a chunk's links held for every chunk is far past it.
 const FLAT: usize = 16 * 1024;
 
-/// A document at `at` holding `links` links `[[hub]]`.
-fn holder(at: &str, links: usize) -> DocumentFacts {
-    let body = "[[hub]]\n".repeat(links);
+/// A document at `at` holding `links` links, the `n`th of them to the
+/// target `target(n)`.
+fn holder(at: &str, links: usize, target: &impl Fn(usize) -> String) -> DocumentFacts {
+    let body: String = (0..links).map(|n| format!("[[{}]]\n", target(n))).collect();
     let mut facts = DocumentFacts::new(
         DocumentPath::new(at).expect("a path"),
         format!("hash-{at}"),
@@ -44,7 +46,7 @@ fn holder(at: &str, links: usize) -> DocumentFacts {
             family: LinkFamily::Wikilink,
             embed: false,
             protocol: None,
-            target: "hub".to_string(),
+            target: target(at),
             title: None,
             anchor: None,
             span: Span {
@@ -67,10 +69,12 @@ fn hub(at: &str) -> DocumentFacts {
     )
 }
 
-/// The most the heap stood above where it stood before a write that makes
-/// `links` links to `hub` ambiguous, each held by a document nobody wrote.
-fn hub_write_peak(links: usize) -> usize {
-    let scratch = Scratch::new(&format!("norn-store-heap-{links}"));
+/// The most the heap stood above where it stood before a write of a second
+/// document the stem `hub` names, beside `links` links held by documents
+/// nobody wrote, the `n`th of them to `target(n)`, each of which the write
+/// re-decides.
+fn hub_write_peak(links: usize, label: &str, target: impl Fn(usize) -> String) -> usize {
+    let scratch = Scratch::new(&format!("norn-store-heap-{label}-{links}"));
     let mut store = Store::open_throwaway(
         scratch.join("store.sqlite3"),
         StoredPathOrder::Sensitive,
@@ -82,7 +86,14 @@ fn hub_write_peak(links: usize) -> usize {
     for chunk in (0..holders).collect::<Vec<_>>().chunks(100) {
         let mut changes: Vec<Change> = chunk
             .iter()
-            .map(|at| Change::Upsert(holder(&format!("h/{at:04}.md"), LINKS_PER_HOLDER)))
+            .map(|at| {
+                let offset = at * LINKS_PER_HOLDER;
+                Change::Upsert(holder(
+                    &format!("h/{at:04}.md"),
+                    LINKS_PER_HOLDER,
+                    &|n| target(offset + n),
+                ))
+            })
             .collect();
         if chunk[0] == 0 {
             changes.push(Change::Upsert(hub("m/hub.md")));
@@ -105,26 +116,37 @@ fn hub_write_peak(links: usize) -> usize {
         .expect("writing a second hub");
     let peak = mark.peak_above();
     let counters = request.finish();
-    assert_eq!(counters.get("links_redecided"), Some(links as u64));
-    assert_eq!(counters.get("findings_written"), Some(links as u64));
+    assert_eq!(counters.get("links_redecided"), Some(links as u64), "{label}");
+    assert_eq!(counters.get("findings_written"), Some(links as u64), "{label}");
     peak
 }
 
 /// **A hub write holds a chunk on the heap, never the neighborhood.** Writing
-/// a second document the stem `hub` names re-decides every link to it and
-/// files an ambiguous finding about each: five thousand links, and then fifty
-/// thousand. The re-decision reads, judges and files one chunk at a time, so
-/// the heap the larger write peaks at stands within [`FLAT`] of the smaller
-/// one's, where holding the links, their findings or a set of the links judged
-/// would grow it by the forty-five thousand links between them.
+/// a second document the stem `hub` names re-decides every link into its
+/// class, five thousand links and then fifty thousand, two ways:
+///
+/// - every link is `[[hub]]`, one key, and each is filed ambiguous;
+/// - every link is `[[dNNNNN/hub]]`, a key of its own in the class, and each
+///   is filed broken.
+///
+/// The re-decision reads, judges and files one chunk at a time, and forgets
+/// each key of the class once its walk has passed it, so the heap the larger
+/// write peaks at stands within [`FLAT`] of the smaller one's, where holding
+/// the links, their findings, a set of the links judged or what each distinct
+/// key names would grow it by the forty-five thousand links between them.
 #[test]
 fn a_hub_write_holds_heap_within_a_chunk() {
-    let small = hub_write_peak(5_000);
-    let large = hub_write_peak(50_000);
-    eprintln!("hub-write heap peaks: 5k links {small} bytes, 50k links {large} bytes");
-    assert!(
-        large <= small + FLAT,
-        "re-deciding fifty thousand links peaked {large} bytes above the mark, and five \
-         thousand {small}: the re-decision holds more than a chunk"
-    );
+    for (label, target) in [
+        ("one-key", (|_| "hub".to_string()) as fn(usize) -> String),
+        ("distinct-keys", |n| format!("d{n:05}/hub")),
+    ] {
+        let small = hub_write_peak(5_000, label, target);
+        let large = hub_write_peak(50_000, label, target);
+        eprintln!("{label} hub-write heap peaks: 5k links {small} bytes, 50k links {large} bytes");
+        assert!(
+            large <= small + FLAT,
+            "{label}: re-deciding fifty thousand links peaked {large} bytes above the mark, \
+             and five thousand {small}: the re-decision holds more than a chunk"
+        );
+    }
 }

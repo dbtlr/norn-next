@@ -467,6 +467,174 @@ fn an_ambiguous_link_is_no_ones_backlink() {
     }
 }
 
+// ---- a candidate's name ----
+
+/// The suffix each candidate of each link-health finding standing at `at` is
+/// named by, in the order a reader reads the findings.
+fn named(store: &mut Store, at: &str) -> Vec<Vec<String>> {
+    let mut findings: Vec<(u64, Vec<String>)> = store
+        .begin_request()
+        .stored_findings(&path(at))
+        .expect("reading findings")
+        .into_iter()
+        .filter(|finding| finding.kind.starts_with("link/"))
+        .map(|finding| {
+            (
+                finding
+                    .ordinal
+                    .expect("a link-health finding names its link"),
+                finding
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| candidate.suffix)
+                    .collect(),
+            )
+        })
+        .collect();
+    findings.sort_by_key(|finding| finding.0);
+    findings.into_iter().map(|(_, suffixes)| suffixes).collect()
+}
+
+/// A store under `order` and one built from zero out of the same documents
+/// are equal under the testkit's comparator, field by field.
+fn assert_rebuilds(
+    store: &mut Store,
+    order: StoredPathOrder,
+    held: &BTreeMap<String, String>,
+    subject: &str,
+) {
+    let scratch = Scratch::new(&format!("{subject}-rebuilt"));
+    let mut rebuilt = pinned_store(&scratch, order);
+    rebuilt
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            held.iter()
+                .map(|(at, body)| Change::Upsert(derived(at, body)))
+                .collect::<Vec<_>>(),
+            &[],
+            &declared(),
+        )
+        .expect("building from zero");
+    StoreProjection::read(store)
+        .expect("a projection")
+        .assert_equivalent(
+            &StoreProjection::read(&mut rebuilt).expect("a projection"),
+            subject,
+        );
+    assert_eq!(
+        DerivedRows::read(store).expect("the derived rows").fields(),
+        DerivedRows::read(&mut rebuilt)
+            .expect("the derived rows")
+            .fields(),
+        "{subject}"
+    );
+}
+
+/// Run `script` on both roots, a changeset per step — `Some(body)` writes the
+/// path, `None` kills it — and after each step hold the suffixes the findings
+/// at `at` carry to the step's `expected`, and the store to a rebuild.
+fn candidates_named_after(
+    label: &str,
+    at: &str,
+    script: &[(&[(&str, Option<&str>)], &[&[&str]])],
+) {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("{label}-{order:?}"), order);
+        let mut held: BTreeMap<String, String> = BTreeMap::new();
+        for (step, (changes, expected)) in script.iter().enumerate() {
+            let changes: Vec<Change> = changes
+                .iter()
+                .map(|(written, body)| match body {
+                    Some(body) => {
+                        held.insert((*written).to_string(), (*body).to_string());
+                        Change::Upsert(derived(written, body))
+                    }
+                    None => {
+                        held.remove(*written);
+                        death(written)
+                    }
+                })
+                .collect();
+            vault.apply(changes);
+            let subject = format!("{label} {order:?} after step {step}");
+            assert_eq!(
+                named(&mut vault.store, at),
+                expected
+                    .iter()
+                    .map(|head| head.iter().map(|suffix| (*suffix).to_string()).collect())
+                    .collect::<Vec<Vec<String>>>(),
+                "{subject}"
+            );
+            assert_rebuilds(&mut vault.store, order, &held, &subject);
+        }
+    }
+}
+
+/// **A path link's missing anchor names its candidate by the suffix the
+/// candidate's class leaves it.** `[p](x/t.md#Nope)` names `x/t.md` alone,
+/// which lacks the heading, and the finding names it `t`. Writing `y/t.md`
+/// touches no key the link is held under — the link is keyed by the path it
+/// spells — but gives `t` a second document, so the candidate is `x/t` now;
+/// killing it makes the candidate `t` again.
+#[test]
+fn a_path_links_candidate_is_renamed_when_its_class_moves() {
+    candidates_named_after(
+        "redecide-named-path",
+        "a.md",
+        &[
+            (
+                &[("a.md", Some("[p](x/t.md#Nope)\n")), ("x/t.md", Some(""))],
+                &[&["t"]],
+            ),
+            (&[("y/t.md", Some(""))], &[&["x/t"]]),
+            (&[("y/t.md", None)], &[&["t"]]),
+        ],
+    );
+}
+
+/// **A same-document anchor names its own document by the suffix its class
+/// leaves it.** `[[#Nope]]` in `x/t.md` names `x/t.md`, which lacks the
+/// heading; a write and a death of `y/t.md` rename the candidate `x/t` and
+/// back to `t`.
+#[test]
+fn a_same_document_anchors_candidate_is_renamed_when_its_class_moves() {
+    candidates_named_after(
+        "redecide-named-self",
+        "x/t.md",
+        &[
+            (&[("x/t.md", Some("[[#Nope]]\n"))], &[&["t"]]),
+            (&[("y/t.md", Some(""))], &[&["x/t"]]),
+            (&[("y/t.md", None)], &[&["t"]]),
+        ],
+    );
+}
+
+/// **An ambiguous link names a dotted candidate by the suffix its reduction
+/// leaves it.** `[[v1.2.3]]` names `v1.2.3.md` and `v1.2.md`, and the second
+/// is named `v1.2` while no `v1.md` stands — the first by its written leaf, since `v1.2.3` reduces to the second. Writing `v1.md` moves the class
+/// `v1/` — which no key of the link falls in — and `v1.2` then names two
+/// documents, so the candidate is `v1.2.md`; killing it gives `v1.2` back.
+#[test]
+fn an_ambiguous_links_dotted_candidate_is_renamed_when_its_reduction_moves() {
+    candidates_named_after(
+        "redecide-named-dotted",
+        "h.md",
+        &[
+            (
+                &[
+                    ("h.md", Some("[[v1.2.3]]\n")),
+                    ("v1.2.3.md", Some("")),
+                    ("v1.2.md", Some("")),
+                ],
+                &[&["v1.2.3.md", "v1.2"]],
+            ),
+            (&[("v1.md", Some(""))], &[&["v1.2.3.md", "v1.2.md"]]),
+            (&[("v1.md", None)], &[&["v1.2.3.md", "v1.2"]]),
+        ],
+    );
+}
+
 // ---- incremental equals rebuild ----
 
 /// A deterministic stream of choices, so a failing script replays.
@@ -490,72 +658,177 @@ impl Rng {
     }
 }
 
+/// The schemas the edit script pins between, each a fingerprint beside the
+/// ambiguity-ignore globs it declares: a directory kept out, a directory and a
+/// dotted leaf kept out, and nothing kept out.
+const SCHEMAS: [(&str, &[&str]); 3] = [
+    ("script-schema-a", &["archive/**"]),
+    ("script-schema-b", &["x/**", "*.2.md"]),
+    ("script-schema-c", &[]),
+];
+
+/// The declaration of the schema at `schema` in [`SCHEMAS`].
+fn declared_by(schema: usize) -> ContentModel {
+    let (fingerprint, globs) = SCHEMAS[schema];
+    globs
+        .iter()
+        .fold(ContentModel::under(fingerprint), |model, glob| {
+            model.declare_ambiguity_ignore(Pattern::parse(glob).expect("a glob"))
+        })
+}
+
+/// Pin the schema at `schema` in [`SCHEMAS`] on `store`.
+fn pin_schema(store: &mut Store, schema: usize) {
+    let fingerprint = SCHEMAS[schema].0;
+    store
+        .begin_request()
+        .pin_vault_schema(fingerprint.as_bytes(), fingerprint)
+        .expect("pinning a schema");
+}
+
 /// The places the edit script writes, kills and renames between: stems shared
-/// across directories, a dotted stem and its reduction, a place under the
-/// ignore glob, and a place only a path link names.
-const PLACES: [&str; 12] = [
+/// across directories and across case, a dotted stem and its reductions, a
+/// leaf that is a directory's name, places under the ignore globs, and places
+/// only a path link names.
+const PLACES: [&str; 30] = [
     "t.md",
+    "T.md",
     "x/t.md",
+    "X/t.md",
+    "x/T.md",
     "y/t.md",
+    "x/y/t.md",
     "archive/t.md",
+    "archive/x/t.md",
+    "t/x.md",
+    "t/t.md",
     "v1.md",
     "v1.2.md",
+    "V1.2.md",
     "x/v1.2.md",
+    "archive/v1.2.md",
+    "v1.2.3.md",
     "h.md",
     "x/h.md",
     "dir/u.md",
+    "Dir/u.md",
+    "u.md",
     "notes.md",
     "x/Notes2.md",
+    "a.md",
+    "x/a.md",
+    "t.md.md",
+    "x.md",
+    "y/x.md",
+    "t/v1.md",
 ];
 
 /// The lines a body is made of: headings and blocks a link's anchor may name,
-/// and links of every address — suffix, dotted, anchored, path, rooted, embed,
-/// ignored, elsewhere, and naming nothing.
-const LINES: [&str; 24] = [
+/// and links of every address — suffix, dotted, anchored, same-document,
+/// relative and rooted paths, embeds, attachments, ignored, elsewhere, and
+/// naming nothing — in both cases.
+const LINES: [&str; 56] = [
     "# Intro",
     "## Setup",
+    "# intro",
     "A paragraph. ^blk",
     "An item. ^b2",
     "[[t]]",
+    "[[T]]",
     "[[x/t]]",
+    "[[X/T]]",
+    "[[y/t]]",
+    "[[x/y/t]]",
     "[[t#Intro]]",
+    "[[t#intro]]",
+    "[[t#Setup]]",
     "[[t#^blk]]",
+    "[[v1]]",
     "[[v1.2]]",
+    "[[v1.2.3]]",
     "[[v1.2#Setup]]",
     "[[vault://t]]",
+    "[[vault://x/t]]",
     "[[vault://v1.2]]",
+    "[[vault://t/x]]",
     "[p](t.md)",
+    "[p](T.md)",
     "[p](x/t.md#Intro)",
     "[p](../t.md)",
+    "[p](../x/t.md)",
+    "[p](./t.md)",
+    "[p](t/x.md)",
+    "[p](../../t.md)",
     "![[t]]",
+    "![[x/t#^b2]]",
+    "![[v1.2#^blk]]",
     "[[notes]]",
+    "[[notes#Intro]]",
     "[[h#^b2]]",
     "[[archive/t]]",
     "[[missing]]",
     "[p](dir/u.md)",
+    "[p](Dir/u.md)",
     "[[u#^blk]]",
+    "[[u]]",
     "[w](https://example.com/page)",
     "[[Notes2]]",
+    "[[#Intro]]",
+    "[[#^blk]]",
+    "[[a]]",
+    "[[a#Intro]]",
+    "[[t.md]]",
+    "[[t.md#Intro]]",
+    "[[x]]",
+    "[[t/x]]",
+    "[[x.md]]",
+    "[i](img.png)",
+    "![[pic.png]]",
 ];
 
-/// A body of up to five of [`LINES`], each its own paragraph.
+/// A body of up to six of [`LINES`], each its own paragraph.
 fn body(rng: &mut Rng) -> String {
-    (0..rng.below(6))
+    (0..rng.below(7))
         .map(|_| format!("{}\n\n", rng.pick(&LINES)))
         .collect()
 }
 
-/// One step of an edit script over `vault`, whose documents `held` tracks:
-/// the changeset, and what it says it does.
-fn step(rng: &mut Rng, held: &mut BTreeMap<String, String>) -> (Vec<Change>, String) {
-    let live: Vec<String> = held.keys().cloned().collect();
+/// The spelling `held` already holds of the path `at` names on a root under
+/// `order`: `at` itself, or on a folding root any spelling that folds with it.
+fn held_spelling(
+    order: StoredPathOrder,
+    held: &BTreeMap<String, String>,
+    at: &str,
+) -> Option<String> {
+    match order {
+        Sensitive => held.contains_key(at).then(|| at.to_string()),
+        Folding => held
+            .keys()
+            .find(|spelled| spelled.eq_ignore_ascii_case(at))
+            .cloned(),
+    }
+}
+
+/// One changeset of an edit script over the documents `held` tracks on a root
+/// under `order` — one to four writes, deaths and renames, a rename's body
+/// sometimes rewritten and its death sometimes ahead of its write — and what
+/// it says it does.
+fn step(
+    rng: &mut Rng,
+    order: StoredPathOrder,
+    held: &mut BTreeMap<String, String>,
+) -> (Vec<Change>, String) {
     let mut changes = Vec::new();
     let mut said = Vec::new();
-    for _ in 0..=rng.below(3) {
+    for _ in 0..=rng.below(4) {
+        let live: Vec<String> = held.keys().cloned().collect();
         let at = rng.pick(&PLACES).to_string();
-        match rng.below(if live.is_empty() { 1 } else { 3 }) {
-            0 => {
+        match rng.below(if live.is_empty() { 1 } else { 4 }) {
+            0 | 3 => {
                 let written = body(rng);
+                // A folding root holds one spelling of a path, so a write
+                // there is a write of the spelling it holds.
+                let at = held_spelling(order, held, &at).unwrap_or(at);
                 said.push(format!("write {at} {written:?}"));
                 changes.push(Change::Upsert(derived(&at, &written)));
                 held.insert(at, written);
@@ -568,12 +841,21 @@ fn step(rng: &mut Rng, held: &mut BTreeMap<String, String>) -> (Vec<Change>, Str
             }
             _ => {
                 let from = live[rng.below(live.len())].clone();
-                let Some(moved) = held.remove(&from) else {
+                if held_spelling(order, held, &at).is_some_and(|existing| existing != from)
+                    || from == at
+                {
                     continue;
-                };
-                said.push(format!("rename {from} to {at}"));
-                changes.push(death(&from));
-                changes.push(Change::Upsert(derived(&at, &moved)));
+                }
+                let kept = held.remove(&from).expect("a live document");
+                let moved = if rng.below(3) == 0 { body(rng) } else { kept };
+                said.push(format!("rename {from} to {at} {moved:?}"));
+                if rng.below(2) == 0 || from.eq_ignore_ascii_case(&at) {
+                    changes.push(death(&from));
+                    changes.push(Change::Upsert(derived(&at, &moved)));
+                } else {
+                    changes.push(Change::Upsert(derived(&at, &moved)));
+                    changes.push(death(&from));
+                }
                 held.insert(at, moved);
             }
         }
@@ -581,64 +863,137 @@ fn step(rng: &mut Rng, held: &mut BTreeMap<String, String>) -> (Vec<Change>, Str
     (changes, said.join("; "))
 }
 
+/// Apply `changes` to `store` as one changeset under the schema at `schema`.
+fn apply_under(store: &mut Store, changes: Vec<Change>, schema: usize, subject: &str) {
+    store
+        .begin_request()
+        .apply_increment(
+            IncrementProvenance::Derived,
+            changes,
+            &[],
+            &declared_by(schema),
+        )
+        .unwrap_or_else(|refusal| panic!("{subject}: a changeset: {refusal}"));
+}
+
+/// Write every document `held` holds into `store` as a heal does: shuffled,
+/// in changesets of one to four.
+fn heal(
+    rng: &mut Rng,
+    store: &mut Store,
+    held: &BTreeMap<String, String>,
+    schema: usize,
+    subject: &str,
+) {
+    let mut entries: Vec<(&String, &String)> = held.iter().collect();
+    for at in (1..entries.len()).rev() {
+        entries.swap(at, rng.below(at + 1));
+    }
+    let mut at = 0;
+    while at < entries.len() {
+        let size = 1 + rng.below(4);
+        let chunk = entries[at..(at + size).min(entries.len())]
+            .iter()
+            .map(|(written, body)| Change::Upsert(derived(written, body)))
+            .collect();
+        apply_under(store, chunk, schema, subject);
+        at += size;
+    }
+}
+
+/// `store` equals `other` under the testkit's comparator, finding order
+/// included, and every derived row agrees field by field.
+fn assert_same(store: &mut Store, other: &mut Store, subject: &str) {
+    StoreProjection::read(store)
+        .expect("a projection")
+        .assert_equivalent(&StoreProjection::read(other).expect("a projection"), subject);
+    assert_eq!(
+        DerivedRows::read(store).expect("the derived rows").fields(),
+        DerivedRows::read(other).expect("the derived rows").fields(),
+        "{subject}"
+    );
+}
+
+/// A count the script reads from the environment variable `name`, or
+/// `default` where it is unset — so a longer run is one variable away.
+fn script_bound(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 /// **Incremental maintenance equals a rebuild, finding order included.** A
-/// seeded edit script — writes, deaths and renames, a changeset of one to three
-/// of them at a time, over bodies whose headings, blocks and links each step
-/// rewrites — is applied to one store, and after every step a second store is
-/// built from zero out of the documents the first holds, in one changeset. The
-/// two are equal under the testkit's comparator, which reads every finding in
-/// the order a reader does, and every derived row agrees field by field, on a
-/// root that tells spellings apart and on one that folds them. The script
-/// reaches every kind the family has.
+/// seeded edit script is applied to one store: changesets of one to four
+/// writes, deaths and renames over bodies whose headings, blocks and links each
+/// step rewrites, and now and then a pin of another schema — which moves the
+/// ambiguity-ignore globs — followed by a heal of every document in shuffled
+/// changesets. After every step a second store is built from zero out of the
+/// documents the first holds, in one changeset, and the two are equal under
+/// the testkit's comparator, which reads every finding and every candidate's
+/// name in the order a reader does, and every derived row agrees field by
+/// field; now and then a third store healed from zero in shuffled changesets
+/// is held to the same. Both roots, the script reaching every kind the family
+/// has.
+///
+/// `NORN_REDECISION_SEEDS` and `NORN_REDECISION_STEPS` lengthen the run.
 #[test]
 fn incremental_equals_rebuild_including_finding_order() {
-    const STEPS: usize = 40;
+    let seeds = script_bound("NORN_REDECISION_SEEDS", 3);
+    let steps = script_bound("NORN_REDECISION_STEPS", 40);
     let mut kinds: BTreeSet<String> = BTreeSet::new();
     for order in [Sensitive, Folding] {
-        for seed in [0x253b_0001_u64, 0x253b_0002, 0x253b_0003] {
+        for seed in 0x253b_0000..0x253b_0000 + seeds {
             let mut rng = Rng(seed);
-            let mut vault = Vault::new(&format!("redecide-script-{order:?}-{seed:x}"), order);
+            let label = format!("redecide-script-{order:?}-{seed:x}");
+            let scratch = Scratch::new(&label);
+            let mut store = scratch.open_under(order);
+            let mut schema = 0;
+            pin_schema(&mut store, schema);
             let mut held: BTreeMap<String, String> = BTreeMap::new();
-            let mut script = Vec::new();
-            for at in 0..STEPS {
-                let (changes, said) = step(&mut rng, &mut held);
-                script.push(said);
-                vault.apply(changes);
+            let mut script: Vec<String> = Vec::new();
+            for at in 0..steps {
+                if rng.below(12) == 0 && !held.is_empty() {
+                    schema = (schema + 1 + rng.below(2)) % SCHEMAS.len();
+                    script.push(format!("pin {} and heal", SCHEMAS[schema].0));
+                    pin_schema(&mut store, schema);
+                    let subject = format!("{order:?} seed {seed:#x}: {script:#?}");
+                    heal(&mut rng, &mut store, &held, schema, &subject);
+                } else {
+                    let (changes, said) = step(&mut rng, order, &mut held);
+                    script.push(said);
+                    let subject = format!("{order:?} seed {seed:#x}: {script:#?}");
+                    apply_under(&mut store, changes, schema, &subject);
+                }
+                let subject = format!("{order:?} seed {seed:#x}: {script:#?}");
 
-                let rebuilt_scratch =
-                    Scratch::new(&format!("redecide-script-{order:?}-{seed:x}-rebuilt-{at}"));
-                let mut rebuilt = pinned_store(&rebuilt_scratch, order);
-                rebuilt
-                    .begin_request()
-                    .apply_increment(
-                        IncrementProvenance::Derived,
-                        held.iter()
-                            .map(|(at, body)| Change::Upsert(derived(at, body)))
-                            .collect::<Vec<_>>(),
-                        &[],
-                        &declared(),
-                    )
-                    .expect("building from zero");
-
-                let subject = format!("{order:?} seed {seed:#x} after {script:#?}");
-                let incremental = StoreProjection::read(&mut vault.store).expect("a projection");
-                let from_zero = StoreProjection::read(&mut rebuilt).expect("a projection");
-                incremental.assert_equivalent(&from_zero, &subject);
-                assert_eq!(
-                    DerivedRows::read(&mut vault.store)
-                        .expect("the derived rows")
-                        .fields(),
-                    DerivedRows::read(&mut rebuilt)
-                        .expect("the derived rows")
-                        .fields(),
-                    "{subject}"
+                let rebuilt_scratch = Scratch::new(&format!("{label}-rebuilt-{at}"));
+                let mut rebuilt = rebuilt_scratch.open_under(order);
+                pin_schema(&mut rebuilt, schema);
+                apply_under(
+                    &mut rebuilt,
+                    held.iter()
+                        .map(|(written, body)| Change::Upsert(derived(written, body)))
+                        .collect(),
+                    schema,
+                    &subject,
                 );
+                assert_same(&mut store, &mut rebuilt, &subject);
                 kinds.extend(
-                    incremental
+                    StoreProjection::read(&mut store)
+                        .expect("a projection")
                         .findings()
                         .iter()
                         .map(|finding| finding.kind.clone()),
                 );
+
+                if rng.below(4) == 0 {
+                    let healed_scratch = Scratch::new(&format!("{label}-healed-{at}"));
+                    let mut healed = healed_scratch.open_under(order);
+                    pin_schema(&mut healed, schema);
+                    heal(&mut rng, &mut healed, &held, schema, &subject);
+                    assert_same(&mut healed, &mut rebuilt, &format!("healed: {subject}"));
+                }
             }
         }
     }
@@ -651,6 +1006,73 @@ fn incremental_equals_rebuild_including_finding_order() {
             kinds.contains(kind.as_str()),
             "the script never reached {kind:?}: {kinds:?}"
         );
+    }
+}
+
+/// **A neighborhood of many pages equals a rebuild.** Seven hundred documents
+/// each hold one to three links into one stem, its dotted neighbor and one
+/// path, so every arm reads more than one page; each changeset after them
+/// moves the stem's class, a path, a dotted reduction, or a holder, and the
+/// store equals one built from zero on both roots.
+#[test]
+fn a_neighborhood_of_many_pages_equals_a_rebuild() {
+    const LINKS: [&str; 6] = [
+        "[[t]]\n\n",
+        "[[x/t]]\n\n",
+        "[p](x/t.md)\n\n",
+        "[[t#Intro]]\n\n",
+        "[[v1.2]]\n\n",
+        "[[vault://t]]\n\n",
+    ];
+    for order in [Sensitive, Folding] {
+        let label = format!("redecide-pages-{order:?}");
+        let scratch = Scratch::new(&label);
+        let mut store = scratch.open_under(order);
+        pin_schema(&mut store, 0);
+        let mut rng = Rng(0x253b_7000);
+        let mut held: BTreeMap<String, String> = (0..700)
+            .map(|at| {
+                let links = (0..=rng.below(3)).map(|_| rng.pick(&LINKS)).collect();
+                (format!("h/{at:04}.md"), links)
+            })
+            .collect();
+        heal(&mut rng, &mut store, &held, 0, &label);
+        let script: [&[(&str, Option<&str>)]; 6] = [
+            &[("t.md", Some("# Intro\n"))],
+            &[("x/t.md", Some("# Intro\n"))],
+            &[("y/t.md", Some("x\n"))],
+            &[("v1.md", Some("x\n")), ("v1.2.md", Some("x\n"))],
+            &[("x/t.md", None)],
+            &[("t.md", None), ("h/0001.md", Some("[[t]]\n[[v1]]\n"))],
+        ];
+        for (at, changes) in script.into_iter().enumerate() {
+            let changes = changes
+                .iter()
+                .map(|(written, body)| match body {
+                    Some(body) => {
+                        held.insert((*written).to_string(), (*body).to_string());
+                        Change::Upsert(derived(written, body))
+                    }
+                    None => {
+                        held.remove(*written);
+                        death(written)
+                    }
+                })
+                .collect();
+            apply_under(&mut store, changes, 0, &label);
+            let rebuilt_scratch = Scratch::new(&format!("{label}-rebuilt-{at}"));
+            let mut rebuilt = rebuilt_scratch.open_under(order);
+            pin_schema(&mut rebuilt, 0);
+            apply_under(
+                &mut rebuilt,
+                held.iter()
+                    .map(|(written, body)| Change::Upsert(derived(written, body)))
+                    .collect(),
+                0,
+                &label,
+            );
+            assert_same(&mut store, &mut rebuilt, &format!("{label} after step {at}"));
+        }
     }
 }
 
@@ -747,6 +1169,54 @@ fn a_writes_work_follows_the_neighborhood_not_the_vault() {
             "({links}, {multiplicity}): ten times the unrelated documents moved the write's work"
         );
     }
+}
+
+/// What writing `hub.md` cost a store holding twenty documents that link
+/// `[[hub]]` beside `beside` documents that each link a path under the folder
+/// `folder`: the counters it moved and the steps its re-decision took.
+fn folder_write(beside: usize, folder: &str) -> (DerivationCounters, u64) {
+    let label = format!("redecide-folder-{beside}-{}", folder.trim_end_matches('/'));
+    let mut vault = Vault::new(&label, Sensitive);
+    let mut documents: Vec<(String, String)> = (0..20)
+        .map(|at| (format!("h/{at:03}.md"), "[[hub]]\n".to_string()))
+        .collect();
+    documents.extend((0..beside).map(|at| (format!("u{at:04}.md"), format!("[p]({folder}{at:04}.md)\n"))));
+    vault.apply(
+        documents
+            .iter()
+            .map(|(at, body)| Change::Upsert(derived(at, body)))
+            .collect::<Vec<_>>(),
+    );
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(derived("hub.md", "hub\n"))],
+            &[],
+            &declared(),
+        )
+        .expect("writing the hub");
+    let steps = request.read_steps();
+    (request.finish(), steps)
+}
+
+/// **A class's walk reads no path-addressed link.** A folder note —
+/// `hub.md` beside a folder `hub/` — is common, and every path link into the
+/// folder is held under a path key spelled inside the range the class `hub/`
+/// opens. Writing `hub.md` re-decides the twenty `[[hub]]` links, and its
+/// steps are the same beside a hundred and two thousand links to paths under
+/// `hub/` as beside as many under another folder.
+#[test]
+fn a_class_walk_reads_no_path_link_spelled_inside_its_range() {
+    let (counters, few) = folder_write(100, "hub/");
+    assert_eq!(counted(&counters, "links_redecided"), 20);
+    let (_, many) = folder_write(2000, "hub/");
+    let (_, elsewhere) = folder_write(2000, "elsewhere/");
+    assert_eq!(
+        (few, many),
+        (elsewhere, elsewhere),
+        "path links under the folder `hub/` moved the work of a write to the class `hub/`"
+    );
 }
 
 // ---- a tear inside the re-decision ----

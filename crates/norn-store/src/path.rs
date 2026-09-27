@@ -519,6 +519,20 @@ impl ClassKey {
         (lower, upper)
     }
 
+    /// The class this key's first segment spells: the key of the class every
+    /// document whose stem that segment is belongs to, which is the one class
+    /// a change to such a document names. `glossary/norn/` is in `glossary/`,
+    /// and a one-segment key is its own class.
+    ///
+    /// A changed path's class is always one segment, so a change reaches a
+    /// key exactly when it names this class.
+    pub(crate) fn leading(&self) -> ClassKey {
+        match self.0.find(SEPARATOR) {
+            Some(at) => ClassKey(self.0[..=at].to_string()),
+            None => self.clone(),
+        }
+    }
+
     /// A probe prefix as the class key it is.
     ///
     /// The prefix comes from [`bounded`], which holds the terminator, and its

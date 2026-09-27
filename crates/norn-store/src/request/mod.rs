@@ -427,8 +427,9 @@ impl<'a> Request<'a> {
     /// The write side of class-scoped maintenance reached **by a class rather
     /// than by a change**: a caller that knows which class to re-derive says so
     /// here, where a changeset says it by naming the paths that moved and
-    /// [`Request::apply_increment`] discards the classes those paths are in.
-    /// Both run the same statement.
+    /// [`Request::apply_increment`] discards the classes those paths are in,
+    /// inside its link-health re-decision, a chunk of findings at a time over
+    /// the same class range.
     ///
     /// This is also the reason findings need no cascade: a finding is keyed by
     /// path and class, outlives the document it is about, and leaves the table
@@ -474,7 +475,7 @@ impl<'a> Request<'a> {
     /// The write side of the subject axis reached **by a path rather than by a
     /// change**, which is the mirror of [`Request::discard_findings_in_class`]
     /// standing beside the class discard [`Request::apply_increment`] folds in.
-    /// Both axes run the same statements whichever door they are reached
+    /// The subject axis runs the same statement whichever door it is reached
     /// through.
     ///
     /// It exists because a subject is not always a path a changeset can name. A
@@ -1309,7 +1310,8 @@ impl<'a> Request<'a> {
     /// link's ordinal. Nothing is written: the findings are handed back.
     ///
     /// Each finding is a warning at the link's ordinal and span, carrying the
-    /// link as written as its target and keyed by exactly the link's keys. An
+    /// link as written as its target, and keyed by the link's keys and by the
+    /// classes its candidates are named in. An
     /// ambiguous finding carries a head of at most [`crate::CANDIDATE_HEAD`]
     /// candidates beside the exact total, and a missing anchor's the one
     /// document it names. A link is judged alike whichever selection reaches

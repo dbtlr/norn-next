@@ -23,10 +23,20 @@
 //!
 //! An embed is a link, and is judged as one. A finding stands at the holding
 //! document's path, at the link's ordinal and span, and carries the link as
-//! written — protocol and anchor included — as its target. It is keyed by
-//! exactly the link's keys in the key space the root probes: a suffix key as a
-//! class key, and a path key as a path key, so the changeset's discard on
-//! either axis reaches it through the key the link reached its documents by.
+//! written — protocol and anchor included — as its target.
+//!
+//! # A finding is keyed by its link's keys and its candidates' naming classes
+//!
+//! A finding's keys are its link's keys, in the key space the root probes — a
+//! suffix key as a class key, and a path key as a path key — and the naming
+//! classes of every candidate it carries: the classes the candidate's minimal
+//! disambiguating suffix is read from ([`SuffixSpellings::naming_classes`]).
+//! What a finding says moves with the documents its link's keys name, and with
+//! the documents those names are read against, so a change to either reaches
+//! it: the changeset's discard on either axis ranges over exactly these keys.
+//! `[p](x/t.md#Nope)` is keyed by the path `x/t.md`, and by the class `t/` its
+//! candidate is named `t` in, so writing `y/t.md` re-decides it, its
+//! candidate named `x/t` now.
 //!
 //! # The work adds links and candidates, and never multiplies them
 //!
@@ -61,9 +71,12 @@
 //! After every entry of a changeset is written, the store judges the links
 //! the changeset reaches and files these findings in the same transaction
 //! ([`redecide`], [ADR 0027]): the links its written documents hold, read a
-//! chunk at a time off the generation the write stamped them with, then the
-//! links each class and each path key it changed selects, read a chunk at a
-//! time too. [`crate::Request::judge_selected_links`] is the door that judges
+//! chunk at a time off the generation the write stamped them with; then, for
+//! each class it changed, the findings standing under the class, discarded a
+//! chunk at a time with the links they were about that no key of the class
+//! reaches, and the links the class selects; then the links each path key it
+//! changed selects, read a chunk at a time too.
+//! [`crate::Request::judge_selected_links`] is the door that judges
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
 //!
@@ -170,27 +183,29 @@ struct Summary {
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
 /// resolves each distinct key once between them, however many chunks hold a
-/// link under it ([ADR 0027]'s fifth condition) — and the suffix each
-/// candidate its findings carried is named by, so a candidate is named once
-/// too.
+/// link under it ([ADR 0027]'s fifth condition) — and how each candidate its
+/// findings carried is named, so a candidate is named once too.
 ///
 /// A summary is what the store held when it was read, under the store's key
 /// space and the ignore set the judgment was taken under. One set is valid
-/// only within one transaction or snapshot — the read that filled it and
-/// every judgment that reuses it see the same store, under the same
-/// declaration, with no write between them — and a judgment after a write
-/// takes a new one. It holds one summary per distinct key it has resolved,
-/// each a head of at most [`CANDIDATE_HEAD`] documents, and a suffix for at
-/// most those heads' documents, so the caller bounds its size by the keys it
-/// chooses to resolve against it.
+/// only while no document fact and no link fact moves — the read that filled
+/// it and every judgment that reuses it see the same documents, links,
+/// headings and blocks, under the same declaration — and a judgment after a
+/// write that moves one takes a new one. Findings are no input to a
+/// judgment, so filing them between chunks leaves a set valid, as the
+/// changeset's re-decision does. It holds one summary per distinct key it has
+/// resolved and not forgotten, each a head of at most [`CANDIDATE_HEAD`]
+/// documents, and a name for at most those heads' documents, so the caller
+/// bounds its size by the keys it chooses to resolve against it: the
+/// re-decision forgets each key once no link it has yet to judge can hold it.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 #[derive(Debug, Default)]
 pub struct KeySummaries {
-    summaries: HashMap<Key, Summary>,
-    /// The minimal disambiguating suffix of each candidate a finding carried,
-    /// by its document's row id: at most the heads of the keys resolved.
-    suffixes: HashMap<i64, String>,
+    summaries: BTreeMap<Key, Summary>,
+    /// How each candidate a finding carried is named, by its document's row
+    /// id: at most the heads of the keys resolved.
+    names: HashMap<i64, CandidateName>,
     resolved: u64,
     candidates: u64,
 }
@@ -215,6 +230,43 @@ impl KeySummaries {
             what: format!("a judgment read a key it did not resolve, {key:?}"),
         })
     }
+
+    /// Forget every suffix key from `lower` up to `below`, and the names of
+    /// the candidates their heads held. A key forgotten is resolved again if
+    /// a later judgment holds it, so forgetting one costs work only where a
+    /// link still to be judged holds it.
+    fn forget_suffix_keys(&mut self, lower: &str, below: &str) {
+        if lower >= below {
+            return;
+        }
+        let forgotten: Vec<Key> = self
+            .summaries
+            .range((lower.to_string(), None)..(below.to_string(), None))
+            .filter(|((_, segments), _)| segments.is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in forgotten {
+            self.forget(&key);
+        }
+    }
+
+    /// Forget `key`, and the names of the candidates its head held.
+    fn forget(&mut self, key: &Key) {
+        if let Some(summary) = self.summaries.remove(key) {
+            for named in summary.head {
+                self.names.remove(&named.id);
+            }
+        }
+    }
+}
+
+/// How a finding names one candidate: its minimal disambiguating suffix, and
+/// the classes that suffix is read from ([`SuffixSpellings::naming_classes`]),
+/// which the finding is keyed by beside its link's own keys.
+#[derive(Debug)]
+struct CandidateName {
+    suffix: String,
+    classes: BTreeSet<ClassKey>,
 }
 
 /// The summary at `index` of the arm `arm` among `summaries`, refused where a
@@ -376,6 +428,8 @@ pub(crate) struct Redecided {
     pub(crate) candidates_read: u64,
     /// Findings filed.
     pub(crate) findings: u64,
+    /// Findings discarded from under the classes the changeset changed.
+    pub(crate) discarded: u64,
 }
 
 /// Re-decide the link health of every link the changeset that stamped
@@ -384,25 +438,41 @@ pub(crate) struct Redecided {
 ///
 /// 1. every link a document the changeset wrote holds — those stamped with
 ///    `generation`;
-/// 2. every suffix-addressed link whose keys fall in one of `classes`, the
-///    classes of the paths it wrote or killed;
+/// 2. for each of `classes`, the classes of the paths it wrote or killed, in
+///    order: every link a finding standing under the class was about, and
+///    every suffix-addressed link whose keys fall in the class;
 /// 3. every path-addressed link whose key is one of `paths`, the paths it
 ///    wrote or killed.
 ///
+/// **The second arm is where a class's findings are discarded.** Each class
+/// first reads the findings standing under it that the changeset did not
+/// file, a chunk at a time, discards them, and judges each link one of them
+/// was about that holds no suffix key in any of `classes`: a finding keyed
+/// under the class only through a candidate's naming class, whose link no key
+/// of the class reaches. Such a link holds no key in `paths` either, since
+/// the path discard took every finding keyed by one before the re-decision
+/// began. The discard is known from the rows it takes, a chunk at a time, so
+/// nothing past a chunk is held.
+///
 /// **Every finding a re-decided link held is gone before it is judged**, so
 /// its new finding never meets the old one: the subject discard took every
-/// finding at a written document's path, and every finding carries all its
-/// link's keys, so the class or path discard that took the finding of a link
-/// the second or third arm reaches took it whichever of the link's keys
-/// reached it.
+/// finding at a written document's path; a finding carries every key its link
+/// is held under, so the path discard took the finding of every link the
+/// third arm reaches; and a finding a link the second arm reaches under one
+/// of its keys was keyed under that key's class, which the class's own
+/// findings pass, or an earlier class's, discarded first.
 ///
 /// **Each link is judged once.** A link the changeset reaches more than one
 /// way is judged by the first arm that reaches it and skipped by the rest,
 /// and which arm is first is a predicate over the link's own facts: a link
-/// whose document the changeset stamped belongs to the first arm, and a link
-/// the second or third arm reaches under one key belongs to the least of its
-/// affected classes or paths. So nothing is remembered between chunks but the
-/// key summaries, and the arms hold no set of the links they judged.
+/// whose document the changeset stamped belongs to the first arm; a link
+/// holding a suffix key in an affected class belongs to the least such
+/// class's keyed pass; a link a finding under a class was about and no such
+/// key reaches belongs to the findings pass that discarded that finding, which
+/// is the only pass that ever reads it; and a link the third arm reaches under
+/// one key belongs to the least of its affected paths. So nothing is
+/// remembered between chunks but the key summaries, and the arms hold no set
+/// of the links they judged.
 ///
 /// Each arm is read a chunk of [`LINK_HEALTH_CHUNK`] links at a time, judged
 /// and filed before the next is read, against one set of key summaries kept
@@ -424,6 +494,9 @@ pub(crate) fn redecide(
     let mut summaries = KeySummaries::default();
     let mut redecided = Redecided::default();
     let mut file = |links: Vec<Held>, summaries: &mut KeySummaries| -> Result<(), StoreError> {
+        if links.is_empty() {
+            return Ok(());
+        }
         redecided.links += links.len() as u64;
         for finding in judge_links(transaction, work, order, ignore, &links, summaries)? {
             request::write_finding(transaction, &finding)?;
@@ -442,6 +515,52 @@ pub(crate) fn redecide(
         file(links, &mut summaries)?;
     }
     for class in classes {
+        // The findings standing under the class go first, a page at a time,
+        // and each link one of them was about is judged here where no arm
+        // reaches it by a key: the finding was keyed under the class only by
+        // a candidate's name.
+        let mut after = After::class_start(class);
+        loop {
+            let page = Request::read_all_on(
+                transaction,
+                work,
+                &statement::class_findings_sql(),
+                params_from_iter(statement::class_findings_parameters(
+                    class,
+                    &after,
+                    generation,
+                    LINK_HEALTH_CHUNK,
+                )),
+                |row| {
+                    Ok(Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    )))
+                },
+                "reading the findings standing under a class",
+            )?;
+            let last = page.len() < LINK_HEALTH_CHUNK;
+            let Some((text, finding, _)) = page.last() else {
+                break;
+            };
+            after = After {
+                text: text.clone(),
+                first: *finding,
+                second: 0,
+            };
+            let findings: BTreeSet<i64> = page.iter().map(|(_, finding, _)| *finding).collect();
+            let links: BTreeSet<i64> = page.iter().filter_map(|(_, _, link)| *link).collect();
+            redecided.discarded += discard(transaction, &findings)?;
+            let mut links = read_links_by_id(transaction, work, key, &links)?;
+            links.retain(|held| !reached_by_a_class(held, classes));
+            file(links, &mut summaries)?;
+            if last {
+                break;
+            }
+        }
+
+        let (lower, upper) = class.bounds();
         let mut pages = Pages::new(LinkSelection::Class(class));
         while let Some(mut links) = pages.next(transaction, work, key)? {
             links.retain(|held| {
@@ -454,6 +573,12 @@ pub(crate) fn redecide(
                     })
             });
             file(links, &mut summaries)?;
+            // The walk is in key order and a link holds one key in a class,
+            // so a key the walk has passed is one no link still to be judged
+            // holds: every later link holding it belongs to this class's pass
+            // and was read already.
+            let passed = pages.after.as_ref().map_or(upper.as_str(), |after| after.text.as_str());
+            summaries.forget_suffix_keys(&lower, passed);
         }
     }
     for path in paths {
@@ -469,10 +594,57 @@ pub(crate) fn redecide(
             });
             file(links, &mut summaries)?;
         }
+        // Every link holding the key after this pass belongs to it.
+        summaries.forget(&(path.as_str().to_string(), None));
     }
     redecided.keys_resolved = summaries.keys_resolved();
     redecided.candidates_read = summaries.candidates_read();
     Ok(redecided)
+}
+
+/// Whether `held` holds a suffix key in one of `classes`: a link the class arm
+/// reaches by its own key.
+fn reached_by_a_class(held: &Held, classes: &BTreeSet<ClassKey>) -> bool {
+    held.keys.iter().any(|(text, segments)| {
+        segments.is_some() && class_of(text).is_some_and(|class| classes_hold(classes, class))
+    })
+}
+
+/// Discard the findings whose row ids `findings` holds, and report how many
+/// went.
+fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u64, StoreError> {
+    if findings.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<i64> = findings.iter().copied().collect();
+    Ok(transaction
+        .execute(
+            &statement::discard_sql(),
+            params_from_iter(statement::ids_parameters(&ids)?),
+        )
+        .map_err(|error| crate::error::sql("discarding the findings under a class", error))?
+        as u64)
+}
+
+/// The links whose row ids `links` holds, read as [`read_links`] reads them.
+fn read_links_by_id(
+    connection: &Connection,
+    work: &ReadWork,
+    key: SuffixKey,
+    links: &BTreeSet<i64>,
+) -> Result<Vec<Held>, StoreError> {
+    if links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = links.iter().copied().collect();
+    let (links, _) = read_links(
+        connection,
+        work,
+        key,
+        Selected::Links,
+        statement::ids_parameters(&ids)?,
+    )?;
+    Ok(links)
 }
 
 /// The class a suffix key falls in: its first segment, separator included,
@@ -522,11 +694,11 @@ fn judge_links(
         }
     }
     // Each candidate is named once per set of summaries: a candidate an
-    // earlier chunk named keeps the suffix it was named by.
-    named.retain(|id, _| !summaries.suffixes.contains_key(id));
-    let named = candidate_suffixes(connection, work, order, ignore, &named)?;
-    summaries.suffixes.extend(named);
-    let suffixes = &summaries.suffixes;
+    // earlier chunk named keeps the name it was named by.
+    named.retain(|id, _| !summaries.names.contains_key(id));
+    let named = candidate_names(connection, work, order, ignore, &named)?;
+    summaries.names.extend(named);
+    let names = &summaries.names;
 
     let mut findings = Vec::new();
     for (at, (held, verdict)) in links.iter().zip(verdicts).enumerate() {
@@ -540,7 +712,7 @@ fn judge_links(
             }
             Some(Verdict::One(_)) | None => continue,
         };
-        findings.push(finding(held, kind, &head, total, message, suffixes)?);
+        findings.push(finding(held, kind, &head, total, message, names)?);
     }
     Ok(findings)
 }
@@ -820,19 +992,23 @@ fn missing_anchors(
         .collect()
 }
 
-/// The minimal disambiguating suffix of each candidate `named` holds, by its
-/// id, as a read names it ([`SuffixSpellings`]).
-fn candidate_suffixes(
+/// How each candidate `named` holds is named, by its id: its minimal
+/// disambiguating suffix as a read names it ([`SuffixSpellings`]) — its path
+/// where no suffix names it alone — and the classes that suffix is read from,
+/// both off the one set of spellings, so the classes a finding is keyed by
+/// are the ones its candidates' names were read in.
+fn candidate_names(
     connection: &Connection,
     work: &ReadWork,
     order: StoredPathOrder,
     ignore: &AmbiguityIgnore,
     named: &BTreeMap<i64, &str>,
-) -> Result<HashMap<i64, String>, StoreError> {
+) -> Result<HashMap<i64, CandidateName>, StoreError> {
     if named.is_empty() {
         return Ok(HashMap::new());
     }
     let spellings = SuffixSpellings::new(named, ignore, order)?;
+    let mut classes = spellings.naming_classes();
     let (sql, values) = spellings.statement()?;
     let rows = Request::read_all_on(
         connection,
@@ -842,18 +1018,33 @@ fn candidate_suffixes(
         |row| Ok(Ok((row.get::<_, usize>(0)?, row.get::<_, i64>(1)?))),
         "naming a judgment's candidates by their suffixes",
     )?;
-    spellings.suffixes(rows)
+    let mut suffixes = spellings.suffixes(rows)?;
+    Ok(named
+        .iter()
+        .map(|(id, path)| {
+            let name = CandidateName {
+                suffix: suffixes.remove(id).unwrap_or_else(|| (*path).to_string()),
+                classes: classes.remove(id).unwrap_or_default(),
+            };
+            (*id, name)
+        })
+        .collect())
 }
 
-/// The finding of `kind` about `held`, carrying `head` named by `suffixes`
+/// The finding of `kind` about `held`, carrying `head` named by `names`
 /// beside `total`.
+///
+/// It is keyed by its link's keys, each in its own key space, and by the
+/// classes its candidates' names are read from: a change in any of them can
+/// move what the finding says, so the changeset's discard reaches it through
+/// any of them.
 fn finding(
     held: &Held,
     kind: FindingKind,
     head: &[Named],
     total: u64,
     message: &str,
-    suffixes: &HashMap<i64, String>,
+    names: &HashMap<i64, CandidateName>,
 ) -> Result<FindingFacts, StoreError> {
     let mut class_keys = BTreeSet::new();
     let mut path_keys = BTreeSet::new();
@@ -871,13 +1062,14 @@ fn finding(
     let candidates = head
         .iter()
         .map(|named| {
+            let name = names.get(&named.id).ok_or_else(|| StoreError::Damaged {
+                what: format!("a judgment named no candidate `{}`", named.path),
+            })?;
+            class_keys.extend(name.classes.iter().cloned());
             Ok(CandidateFact {
                 path: DocumentPath::new(&named.path)
                     .map_err(|_| unreadable("documents.path", &named.path))?,
-                suffix: suffixes
-                    .get(&named.id)
-                    .cloned()
-                    .unwrap_or_else(|| named.path.clone()),
+                suffix: name.suffix.clone(),
             })
         })
         .collect::<Result<Vec<CandidateFact>, StoreError>>()?;

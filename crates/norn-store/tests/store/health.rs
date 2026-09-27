@@ -595,7 +595,8 @@ fn an_ambiguous_finding_carries_head_total_and_hint_and_a_broken_one_no_hint() {
 /// `**/v1.2.md` and every `**/v1.md`, so over two of the first and one of the
 /// second it is ambiguous among three, its head merged across the two classes
 /// in the resolution ladder's order, as the links column reads it, and it is
-/// keyed by both classes.
+/// keyed by both classes, and by `v1.2.md/` and `v1.md/`, the classes its
+/// candidates' written leaves are named in.
 #[test]
 fn a_dotted_leaf_totals_both_reductions() {
     for order in [Sensitive, Folding] {
@@ -621,7 +622,7 @@ fn a_dotted_leaf_totals_both_reductions() {
                 .iter()
                 .map(|key| key.as_str())
                 .collect::<Vec<_>>(),
-            ["v1.2/", "v1/"],
+            ["v1.2.md/", "v1.2/", "v1.md/", "v1/"],
             "{order:?}"
         );
     }
@@ -772,11 +773,15 @@ fn a_missing_anchor_is_judged_by_the_stored_readings() {
     }
 }
 
-/// **A finding's keys are its link's keys.** On either root, each finding is
-/// keyed by exactly the keys the link index holds its link under, in the key
-/// space the root probes: a suffix address's classes, one per reduction; a
-/// path's exact path, or each path a rooted name's reductions spell; and none
-/// for a link that names no vault path. The store files each of them.
+/// **A finding's keys are its link's keys and its candidates' naming
+/// classes.** On either root, each finding is keyed by the keys the link
+/// index holds its link under, in the key space the root probes — a suffix
+/// address's classes, one per reduction; a path's exact path, or each path a
+/// rooted name's reductions spell; and none for a link that names no vault
+/// path — and by the classes each candidate it carries is named in: its
+/// stem's class and its leaf's, each with its reduction's. `V1.2.md` is named
+/// in `V1.2/`, `V1/` and `V1.2.md/`, and `V1.md` in `V1/` and `V1.md/`. The
+/// store files each of them.
 #[test]
 fn a_findings_keys_are_its_links_keys() {
     for order in [Sensitive, Folding] {
@@ -822,10 +827,24 @@ fn a_findings_keys_are_its_links_keys() {
                     (spelled, key.segments.is_some())
                 })
                 .collect();
+            let naming = |candidate: &str| -> &[&str] {
+                match candidate.rsplit('/').next() {
+                    Some("V1.2.md") => &["V1.2/", "V1/", "V1.2.md/"],
+                    Some("V1.md") => &["V1/", "V1.md/"],
+                    other => panic!("{order:?}: a candidate the fixture holds no name of: {other:?}"),
+                }
+            };
+            let in_space = |class: &str| match space {
+                SuffixKey::Raw => class.to_string(),
+                SuffixKey::Folded => class.to_ascii_lowercase(),
+            };
             let expected_classes: BTreeSet<String> = keys
                 .iter()
                 .filter(|(_, class)| *class)
                 .map(|(key, _)| key.clone())
+                .chain(finding.candidates.iter().flat_map(|candidate| {
+                    naming(candidate.path.as_str()).iter().map(|class| in_space(class))
+                }))
                 .collect();
             let expected_paths: BTreeSet<String> = keys
                 .iter()
@@ -847,7 +866,7 @@ fn a_findings_keys_are_its_links_keys() {
             classes = classes.max(filed_classes.len());
             paths = paths.max(filed_paths.len());
         }
-        assert_eq!((classes, paths), (2, 2), "{order:?}: the fixture's reach");
+        assert_eq!((classes, paths), (4, 2), "{order:?}: the fixture's reach");
         assert!(
             findings[&4].class_keys.is_empty() && findings[&4].path_keys.is_empty(),
             "{order:?}: a link naming no vault path is keyed by nothing"
@@ -1142,7 +1161,7 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 8] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 11] = [
     ExplainedStatement::LinkHealthLinks,
     ExplainedStatement::LinkHealthClassLinks,
     ExplainedStatement::LinkHealthPathLinks,
@@ -1151,6 +1170,9 @@ pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 8] = [
     ExplainedStatement::LinkHealthSuffixes,
     ExplainedStatement::LinkHealthAnchors,
     ExplainedStatement::LinkHealthWrittenLinks,
+    ExplainedStatement::LinkHealthClassFindings,
+    ExplainedStatement::LinkHealthFoundLinks,
+    ExplainedStatement::LinkHealthDiscard,
 ];
 
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -1183,12 +1205,13 @@ fn seek(alias: &'static str, access: Access<'static>, constraint: &str) -> Seek 
 
 /// The seeks each judgment statement is held to under `order`.
 fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek> {
-    let (class_index, key, path_index, link_index, link_key) = match order {
+    let (class_index, key, path_index, link_index, suffix_index, link_key) = match order {
         Sensitive => (
             "documents_suffix_key",
             "suffix_key",
             "documents_path",
             "link_keys_key",
+            "link_keys_suffix_key",
             "key",
         ),
         Folding => (
@@ -1196,6 +1219,7 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             "folded_suffix_key",
             "documents_path_nocase",
             "link_keys_folded_key",
+            "link_keys_folded_suffix_key",
             "folded_key",
         ),
     };
@@ -1220,7 +1244,7 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
         ],
         ExplainedStatement::LinkHealthClassLinks => reached(vec![seek(
             "s",
-            Access::Index(link_index),
+            Access::Index(suffix_index),
             &format!("(({link_key},document,link)>(?,?,?) AND {link_key}<?)"),
         )]),
         ExplainedStatement::LinkHealthPathLinks => reached(vec![seek(
@@ -1240,6 +1264,26 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
                 "(document=? AND ordinal>?)",
             ),
         ]),
+        ExplainedStatement::LinkHealthClassFindings => vec![
+            seek(
+                "s",
+                Access::Index("finding_classes_class_key"),
+                "((class_key,finding)>(?,?) AND class_key<?)",
+            ),
+            seek("f", Access::RowId, "(rowid=?)"),
+            seek("d", Access::Index("documents_path"), "(path=?)"),
+            seek(
+                "l",
+                Access::Index("links_document_ordinal"),
+                "(document=? AND ordinal=?)",
+            ),
+        ],
+        ExplainedStatement::LinkHealthFoundLinks => vec![
+            seek("l", Access::RowId, "(rowid=?)"),
+            seek("d", Access::RowId, "(rowid=?)"),
+            seek("k", Access::Index("link_keys_link"), "(link=?)"),
+        ],
+        ExplainedStatement::LinkHealthDiscard => vec![seek("findings", Access::RowId, "(rowid=?)")],
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),

@@ -222,29 +222,37 @@ impl Snapshot {
     }
 }
 
-/// The request that enumerates the classes a finding of `kind` in `classes` is
-/// about: a `find` resolving the address the longest of them reads back as,
-/// ties to the byte-least. Only an ambiguous link's finding has candidates
-/// past its head to enumerate, so every other kind has none; and neither has a
-/// finding in no class, nor one whose address a target cannot spell.
+/// The request that enumerates the class a finding of `kind` about the link
+/// written `target` is about: a `find` resolving the address of the class in
+/// `classes` that the link's own address spells — as written, or folded by
+/// ASCII case where the root folds it. Only an ambiguous link's finding has
+/// candidates past its head to enumerate, so every other kind has none; and
+/// neither has a finding in no class its link spells, nor one whose address a
+/// target cannot spell.
 ///
-/// An ambiguous finding in a class — a suffix-addressed link's — carries the
-/// hint whether or not its head holds the whole total: the hint names the
-/// class, not the candidates the head left out. An ambiguous rooted name is
-/// keyed by paths alone, stands in no class, and so carries none.
-fn hint_of(kind: FindingKind, classes: &BTreeSet<ClassKey>) -> Option<Hint> {
+/// A finding is in the classes its link's keys open and in the classes its
+/// candidates are named in, and only the first name the link: the class the
+/// link spells is the longest of its keys', and a candidate's naming class
+/// can be longer, so the hint is found by the link's own address rather than
+/// by length. An ambiguous finding in a class — a suffix-addressed link's —
+/// carries the hint whether or not its head holds the whole total: the hint
+/// names the class, not the candidates the head left out. An ambiguous rooted
+/// name is written with its protocol and spells no class, and so carries
+/// none.
+fn hint_of(kind: FindingKind, target: Option<&str>, classes: &BTreeSet<ClassKey>) -> Option<Hint> {
     if kind != FindingKind::Ambiguous {
         return None;
     }
-    let longest = classes
-        .iter()
-        .rev()
-        .max_by_key(|class| class.as_str().len())?;
-    let address = longest.address();
-    if address.contains('#') {
+    let written = target?;
+    if written.contains("://") {
         return None;
     }
-    ResolutionTarget::new(address).ok().map(Hint::resolves)
+    let spelled = written.split('#').next()?;
+    let class = classes.iter().find(|class| {
+        let address = class.address();
+        address == spelled || address == spelled.to_ascii_lowercase()
+    })?;
+    ResolutionTarget::new(class.address()).ok().map(Hint::resolves)
 }
 
 /// The row `base` reads as, over its candidate head and the hint its kind
@@ -256,7 +264,7 @@ fn finding_row(
 ) -> Result<FindingRow, StoreError> {
     let kind = FindingKind::try_from(base.kind.as_str())
         .map_err(|_| unreadable("findings.kind", &base.kind))?;
-    let hint = hint_of(kind, classes);
+    let hint = hint_of(kind, base.target.as_deref(), classes);
     let severity = Severity::try_from(base.severity.as_str())
         .map_err(|_| unreadable("findings.severity", &base.severity))?;
     let path = norn_wire::DocumentPath::new(&base.path)
@@ -294,32 +302,52 @@ mod tests {
             .collect()
     }
 
-    /// **A hint names the address the longest class reads back as**, whose
-    /// probe opens every class the ambiguous finding is in; a finding in no
-    /// class, one whose address carries `#`, and a finding of any other kind
-    /// has none.
+    /// **A hint names the class the link's own address spells**, which is
+    /// the class every other class the link opens is a reduction of, and
+    /// never a class a candidate is named in, however long: `[[crowd]]`
+    /// whose candidates are named in `crowd.md/` names `crowd`, and on a
+    /// folding root the folded class. An anchor is no part of the address. A
+    /// finding in no class its link spells, a rooted name, and a finding of
+    /// any other kind have none.
     #[test]
-    fn a_hint_names_the_address_whose_probe_opens_every_class() {
+    fn a_hint_names_the_class_the_links_own_address_spells() {
         let target = |hint: Option<Hint>| match hint {
             Some(Hint::Resolves { target, .. }) => Some(target.to_string()),
             _ => None,
         };
+        let ambiguous = |written: &str, keys: &[&str]| {
+            target(hint_of(FindingKind::Ambiguous, Some(written), &classes(keys)))
+        };
         assert_eq!(
-            target(hint_of(
-                FindingKind::Ambiguous,
-                &classes(&["glossary/norn/"])
-            )),
+            ambiguous("norn/glossary", &["glossary/norn/", "glossary.md/"]),
             Some("norn/glossary".to_string())
         );
         assert_eq!(
-            target(hint_of(FindingKind::Ambiguous, &classes(&["v1/", "v1.2/"]))),
+            ambiguous("v1.2#Setup", &["v1/", "v1.2/", "v1.2.md/"]),
             Some("v1.2".to_string())
         );
-        assert_eq!(hint_of(FindingKind::Ambiguous, &BTreeSet::new()), None);
-        assert_eq!(hint_of(FindingKind::Ambiguous, &classes(&["a#b/"])), None);
+        assert_eq!(
+            ambiguous("crowd", &["crowd.md/", "crowd/"]),
+            Some("crowd".to_string())
+        );
+        assert_eq!(
+            ambiguous("Crowd", &["crowd.md/", "crowd/"]),
+            Some("crowd".to_string())
+        );
+        assert_eq!(ambiguous("crowd", &["crowd.md/"]), None);
+        assert_eq!(ambiguous("vault://v1.2", &["v1/", "v1.2/"]), None);
+        assert_eq!(ambiguous("crowd", &[]), None);
+        assert_eq!(
+            hint_of(FindingKind::Ambiguous, None, &classes(&["crowd/"])),
+            None
+        );
         for kind in FindingKind::ALL {
             if kind != FindingKind::Ambiguous {
-                assert_eq!(hint_of(kind, &classes(&["glossary/"])), None, "{kind}");
+                assert_eq!(
+                    hint_of(kind, Some("glossary"), &classes(&["glossary/"])),
+                    None,
+                    "{kind}"
+                );
             }
         }
     }

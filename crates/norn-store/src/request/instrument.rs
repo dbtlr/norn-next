@@ -163,6 +163,9 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
             ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
             ExplainedStatement::LinkHealthWrittenLinks => health::links_sql(key, Selected::Written),
+            ExplainedStatement::LinkHealthClassFindings => health::class_findings_sql(),
+            ExplainedStatement::LinkHealthFoundLinks => health::links_sql(key, Selected::Links),
+            ExplainedStatement::LinkHealthDiscard => health::discard_sql(),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -342,6 +345,29 @@ impl<'a> Request<'a> {
                     EXPLAINED_DOCUMENT_ROW,
                 )])?),
             ),
+            // A page of a class's findings resumes past a membership inside
+            // the class, for the reason a page's cursor is bound, at the bound
+            // a re-decision reads it by.
+            ExplainedStatement::LinkHealthClassFindings => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::class_findings_parameters(
+                        &class,
+                        &explained_after(class.as_str()),
+                        EXPLAINED_FEED_GENERATION,
+                        LINK_HEALTH_CHUNK,
+                    )),
+                )
+            }
+            // Both lists of row ids are explained over one id, which is bound
+            // as a fact read's id is.
+            ExplainedStatement::LinkHealthFoundLinks | ExplainedStatement::LinkHealthDiscard => {
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::ids_parameters(&[EXPLAINED_DOCUMENT_ROW])?),
+                )
+            }
         }?)
     }
 
@@ -545,6 +571,18 @@ pub enum ExplainedStatement<'a> {
     /// the documents stamped with its generation, beside every key each is
     /// held under.
     LinkHealthWrittenLinks,
+    /// The findings standing under one class the re-decision's second arm
+    /// discards first: a page of the class's memberships the changeset did
+    /// not file, each beside its finding's row id and the row id of the link
+    /// the finding is about.
+    LinkHealthClassFindings,
+    /// The links a page of discarded findings was about, read by their row
+    /// ids beside every key each is held under, so the second arm judges the
+    /// ones no key of the class reaches.
+    LinkHealthFoundLinks,
+    /// The discard of a page of findings by their row ids, which the second
+    /// arm runs over each page of a class's findings.
+    LinkHealthDiscard,
 }
 
 /// How many keyed point reads this seam names.
@@ -558,7 +596,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 37;
+pub const STATEMENTS: usize = 40;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -626,6 +664,9 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthSuffixes,
             Self::LinkHealthAnchors,
             Self::LinkHealthWrittenLinks,
+            Self::LinkHealthClassFindings,
+            Self::LinkHealthFoundLinks,
+            Self::LinkHealthDiscard,
         ]
     }
 
@@ -675,6 +716,9 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthSuffixes => 34,
             Self::LinkHealthAnchors => 35,
             Self::LinkHealthWrittenLinks => 36,
+            Self::LinkHealthClassFindings => 37,
+            Self::LinkHealthFoundLinks => 38,
+            Self::LinkHealthDiscard => 39,
         };
         assert!(
             slot < STATEMENTS,
@@ -753,7 +797,10 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthTotals
             | Self::LinkHealthSuffixes
             | Self::LinkHealthAnchors
-            | Self::LinkHealthWrittenLinks => false,
+            | Self::LinkHealthWrittenLinks
+            | Self::LinkHealthClassFindings
+            | Self::LinkHealthFoundLinks
+            | Self::LinkHealthDiscard => false,
         }
     }
 }

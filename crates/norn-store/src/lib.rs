@@ -14,8 +14,10 @@
 //! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed. It takes **typed facts rather than documents**: parsing
-//! is orchestration's job, so nothing here reads document text.
+//! query is composed, save one rule [ADR 0027] rules into it: link health,
+//! judged in SQL and filed inside every changeset ([`health`]). It takes
+//! **typed facts rather than documents**: parsing is orchestration's job, so
+//! nothing here reads document text.
 //!
 //! # Where to start
 //!

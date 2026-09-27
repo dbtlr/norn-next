@@ -44,6 +44,8 @@ pub(crate) enum Selected {
     /// By a path key: an equality seek of the link index at the key. Read a
     /// page at a time.
     Path,
+    /// By their row ids: an equality seek of `links` per id. Read whole.
+    Links,
 }
 
 impl Selected {
@@ -142,6 +144,14 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
          WHERE d.path = j.value AND l.document = d.id"
             );
         }
+        Selected::Links => {
+            return format!(
+                "SELECT {columns}, NULL, NULL, NULL
+         FROM json_each(?1) AS j CROSS JOIN links AS l CROSS JOIN documents AS d
+         LEFT JOIN link_keys AS k ON k.link = l.id
+         WHERE l.id = j.value AND d.id = l.document"
+            );
+        }
         Selected::Written => "SELECT lw.id AS link, dw.path AS after_text,
                         lw.ordinal AS after_first, 0 AS after_second
                  FROM documents AS dw CROSS JOIN links AS lw
@@ -208,6 +218,62 @@ fn paged(selected_by: Value, after: &After, limit: usize) -> Vec<Value> {
 /// The values [`links_sql`] binds over documents: their paths.
 pub(crate) fn documents_parameters(documents: &[&str]) -> Result<Vec<Value>, StoreError> {
     Ok(vec![path_list(documents)?])
+}
+
+/// The values [`links_sql`] binds over links, and [`discard_sql`] over
+/// findings: their row ids.
+pub(crate) fn ids_parameters(ids: &[i64]) -> Result<Vec<Value>, StoreError> {
+    Ok(vec![Value::Text(canonical_json(&FrontmatterValue::Sequence(
+        ids.iter().copied().map(FrontmatterValue::Int).collect(),
+    ))?)])
+}
+
+/// [`crate::ExplainedStatement::LinkHealthClassFindings`]: a page of the
+/// findings standing under a class that no statement of the changeset
+/// stamped with `?4` filed, at most `?5` rows, each the class key it is held
+/// under, its row id, and the row id of the link it is about — `NULL` where
+/// it is about no link. The page resumes past the `(class key, finding)` pair
+/// `?2`, `?3`, and ends below the class's upper bound `?1`.
+///
+/// A range seek of `finding_classes_class_key`, which holds the finding
+/// beside its key and so orders the pairs the page resumes by; each finding
+/// is reached by its row id, its holder by its path, and its link by the
+/// holder and the ordinal. A finding the changeset filed is stepped past, and
+/// is one of the re-decided set's own.
+pub(crate) fn class_findings_sql() -> String {
+    "SELECT s.class_key, s.finding, l.id
+     FROM finding_classes AS s CROSS JOIN findings AS f
+     LEFT JOIN documents AS d ON d.path = f.path
+     LEFT JOIN links AS l ON l.document = d.id AND l.ordinal = f.ordinal
+     WHERE (s.class_key, s.finding) > (?2, ?3) AND s.class_key < ?1
+       AND f.id = s.finding AND f.generation < ?4
+     ORDER BY s.class_key, s.finding LIMIT ?5"
+        .to_string()
+}
+
+/// The values [`class_findings_sql`] binds over one page of a class: its
+/// upper bound, the pair the page resumes past, the generation the changeset
+/// was stamped with, and the page's bound.
+pub(crate) fn class_findings_parameters(
+    class: &ClassKey,
+    after: &After,
+    generation: i64,
+    limit: usize,
+) -> Vec<Value> {
+    vec![
+        Value::Text(class.bounds().1),
+        Value::Text(after.text.clone()),
+        Value::Integer(after.first),
+        Value::Integer(generation),
+        Value::Integer(i64::try_from(limit).expect("a page bound fits i64")),
+    ]
+}
+
+/// [`crate::ExplainedStatement::LinkHealthDiscard`]: discard the findings
+/// whose row ids `?1` lists, each by its row id, their candidate, class and
+/// path rows going with them.
+pub(crate) fn discard_sql() -> String {
+    "DELETE FROM findings WHERE id IN (SELECT value FROM json_each(?1))".to_string()
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each

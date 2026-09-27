@@ -147,8 +147,10 @@ pub struct IncrementOutcome {
     /// the store's path order selects — raw where its root tells spellings
     /// apart, folded by ASCII case where it folds — which is the space every
     /// finding in the store is filed in. This is the resolution axis of the
-    /// findings maintenance this changeset implies: the classes whose
-    /// suffix-addressed links the store re-decided the link health of.
+    /// findings maintenance this changeset implies: the classes whose standing
+    /// findings the store discarded and whose suffix-addressed links it
+    /// re-decided the link health of, with every link one of those findings
+    /// was about.
     ///
     /// The subject axis carries no field beside it: the paths whose findings
     /// went are the changeset's own entries, which the caller processed one by
@@ -281,15 +283,14 @@ pub(crate) fn apply(
             crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
         let discarded =
-            discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
-        tally.findings_discarded += discarded;
-        let discarded =
             discard_affected_paths(&mut statements.discard_path, &tally.affected_paths)?;
         tally.findings_discarded += discarded;
     }
 
     // The findings the same act derived, after the discards above so that a
-    // finding this act still concludes is not taken by them. Each one that
+    // finding this act still concludes is not taken by them; the class
+    // discard, which the re-decision below runs, passes every finding this
+    // changeset filed. Each one that
     // names a scope replaces that scope at its subject first, which is
     // discard-then-record for a subject the changeset does not name.
     for DerivedFinding { facts, replaces } in findings {
@@ -301,10 +302,10 @@ pub(crate) fn apply(
     }
 
     // Link health, re-decided last, so every fact it reads is the one this
-    // changeset leaves and every finding it replaces is already gone: the
-    // subject discard took the findings at each written path, and the class
-    // and path discards took every finding keyed by a class or a path this
-    // changeset changed.
+    // changeset leaves: the subject discard took the findings at each written
+    // path and the path discard every finding keyed by a path this changeset
+    // changed, and the re-decision discards the findings under each class it
+    // changed before it files one in that class.
     let redecided = match generation {
         Some(generation) => health::redecide(
             &transaction,
@@ -340,6 +341,7 @@ pub(crate) fn apply(
     counters.add(Counter::TagRowsWritten, tally.tag_rows);
     counters.add(Counter::FieldRowsWritten, tally.field_rows);
     counters.add(Counter::FrontmatterProjections, tally.projections);
+    tally.findings_discarded += redecided.discarded;
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
     counters.add(
         Counter::FindingsWritten,
@@ -405,8 +407,6 @@ struct Statements<'t> {
     record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
     discard_subject: CachedStatement<'t>,
-    /// The class-scoped findings discard, over one class at a time.
-    discard_class: CachedStatement<'t>,
     /// The path-keyed findings discard, over one path key at a time.
     discard_path: CachedStatement<'t>,
 }
@@ -524,10 +524,6 @@ impl<'t> Statements<'t> {
             discard_subject: prepared(
                 request::SUBJECT_DISCARD_SQL,
                 "preparing a path's findings discard",
-            )?,
-            discard_class: prepared(
-                &request::class_discard_sql(1),
-                "preparing a class's findings discard",
             )?,
             discard_path: prepared(
                 request::PATH_DISCARD_SQL,
@@ -885,39 +881,15 @@ fn discard_the_subject(
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
 }
 
-/// Discard the findings in every class the changeset's paths affect, and report
-/// how many went.
-///
-/// One seek per class rather than one predicate over all of them: each class is
-/// a range over `finding_classes(class_key)`, and the statement that opens one
-/// is prepared once and run per class. The count is findings rather than rows,
-/// because a finding a previous range — or the subject axis — already took is
-/// found gone rather than counted twice.
-fn discard_affected_classes(
-    statement: &mut CachedStatement<'_>,
-    classes: &BTreeSet<ClassKey>,
-) -> Result<u64, StoreError> {
-    let mut discarded = 0_u64;
-    for class in classes {
-        // The statement was compiled for one range, and a class key is its
-        // own range's lower bound.
-        let (lower, upper) = class.bounds();
-        discarded += statement
-            .execute(params![lower, upper])
-            .map_err(|error| error::sql("discarding a class's findings", error))?
-            as u64;
-    }
-    Ok(discarded)
-}
-
 /// Discard the findings keyed by every path the changeset writes or kills, and
 /// report how many went.
 ///
 /// One equality seek of `finding_paths_path_key` per path, prepared once and
 /// run per key. A path key is matched exactly and never as a prefix, so the
 /// findings about links to `glossary/x.md` stand through a change to
-/// `glossary/x.md/y.md`. The count is findings rather than rows, for the reason
-/// [`discard_affected_classes`] states.
+/// `glossary/x.md/y.md`. The count is findings rather than rows, because a
+/// finding the subject axis already took is found gone rather than counted
+/// twice.
 fn discard_affected_paths(
     statement: &mut CachedStatement<'_>,
     paths: &BTreeSet<PathKey>,

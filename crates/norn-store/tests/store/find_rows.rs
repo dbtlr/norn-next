@@ -976,6 +976,7 @@ fn a_rows_findings_column_carries_what_validate_answers_at_its_path() {
         finding.kind = kind;
         finding.ordinal = Some(ordinal);
         finding.class_keys = classes(&["glossary/"]);
+        finding.target = Some("glossary".to_string());
         finding
     };
     for finding in [
