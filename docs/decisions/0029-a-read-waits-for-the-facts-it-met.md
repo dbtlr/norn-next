@@ -1,30 +1,36 @@
 ---
-status: superseded
-superseded-by: 0029-a-read-waits-for-the-facts-it-met.md
+status: accepted
 date: 2026-09-26
 ---
 
-# 0028 — wire reads run on store-minted snapshot readers, a read's hold is demand, a read waits out a change it was served over, and teardown never waits for one
+# 0029 — wire reads run on store-minted snapshot readers, a read's hold is demand, a read waits for the facts it met and never for the vault to fall quiet, and teardown never waits for one
 
-Supersedes [ADR 0025](0025-a-reads-hold-is-demand.md), whose reader, lifetime rule, demand
-lease and prices this decision restates whole. ADR 0025 set heals aside as a motivating case
-on the clause that "a re-heal drops trust out of `Ready`, where reads already refuse". Read as
-written, that clause refuses every read that meets an entry out of `Ready`, and an entry
-leaves `Ready` for every change it takes in: each polled watcher batch, each reconcile turn
-and each schema reload publishes warming until the change is derived. So a client that edits
-a note and then queries it is refused, and every client, agents included, would have to catch
-that refusal and retry after each edit. **A read that meets an entry reconciling a change,
-over a snapshot the entry has already served, waits up to a bound for `Ready` and answers
-from the snapshot established under that wait. It never answers from the state before the
-change.** Everything else ADR 0025 ruled stands: a read's hold is demand on the entry, and
-it is the lifecycle's own demand lease that says so; the reader's open is a **fallible
-mint** that answers a reason rather than an absence and never panics under the entry gate;
-and **no acquisition waits for the entry's connection while it holds the entry gate**, a
-rule the read's new wait obeys in the same way. ADR 0025 itself superseded
-[0015](0015-snapshot-reader-lifetime.md), which superseded
+Supersedes [ADR 0028](0028-a-read-waits-out-a-change-it-was-served-over.md), whose reader,
+lifetime rule, demand lease, read stance, bound and prices this decision restates whole.
+ADR 0028 ruled that a settling read establishes its snapshot only where the published
+reading is `Ready`, that it answers from the first `Ready` it observes, and that it does not
+wait for the vault to fall quiet. Under steady edits those three cannot all hold. A
+reconcile turn that drained new facts hands on to the next turn and publishes no `Ready`
+between the two, so a vault edited faster than one turn takes publishes no `Ready` at all,
+and every read that meets it refuses at its bound: a reproduction ran 66,619 reconcile
+turns inside one read's 300 ms wait. **A settling read records how far the facts the entry
+had taken in ran when the read met it, and answers once the entry is `Ready` or has derived
+every one of those facts with a reader standing. Its snapshot is never older than the change
+it arrived during, and it never waits for the vault to fall quiet.** The invariant ADR 0028
+bought — no read answers from the state before the change it met — is kept; what changes is
+that the read no longer waits for a `Ready` a busy vault never publishes.
+
+Everything else ADR 0028 ruled stands, including what it kept from ADR 0025: a read's hold
+is demand on the entry, and it is the lifecycle's own demand lease that says so; the
+reader's open is a **fallible mint** that answers a reason rather than an absence and never
+panics under the entry gate; **no acquisition waits for the entry's connection while it
+holds the entry gate**, a rule the read's wait obeys in the same way; what settles and what
+refuses at once; the bound; teardown waking a waiting read; and the known limit during a
+maintenance scan. ADR 0028 itself superseded [0025](0025-a-reads-hold-is-demand.md), which
+superseded [0015](0015-snapshot-reader-lifetime.md), which superseded
 [0014](0014-snapshot-readers.md); what 0015 corrected was the reach of the lifetime rule,
-what 0025 corrected was what a read's hold is, and what this record corrects is what a read
-does when the vault it reads is changing.
+what 0025 corrected was what a read's hold is, what 0028 corrected was what a read does when
+the vault it reads is changing, and what this record corrects is when that read may answer.
 
 The store's one writer connection sits behind `&mut`, inside the attachment that every
 lifecycle job holds for its whole duration — so a wire read borrowing it would serialize
@@ -52,10 +58,12 @@ connection, the acquisition gives the gate back, waits outside it under the dema
 already recorded, takes the gate again and reads the published demand afresh before it
 establishes. Where the entry has stopped serving, or its reader is no longer the one waited
 for, the acquisition gives the connection back and answers what the entry now publishes
-under the stance ruled below: where the entry settles, it waits; where the entry is `Ready`
-on a reader other than the one it waited for, it acquires that reader, within the same
-bound; and it refuses with what the entry publishes only where the entry neither settles nor
-serves — lost trust, a release, a park.
+under the stance ruled below: where the entry settles without answering the read, it waits;
+where the entry answers the read on a reader other than the one it waited for, it acquires
+that reader, within the same bound; and it refuses with what the entry publishes only where
+the entry neither settles nor serves — lost trust, a release, a park. **The wait for the
+connection ends at the read's bound**: a read that finds the connection still held past it
+refuses as reader-unavailable, since the entry serves and only its read seam is taken.
 
 ADR 0015 priced that contention as "the hot per-entry lock riding across that one
 statement — a cheap read alone, a wait where a concurrent read still holds the one reader",
@@ -120,7 +128,7 @@ asks for an answer, and a vault the registry has parked has none to give. A read
 entry therefore refuses with the park's own code — identity refused, duplicate root and
 maintainer contention alike — and schedules nothing.
 
-## A read waits out a change it was served over
+## A read waits for the facts it met
 
 **Whether a read waits is its stance, and the stance is read under the entry gate, in the
 same critical section that reads the published demand.** There are two stances.
@@ -138,40 +146,51 @@ Warming published by a reconcile and warming published by a recovery or a rebuil
 same trust label, so the label does not say how warming was entered. The entry's own state
 holds that fact, beside the published demand, and the stance is read from it.
 
-**The wait obeys ADR 0025's standing rule: no acquisition waits while it holds the entry
-gate.** A settling read gives the gate back, waits outside it on a signal that moves only
-when the stance changes, takes the gate again, and reads the published demand afresh. It
-establishes its snapshot only where that reading is `Ready`, in the same critical section,
-so the snapshot it answers from is one the change has already reached. **A settling read
-that finds a new reader after the wait acquires that reader and answers from it, under the
-same bound**: a schema reload gives back the reader it warmed over and mints another once
-`Ready` returns, and the read the reload settled answers from that one; it refuses only
-where the entry is no longer settling or `Ready` — lost trust, a release, a park. The demand it
-recorded before the wait holds the entry across it, as it does across a wait for the
-connection.
+**The wait obeys the standing rule: no acquisition waits while it holds the entry gate.** A
+settling read gives the gate back, waits outside it on a signal that moves when the stance
+changes or when the entry has derived further through the facts it has taken in, takes the
+gate again, and reads the published demand afresh.
 
-**The wait is fair.** A read answers from the first `Ready` it observes after it began; it
-does not wait for the vault to fall quiet. Past its bound, the read refuses as still
-indexing, under the same `host/entry-not-ready` code, with the message "this vault is still
-indexing a change". The message a warming refusal carried before this decision, "holds
-nothing to answer the read from yet", is false for a vault that has served.
+**A settling read waits for the facts it met, never for the ones that arrive after it.**
+Under the first hold that finds the entry settling, the read records how far the facts the
+entry has taken in run at that instant, and it never moves that record. It establishes its
+snapshot, in the same critical section that reads the published demand, at the first of two
+things it observes: the entry `Ready`, or the entry having derived every fact up to that
+record with a reader standing beside it. Either way the snapshot holds every fact the entry
+knew of when the read met it, so **it is never older than the change the read arrived
+during**. A schema reload waits for `Ready`, because it replaces the reader: a read it
+settles answers from the reader minted once `Ready` returns. **A settling read that finds a
+new reader after the wait acquires that reader and answers from it, under the same bound**;
+it refuses only where the entry neither settles nor serves — lost trust, a release, a park.
+The demand it recorded before the wait holds the entry across it, as it does across a wait
+for the connection.
+
+**The answer reports what it was taken under.** The trust an answer carries is what the
+entry published at the instant its snapshot was established. Where later facts are still
+being derived, that is warming in its healing phase, not `Ready`, and the answer says so.
+The generation it carries is the store's committed write generation.
+
+**The wait is fair.** It never runs until the vault falls quiet: a vault edited faster than
+one reconcile turn takes still answers a read that meets it, once the facts that read met are
+derived. Past its bound, the read refuses as still indexing, under the `host/entry-not-ready`
+code, with the message "this vault is still indexing a change".
 
 **Teardown never waits for a read, and a waiting read is no exception.** A teardown's
 publication moves the stance to refuse, which wakes every waiting read, and each of them
-refuses with what that publication states.
+takes the gate again and refuses with what the entry then publishes, unless the entry has
+reached `Ready` again before that retake.
 
 **The bound is operational containment, not a performance threshold.** It keeps a read from
 waiting on a change that does not converge, and it states nothing about how fast a change
 should settle. It is a lifecycle policy value, and its production value equals the settle
 ceiling already authored for one vault walk: 5 seconds. The bound runs from the read's
 first hold of the entry gate and covers every wait the read takes, the wait for the
-connection and the wait for `Ready` together.
-
-The wait is ruled and not yet built.
+connection and the wait for the change together.
 
 ### Drivers
 
-- **Least surprise.** A client that edits a note and then queries it sees the edit.
+- **Least surprise.** A client that edits a note and then queries it sees the edit, even
+  while other notes are being edited.
 - **Trust over speed.** A read never answers from a state it knows is stale.
 - **No retry burden on every client.** Without the wait, every client, agents included,
   must catch a refusal and retry after each edit it makes.
@@ -198,11 +217,13 @@ scheduled. It answers the same safety question and loses twice: it makes a vault
 for the length of a teardown the caller's own demand would have cancelled, and it would be
 a second rule about a demanded entry in a lifecycle that already has one.
 
-Three alternatives to the wait were rejected:
+Four alternatives to the wait were rejected:
 
 - **Keep refusing.** It pushes the retry onto every client, for every edit.
-- **Answer from the last snapshot.** That answer is stale, and a read that answers stale
-  breaks the trust the trust state exists to carry.
+- **Answer only from `Ready`.** Under steady edits no `Ready` is published, so every read
+  that meets the vault starves until its bound and refuses.
+- **Answer from the last `Ready` snapshot.** That answer is stale, and a read that answers
+  stale breaks the trust the trust state exists to carry.
 - **Check the watcher on every read.** The substrate maintains trust by signal and by
   schedule, never per request.
 
@@ -216,6 +237,9 @@ are what keep the WAL pin short. The lifetime rule prices one more: a read that 
 teardown runs under finishes against files the teardown has unlinked, and its descriptors
 ride until the hold drops. The lease prices another: a vault under continuous read
 traffic is a vault the idle budget stops bounding, which is what the idle interval is for, and the
-lease's restart on drop is what keeps that honest. The wait prices the last one: a read that
+lease's restart on drop is what keeps that honest. The wait prices another: a read that
 meets a change holds its caller for up to the bound, and its demand holds the entry's idle
-interval open for as long as it waits.
+interval open for as long as it waits. Answering before `Ready` prices the last one: an
+answer can be taken while later facts are still being derived; it says so in the trust it
+carries, and a client that needs those later facts must read that trust rather than assume
+`Ready`.

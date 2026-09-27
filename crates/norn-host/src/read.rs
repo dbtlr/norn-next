@@ -75,9 +75,12 @@ impl HoldReading {
     /// The reading an answer taken under this hold carries: the trust state the
     /// entry published and the store reading its snapshot was established at.
     ///
-    /// A hold is taken only under a published demand that serves, so the
-    /// demand answers with its state; one that did not would be refused with
-    /// its own envelope, through the mapping every demand renders through. A
+    /// A hold is taken only under a published demand that answers a read —
+    /// `Ready`, or the healing of an entry that has derived every fact the
+    /// read met — so the demand answers with its state, and the trust an
+    /// answer carries is what the entry published at the instant its
+    /// snapshot was established; one that did not would be refused with its
+    /// own envelope, through the mapping every demand renders through. A
     /// write generation below zero names no position in any database, so the
     /// statement that read it is refused under `host/read-failed`.
     pub(crate) fn answer_reading(&self, name: &VaultName) -> Result<AnswerReading, ErrorEnvelope> {

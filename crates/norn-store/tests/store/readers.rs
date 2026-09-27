@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::common::{Scratch, document, write_document};
 
@@ -255,18 +256,77 @@ fn a_second_read_waits_for_the_one_connection_and_takes_it_when_it_comes_back() 
     let waiting = Arc::clone(&reader);
     let second = thread::spawn(move || {
         waiting
-            .wait_for_the_connection()
+            .wait_for_the_connection_until(Instant::now() + Duration::from_secs(60))
+            .expect("the connection came back inside a minute")
             .establish()
             .expect("a second snapshot")
     });
     // The second read cannot establish while the first holds the connection,
     // so the hand-back is what releases it.
-    thread::sleep(std::time::Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(50));
     drop(held);
     let second = second.join().expect("the waiting read finished");
     assert!(
         second.reading().write_generation() > 0,
         "the read that waited for the connection answered under no reading"
+    );
+}
+
+/// How far past its deadline a wait for the connection may be seen to end.
+const DEADLINE_SLACK: Duration = Duration::from_millis(250);
+
+/// **A wait for the connection ends at its deadline.** While another read
+/// holds the connection, a wait answers nothing once its deadline passes, and
+/// it leaves the connection where the holding read gives it back; a deadline
+/// already past answers at once. The control is the same wait after the hand
+/// back, which takes the connection even past its deadline, because nothing
+/// is left to wait for.
+///
+/// The wait ends inside [`DEADLINE_SLACK`] of its deadline: room for a loaded
+/// host to schedule the waking thread, and well short of a wait that runs a
+/// second past it.
+#[test]
+fn a_wait_for_the_connection_ends_at_its_deadline() {
+    let scratch = Scratch::new("reader-deadline");
+    let mut store = scratch.open();
+    write_one(&mut store, "notes/first.md");
+    let reader = Arc::new(store.open_reader().reader.expect("a reader"));
+
+    let held = a_snapshot(&reader);
+    let deadline = Instant::now() + Duration::from_millis(50);
+    assert!(
+        reader.wait_for_the_connection_until(deadline).is_none(),
+        "a wait took a connection another read holds"
+    );
+    let ended = Instant::now();
+    assert!(
+        ended >= deadline,
+        "the wait ended {:?} before its deadline",
+        deadline - ended
+    );
+    assert!(
+        ended < deadline + DEADLINE_SLACK,
+        "the wait ran {:?} past its deadline",
+        ended - deadline
+    );
+
+    let started = Instant::now();
+    assert!(
+        reader.wait_for_the_connection_until(started).is_none(),
+        "a wait past its deadline took a connection another read holds"
+    );
+    assert!(
+        started.elapsed() < DEADLINE_SLACK,
+        "a wait past its deadline waited {:?}",
+        started.elapsed()
+    );
+
+    drop(held);
+    assert!(
+        reader
+            .wait_for_the_connection_until(Instant::now())
+            .is_some(),
+        "a wait past its deadline refused a connection nothing holds"
     );
 }
 

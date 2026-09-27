@@ -28,7 +28,7 @@ use norn_wire::{
     FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, Predicate, ReasonCode,
     ResolutionTarget, Rung, RungSelection, RungSet, SearchParams, Sort, SortKey, TrustState,
     Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
-    VaultRoot,
+    VaultRoot, WarmingPhase,
 };
 
 /// The generated profile every case here attaches.
@@ -670,6 +670,16 @@ fn assert_read_from_its_snapshot(reading: &norn_wire::AnswerReading, vault: &att
     );
 }
 
+/// The last write generation the vault's store has committed.
+fn committed_generation(vault: &attach::Vault) -> u64 {
+    let generation = vault
+        .store()
+        .begin_request()
+        .write_generation()
+        .expect("the store's generation");
+    u64::try_from(generation).expect("a generation at or above zero")
+}
+
 fn address(name: &VaultName) -> VaultAddress {
     VaultAddress::name(name.clone())
 }
@@ -1037,6 +1047,91 @@ fn a_get_of_an_unknown_target_refuses_as_unknown() {
         refused.detail(),
         &ErrorDetail::unknown_target(a_target("zz-nowhere#^gone"))
     );
+}
+
+/// **A read issued after an edit answers the edit, and no read on the way to
+/// it is refused.** A burst of documents is written into a vault that is
+/// `Ready`, and reads are issued back to back from that instant: while the
+/// watcher has not reported the burst, a read answers the state before it,
+/// which is the only thing the vault can know; once the entry is taking the
+/// burst in, a read waits for it rather than refusing or answering the state
+/// the burst made stale; and a read after that answers the document written
+/// last. A read refused as not ready at any point is the failure.
+#[test]
+fn a_read_issued_after_an_edit_answers_it_and_none_is_refused_meanwhile() {
+    let (_sandbox, vault) = a_vault("host-reads-after-an-edit");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let committed_before = committed_generation(&vault);
+
+    let folder = vault.path().join("zz-burst");
+    std::fs::create_dir_all(&folder).expect("create the burst's folder");
+    const BURST: usize = 200;
+    for index in 0..BURST {
+        std::fs::write(
+            folder.join(format!("zz-burst-{index:03}.md")),
+            format!("# Burst {index}\n\nwritten after ready ^burst{index}\n"),
+        )
+        .expect("write a burst document");
+    }
+    let last = a_target(&format!("zz-burst-{:03}", BURST - 1));
+
+    let deadline = std::time::Instant::now() + attach::READY_LIMIT;
+    let answered = loop {
+        match host.get(&GetParams::new(address(vault.name()), last.clone())) {
+            Ok(answered) => break answered,
+            Err(refused) => assert_eq!(
+                refused.detail(),
+                &ErrorDetail::unknown_target(last.clone()),
+                "a read issued after an edit was refused rather than answered: {refused:?}"
+            ),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no read answered the document written last inside {:?}",
+            attach::READY_LIMIT
+        );
+        std::thread::yield_now();
+    };
+    // A read answers once every fact the entry had taken in when it arrived
+    // is derived, so it may answer while later facts of the burst are still
+    // being derived, and says so.
+    assert!(
+        matches!(
+            answered.answer.reading.trust,
+            TrustState::Ready
+                | TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                }
+        ),
+        "the read answered under {:?}",
+        answered.answer.reading.trust
+    );
+    let GetReport::Record { document, .. } = &answered.answer.report else {
+        panic!(
+            "the burst's last document answered {:?}",
+            answered.answer.report
+        );
+    };
+    assert_eq!(
+        document.path.as_str(),
+        format!("zz-burst/zz-burst-{:03}.md", BURST - 1)
+    );
+    // The answer names the store's committed write generation at the instant
+    // its snapshot was established: past the one before the burst, since the
+    // snapshot holds the burst's last document, and no further than the store
+    // has committed since.
+    let generation = answered.answer.reading.generation;
+    assert!(
+        committed_before < generation && generation <= committed_generation(&vault),
+        "the answer names generation {generation}, which is not one the burst committed \
+         (the store stood at {committed_before} before it)"
+    );
+    // Whether a read met the burst mid-reconcile, and so waited, depends on
+    // the watcher's schedule; the lifecycle's own tests hold the settle wait
+    // and its bound at a known point, so this one holds only what the read
+    // answered.
 }
 
 /// **A part a verb could not apply reaches the answer through the host.** A

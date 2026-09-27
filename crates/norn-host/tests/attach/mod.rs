@@ -329,6 +329,7 @@ impl Vault {
                 idle_after: IDLE_AFTER,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(50),
+                read_settle_bound: norn_host::READ_SETTLE_BOUND,
             },
         )
         .expect("production host");

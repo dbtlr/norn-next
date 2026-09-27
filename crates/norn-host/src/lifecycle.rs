@@ -34,7 +34,7 @@ mod gate;
 mod serving;
 
 use claim::{Claim, Coverage, Leg};
-use gate::EntryGate;
+use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
 use serving::ServingSet;
 
@@ -46,6 +46,10 @@ pub struct LifecyclePolicy {
     pub worker_slots: usize,
     /// Cadence of the one host-wide nonblocking watcher scan.
     pub watch_poll_interval: Duration,
+    /// Longest a read waits for an entry taking in a change, from the read's
+    /// first hold of the entry gate, across every wait the read takes.
+    /// Operational containment: past it the read refuses.
+    pub read_settle_bound: Duration,
 }
 
 /// Work coalesced behind an entry's capacity-one scheduling marker.
@@ -136,7 +140,7 @@ pub struct MintedReader<R> {
 /// that holds it gives it back only when it ends — so an acquisition that
 /// waited for it under the entry gate would be waiting for a lock the holding
 /// read needs in order to let go. [`ReadSource::try_take`] is the act a caller
-/// under the gate performs; [`ReadSource::wait_for_the_connection`] is the act
+/// under the gate performs; [`ReadSource::wait_for_the_connection_until`] is the act
 /// it performs with the gate given back.
 pub trait ReadSource: Send + Sync + 'static {
     /// One read's established snapshot. It holds the handle it was established
@@ -156,12 +160,15 @@ pub trait ReadSource: Send + Sync + 'static {
     /// on it.
     fn try_take(self: &Arc<Self>) -> Option<Self::Turn>;
 
-    /// Wait for this handle's connection, and take it.
+    /// Wait for this handle's connection until `deadline`, and take it; or,
+    /// where the deadline passes first, answer nothing.
     ///
-    /// **Never called under the entry gate.** It blocks until the read holding
-    /// the connection ends, and that read asks for the entry gate on its way
-    /// out.
-    fn wait_for_the_connection(self: &Arc<Self>) -> Self::Turn;
+    /// **Never called under the entry gate.** It waits for the read holding
+    /// the connection to end, and that read asks for the entry gate on its
+    /// way out. The wait ends when the connection comes back or when the
+    /// deadline passes, whichever is first, so nothing else — a teardown that
+    /// wakes no waiter among them — keeps it waiting.
+    fn wait_for_the_connection_until(self: &Arc<Self>, deadline: Instant) -> Option<Self::Turn>;
 
     /// Statements SQLite has begun on the calling thread over every handle's
     /// connection, transaction control included, over the thread's life. A
@@ -907,10 +914,11 @@ impl<A: SnapshotSource> Entry<A> {
             registration,
             gate: EntryGate::new(EntryState {
                 trust: TrustState::Unattached,
+                trust_unbroken_since_ready: false,
                 coverage: Coverage::none(),
                 reader: None,
                 reader_unavailable: None,
-                pending: Batch::default(),
+                pending: PendingFacts::default(),
                 active_fingerprints: None,
                 active_content_model: Arc::new(ContentModel::none()),
                 control_root: None,
@@ -946,6 +954,26 @@ impl<A: SnapshotSource> Entry<A> {
 
 struct EntryState<A: SnapshotSource> {
     trust: TrustState,
+    /// Whether the entry's trust has stood unbroken since it last published
+    /// `Ready`: no withdrawal of trust, no teardown, no new coverage and no
+    /// park between that publication and now.
+    ///
+    /// **It is what says how a warming entry entered warming**, which the
+    /// trust label does not: a reconcile's healing and a recovery's healing
+    /// carry one label. An entry healing with this set entered warming from
+    /// `Ready`, taking in a change over coverage it has served, and a read
+    /// that meets it waits for that change ([`ReadStance::Settle`]); an entry
+    /// healing without it entered warming from untrusted, or has never
+    /// served, and a read refuses at once.
+    ///
+    /// Set only by [`EntryState::end_hold`], as a hold ends at `Ready`.
+    /// Cleared where trust breaks: by [`EntryState::withdraw_trust`], which is
+    /// every withdrawal; by [`EntryState::install_coverage`],
+    /// [`EntryState::remint_coverage`] and [`begin_release`], because the
+    /// coverage it speaks of is the coverage they replace or give back; and by
+    /// `end_hold` where a hold ends at a state that neither serves nor
+    /// settles.
+    trust_unbroken_since_ready: bool,
     /// The entry's coverage, and who holds it.
     coverage: Coverage<A>,
     /// The read-only snapshot handle this entry's reads run on, where its
@@ -979,7 +1007,10 @@ struct EntryState<A: SnapshotSource> {
     /// meets it: a reason kept past the mint that replaced it would name an
     /// open nothing ran.
     reader_unavailable: Option<ReaderUnavailable>,
-    pending: Batch,
+    /// The facts the entry has taken in and no leg has taken yet, and how
+    /// far along the stream of every fact it has taken in its reconciles
+    /// have derived.
+    pending: PendingFacts,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
     /// The content model of the schema the entry's store pins, which a read
@@ -1144,6 +1175,70 @@ enum Service {
     Retired,
 }
 
+/// The facts an entry has taken in and no leg has taken yet, and the entry's
+/// position in the stream of every fact it has taken in.
+///
+/// **Every fact taken in moves the position, and nothing else does.**
+/// [`PendingFacts::merge`] is the one way a batch enters, and it counts each
+/// batch that carries a fact; a batch carrying none — the drain of a turn
+/// that observed nothing — names nothing a turn is coming to derive, so it
+/// leaves the position where it stands. A reconcile turn takes what is
+/// pending together with the position it runs through, and where the turn
+/// commits, every fact up to that position is derived. So a read that met
+/// the entry's change at one position may answer from a snapshot established
+/// once the entry has derived through it, whatever arrived after: that
+/// snapshot holds every fact the entry knew of when the read met it.
+///
+/// The position and how far the entry has derived run over the entry's
+/// life: coverage going back drops the pending facts and neither count, so
+/// a position a read recorded is compared with the same count however many
+/// coverages come and go.
+#[derive(Debug, Default)]
+struct PendingFacts {
+    batch: Batch,
+    /// Batches taken in, over the entry's life.
+    taken_in: u64,
+    /// The position through which a committed reconcile turn has derived the
+    /// facts taken in.
+    derived_through: u64,
+}
+
+impl PendingFacts {
+    /// Take `batch` in, moving the position one past it where it carries a
+    /// fact.
+    fn merge(&mut self, batch: Batch) {
+        if batch.is_empty() {
+            return;
+        }
+        self.batch.merge(batch);
+        self.taken_in += 1;
+    }
+
+    /// Take every pending fact for a leg, with the position they run through.
+    fn take(&mut self) -> (Batch, u64) {
+        (std::mem::take(&mut self.batch), self.taken_in)
+    }
+
+    /// Drop every pending fact, for coverage that is going back: the next
+    /// coverage derives the vault whole. The position stands.
+    fn clear(&mut self) {
+        self.batch = Batch::default();
+    }
+
+    /// Record that a reconcile turn committed every fact up to `position`.
+    fn derive_through(&mut self, position: u64) {
+        self.derived_through = self.derived_through.max(position);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+
+    fn has_rescans(&self) -> bool {
+        !self.batch.rescans().is_empty()
+    }
+}
+
 /// What a read's re-mint left: the handle the read runs on, and what the mint
 /// ran against the database while that read held the entry gate.
 ///
@@ -1157,6 +1252,72 @@ struct ReadMint<R> {
     /// Statements the mint ran against the database, and zero where there was
     /// no mint to run.
     statements: u64,
+}
+
+/// What a read does about an entry, read under the entry gate in the same
+/// critical section that reads the published demand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadStance {
+    /// The entry publishes `Ready`: a read establishes its snapshot here.
+    Serve,
+    /// The entry is taking in a change over coverage it has served — a polled
+    /// watcher batch, a reconcile turn, a schema reload — and a read waits,
+    /// bounded, until the entry has derived every fact it had taken in when
+    /// the read met it and holds a reader, or publishes `Ready`.
+    Settle,
+    /// Everything else: an entry that has never served, lost trust, is torn
+    /// down, parked, out of service, or warming from untrusted. A read
+    /// refuses at once with what the entry publishes.
+    Refuse,
+}
+
+/// What a read waiting outside the entry gate is woken by a change of: the
+/// entry's read stance, and how far its reconciles have derived the facts it
+/// has taken in. A committed turn moves the second while the first stands at
+/// settle, and a waiting read whose facts that turn derived answers from it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReadStanding {
+    stance: ReadStance,
+    derived_through: u64,
+}
+
+impl<A: SnapshotSource> Stanced for EntryState<A> {
+    type Stance = ReadStanding;
+
+    fn stance(&self) -> ReadStanding {
+        ReadStanding {
+            stance: self.read_stance(),
+            derived_through: self.pending.derived_through,
+        }
+    }
+
+    /// Record whether trust has stood unbroken since `Ready`, from the state
+    /// this hold left.
+    ///
+    /// **This is the one place the flag is set**: by a hold that ends at
+    /// `Ready` over an entry in service and unparked. The flag is cleared by
+    /// every move that breaks trust, where that move is made —
+    /// [`EntryState::withdraw_trust`], [`EntryState::install_coverage`],
+    /// [`EntryState::remint_coverage`] and [`begin_release`] — and here by a
+    /// hold that ends at any state but `Ready` or healing, or ends healing
+    /// parked, out of service or owing a rung. A hold that ends healing
+    /// otherwise keeps it, because healing is entered from `Ready` and from
+    /// untrusted alike, and the flag is what tells the two apart.
+    fn end_hold(&mut self) {
+        self.trust_unbroken_since_ready = match &self.trust {
+            TrustState::Ready => !self.stands_parked() && self.out_of_service().is_none(),
+            TrustState::Warming {
+                phase: WarmingPhase::Healing,
+                ..
+            } => {
+                self.trust_unbroken_since_ready
+                    && !self.stands_parked()
+                    && self.out_of_service().is_none()
+                    && !self.owes_a_rung()
+            }
+            _ => false,
+        };
+    }
 }
 
 impl<A: SnapshotSource> EntryState<A> {
@@ -1209,7 +1370,42 @@ impl<A: SnapshotSource> EntryState<A> {
     /// opens a file to discard.
     fn withdraw_trust_for_damage(&mut self, detail: impl Into<String>) {
         self.require_rebuild();
-        self.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+        self.withdraw_trust(UntrustedReason::store_damaged_rebuilding(detail));
+    }
+
+    /// Withdraw the entry's trust for `reason`: publish it untrusted, and
+    /// record that trust no longer stands unbroken since `Ready`.
+    ///
+    /// **Every withdrawal of trust is this call.** The flag is cleared at the
+    /// write rather than read back off the label where the hold ends, so a
+    /// hold that withdraws trust and then publishes healing within itself
+    /// leaves an entry that refuses a read, as a withdrawal must.
+    fn withdraw_trust(&mut self, reason: UntrustedReason) {
+        self.trust = TrustState::untrusted(reason);
+        self.trust_unbroken_since_ready = false;
+    }
+
+    /// Publish what the facts standing in the entry leave it at while a
+    /// reconcile of them is owed: an overflow withdraws trust until the rescan
+    /// among them is reread, and anything else is healing on the document
+    /// side of the ladder, because coverage is installed and the facts it
+    /// delivered are what is left to derive.
+    fn publish_pending_reconcile(&mut self) {
+        if !self.pending.has_rescans() {
+            self.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        } else {
+            self.withdraw_trust(UntrustedReason::WatcherOverflow);
+        }
+    }
+
+    /// Publish `Ready` where a leg that ended well left nothing to derive: no
+    /// fact pending, a drain that was not `saturated`, and no rung owed.
+    /// Anything else leaves what stands, for the leg or the work that
+    /// follows to publish.
+    fn publish_ready_where_nothing_is_left(&mut self, saturated: bool) {
+        if !saturated && self.pending.is_empty() && !self.owes_a_rung() {
+            self.trust = TrustState::Ready;
+        }
     }
 
     /// Whether the entry owes a rung of the ladder, which is work no ordinary
@@ -1293,6 +1489,7 @@ impl<A: SnapshotSource> EntryState<A> {
             self.reader.is_none(),
             "a reader stands over coverage the entry never installed"
         );
+        self.trust_unbroken_since_ready = false;
         self.mint_for_a_leg(ops, &attachment);
         self.coverage.install(attachment);
     }
@@ -1404,6 +1601,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// the coverage is the lock that publishes the trust label a read pairs the
     /// handle with.
     fn remint_coverage<O: EntryOps<Attachment = A>>(&mut self, ops: &O, leg: u64, attachment: A) {
+        self.trust_unbroken_since_ready = false;
         self.close_reader();
         self.mint_for_a_leg(ops, &attachment);
         self.coverage.park_by(leg, attachment);
@@ -1557,6 +1755,13 @@ impl<A: SnapshotSource> EntryState<A> {
             })
     }
 
+    /// Whether a park stands, read without cloning what it stands on.
+    fn stands_parked(&self) -> bool {
+        self.maintainer_contended.is_some()
+            || self.duplicate_root.is_some()
+            || self.identity_refused.is_some()
+    }
+
     /// Withdraw the parks the registry raised, leaving the entry free to be
     /// worked again.
     ///
@@ -1627,6 +1832,55 @@ impl<A: SnapshotSource> EntryState<A> {
     /// reading this entry recorded.
     fn engine_report(&self) -> EngineReport {
         EngineReport::of(self.delivered_engine.as_ref(), self.store_reading.as_ref())
+    }
+
+    /// What a read does about this entry at this instant: serve it, wait for
+    /// the change it is taking in, or refuse.
+    ///
+    /// It reads what [`EntryState::published_demand`] reads, without the
+    /// clone: out of service and parked refuse; `Ready` serves; healing
+    /// settles where trust has stood unbroken since `Ready` and no rung is
+    /// owed; every other state refuses.
+    fn read_stance(&self) -> ReadStance {
+        if self.out_of_service().is_some() || self.stands_parked() {
+            return ReadStance::Refuse;
+        }
+        match &self.trust {
+            TrustState::Ready => ReadStance::Serve,
+            TrustState::Warming {
+                phase: WarmingPhase::Healing,
+                ..
+            } if self.trust_unbroken_since_ready && !self.owes_a_rung() => ReadStance::Settle,
+            _ => ReadStance::Refuse,
+        }
+    }
+
+    /// Where in the entry's fact stream a read meets the change it is
+    /// taking in: every fact taken in so far, the one a turn has taken
+    /// included.
+    fn change_met_at(&self) -> u64 {
+        self.pending.taken_in
+    }
+
+    /// Whether a read answers from this entry now, having met its change at
+    /// `met_at` where it met one.
+    ///
+    /// An entry that serves answers. An entry that settles answers a read
+    /// that met its change at a position its reconciles have derived
+    /// through, where it holds a reader: every fact the entry knew of when
+    /// the read met it is committed, so the snapshot established now is not
+    /// the state before the change, whatever arrived after it. An entry
+    /// holding no reader — a schema reload closed it — answers nothing until
+    /// it mints one with `Ready`. Every other entry answers nothing.
+    fn answers_a_read(&self, met_at: Option<u64>) -> bool {
+        match self.read_stance() {
+            ReadStance::Serve => true,
+            ReadStance::Settle => {
+                met_at.is_some_and(|met_at| self.pending.derived_through >= met_at)
+                    && self.reader.is_some()
+            }
+            ReadStance::Refuse => false,
+        }
     }
 
     /// What a caller reads off this entry: the park it stands on, or its trust
@@ -1745,16 +1999,6 @@ fn root_moved(error: &WatchError) -> bool {
     matches!(error, WatchError::CoverageLost(_))
 }
 
-fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
-    if pending.rescans().is_empty() {
-        // Coverage is installed and the facts it delivered are what is left to
-        // derive, so the entry is warming on the document side of the ladder.
-        TrustState::warming(WarmingPhase::Healing, 0, None)
-    } else {
-        TrustState::untrusted(UntrustedReason::WatcherOverflow)
-    }
-}
-
 /// The work a demand lease is owed, read off what the entry holds.
 ///
 /// The job follows what the entry needs rather than which door the demand came
@@ -1827,8 +2071,8 @@ impl DemandedWork {
         }
     }
 
-    /// What the entry publishes while this work is scheduled and running, or
-    /// `None` where what already stands is what the work runs under.
+    /// Publish what the entry stands at while this work is scheduled and
+    /// running, or leave what already stands where the work runs under it.
     ///
     /// An attach and a recover both establish coverage before they read a
     /// document, so the phase they warm under is the prologue that counts
@@ -1842,15 +2086,13 @@ impl DemandedWork {
     /// the rung that resolves it has. Warming over the verdict would retire the
     /// reason before anything addressed it, and leave a caller unable to tell a
     /// vault being derived again from one that never lost its store.
-    fn scheduled_state(self, pending: &Batch) -> Option<TrustState> {
+    fn publish_scheduled<A: SnapshotSource>(self, state: &mut EntryState<A>) {
         match self {
-            Self::Attach | Self::Recover => Some(TrustState::warming(
-                WarmingPhase::InstallingCoverage,
-                0,
-                None,
-            )),
-            Self::Rebuild => None,
-            Self::Reconcile => Some(trust_for_pending_reconcile(pending)),
+            Self::Attach | Self::Recover => {
+                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+            }
+            Self::Rebuild => {}
+            Self::Reconcile => state.publish_pending_reconcile(),
         }
     }
 }
@@ -1859,9 +2101,7 @@ impl DemandedWork {
 /// publishing the state that work warms under.
 fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
-    if let Some(scheduled) = work.scheduled_state(&state.pending) {
-        state.trust = scheduled;
-    }
+    work.publish_scheduled(state);
     state.claim.schedule(|epoch| work.job(name, epoch))
 }
 
@@ -1946,7 +2186,8 @@ fn unheld_lease<O: EntryOps>(name: &VaultName, outcome: Demand) -> DemandLease<O
 /// the idle interval is restarted, and an idle detach that is scheduled and
 /// not yet dispatched is withdrawn — the claim it was scheduled under is
 /// invalidated and re-opened, so the work this demand asks for is what the
-/// entry does next.
+/// entry does next. Facts the teardown was scheduled over stay pending, and
+/// the next watcher poll schedules the reconcile they are owed.
 ///
 /// A detach already in flight is not withdrawn. It has run [`begin_release`],
 /// which emptied the reader slot and published the releasing phase, so what a
@@ -2038,6 +2279,7 @@ fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // is one no dispatch reaches.
     state.claim.open();
     state.close_reader();
+    state.trust_unbroken_since_ready = false;
     state.detach_in_flight = true;
     state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
 }
@@ -2121,7 +2363,7 @@ fn finish_release<O: EntryOps>(
     // and stands.
     state.coverage.released_by(epoch);
     state.detach_in_flight = false;
-    state.pending = Batch::default();
+    state.pending.clear();
     state.active_fingerprints = None;
     state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
@@ -2487,7 +2729,7 @@ fn reclaim_unwound_leg<O: EntryOps>(
     );
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.trust == TrustState::Unattached && state.parked().is_none() {
-        state.trust = TrustState::untrusted(UntrustedReason::leg_unwound(detail));
+        state.withdraw_trust(UntrustedReason::leg_unwound(detail));
     }
 }
 
@@ -2660,7 +2902,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     let mut releasing = Vec::new();
     for (entry, state) in entries.iter().zip(&mut states) {
         state.claim.invalidate();
-        state.pending = Batch::default();
+        state.pending.clear();
         // Every route below ends with the entry's coverage back at the ops, so
         // neither rung is owed against the store the conflict took away.
         state.clear_rung_requirements();
@@ -2830,7 +3072,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 /// middle of.
 fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: String) {
     state.identity_refused = Some(detail.clone());
-    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
 }
 
 /// Classify one entry's root against every root the host serves, and park the
@@ -3038,6 +3280,8 @@ struct Shared<O: EntryOps> {
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
     idle_after: Duration,
+    /// The policy's [`LifecyclePolicy::read_settle_bound`].
+    read_settle_bound: Duration,
     /// Root identities claimed by coverage acquisitions while their
     /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
@@ -3240,14 +3484,16 @@ impl HoldReading {
 
 /// Why a read was not served.
 ///
-/// Two shapes. The first is a demand: a name the serving set does not hold,
+/// Three shapes. The first is a demand: a name the serving set does not hold,
 /// decided at that lookup before any entry gate is taken; or, under a hold of
-/// the entry's gate, the demand that entry publishes — a warming entry with
-/// its phase, an untrusted state, coverage on its way back, or a park under
-/// its own code. An entry holding no coverage is not among them: the read's
-/// own demand schedules the attach it owes, so what such an entry refuses
-/// with is the warming state of that attach. The second shape is an entry
-/// serving every surface but this one.
+/// the entry's gate, the demand an entry that refuses at once publishes — a
+/// warming entry that has never served or is warming from untrusted, an
+/// untrusted state, coverage on its way back, or a park under its own code.
+/// An entry holding no coverage is not among them: the read's own demand
+/// schedules the attach it owes, so what such an entry refuses with is the
+/// warming state of that attach. The second is the demand an entry taking in
+/// a change published when the read's settle bound ran out. The third is an
+/// entry serving every surface but this one.
 ///
 /// **No wire rendering is written here.** A demand renders through
 /// [`Demand::answer`], the one mapping every surface renders a demand
@@ -3260,6 +3506,11 @@ impl HoldReading {
 pub enum ReadRefusal {
     /// The entry is not serving reads, and this is what it publishes instead.
     NotServing(Demand),
+    /// The entry was taking in a change over coverage it had served, and had
+    /// neither derived the facts the read met nor reached `Ready` inside the
+    /// read's settle bound. It carries what the entry published when the
+    /// bound ran out.
+    Unsettled(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
     /// given it a handle failed, or the snapshot could not be established.
     ReaderUnavailable(ReaderUnavailable),
@@ -3403,7 +3654,7 @@ fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_deman
 struct AcquisitionUnderTheGate<'g, O: EntryOps> {
     gate: &'g EntryGate<EntryState<O::Attachment>>,
     /// Taken out only as the gate is let go, by a move that consumes this.
-    state: Option<MutexGuard<'g, EntryState<O::Attachment>>>,
+    state: Option<GateHold<'g, EntryState<O::Attachment>>>,
     /// Taken out only as the gate is let go, by a move that consumes this, and
     /// by this type's drop, which gives it back under `state`.
     lease: Option<DemandLease<O>>,
@@ -3432,6 +3683,10 @@ struct AcquisitionUnderTheGate<'g, O: EntryOps> {
 struct AcquisitionOutsideTheGate<'g, O: EntryOps> {
     gate: &'g EntryGate<EntryState<O::Attachment>>,
     lease: DemandLease<O>,
+    /// The stance's generation, read under the hold this acquisition let go,
+    /// before the gate went back: every change published after that hold has
+    /// moved past it.
+    seen: u64,
 }
 
 impl<'g, O: EntryOps> AcquisitionUnderTheGate<'g, O> {
@@ -3439,7 +3694,7 @@ impl<'g, O: EntryOps> AcquisitionUnderTheGate<'g, O> {
     /// that hold.
     fn new(
         gate: &'g EntryGate<EntryState<O::Attachment>>,
-        state: MutexGuard<'g, EntryState<O::Attachment>>,
+        state: GateHold<'g, EntryState<O::Attachment>>,
         lease: DemandLease<O>,
     ) -> Self {
         AcquisitionUnderTheGate {
@@ -3454,9 +3709,15 @@ impl<'g, O: EntryOps> AcquisitionUnderTheGate<'g, O> {
         self.gate
     }
 
-    /// Let the gate go and keep the lease across the time outside it.
+    /// Let the gate go and keep the lease across the time outside it, with
+    /// the stance's generation read under the hold that goes.
+    ///
+    /// **The generation is read before the guard goes**, so a change
+    /// published in the instant after it — before the acquisition waits on
+    /// the stance — has already moved past it, and that wait answers at once.
     fn let_the_gate_go(mut self) -> AcquisitionOutsideTheGate<'g, O> {
         let gate = self.gate;
+        let seen = gate.stance_generation();
         let lease = self
             .lease
             .take()
@@ -3464,7 +3725,9 @@ impl<'g, O: EntryOps> AcquisitionUnderTheGate<'g, O> {
         // The guard goes back here, and with the lease taken out above this
         // drop gives nothing back.
         drop(self);
-        AcquisitionOutsideTheGate { gate, lease }
+        #[cfg(test)]
+        gate.run_the_let_go_hook();
+        AcquisitionOutsideTheGate { gate, lease, seen }
     }
 }
 
@@ -3508,6 +3771,13 @@ impl<'g, O: EntryOps> AcquisitionOutsideTheGate<'g, O> {
         }
     }
 
+    /// Wait, holding no hold of the gate, for the entry's stance to move past
+    /// the generation read under the hold this acquisition let go, or until
+    /// `deadline`.
+    fn wait_for_the_stance_to_move(&self, deadline: Instant) {
+        self.gate.wait_for_the_stance_to_move(self.seen, deadline);
+    }
+
     /// Hand the lease on to the hold that keeps it for the length of the read,
     /// which gives it back and nothing else does.
     fn into_lease(self) -> DemandLease<O> {
@@ -3530,7 +3800,7 @@ impl<O: EntryOps> Drop for Host<O> {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.invalidate();
             state.claim.open();
-            state.pending = Batch::default();
+            state.pending.clear();
             if state.detach_in_flight {
                 // A release is already under way with this entry's resources.
                 // The joins below wait for the leg running it, and whatever it
@@ -3844,6 +4114,7 @@ impl<O: EntryOps> Host<O> {
             jobs: Mutex::new(Some(jobs)),
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
+            read_settle_bound: policy.read_settle_bound,
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             panic_after_reload_handoff: AtomicBool::new(false),
@@ -4374,21 +4645,54 @@ impl<O: EntryOps> Host<O> {
     /// The pin is taken under that same hold, so no teardown reads an unpinned
     /// entry between the two.
     ///
-    /// **No acquisition waits for the entry's connection while it holds the
-    /// entry gate.** An entry's reads share one connection and the read
-    /// holding it gives it back only when it ends, asking for the entry gate
-    /// on its way out — so a gate held across that wait is a gate no holder
-    /// can take again. Under the gate this tries for the connection without
-    /// blocking and establishes there where it is free. Where another read
-    /// holds it, the gate is given back, the connection is waited for and
-    /// taken outside it, and the gate is taken again: the acquisition then
-    /// reads the published demand afresh, because the instant it first read is
-    /// not the instant it answers under. That second hold does not contend —
-    /// this read is holding the connection by then, so nothing else can be
-    /// establishing — and it ends either in the establishment or in the
-    /// connection going back with a refusal. There is no third outcome, so
-    /// there is no round after it. The acquisition counts the rounds it takes
-    /// and records them once, where it leaves, on every way out.
+    /// **What a read does is its stance, read under the gate beside the
+    /// published demand.** An entry publishing `Ready` serves. An entry taking
+    /// in a change over coverage it has served — a polled batch, a reconcile
+    /// turn, a schema reload — settles. The read records, under the first
+    /// hold that finds it settling, where the entry's fact stream stands, and
+    /// waits until the entry's reconciles have derived through that position
+    /// with a reader standing, or until the entry publishes `Ready`; it
+    /// answers from the first of the two it observes, under what the entry
+    /// then publishes. A vault whose facts keep arriving is answered once
+    /// the facts the read met are committed, without waiting for it to fall
+    /// quiet, and no read answers from the state before the change it met.
+    /// Every other entry refuses at once with what it publishes: an entry
+    /// that has never served, one whose trust was withdrawn, one warming from
+    /// untrusted, a teardown, and every park.
+    ///
+    /// **No acquisition waits while it holds the entry gate**, for the entry's
+    /// connection or for the change a settling read met. An entry's reads share one connection and
+    /// the read holding it gives it back only when it ends, asking for the
+    /// entry gate on its way out — so a gate held across that wait is a gate
+    /// no holder can take again; and the change a settling read waits for is
+    /// published under that same gate. Under the gate this tries for the
+    /// connection without blocking and establishes there where it is free.
+    /// Otherwise the gate is given back — for the connection, which is waited
+    /// for and taken outside it, or for the change, whose publication moves
+    /// the gate's stance signal — and the gate is taken again. Each round
+    /// after a wait reads the stance afresh, because the instant the round
+    /// before read is not the instant the read answers under: it establishes
+    /// where the entry answers it on the handle it holds the connection of,
+    /// waits again where the entry settles without answering it, acquires the
+    /// handle the entry serves now where that is another one, and refuses
+    /// where the entry refuses.
+    ///
+    /// **The settle bound runs from the first hold and covers every wait.**
+    /// A settling read that meets its bound refuses as
+    /// [`ReadRefusal::Unsettled`] with what the entry publishes. A wait for
+    /// the connection ends when the connection comes back or when the bound
+    /// runs out, whichever is first, and a read that finds the connection
+    /// still held past its bound refuses as [`ReadRefusal::ReaderUnavailable`]:
+    /// the entry serves, and its read seam is taken. A zero bound therefore
+    /// refuses at once wherever the read would wait. A teardown waits for no
+    /// read: its publication moves the stance, which wakes every settling
+    /// read, and a woken read refuses with what the entry then publishes
+    /// unless the entry has reached `Ready` again by the time it retakes the
+    /// gate.
+    ///
+    /// The acquisition counts the rounds it takes after a wait for the
+    /// connection apart from the rounds after a settle wait, and records
+    /// both once, where it leaves, on every way out.
     ///
     /// **A read is demand the way a client's demand is**, served or refused.
     /// It records a lease, restarts the idle interval, withdraws an idle
@@ -4397,12 +4701,11 @@ impl<O: EntryOps> Host<O> {
     /// attached by the first read and kept by the ones after it. What the read
     /// is answered with meanwhile is the published demand: an entry that has
     /// to be attached first refuses with the warming state that attach runs
-    /// under.
+    /// under. The lease holds the entry across every wait the read takes.
     ///
-    /// The one state a read is served under is `Ready`. Every other published
-    /// demand refuses as itself, and an entry serving with no handle mints one
-    /// again from the coverage it holds and refuses as
-    /// [`ReadRefusal::ReaderUnavailable`] where that mint refuses too.
+    /// An entry serving with no handle mints one again from the coverage it
+    /// holds and refuses as [`ReadRefusal::ReaderUnavailable`] where that mint
+    /// refuses too.
     ///
     /// **Both acts this runs against a database — the mint and the
     /// establishment — run under a hold of the entry gate, and each is
@@ -4413,17 +4716,20 @@ impl<O: EntryOps> Host<O> {
     /// acquiring thread, taken as each round takes the gate and again as the
     /// establishing round gives it back, so a statement is counted however it
     /// was composed and the establishment reports no count of its own. No exit
-    /// from here runs a statement under the gate and reports nothing: the two
-    /// exits above the mint took none, the mint's own refusal and the two
-    /// refusals a waiting read can take report the mint and run nothing on a
-    /// handle's connection, and the establishment's refusal reports both. Each
-    /// act lands in its own reading, so the reading that claims each served
+    /// from here runs a statement under the gate and reports nothing: the
+    /// exits before a mint took none, the mint's own refusal and the refusals
+    /// a waiting read can take report the mints and run nothing on a handle's
+    /// connection, and the establishment's refusal reports both. Each act
+    /// lands in its own reading, so the reading that claims each served
     /// read's establishment is the reads this served and nothing else.
     pub fn begin_read(&self, name: &VaultName) -> Result<ReadHold<O>, ReadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
+        // The bound on every wait this read takes runs from here, its first
+        // hold of the gate.
+        let deadline = settle_deadline(self.shared.read_settle_bound);
         // The readings this round of the gate opens on, taken as the gate is
         // taken and before anything runs under it: what SQLite has begun on
         // this thread, and the gate's take count. The connection's turn is
@@ -4473,95 +4779,130 @@ impl<O: EntryOps> Host<O> {
         if scheduled {
             schedule_demand(&mut state, name);
         }
-        let published = state.published_demand();
-        if published != Demand::State(TrustState::Ready) {
-            if scheduled {
-                // The dispatch is the demand's, and its one failure is the
-                // worker pool being gone — which is the host coming down, and
-                // is not something this read is refused for: the entry's own
-                // published demand is what answers it either way. It takes the
-                // gate, so the gate goes first, and the lease goes back after
-                // the dispatch.
-                let outside = state.let_the_gate_go();
-                let _ = dispatch_pending(&self.shared, &entry);
-                drop(outside);
-            }
+        let mut stance = state.read_stance();
+        // Scheduled work publishes the warming of an attach or a recovery,
+        // or leaves an untrusted state standing, and each of those refuses.
+        debug_assert!(
+            !scheduled || stance == ReadStance::Refuse,
+            "a read scheduled work over an entry that then {stance:?}s"
+        );
+        if stance == ReadStance::Refuse && scheduled {
+            // The dispatch is the demand's, and its one failure is the
+            // worker pool being gone — which is the host coming down, and is
+            // not something this read is refused for: the entry's own
+            // published demand is what answers it either way. It takes the
+            // gate, so the gate goes first, and the lease goes back after the
+            // dispatch.
+            let published = state.published_demand();
+            let outside = state.let_the_gate_go();
+            let _ = dispatch_pending(&self.shared, &entry);
+            drop(outside);
             return Err(ReadRefusal::NotServing(published));
         }
-        // An entry serving with an empty slot is one whose mint met the
-        // environment and lost. The read asks for the mint again before it
-        // refuses, because nothing else this entry does will.
-        //
-        // What that mint ran, it ran under this hold of the entry gate, so it
-        // is accounted here rather than on the way out: every path below this
-        // line is a path that already paid for it, the refusals included.
-        let minted = state.remint_for_a_read();
-        self.shared
-            .reads
-            .count_mint_under_the_gate(minted.statements);
-        let Some(reader) = minted.handle else {
-            let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
-                ReaderUnavailable::new("this entry's coverage holds no read handle")
-            });
-            return Err(ReadRefusal::ReaderUnavailable(unavailable));
-        };
-        let (turn, published) = match reader.try_take() {
-            // The connection is free, so this hold is the hold that
-            // establishes and the demand above is the demand the answer
-            // carries.
-            Some(turn) => (turn, published),
-            None => {
-                // Another read is answering on the entry's one connection.
-                // The gate goes back before the wait, and the demand recorded
-                // above is what holds the entry across it. What ran under this
-                // round is carried into the next, and the wait between the two
-                // is outside both.
-                let (earlier, outside) = opening.let_the_gate_go(state);
-                // Accounted where the wait begins: the wait below returns only
-                // with the connection, so every wait counted here ends, and
-                // the account names a contended acquisition while it is still
-                // waiting rather than once another read has let it through.
-                self.shared.reads.count_reader_wait();
-                let turn = reader.wait_for_the_connection();
-                // The connection is this read's from here, so this round is
-                // the round that establishes and nothing else can be
-                // establishing under it. What may have moved is the entry: the
-                // round reads afresh what it publishes, and the handle waited
-                // for is checked to still be the handle its reads run on. A
-                // rung-3 rebuild swaps one for another while the entry goes on
-                // serving, and a teardown takes the entry out of service while
-                // the handle stands.
-                //
-                // The two refusals below report nothing of what this round and
-                // the first ran under the gate, because that is zero by
-                // construction. The first round's one act against a database
-                // is the mint, whose connection counts nothing until it is a
-                // handle's and whose statements its own report carries, and
-                // this round runs nothing before either refusal.
-                let published;
-                (state, opening, published) = rounds.take_the_gate_again(outside, earlier);
-                if published != Demand::State(TrustState::Ready) {
-                    // The connection goes back with the turn, before the gate
-                    // does: the read waiting for it is woken by that and takes
-                    // the gate after this one lets go.
-                    drop(turn);
-                    return Err(ReadRefusal::NotServing(published));
-                }
-                let still_the_entrys = state
-                    .reader
-                    .as_ref()
-                    .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
-                if !still_the_entrys {
-                    let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
-                        ReaderUnavailable::new(
-                            "this entry's reads moved to another handle while this read waited",
-                        )
-                    });
-                    drop(turn);
-                    return Err(ReadRefusal::ReaderUnavailable(unavailable));
-                }
-                (turn, published)
+        // What the mints this acquisition asked for ran, over every round.
+        let mut mint_statements = 0;
+        // Where in the entry's fact stream this read met the change the entry
+        // is taking in: recorded under the first hold that finds the entry
+        // settling, before any wait, and never moved after.
+        let mut met_at = None;
+        let (turn, reader) = loop {
+            if stance == ReadStance::Settle && met_at.is_none() {
+                met_at = Some(state.change_met_at());
             }
+            match stance {
+                ReadStance::Refuse => {
+                    return Err(ReadRefusal::NotServing(state.published_demand()));
+                }
+                ReadStance::Settle if !state.answers_a_read(met_at) => {
+                    if Instant::now() >= deadline {
+                        self.shared.reads.count_settle_expiry();
+                        return Err(ReadRefusal::Unsettled(state.published_demand()));
+                    }
+                    // The let-go reads the stance's generation under this
+                    // hold, so every change published after the gate goes
+                    // back moves past it.
+                    let (earlier, outside) = opening.let_the_gate_go(state);
+                    // Accounted where the wait begins, so a reading taken
+                    // while this read waits names it.
+                    self.shared.reads.count_settle_wait();
+                    outside.wait_for_the_stance_to_move(deadline);
+                    (state, opening, stance) =
+                        rounds.take_the_gate_again_after_settling(outside, earlier);
+                    continue;
+                }
+                ReadStance::Settle | ReadStance::Serve => {}
+            }
+            // An entry serving with an empty slot is one whose mint met the
+            // environment and lost. The read asks for the mint again before
+            // it refuses, because nothing else this entry does will.
+            //
+            // What that mint ran, it ran under this hold of the entry gate,
+            // so it is accounted here rather than on the way out: every path
+            // below this line is a path that already paid for it, the
+            // refusals included.
+            let minted = state.remint_for_a_read();
+            mint_statements += minted.statements;
+            self.shared
+                .reads
+                .count_mint_under_the_gate(minted.statements, mint_statements);
+            let Some(reader) = minted.handle else {
+                let unavailable = state.reader_unavailable.clone().unwrap_or_else(|| {
+                    ReaderUnavailable::new("this entry's coverage holds no read handle")
+                });
+                return Err(ReadRefusal::ReaderUnavailable(unavailable));
+            };
+            // The connection is free, so this hold is the hold that
+            // establishes and the stance above is the one the answer carries.
+            if let Some(turn) = reader.try_take() {
+                break (turn, reader);
+            }
+            // Another read is answering on the entry's one connection, and
+            // past the bound this read waits for it no longer: the entry
+            // serves every surface but this read's seam.
+            if Instant::now() >= deadline {
+                return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                    "another read held this entry's connection past this read's bound",
+                )));
+            }
+            // The gate goes back before the wait, and the demand recorded
+            // above is what holds the entry across it. What ran under this
+            // round is carried into the next, and the wait between the two is
+            // outside both.
+            let (earlier, outside) = opening.let_the_gate_go(state);
+            // Accounted where the wait begins, so the account names a
+            // contended acquisition while it is still waiting rather than once
+            // another read has let it through or its bound has run out.
+            self.shared.reads.count_reader_wait();
+            let turn = reader.wait_for_the_connection_until(deadline);
+            // What may have moved is the entry: the round reads its stance
+            // afresh, and a handle waited for is checked to still be the
+            // handle its reads run on. A rung-3 rebuild swaps one for another
+            // while the entry goes on serving, a schema reload closes one and
+            // mints another, and a teardown takes the entry out of service
+            // while the handle stands.
+            (state, opening, stance) = rounds.take_the_gate_again(outside, earlier);
+            // A wait the bound ended took no connection, and the loop answers
+            // the stance this round read: past the bound, every arm of it
+            // that would wait refuses instead.
+            let Some(turn) = turn else {
+                continue;
+            };
+            // The connection is this read's from here, so nothing else can be
+            // establishing on it.
+            let still_the_entrys = state
+                .reader
+                .as_ref()
+                .is_some_and(|standing| Arc::ptr_eq(standing, &reader));
+            if still_the_entrys && state.answers_a_read(met_at) {
+                break (turn, reader);
+            }
+            // The connection goes back with the turn, before the gate does:
+            // the read waiting for it is woken by that and takes the gate
+            // after this one lets go. What this round ran under the gate
+            // before here is zero by construction: it ran nothing on a
+            // handle's connection. The loop answers the stance this round
+            // read, on the handle the entry serves now.
+            drop(turn);
         };
         // The gate and the connection's turn are both this read's from here,
         // so nothing runs on the connection but what this hold runs: this
@@ -4571,7 +4912,10 @@ impl<O: EntryOps> Host<O> {
         // attested by the hold rather than reported by the establishment.
         //
         // The model is the entry's under this same hold, so it and the
-        // snapshot established below describe one declaration.
+        // snapshot established below describe one declaration, and the demand
+        // is the one this hold answers under: `Ready`, or the healing of an
+        // entry that has derived every fact this read met.
+        let published = state.published_demand();
         let content_model = Arc::clone(&state.active_content_model);
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
@@ -4581,7 +4925,7 @@ impl<O: EntryOps> Host<O> {
                 let (hold, _outside) = opening.give_the_gate_back(state);
                 self.shared
                     .reads
-                    .count_refused_establishment_under_the_gate(hold, minted.statements);
+                    .count_refused_establishment_under_the_gate(hold, mint_statements);
                 return Err(ReadRefusal::ReaderUnavailable(unavailable));
             }
         };
@@ -4590,7 +4934,7 @@ impl<O: EntryOps> Host<O> {
         let lease = outside.into_lease();
         self.shared
             .reads
-            .count_establishment_under_the_gate(hold, minted.statements);
+            .count_establishment_under_the_gate(hold, mint_statements);
         self.shared.reads.count_read();
         Ok(ReadHold {
             entry,
@@ -4709,37 +5053,48 @@ struct HoldOpening<R> {
 
 /// One read acquisition's rounds of its entry gate.
 ///
-/// **The cost of contention is a round of the gate, not a read of the
-/// demand.** An acquisition that finds its entry's connection taken gives the
-/// gate back, waits, and takes the gate again, and in that round it reads
-/// afresh the demand its entry publishes, because the demand it read first
-/// describes an instant it no longer answers under. That reading is an
-/// in-memory read under a hold already taken; the hold is what the acquisition
-/// paid for, so the round is what is counted.
-/// [`AcquisitionRounds::take_the_gate_again`] is the one way an acquisition
-/// takes a round after its first, and it takes the gate, opens the round's
-/// readings and reads the demand together, so a round after the first is
-/// counted and reads the demand by construction.
+/// **The cost of a wait is a round of the gate, not a read of the stance.**
+/// An acquisition that finds its entry's connection taken, or its entry
+/// settling, gives the gate back, waits, and takes the gate again, and in
+/// that round it reads afresh the stance its entry stands at, because the
+/// stance it read before describes an instant it no longer answers under.
+/// That reading is an in-memory read under a hold already taken; the hold is
+/// what the acquisition paid for, so the round is what is counted.
+/// [`AcquisitionRounds::take_the_gate_again`] and
+/// [`AcquisitionRounds::take_the_gate_again_after_settling`] are the two ways
+/// an acquisition takes a round after its first, and each takes the gate,
+/// opens the round's readings and reads the stance together, so a round after
+/// the first is counted and reads the stance by construction.
+///
+/// **The two kinds of round are counted apart**, so the rounds after a wait
+/// for the connection go on equalling the waits for it, and the rounds after
+/// a settle wait equal the settle waits.
 ///
 /// **The rounds are recorded once, where this drops**, which is where the
-/// acquisition leaves whichever way it leaves: served, refused before the wait
-/// or after it, or unwound. The read account adds the rounds after the first
-/// to its total and widens its per-acquisition maximum with them.
+/// acquisition leaves whichever way it leaves: served, refused before a wait
+/// or after one, or unwound.
 struct AcquisitionRounds<'r> {
     reads: &'r ReadEvidence,
+    /// Rounds taken after waits for the connection, and the first round.
     taken: u64,
+    /// Rounds taken after settle waits.
+    settled: u64,
 }
 
 impl<'r> AcquisitionRounds<'r> {
     /// An acquisition that has taken its first round of the gate.
     fn first(reads: &'r ReadEvidence) -> Self {
-        AcquisitionRounds { reads, taken: 1 }
+        AcquisitionRounds {
+            reads,
+            taken: 1,
+            settled: 0,
+        }
     }
 
     /// Take the entry gate again once the wait for the connection has ended:
     /// the acquisition under the gate, the round's readings opened on the take
-    /// and carrying what the earlier rounds ran, and the demand the entry
-    /// publishes now.
+    /// and carrying what the earlier rounds ran, and the stance the entry
+    /// stands at now.
     fn take_the_gate_again<'g, O: EntryOps>(
         &mut self,
         outside: AcquisitionOutsideTheGate<'g, O>,
@@ -4747,13 +5102,40 @@ impl<'r> AcquisitionRounds<'r> {
     ) -> (
         AcquisitionUnderTheGate<'g, O>,
         HoldOpening<<O::Attachment as SnapshotSource>::Reader>,
-        Demand,
+        ReadStance,
+    ) {
+        self.taken = self.taken.saturating_add(1);
+        Self::retake(outside, earlier)
+    }
+
+    /// Take the entry gate again once a settle wait has ended, woken or
+    /// out of time, answering what [`AcquisitionRounds::take_the_gate_again`]
+    /// answers.
+    fn take_the_gate_again_after_settling<'g, O: EntryOps>(
+        &mut self,
+        outside: AcquisitionOutsideTheGate<'g, O>,
+        earlier: StatementsUnderEarlierRounds,
+    ) -> (
+        AcquisitionUnderTheGate<'g, O>,
+        HoldOpening<<O::Attachment as SnapshotSource>::Reader>,
+        ReadStance,
+    ) {
+        self.settled = self.settled.saturating_add(1);
+        Self::retake(outside, earlier)
+    }
+
+    fn retake<'g, O: EntryOps>(
+        outside: AcquisitionOutsideTheGate<'g, O>,
+        earlier: StatementsUnderEarlierRounds,
+    ) -> (
+        AcquisitionUnderTheGate<'g, O>,
+        HoldOpening<<O::Attachment as SnapshotSource>::Reader>,
+        ReadStance,
     ) {
         let state = outside.take_the_gate_again();
         let opening = HoldOpening::read(state.gate(), earlier);
-        self.taken = self.taken.saturating_add(1);
-        let published = state.published_demand();
-        (state, opening, published)
+        let stance = state.read_stance();
+        (state, opening, stance)
     }
 }
 
@@ -4761,7 +5143,16 @@ impl Drop for AcquisitionRounds<'_> {
     fn drop(&mut self) {
         self.reads
             .count_gate_rounds_after_the_first(self.taken.saturating_sub(1));
+        self.reads.count_settle_rounds(self.settled);
     }
+}
+
+/// The instant a read's settle bound runs out, for a read whose first hold of
+/// the entry gate is now. A bound past what the clock can hold is no bound.
+fn settle_deadline(bound: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(bound)
+        .unwrap_or_else(|| now + Duration::from_secs(60 * 60 * 24 * 365))
 }
 
 /// Statements an acquisition's earlier rounds of the entry gate ran, carried
@@ -4925,12 +5316,27 @@ fn poll_claimed_entry<O: EntryOps>(
                 Ok(None) => {
                     state.claim.end_poll(epoch);
                     state.coverage.park_by(epoch, attachment);
-                    if maintenance_due && !state.owes_a_rung() {
-                        schedule = Some(
-                            state
-                                .claim
-                                .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
-                        );
+                    if !state.owes_a_rung() {
+                        // Facts can stand pending over an entry nothing is
+                        // working: a teardown a leg scheduled over them and a
+                        // demand then withdrew. The watcher has nothing more
+                        // to report, so this poll is what schedules the
+                        // reconcile they are owed — behind due maintenance,
+                        // which hands that reconcile on when it ends.
+                        if maintenance_due {
+                            schedule = Some(
+                                state
+                                    .claim
+                                    .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
+                            );
+                        } else if !state.pending.is_empty() {
+                            state.publish_pending_reconcile();
+                            schedule = Some(
+                                state
+                                    .claim
+                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
+                            );
+                        }
                     }
                 }
                 Ok(Some(batch)) => {
@@ -4938,11 +5344,11 @@ fn poll_claimed_entry<O: EntryOps>(
                     let rescan = !batch.rescans().is_empty();
                     state.pending.merge(batch);
                     if !state.owes_a_rung() {
-                        state.trust = if rescan {
-                            TrustState::untrusted(UntrustedReason::WatcherOverflow)
+                        if rescan {
+                            state.withdraw_trust(UntrustedReason::WatcherOverflow);
                         } else {
-                            TrustState::warming(WarmingPhase::Healing, 0, None)
-                        };
+                            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+                        }
                     }
                     state.coverage.park_by(epoch, attachment);
                     if !state.owes_a_rung() {
@@ -4990,7 +5396,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     state.coverage.park_by(epoch, attachment);
                 }
                 Err(JobFailure::Environmental(detail)) => {
@@ -4998,8 +5404,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.claim.end_poll(epoch);
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     state.coverage.park_by(epoch, attachment);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -5008,8 +5413,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     state.coverage.park_by(epoch, attachment);
                 }
                 // Damaged derived state is not what a poll retries into.
@@ -5443,11 +5847,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // wait in `pending` for the heal that recovery runs.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                         let next = state
                             .claim
                             .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
@@ -5465,20 +5869,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.trust = TrustState::Unattached;
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
+                    state.pending.clear();
                     state.trust = TrustState::Unattached;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                 }
                 Err(JobFailure::Environmental(detail)) => {
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                 }
                 Err(JobFailure::Reload(error)) => {
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                 }
                 // An attach runs rung 3 against the database it opened, so
                 // damage reaching here is damage that rung could not resolve.
@@ -5489,9 +5891,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // demand is what resumes it, rather than the one that says the
                 // entry is already rebuilding.
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.trust = TrustState::untrusted(
-                        UntrustedReason::store_damaged_awaiting_demand(detail),
-                    );
+                    state.withdraw_trust(UntrustedReason::store_damaged_awaiting_demand(detail));
                 }
             }
             None
@@ -5650,7 +6050,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // for once the schema is corrected.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -5698,15 +6098,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -5714,8 +6113,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::StoreDamaged(detail)) => {
@@ -5817,21 +6215,33 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // that reads the declaration again owed beside it.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                         schedule_due_detach(&mut state, &name)
-                    } else if state.detach_due {
-                        state.trust = TrustState::Ready;
-                        schedule_due_detach(&mut state, &name)
-                    } else if state.pending.is_empty() && !handoff_saturated {
-                        state.trust = TrustState::Ready;
-                        None
                     } else {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
-                        Some(
-                            state
-                                .claim
-                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
-                        )
+                        // A rebuild's drain can merge facts behind a pending
+                        // batch this leg never touched, so what is left to
+                        // derive is published where the leg leaves it: healing
+                        // over the fact, in place of the progress phase the
+                        // rung reported while it ran, where one is owed;
+                        // `Ready` where nothing is, exactly as the reconcile
+                        // and maintenance legs publish it. That holds where a
+                        // teardown is due too, because a demand can withdraw
+                        // it before it runs.
+                        if handoff_saturated || !state.pending.is_empty() {
+                            state.publish_pending_reconcile();
+                        }
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
+                        if state.detach_due {
+                            schedule_due_detach(&mut state, &name)
+                        } else if handoff_saturated || !state.pending.is_empty() {
+                            Some(
+                                state
+                                    .claim
+                                    .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+                            )
+                        } else {
+                            None
+                        }
                     };
                     drop(state);
                     if let Some(job) = next {
@@ -5853,7 +6263,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
         Job::Reconcile(name, epoch) => loop {
-            let (mut attachment, work) = {
+            let (mut attachment, work, through) = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
                     return None;
@@ -5863,16 +6273,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 };
                 state.pin_for_leg(Leg::Job(epoch));
-                let work = ReconcileWork {
-                    batch: std::mem::take(&mut state.pending),
-                };
+                let (batch, through) = state.pending.take();
+                let work = ReconcileWork { batch };
                 if !matches!(
                     state.trust,
                     TrustState::Warming { .. } | TrustState::Untrusted { .. }
                 ) {
                     state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
                 }
-                (attachment, work)
+                (attachment, work, through)
             };
             let mut result =
                 shared
@@ -5905,13 +6314,23 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             match result {
                 Ok(()) => {
+                    // The turn committed every fact it took, so a read that
+                    // met the entry's change at or before `through` may
+                    // answer from here on, whatever the turn observed after.
+                    state.pending.derive_through(through);
                     state.pending.merge(observed);
                     record_advisories(&mut state, &*shared.ops, &attachment);
                     state.coverage.park_by(epoch, attachment);
                     if handoff_saturated || !state.pending.is_empty() {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                     }
                     if state.detach_due {
+                        // A teardown the entry is due can be withdrawn by a
+                        // demand before it runs, and what the entry then
+                        // publishes is what this turn left: `Ready` where it
+                        // left nothing to derive, as the turn below publishes
+                        // it where no teardown is due.
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
                         state.claim.release();
                         let next = schedule_due_detach(&mut state, &name);
                         drop(state);
@@ -5981,7 +6400,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     // The watcher this leg drained reported that the root
@@ -6001,8 +6420,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -6016,8 +6434,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -6096,22 +6513,22 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(observed);
                     state.coverage.park_by(epoch, attachment);
                     state.claim.release();
+                    // The claim this leg took can be the one a watcher's facts
+                    // arrived under, so the label those facts warmed the entry
+                    // to is one this leg ends: a maintenance that left nothing
+                    // to derive is an entry serving the vault, and no leg
+                    // follows to say so. That holds where a teardown is due
+                    // too, because a demand can withdraw it before it runs.
+                    state.publish_ready_where_nothing_is_left(handoff_saturated);
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if handoff_saturated || !state.pending.is_empty() {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                         next = Some(
                             state
                                 .claim
                                 .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
                         );
-                    } else if !state.owes_a_rung() {
-                        // The claim this leg took can be the one a watcher's
-                        // facts arrived under, so the label those facts warmed
-                        // the entry to is one this leg ends: a maintenance that
-                        // left nothing to derive is an entry serving the vault,
-                        // and no leg follows to say so.
-                        state.trust = TrustState::Ready;
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
@@ -6147,7 +6564,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
@@ -6155,8 +6572,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -6165,8 +6581,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 // Maintenance is where a verification the warm path never runs
@@ -6235,7 +6650,7 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
     entry: &'entry Entry<A>,
     epoch: u64,
     reply: &ReloadReply,
-) -> Option<(MutexGuard<'entry, EntryState<A>>, A)> {
+) -> Option<(GateHold<'entry, EntryState<A>>, A)> {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if !state.claim.stands_at(epoch) {
         let _ = reply.send(Err(ReloadRefusal::Unavailable(state.published_demand())));
@@ -6254,7 +6669,7 @@ fn begin_reload_leg<'entry, A: SnapshotSource>(
 enum ReloadLegEnd<'entry, A: SnapshotSource> {
     /// The claim still stands at the leg's epoch and no release opened over
     /// it: the leg publishes what its work met, under this hold.
-    Standing(MutexGuard<'entry, EntryState<A>>, A),
+    Standing(GateHold<'entry, EntryState<A>>, A),
     /// The claim was taken away or a release opened while the leg ran. The
     /// asker has been told where the entry stands, and the job returns this
     /// attachment for the release to take.
@@ -6346,7 +6761,7 @@ fn run_reload_job<O: EntryOps>(
     let (mut state, mut attachment) = begin_reload_leg(entry, epoch, &reply)?;
     let work = match step {
         ReloadStep::Activate => Batch::default(),
-        ReloadStep::Reconcile(_) => std::mem::take(&mut state.pending),
+        ReloadStep::Reconcile(_) => state.pending.take().0,
     };
     drop(state);
 
@@ -6452,7 +6867,7 @@ fn run_reload_job<O: EntryOps>(
             if !ready {
                 state.require_recovery();
                 state.pending.merge(Batch::rescan(RescanScope::Vault));
-                state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
             }
             Err(ReloadRefusal::Core(error))
         }
@@ -6485,7 +6900,7 @@ fn run_reload_job<O: EntryOps>(
 fn apply_reload_runtime_failure<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
-    mut state: MutexGuard<'_, EntryState<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
     name: VaultName,
     epoch: u64,
     attachment: O::Attachment,
@@ -6534,7 +6949,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.trust = TrustState::untrusted(watcher_lost(error));
+            state.withdraw_trust(watcher_lost(error));
             state.claim.release();
             drop(state);
             if reclassify {
@@ -6549,7 +6964,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
             Err(ReloadRefusal::Runtime(failure))
         }
         JobFailure::StoreDamaged(detail) => {
@@ -6823,6 +7238,8 @@ mod tests {
         /// and the cases that read this hold what an unwind out of that wait
         /// leaves behind.
         wait_panics: std::sync::atomic::AtomicBool,
+        /// The deadline the last wait for a handle's connection was given.
+        waited_until: Mutex<Option<Instant>>,
         /// Whether establishing a snapshot on a handle from this ledger panics
         /// instead of answering. It runs under the entry gate, and the case
         /// that reads this holds what an unwind there leaves behind once the
@@ -6844,6 +7261,7 @@ mod tests {
                 establish_statements: AtomicU64::new(norn_store::SNAPSHOT_ESTABLISHMENT_STATEMENTS),
                 mint_panics: std::sync::atomic::AtomicBool::default(),
                 wait_panics: std::sync::atomic::AtomicBool::default(),
+                waited_until: Mutex::default(),
                 establish_panics: std::sync::atomic::AtomicBool::default(),
             }
         }
@@ -6954,24 +7372,33 @@ mod tests {
             })
         }
 
-        fn wait_for_the_connection(self: &Arc<Self>) -> FakeTurn {
+        fn wait_for_the_connection_until(self: &Arc<Self>, deadline: Instant) -> Option<FakeTurn> {
             assert!(
                 !self.ledger.wait_panics.load(Ordering::SeqCst),
                 "the case asked this wait to unwind outside the entry gate"
             );
+            *self
+                .ledger
+                .waited_until
+                .lock()
+                .expect("a fake reader's deadline") = Some(deadline);
             self.ledger.waiting.fetch_add(1, Ordering::SeqCst);
             let mut free = self.free.lock().expect("a fake reader's connection");
             while !*free {
-                free = self
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                (free, _) = self
                     .returned
-                    .wait(free)
+                    .wait_timeout(free, remaining)
                     .expect("a fake reader's connection");
             }
             *free = false;
-            FakeTurn {
+            Some(FakeTurn {
                 reader: Arc::clone(self),
                 holds_the_connection: true,
-            }
+            })
         }
 
         fn statements_run_on_this_thread() -> u64 {
@@ -7209,6 +7636,15 @@ mod tests {
         attach_started: std::sync::atomic::AtomicBool,
         attach_release: std::sync::atomic::AtomicBool,
         heal_in_attach: std::sync::atomic::AtomicBool,
+        /// Publish counted progress from inside a recovery, which is how a
+        /// recovering entry comes to heal under the phase a reconcile heals
+        /// under.
+        heal_in_recover: std::sync::atomic::AtomicBool,
+        /// Hold a schema-changing reload open after it has published its
+        /// warming, on the reload's own `reload_started` and `reload_release`
+        /// markers, so a case reads an entry mid-reload with its reader
+        /// closed.
+        block_schema_reload: std::sync::atomic::AtomicBool,
         block_detach: std::sync::atomic::AtomicBool,
         detach_started: std::sync::atomic::AtomicBool,
         detach_release: std::sync::atomic::AtomicBool,
@@ -7216,6 +7652,11 @@ mod tests {
         block_reconcile_at: AtomicUsize,
         reconcile_started: std::sync::atomic::AtomicBool,
         reconcile_release: std::sync::atomic::AtomicBool,
+        /// The reconcile turn from which every later turn is held on its own
+        /// release, and zero for none: a case that lets one held turn go
+        /// through `reconcile_release` still holds the turns after it.
+        hold_reconciles_from: AtomicUsize,
+        later_reconcile_release: std::sync::atomic::AtomicBool,
         block_poll: std::sync::atomic::AtomicBool,
         /// The one vault whose poll blocks, where `block_poll` blocks every
         /// vault's. A case holding one alias inside a poll while it drives the
@@ -7251,7 +7692,18 @@ mod tests {
         /// race a watcher poll for the same batches; see `ON_JOB_THREAD`.
         handoff_poll_batches: AtomicUsize,
         handoff_rescan_poll_batches: AtomicUsize,
+        /// The batch source for a poll off a job thread that reports a fact,
+        /// spent one batch per poll: a change the entry takes in and a
+        /// reconcile turn derives, where the source above reports a batch
+        /// carrying nothing.
+        off_thread_fact_poll_batches: AtomicUsize,
         continuous_handoff_poll_for: Mutex<Option<VaultName>>,
+        /// The vault whose every handoff drain comes back full of facts: each
+        /// poll on a job thread reports one, so every turn hands on to another
+        /// and the facts each turn observed are what the next one derives.
+        continuous_fact_handoff_for: Mutex<Option<VaultName>>,
+        /// Every batch a reconcile was handed, in call order.
+        reconciled_batches: Mutex<Vec<Batch>>,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
@@ -7526,16 +7978,24 @@ mod tests {
             &self,
             name: &VaultName,
             _: &mut FakeCoverage,
-            _: ReconcileWork,
+            work: ReconcileWork,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
+            self.reconciled_batches
+                .lock()
+                .expect("reconciled batches poisoned")
+                .push(work.batch);
             let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
             if self.block_reconcile.load(Ordering::SeqCst)
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
                 self.reconcile_started.store(true, Ordering::SeqCst);
                 wait_for_release("reconcile_release", &self.reconcile_release);
+            }
+            let held_from = self.hold_reconciles_from.load(Ordering::SeqCst);
+            if held_from != 0 && reconcile >= held_from {
+                wait_for_release("later_reconcile_release", &self.later_reconcile_release);
             }
             if self.panic_in_reconcile.load(Ordering::SeqCst) {
                 panic!("{RECONCILE_PANIC}");
@@ -7597,10 +8057,13 @@ mod tests {
             &self,
             _: &VaultName,
             _: &mut FakeCoverage,
-            _: &ProgressReporter<FakeCoverage>,
+            progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.recovers.fetch_add(1, Ordering::SeqCst);
+            if self.heal_in_recover.load(Ordering::SeqCst) {
+                progress.healing().report(1, Some(2));
+            }
             if self.block_recover.load(Ordering::SeqCst) {
                 self.recover_started.store(true, Ordering::SeqCst);
                 wait_for_release("recover_release", &self.recover_release);
@@ -7662,6 +8125,10 @@ mod tests {
             }
             if self.reload_schema_changed.load(Ordering::SeqCst) {
                 progress.begin_schema_reload();
+                if self.block_schema_reload.load(Ordering::SeqCst) {
+                    self.reload_started.store(true, Ordering::SeqCst);
+                    wait_for_release("reload_release", &self.reload_release);
+                }
                 if self
                     .reload_schema_apply_failure
                     .swap(false, Ordering::SeqCst)
@@ -7769,6 +8236,12 @@ mod tests {
                     == Some(name)
             {
                 return Ok(Some(Batch::default()));
+            }
+            if on_job_thread && stands_for_the_vault(&self.continuous_fact_handoff_for, name) {
+                return Ok(Some(a_fact()));
+            }
+            if !on_job_thread && spend_one(&self.off_thread_fact_poll_batches) {
+                return Ok(Some(a_fact()));
             }
             let (empty, rescans) = if on_job_thread {
                 (
@@ -7974,6 +8447,7 @@ mod tests {
                 idle_after,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -8006,6 +8480,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -8034,6 +8509,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap()
@@ -8070,6 +8546,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots,
                 watch_poll_interval,
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap()
@@ -8431,6 +8908,13 @@ mod tests {
     /// spin competes with them for the core that would set the marker.
     fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
         wait_for_marker(label, flag, lifecycle_wait_budget())
+    }
+
+    /// One fact a watcher reports: a batch that is not empty. The fake's legs
+    /// read no batch's content, so any fact serves, and this is the one
+    /// constructor that names no path under a root.
+    fn a_fact() -> Batch {
+        Batch::schema_change()
     }
 
     /// Arrange for one vault: the leg that reads the arrangement finds this
@@ -9532,6 +10016,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -10609,6 +11094,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -11049,6 +11535,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -14827,6 +15314,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15398,7 +15886,7 @@ mod tests {
             {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
             }
-            Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
+            Ok(self.emit.swap(false, Ordering::SeqCst).then(a_fact))
         }
         fn detach(&self, _: &VaultName, _: FakeCoverage) {}
         /// No case here reads a job account, so these ops keep none.
@@ -15421,6 +15909,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15518,6 +16007,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15549,6 +16039,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15578,6 +16069,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15613,6 +16105,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15799,6 +16292,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15851,6 +16345,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -15898,6 +16393,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16496,6 +16992,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16521,6 +17018,11 @@ mod tests {
         drop((renewed_healthy, refused_lease, healthy_lease, host));
     }
 
+    /// **The dispatcher's own poll closes `Ready` before the reconcile of what
+    /// it reported runs**: the entry publishes healing while the batch is
+    /// reconciled, withholding the snapshot the batch made stale, and a read
+    /// that arrives meanwhile waits for the reconcile and answers from the
+    /// `Ready` it ends at.
     #[test]
     fn dispatcher_closes_ready_before_reconciling_a_polled_batch() {
         let ops = Arc::new(PollingOps::default());
@@ -16536,6 +17038,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16553,7 +17056,24 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        ops.reconcile_release.store(true, Ordering::SeqCst);
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(
+                !reading.is_finished(),
+                "a read answered from the snapshot the batch made stale"
+            );
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            let hold = reading
+                .join()
+                .expect("the read finished")
+                .expect("the read waiting on the reconcile was refused");
+            assert_eq!(
+                hold.reading().published(),
+                &Demand::State(TrustState::Ready)
+            );
+        });
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -16572,6 +17092,7 @@ mod tests {
                 idle_after: Duration::ZERO,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -16614,6 +17135,7 @@ mod tests {
                 idle_after: Duration::ZERO,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -18598,16 +19120,15 @@ mod tests {
     /// mints a handle over the store that replaced the damaged one, so the
     /// connection this acquisition waited for reads a file nothing links to;
     /// establishing on it would answer from a database the entry has moved on
-    /// from. The acquisition refuses as reader-unavailable and gives that
-    /// connection back to the handle it took it from, which is what keeps a
-    /// retired handle from being left empty.
+    /// from. The acquisition gives that connection back to the handle it took
+    /// it from, which is what keeps a retired handle from being left empty,
+    /// and acquires the handle the entry serves now, inside its bound.
     ///
-    /// **The wait it paid is in the account, and the read it was not served is
-    /// not.** The account reports what an acquisition did whichever way it
-    /// left, and a refusal after the wait paid the whole of that wait: the
-    /// contention reading moves and the served reading does not.
+    /// **The wait it paid is in the account beside the read it was served.**
+    /// One wait for the connection and one round after it, whichever handle
+    /// the read was answered from.
     #[test]
-    fn a_read_that_waited_refuses_where_the_entrys_handle_was_replaced_under_it() {
+    fn a_read_that_waited_acquires_the_handle_that_replaced_the_one_it_waited_for() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
@@ -18628,10 +19149,10 @@ mod tests {
                 .expect("the entry holds the handle its reads run on"),
         );
 
-        let refusal = thread::scope(|scope| {
+        let (hold, replacement) = thread::scope(|scope| {
             let waiting = scope.spawn(|| {
                 host.begin_read(&name)
-                    .expect_err("a read established on a handle the entry had replaced")
+                    .expect("a read that waited was refused over the handle that replaced it")
             });
             wait_until(
                 "the second read to reach the wait for the entry's connection",
@@ -18648,53 +19169,1473 @@ mod tests {
 
             // The entry lets its handle go and mints another over the coverage
             // it holds, the way a rebuild that replaced the store does. It
-            // goes on serving throughout, so what refuses the waiting read is
-            // the handle rather than the entry's state.
-            {
+            // goes on serving throughout.
+            let replacement = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 state.close_reader();
-                assert!(
-                    state.remint_for_a_read().handle.is_some(),
-                    "the entry minted no handle over the coverage it holds"
-                );
-            }
+                state
+                    .remint_for_a_read()
+                    .handle
+                    .expect("the entry minted no handle over the coverage it holds")
+            };
             assert_eq!(host.state(&name), answered(TrustState::Ready));
 
             drop(first);
-            waiting.join().expect("the waiting read finished")
+            (
+                waiting.join().expect("the waiting read finished"),
+                replacement,
+            )
         });
 
-        let ReadRefusal::ReaderUnavailable(unavailable) = &refusal else {
-            panic!(
-                "the read that waited was refused as the entry rather than as the handle it waited for: {refusal:?}"
-            );
-        };
         assert!(
-            unavailable.detail().contains("another handle"),
-            "the refusal names something other than the handle that moved: {unavailable}"
+            Arc::ptr_eq(&hold.reader, &replacement),
+            "the read answered from a handle other than the one the entry serves"
         );
         assert!(
             waited_for.try_take().is_some(),
-            "the refused read kept the connection of the handle it waited for"
+            "the read kept the connection of the handle it waited for"
         );
         let reading = host.read_evidence().since(before);
         assert_eq!(
-            reading.reads_served, 0,
-            "the read that waited and was refused was counted as served"
+            (
+                reading.reads_served,
+                reading.reader_waits,
+                reading.gate_rounds_after_the_first
+            ),
+            (1, 1, 1),
+            "the account holds another shape than one served read that waited once"
+        );
+    }
+
+    /// The bound a case that waits a read out gives it: long enough that a
+    /// read answering inside a case was woken rather than timed out.
+    const LONG_SETTLE: Duration = Duration::from_secs(60);
+
+    /// The fixture without ambient polling, with the read settle bound a case
+    /// names.
+    fn fixture_settling_within(
+        ops: Arc<FakeOps>,
+        read_settle_bound: Duration,
+    ) -> (Host<Arc<FakeOps>>, VaultName) {
+        let name = VaultName::new("notes").unwrap();
+        let entry = RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
+        );
+        let host = Host::new(
+            RegistryRead::from_entries([entry]),
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+                read_settle_bound,
+            },
+        )
+        .unwrap();
+        (host, name)
+    }
+
+    /// Take a `Ready` entry into a change: a driven poll reports a fact, and
+    /// the reconcile it schedules is held open once it has begun, so the
+    /// entry stands healing over coverage it has served.
+    fn hold_a_change_in_flight(ops: &Arc<FakeOps>, host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(ops, host, name, &ops.off_thread_fact_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        assert_eq!(
+            host.state(name),
+            answered(TrustState::warming(WarmingPhase::Healing, 0, None)),
+            "the change did not leave the entry healing"
+        );
+    }
+
+    /// Wait for the read account to name `waits` settle waits begun since
+    /// `before`.
+    fn wait_for_settle_waits<O: EntryOps>(host: &Host<O>, before: ReadReading, waits: u64) {
+        wait_until(
+            "a read to begin its settle wait",
+            lifecycle_wait_budget(),
+            || match host.read_evidence().since(before).settle_waits {
+                begun if begun == waits => Observed::Met(()),
+                begun => Observed::pending(format!("the account holds {begun} settle waits")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// **A read issued while a change is being indexed answers the state
+    /// after it.** The entry is healing over a polled batch it has not
+    /// reconciled, so the snapshot standing is the state before the change;
+    /// the read waits rather than answering from it or refusing, and answers
+    /// once the reconcile has published `Ready`. The snapshot is established
+    /// in the hold that reads `Ready`, so what it reads is the store the
+    /// reconcile left.
+    #[test]
+    fn a_read_issued_mid_increment_answers_the_post_increment_state() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(
+                !reading.is_finished(),
+                "the read answered while the change it met was still being indexed"
+            );
+            let released = Instant::now();
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            let answered = reading.join().expect("the read finished");
+            // The bound is a minute, so a read answering well inside it was
+            // woken by the change rather than by its bound running out.
+            assert!(
+                released.elapsed() < LONG_SETTLE / 4,
+                "the read answered {:?} after the change landed",
+                released.elapsed()
+            );
+            answered
+        })
+        .expect("a read that met a change was refused once the change was indexed");
+
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the read answered under a state other than the one the change ended at"
         );
         assert_eq!(
-            reading.reader_waits, 1,
-            "the wait the refused acquisition paid is missing from the account"
-        );
-        assert_eq!(
-            reading.gate_rounds_after_the_first, 1,
-            "the round the refused acquisition took after its wait is missing from the account"
-        );
-        assert_eq!(
-            host.read_evidence().widest_gate_rounds_after_the_first,
+            ops.reconciles.load(Ordering::SeqCst),
             1,
-            "an acquisition took other than one round of the gate after its first"
+            "the read answered before the reconcile it waited for had run"
         );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reads_served, reading.settle_expiries),
+            (1, 0),
+            "the read was not served inside its bound"
+        );
+    }
+
+    /// **A change published between the read letting the gate go and its
+    /// wait still wakes the read.** The generation the read waits past is
+    /// read under the gate, so a `Ready` published in that window has already
+    /// moved past it, and the wait answers at once. The bound is a minute, so
+    /// a read answering well inside it was not left to wait its bound out.
+    #[test]
+    fn a_change_published_before_a_settling_read_waits_still_wakes_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        {
+            let ops = Arc::clone(&ops);
+            let landing = Arc::clone(&entry);
+            entry.gate.when_a_read_lets_go(move || {
+                ops.reconcile_release.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while landing.gate.lock().expect("entry gate poisoned").trust != TrustState::Ready {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the change did not land while the read had the gate let go"
+                    );
+                    thread::yield_now();
+                }
+            });
+        }
+
+        let started = Instant::now();
+        let hold = host
+            .begin_read(&name)
+            .expect("a read whose change landed before it waited was refused");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "the read waited {:?} for a change that had already landed",
+            started.elapsed()
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A read does not wait for the vault to fall quiet.** Facts arrive
+    /// faster than one reconcile turn takes them: every turn's drain comes
+    /// back full, so each turn hands on to another and the entry never
+    /// publishes `Ready`. A read that meets the entry answers once the entry
+    /// has derived every fact it had taken in when the read met it, inside
+    /// its bound, and says truthfully that the entry is still healing.
+    #[test]
+    fn a_read_answers_inside_its_bound_while_facts_keep_arriving() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(300);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        arrange_for(&ops.continuous_fact_handoff_for, &name);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
+
+        let before = host.read_evidence();
+        let hold = host
+            .begin_read(&name)
+            .expect("a read over a vault whose facts never stop arriving was refused");
+        assert!(
+            matches!(
+                hold.reading().published(),
+                Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                })
+            ),
+            "the read answered under {:?} rather than the healing that still stands",
+            hold.reading().published()
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reads_served, reading.settle_expiries),
+            (1, 0),
+            "the read was not served inside its bound"
+        );
+        drop(hold);
+        *ops.continuous_fact_handoff_for
+            .lock()
+            .expect("continuous handoff poll poisoned") = None;
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read answers from no state older than the facts it met.** The
+    /// entry takes in a batch and holds the turn deriving it; a read that
+    /// meets it records where the entry's fact stream stood and waits. The
+    /// turn commits, its drain comes back full, and it hands on to a second
+    /// turn, which is held. The read answers while the second
+    /// turn is held — it waits for the facts it met and for none that
+    /// arrived after it — and not while the first is: that snapshot is the
+    /// state before the change.
+    #[test]
+    fn a_read_answers_once_the_facts_it_met_are_derived_and_not_before() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        // The first turn's drain comes back full, so it hands on to a second
+        // turn, which is held.
+        ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+        arrange_for(&ops.continuous_fact_handoff_for, &name);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(
+                !reading.is_finished(),
+                "the read answered before the turn deriving the facts it met had committed"
+            );
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            // A read that waits for the second turn too is let go by its
+            // release, so the case fails rather than hanging.
+            let answered = wait_until(
+                "the read to answer while the second turn is held",
+                lifecycle_wait_budget(),
+                || match reading.is_finished() {
+                    true => Observed::Met(()),
+                    false => Observed::pending("the read is still waiting"),
+                },
+            );
+            let turns = ops.reconciles.load(Ordering::SeqCst);
+            *ops.continuous_fact_handoff_for
+                .lock()
+                .expect("continuous handoff poll poisoned") = None;
+            ops.later_reconcile_release.store(true, Ordering::SeqCst);
+            answered.unwrap_or_else(|failure| panic!("{failure}"));
+            assert_eq!(
+                turns, 2,
+                "the read answered with the second turn not yet begun"
+            );
+            reading.join().expect("the read finished")
+        })
+        .expect("a read whose facts were derived was refused");
+        assert!(
+            matches!(
+                hold.reading().published(),
+                Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                })
+            ),
+            "the read answered under {:?} rather than the healing of the second turn",
+            hold.reading().published()
+        );
+        // The answer names the store's committed write generation at the
+        // instant its snapshot was established.
+        let reading = hold
+            .reading()
+            .answer_reading(&name)
+            .expect("the hold's reading answers");
+        assert_eq!(
+            reading.generation,
+            u64::try_from(hold.reading().store().write_generation())
+                .expect("a generation at or above zero"),
+            "the answer names another generation than its snapshot was established at"
+        );
+        drop(hold);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// Wait until the read account names `waits` settle waits begun since
+    /// `before`, or until `reading` has finished, and answer whether it
+    /// finished. A read that answers without waiting ends the wait at once,
+    /// so a case ruling an answer out fails there rather than at its budget.
+    fn settle_waits_or_an_answer<T>(
+        host: &Host<Arc<FakeOps>>,
+        before: ReadReading,
+        waits: u64,
+        reading: &thread::ScopedJoinHandle<'_, T>,
+    ) -> bool {
+        wait_until(
+            "a read to wait again or to answer",
+            lifecycle_wait_budget(),
+            || {
+                if reading.is_finished() {
+                    return Observed::Met(true);
+                }
+                match host.read_evidence().since(before).settle_waits {
+                    begun if begun >= waits => Observed::Met(false),
+                    begun => Observed::pending(format!("the account holds {begun} settle waits")),
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// Take a `Ready` entry into its second reconcile turn while facts keep
+    /// arriving: the first turn commits, its drain comes back full of facts,
+    /// and the second turn takes them and is held.
+    fn hold_the_second_turn(ops: &Arc<FakeOps>, host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+        arrange_for(&ops.continuous_fact_handoff_for, name);
+        hold_a_change_in_flight(ops, host, name);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the second reconcile turn to begin",
+            lifecycle_wait_budget(),
+            || match ops.reconciles.load(Ordering::SeqCst) {
+                turns if turns >= 2 => Observed::Met(()),
+                turns => Observed::pending(format!("{turns} turns have begun")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// Stop the facts arriving and let every held turn go, so the entry
+    /// reaches `Ready`.
+    fn let_the_turns_go(ops: &Arc<FakeOps>, host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        *ops.continuous_fact_handoff_for
+            .lock()
+            .expect("continuous fact handoff poisoned") = None;
+        ops.later_reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(host, name, TrustState::Ready);
+    }
+
+    /// **A read that meets a later turn waits for that turn, never for the
+    /// commit before it.** Facts keep arriving, so each turn hands on to the
+    /// next: the first turn commits, and the second takes the facts the first
+    /// observed and is held. A read that meets the entry now met facts the
+    /// second turn has taken and not committed, and the first turn's commit
+    /// derived none of them, so the read waits rather than answering from it.
+    #[test]
+    fn a_read_meeting_a_later_turn_waits_for_it_and_not_for_the_commit_before() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_the_second_turn(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            assert!(
+                !settle_waits_or_an_answer(&host, before, 1, &reading),
+                "the read answered from the commit of the turn before the one it met"
+            );
+            let_the_turns_go(&ops, &host, &name);
+            reading.join().expect("the read finished")
+        })
+        .expect("a read whose facts were derived was refused");
+        drop(hold);
+    }
+
+    /// **A read meeting the second turn cannot answer from the first turn's
+    /// commit.** With no time to wait, a read that meets the entry while the
+    /// second turn is held refuses as still indexing: the first turn's commit
+    /// derived none of the facts the second has taken.
+    #[test]
+    fn a_read_meeting_the_second_turn_cannot_use_the_first_commit() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_the_second_turn(&ops, &host, &name);
+
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read answered from the commit of the turn before the one it met");
+        assert!(
+            matches!(refusal, ReadRefusal::Unsettled(_)),
+            "the read refused as {refusal:?}"
+        );
+        let_the_turns_go(&ops, &host, &name);
+    }
+
+    /// **A fact taken in while a turn runs is not derived by that turn's
+    /// commit.** The turn took what was pending when it began, and commits
+    /// that and nothing after it. A read that met the fact taken in behind it
+    /// is woken by the commit and waits again, for the turn that takes the
+    /// fact.
+    #[test]
+    fn a_fact_taken_in_while_a_turn_runs_is_not_derived_by_its_commit() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+        hold_a_change_in_flight(&ops, &host, &name);
+        host.shared
+            .entries
+            .get(&name)
+            .expect("the entry is served")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .pending
+            .merge(a_fact());
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            assert!(
+                !settle_waits_or_an_answer(&host, before, 1, &reading),
+                "the read answered before the turn deriving the facts it met had committed"
+            );
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            // The first turn's commit moves how far the entry has derived,
+            // which wakes the read.
+            assert!(
+                !settle_waits_or_an_answer(&host, before, 2, &reading),
+                "the read answered from the commit of a turn that took none of the fact it met"
+            );
+            ops.later_reconcile_release.store(true, Ordering::SeqCst);
+            reading.join().expect("the read finished")
+        })
+        .expect("a read whose facts were derived was refused");
+        drop(hold);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read whose facts are derived still waits for a reader.** The read
+    /// records where the entry's fact stream stands and lets the gate go; its
+    /// reconcile commits and the entry reaches `Ready`; a schema reload then
+    /// begins and closes the reader. The read takes the gate again to find
+    /// its facts derived and no reader standing, so it waits for the reader
+    /// the reload mints and answers from it, rather than refusing.
+    #[test]
+    fn a_read_whose_facts_are_derived_waits_for_the_reader_a_reload_mints() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        let (paused, pause) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel::<()>();
+        entry.gate.when_a_read_lets_go(move || {
+            paused.send(()).expect("the case waits for the pause");
+            resumed.recv().expect("the case resumes the read");
+        });
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            pause
+                .recv()
+                .expect("the read paused after letting the gate go");
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            wait_for_state(&host, &name, TrustState::Ready);
+            ops.block_schema_reload.store(true, Ordering::SeqCst);
+            let reloading = scope.spawn(|| host.reload(&name));
+            wait_for_flag("reload_started", &ops.reload_started);
+            assert!(
+                !reader_stands(&host, &name),
+                "the reload's warming left the reader it closed standing"
+            );
+            resume.send(()).expect("the read is paused");
+            assert!(
+                !settle_waits_or_an_answer(&host, before, 2, &reading),
+                "a read whose facts were derived answered while the entry held no reader"
+            );
+            ops.reload_release.store(true, Ordering::SeqCst);
+            reloading
+                .join()
+                .expect("the reload finished")
+                .expect("the reload was refused");
+            reading.join().expect("the read finished")
+        })
+        .expect("a read that waited for the reload's reader was refused");
+
+        let standing = Arc::clone(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reader
+                .as_ref()
+                .expect("a ready entry holds a reader"),
+        );
+        assert!(
+            Arc::ptr_eq(&hold.reader, &standing),
+            "the read answered from a handle other than the one the reload minted"
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A reconcile turn is handed every fact the entry took in.** A poll
+    /// reports a fact, and the turn it schedules is handed that fact, so what
+    /// the turn commits is the change the entry took in.
+    #[test]
+    fn a_reconcile_turn_is_handed_the_facts_the_entry_took_in() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            *ops.reconciled_batches
+                .lock()
+                .expect("reconciled batches poisoned"),
+            vec![a_fact()],
+            "the turn was handed other facts than the entry took in"
+        );
+    }
+
+    /// Run `leg` on this thread over an entry that is healing and due a
+    /// teardown, with `pending` taken in, while the host's one worker is held
+    /// inside another vault's attach: the leg schedules the teardown, which
+    /// waits in the channel for a read to withdraw it. The dispatcher ticks
+    /// every `tick`. Answers the host, the entry the leg ran over, and the
+    /// lease on the vault holding the worker.
+    fn a_leg_ending_due_a_teardown(
+        ops: &Arc<FakeOps>,
+        leg: fn(VaultName, u64) -> Job,
+        pending: Option<Batch>,
+        bound: Duration,
+        tick: Duration,
+    ) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
+        let subject = VaultName::new("a").unwrap();
+        let holding = VaultName::new("b").unwrap();
+        let registry = RegistryRead::from_entries([&subject, &holding].map(|name| {
+            RegistryEntry::new(
+                name.clone(),
+                VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
+            )
+        }));
+        let host = Host::new(
+            registry,
+            Arc::clone(ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: tick,
+                read_settle_bound: bound,
+            },
+        )
+        .unwrap();
+        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &subject, TrustState::Ready);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        let entry = host
+            .shared
+            .entries
+            .get(&subject)
+            .expect("the entry is served");
+        let job = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if let Some(batch) = pending {
+                state.pending.merge(batch);
+            }
+            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+            state.detach_due = true;
+            state.claim.schedule(|epoch| leg(subject.clone(), epoch))
+        };
+        run_job(&host.shared, job);
+        assert!(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .detach_scheduled,
+            "the leg scheduled no teardown for the read to withdraw"
+        );
+        (host, subject, holding_lease)
+    }
+
+    /// A read that withdraws the teardown a leg left nothing to derive
+    /// behind answers at once from the `Ready` the leg published, rather than
+    /// waiting its bound out over an entry left healing with nothing owed.
+    fn a_read_withdrawing_a_teardown_after(leg: fn(VaultName, u64) -> Job, pending: Option<Batch>) {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_secs(2);
+        // The dispatcher does not tick inside the case, so nothing but the
+        // leg publishes over the entry before the read.
+        let (host, subject, holding_lease) =
+            a_leg_ending_due_a_teardown(&ops, leg, pending, bound, Duration::from_secs(60));
+
+        let started = Instant::now();
+        let hold = host
+            .begin_read(&subject)
+            .expect("a read over an entry with nothing left to derive was refused");
+        assert!(
+            started.elapsed() < bound,
+            "the read waited {:?} over an entry with nothing left to derive",
+            started.elapsed()
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the leg left the entry healing with nothing left to derive"
+        );
+        drop(hold);
+        assert_eq!(host.state(&subject), answered(TrustState::Ready));
+        ops.attach_release.store(true, Ordering::SeqCst);
+        drop(holding_lease);
+    }
+
+    /// **A poll schedules the reconcile facts left pending are owed.** A
+    /// maintenance ends with a fact pending and a teardown due, so it
+    /// schedules the teardown and leaves the entry healing with the fact
+    /// owed. A read withdraws the teardown and waits; the watcher reports
+    /// nothing more, so the dispatcher's next poll is what schedules the
+    /// reconcile, and the read answers once that commits, well inside its
+    /// bound.
+    #[test]
+    fn a_poll_schedules_the_reconcile_that_facts_left_pending_are_owed() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, subject, holding_lease) = a_leg_ending_due_a_teardown(
+            &ops,
+            Job::Maintenance,
+            Some(a_fact()),
+            LONG_SETTLE,
+            Duration::from_millis(5),
+        );
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let hold = thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&subject));
+            // The worker goes free once the read has withdrawn the teardown,
+            // so the teardown it finds in the channel is one the entry has
+            // moved past.
+            wait_for_settle_waits(&host, before, 1);
+            ops.attach_release.store(true, Ordering::SeqCst);
+            reading.join().expect("the read finished")
+        })
+        .expect("a read over facts the next poll scheduled was refused");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "the read waited {:?} for facts nothing scheduled",
+            started.elapsed()
+        );
+        drop(hold);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the facts left pending were not reconciled once"
+        );
+        drop(holding_lease);
+    }
+
+    /// **A reconcile turn that derived everything publishes `Ready` though a
+    /// teardown is due**, so a read that withdraws the teardown answers.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_turn_that_derived_everything_answers() {
+        a_read_withdrawing_a_teardown_after(Job::Reconcile, Some(a_fact()));
+    }
+
+    /// **A maintenance that left nothing to derive publishes `Ready` though a
+    /// teardown is due**, so a read that withdraws the teardown answers.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_maintenance_that_left_nothing_answers() {
+        a_read_withdrawing_a_teardown_after(Job::Maintenance, None);
+    }
+
+    /// **A rebuild that leaves a fact pending publishes no `Ready` though a
+    /// teardown is due.** Its drain can merge facts behind a pending batch
+    /// the rung never derives, unlike a reconcile's own turn over the batch
+    /// it takes, so the healing the rung leaves behind — not the `Ready` the
+    /// unfixed leg published unconditionally — is what a read that withdraws
+    /// the teardown meets: the coverage the rung reminted carries no
+    /// continuity for a read to settle across, so the read is refused
+    /// healing rather than served a `Ready` the fact is still owed against.
+    /// A poll schedules the reconcile the fact is owed once the worker the
+    /// rung's teardown was waiting on frees up, and a read answers once that
+    /// commits.
+    #[test]
+    fn a_poll_schedules_the_reconcile_that_a_rebuild_left_pending() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, subject, holding_lease) = a_leg_ending_due_a_teardown(
+            &ops,
+            Job::Rebuild,
+            Some(a_fact()),
+            Duration::from_secs(2),
+            Duration::from_millis(5),
+        );
+
+        assert_ne!(
+            host.state(&subject),
+            answered(TrustState::Ready),
+            "a rebuild published Ready though a fact from its drain was still pending"
+        );
+        let refusal = host
+            .begin_read(&subject)
+            .expect_err("a read met a rebuild's pending fact and a due teardown as service");
+        assert!(
+            matches!(
+                refusal,
+                ReadRefusal::NotServing(Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::Healing,
+                    ..
+                }))
+            ),
+            "a read over a rebuild's pending fact was refused as {refusal:?}, not the healing it left"
+        );
+
+        // Nothing schedules the reconcile the fact is owed until the worker
+        // the holding vault's attach pinned frees up for the dispatcher's
+        // next poll to use.
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the fact a rebuild left pending was not reconciled once"
+        );
+        assert_eq!(
+            host.begin_read(&subject)
+                .expect("a rebuild's fact reconciled by the poll answers a read")
+                .reading()
+                .published(),
+            &Demand::State(TrustState::Ready)
+        );
+        drop(holding_lease);
+    }
+
+    /// **A rebuild that left nothing to derive publishes `Ready` though a
+    /// teardown is due**, so a read that withdraws the teardown answers.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_rebuild_that_left_nothing_answers() {
+        a_read_withdrawing_a_teardown_after(Job::Rebuild, None);
+    }
+
+    /// **A batch carrying no fact leaves the entry's position where it
+    /// stands.** A turn whose drain observed nothing merges an empty batch,
+    /// and a position moved by it would name a fact no turn is coming to
+    /// derive: every read meeting the entry would wait for it.
+    #[test]
+    fn a_batch_carrying_no_fact_leaves_the_position_where_it_stands() {
+        let mut pending = PendingFacts::default();
+        pending.merge(Batch::default());
+        assert_eq!(pending.taken_in, 0, "an empty batch moved the position");
+        pending.merge(a_fact());
+        assert_eq!(pending.taken_in, 1, "a fact did not move the position");
+    }
+
+    /// **The position stands across a coverage return.** Coverage that goes
+    /// back drops the facts pending with it, and the position and how far the
+    /// entry has derived stay where they were: a read that recorded a
+    /// position before the return compares it with the same count after it.
+    #[test]
+    fn the_position_stands_across_a_coverage_return() {
+        let mut pending = PendingFacts::default();
+        pending.merge(a_fact());
+        pending.merge(a_fact());
+        let (_, through) = pending.take();
+        pending.derive_through(through);
+        pending.merge(a_fact());
+        pending.clear();
+        assert!(pending.is_empty(), "the return kept a pending fact");
+        assert_eq!(
+            (pending.taken_in, pending.derived_through),
+            (3, 2),
+            "the return moved the position or how far the entry derived"
+        );
+    }
+
+    /// **A read past its settle bound refuses as still indexing.** The change
+    /// never lands inside the bound, so the read refuses under
+    /// `host/entry-not-ready` with the healing it met, the message that says
+    /// the vault is catching up rather than empty, and one expiry in the
+    /// account.
+    #[test]
+    fn a_read_past_its_settle_bound_refuses_as_still_indexing() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(50);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read answered from an entry still indexing a change");
+        assert!(
+            started.elapsed() >= bound,
+            "the read refused before its bound ran out"
+        );
+        assert_eq!(
+            refusal,
+            ReadRefusal::Unsettled(Demand::State(TrustState::warming(
+                WarmingPhase::Healing,
+                0,
+                None
+            )))
+        );
+        let envelope = refusal.answer(&name);
+        assert_eq!(envelope.code(), &norn_wire::ReasonCode::HostEntryNotReady);
+        assert_eq!(envelope.message(), "this vault is still indexing a change");
+        assert_eq!(
+            envelope.detail(),
+            &ErrorDetail::entry_not_ready(norn_wire::NotReady::warming(
+                WarmingPhase::Healing,
+                0,
+                None
+            ))
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (
+                reading.settle_waits,
+                reading.settle_expiries,
+                reading.reads_served
+            ),
+            (1, 1, 0)
+        );
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// Hold a read waiting over a change, let `teardown` act on the entry,
+    /// and answer the read's refusal and how long the read took once the
+    /// teardown began. The bound is a minute, so a refusal well inside it is
+    /// a read the teardown's publication woke.
+    fn a_waiting_read_meets(
+        ops: &Arc<FakeOps>,
+        teardown: impl FnOnce(&Arc<FakeOps>),
+    ) -> (ReadRefusal, Duration) {
+        let (host, name) = fixture_settling_within(Arc::clone(ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(ops, &host, &name);
+
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            let began = Instant::now();
+            teardown(ops);
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            let refusal = reading
+                .join()
+                .expect("the read finished")
+                .expect_err("a read answered over an entry that withdrew what it served");
+            let took = began.elapsed();
+            ops.later_reconcile_release.store(true, Ordering::SeqCst);
+            ops.attach_release.store(true, Ordering::SeqCst);
+            (refusal, took)
+        })
+    }
+
+    /// **A release wakes a waiting read and refuses it.** The reconcile the
+    /// read waits on loses the maintainership, so the entry releases its
+    /// coverage; teardown waits for no read, and its publication is what
+    /// ends the read's wait.
+    #[test]
+    fn a_release_wakes_and_refuses_a_waiting_read() {
+        let ops = Arc::new(FakeOps::default());
+        let (refusal, took) = a_waiting_read_meets(&ops, |ops| {
+            // The re-attach the release honors the read's lease with is held,
+            // so the entry stands released until the read has answered.
+            ops.block_attach.store(true, Ordering::SeqCst);
+            ops.lost_reconcile.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            took < LONG_SETTLE / 4,
+            "the read waited {took:?} past the release"
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::NotServing(_)),
+            "a released entry refused a waiting read as {refusal:?}"
+        );
+    }
+
+    /// **An overflow wakes a waiting read and refuses it with the overflow.**
+    /// The reconcile's own drain reports a rescan, so trust is withdrawn
+    /// while the read waits, and the read refuses with that reason rather
+    /// than waiting on the reread.
+    #[test]
+    fn an_overflow_wakes_and_refuses_a_waiting_read() {
+        let ops = Arc::new(FakeOps::default());
+        let (refusal, took) = a_waiting_read_meets(&ops, |ops| {
+            // The reread the overflow owes is held, so the entry stands
+            // overflowed until the read has answered.
+            ops.hold_reconciles_from.store(2, Ordering::SeqCst);
+            ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        });
+        assert!(
+            took < LONG_SETTLE / 4,
+            "the read waited {took:?} past the overflow"
+        );
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::untrusted(
+                UntrustedReason::WatcherOverflow
+            )))
+        );
+    }
+
+    /// **An unwind wakes a waiting read and refuses it.** The reconcile the
+    /// read waits on panics, so the entry withdraws what it was serving and
+    /// the read refuses with what it publishes.
+    #[test]
+    fn an_unwind_wakes_and_refuses_a_waiting_read() {
+        let ops = Arc::new(FakeOps::default());
+        let (refusal, took) = a_waiting_read_meets(&ops, |ops| {
+            ops.panic_in_reconcile.store(true, Ordering::SeqCst);
+        });
+        ops.panic_in_reconcile.store(false, Ordering::SeqCst);
+        assert!(
+            took < LONG_SETTLE / 4,
+            "the read waited {took:?} past the unwind"
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::NotServing(_)),
+            "an unwound reconcile refused a waiting read as {refusal:?}"
+        );
+    }
+
+    /// **A settle wait is counted where it begins.** The account names
+    /// the waiting read while it still waits, and the round it takes after
+    /// the wait lands where it leaves, apart from the rounds a wait for the
+    /// connection takes.
+    #[test]
+    fn a_settle_wait_is_counted_where_it_begins() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(!reading.is_finished(), "the counted read was not waiting");
+            assert_eq!(
+                host.read_evidence().since(before).settle_rounds,
+                0,
+                "a read still waiting recorded its rounds before it left"
+            );
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            drop(reading.join().expect("the read finished"));
+        });
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (
+                reading.settle_waits,
+                reading.settle_rounds,
+                reading.reader_waits,
+                reading.gate_rounds_after_the_first
+            ),
+            (1, 1, 0, 0),
+            "the settle wait was counted as something other than one wait and one round"
+        );
+    }
+
+    /// **No read waits under the entry gate.** While a read waits for a
+    /// change, the gate is free to take and the entry's status answers, so
+    /// the waiting read freezes no surface of the entry it waits on.
+    #[test]
+    fn no_read_waits_under_the_entry_gate() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(
+                entry.gate.try_lock().is_ok(),
+                "the entry gate was held while a read waited for a change"
+            );
+            assert_eq!(
+                host.state(&name),
+                answered(TrustState::warming(WarmingPhase::Healing, 0, None)),
+                "the entry's status did not answer while a read waited"
+            );
+            assert!(!reading.is_finished(), "the read stopped waiting");
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            drop(reading.join().expect("the read finished"));
+        });
+    }
+
+    /// Answer a read over an entry that refuses it at once, and what the read
+    /// account moved, with a minute's bound: a refusal inside the case is one
+    /// that waited for nothing.
+    fn refused_at_once(host: &Host<Arc<FakeOps>>, name: &VaultName) -> ReadRefusal {
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(name)
+            .expect_err("an entry that has not served this change answered a read");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "the read waited {:?} before it refused",
+            started.elapsed()
+        );
+        assert_eq!(
+            host.read_evidence().since(before).settle_waits,
+            0,
+            "the read waited for an entry that refuses"
+        );
+        refusal
+    }
+
+    /// **An entry that has never served refuses a read at once**, although it
+    /// heals under the phase a change does. Its first attach is deriving the
+    /// vault, so nothing it holds has been served, and a read waits on no
+    /// first heal.
+    #[test]
+    fn a_read_refuses_at_once_over_an_entry_that_never_served() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        ops.heal_in_attach.store(true, Ordering::SeqCst);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_flag("attach_started", &ops.attach_started);
+        let healing = TrustState::warming(WarmingPhase::Healing, 1, Some(2));
+        assert_eq!(host.state(&name), answered(healing.clone()));
+
+        assert_eq!(
+            refused_at_once(&host, &name),
+            ReadRefusal::NotServing(Demand::State(healing))
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **An overflowed entry refuses a read at once**: the watcher reported
+    /// less than it saw, trust is withdrawn until the reread, and a read
+    /// waits on no reread.
+    #[test]
+    fn a_read_refuses_at_once_over_an_overflowed_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        assert_eq!(
+            refused_at_once(&host, &name),
+            ReadRefusal::NotServing(Demand::State(TrustState::untrusted(
+                UntrustedReason::WatcherOverflow
+            )))
+        );
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A recovering entry refuses a read at once, even where it heals.**
+    /// The watcher was lost, so trust was withdrawn; the recovery heals, then
+    /// hands on the reconcile of what the loss left, and the entry heals
+    /// under the phase a change heals under with no rung owed. It entered
+    /// warming from untrusted, so a read refuses rather than waiting.
+    #[test]
+    fn a_read_refuses_at_once_over_a_recovering_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        lose_coverage_through_a_driven_poll(&ops, &host, &name, "the watcher went away");
+        ops.heal_in_recover.store(true, Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        let healing = TrustState::warming(WarmingPhase::Healing, 1, Some(2));
+        assert_eq!(host.state(&name), answered(healing.clone()));
+        assert!(
+            !host
+                .shared
+                .entries
+                .get(&name)
+                .expect("the entry is served")
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .owes_a_rung(),
+            "the entry still owes the recovery, so the rung rather than how it entered \
+             warming would refuse the read"
+        );
+
+        assert_eq!(
+            refused_at_once(&host, &name),
+            ReadRefusal::NotServing(Demand::State(healing))
+        );
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(recovery);
+    }
+
+    /// **A rebuilt entry refuses a read at once, even where it heals.** The
+    /// store was found damaged, so trust was withdrawn; the rebuild replaces
+    /// it and hands on the reconcile of what its drain saw, and the entry
+    /// heals under the phase a change heals under with no rung owed. Nothing
+    /// in the rebuilt store has been served, so a read refuses rather than
+    /// waiting.
+    #[test]
+    fn a_read_refuses_at_once_over_a_rebuilt_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        // The rebuild's drain is saturated, so the rung ends healing and hands
+        // on a reconcile, which is held.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        arrange_for(&ops.continuous_handoff_poll_for, &name);
+        arrange_for(&ops.damaged_poll_at, &name);
+        poll_watchers(&host.shared);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        let healing = TrustState::warming(WarmingPhase::Healing, 0, None);
+        assert_eq!(host.state(&name), answered(healing.clone()));
+        assert!(
+            !host
+                .shared
+                .entries
+                .get(&name)
+                .expect("the entry is served")
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .owes_a_rung(),
+            "the entry still owes the rebuild, so the rung rather than how it entered \
+             warming would refuse the read"
+        );
+
+        assert_eq!(
+            refused_at_once(&host, &name),
+            ReadRefusal::NotServing(Demand::State(healing))
+        );
+        *ops.continuous_handoff_poll_for
+            .lock()
+            .expect("continuous handoff poll poisoned") = None;
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read waiting through a schema reload answers from the reader the
+    /// reload minted.** The reload closes the entry's reader as it begins
+    /// warming, so the handle standing before it reads a schema the entry
+    /// has moved on from; the read waits, and answers from the handle minted
+    /// with the `Ready` the reload ends at.
+    #[test]
+    fn a_read_waiting_through_a_schema_reload_answers_from_the_new_reader() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        let before_the_reload = Arc::clone(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reader
+                .as_ref()
+                .expect("a ready entry holds a reader"),
+        );
+        ops.block_schema_reload.store(true, Ordering::SeqCst);
+
+        let before = host.read_evidence();
+        let hold = thread::scope(|scope| {
+            let reloading = scope.spawn(|| host.reload(&name));
+            wait_for_flag("reload_started", &ops.reload_started);
+            assert!(
+                !reader_stands(&host, &name),
+                "the reload's warming left the reader it closed standing"
+            );
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(!reading.is_finished(), "the read answered mid-reload");
+            ops.reload_release.store(true, Ordering::SeqCst);
+            reloading
+                .join()
+                .expect("the reload finished")
+                .expect("the reload was refused");
+            reading.join().expect("the read finished")
+        })
+        .expect("a read that waited through a reload was refused");
+
+        let standing = Arc::clone(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .reader
+                .as_ref()
+                .expect("a ready entry holds a reader"),
+        );
+        assert!(
+            Arc::ptr_eq(&hold.reader, &standing),
+            "the read answered from a handle other than the one the reload minted"
+        );
+        assert!(
+            !Arc::ptr_eq(&hold.reader, &before_the_reload),
+            "the read answered from the handle the reload closed"
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A withdrawal of trust breaks it, whatever the same hold publishes
+    /// after.** One hold over a `Ready` entry withdraws trust and then
+    /// publishes healing, which is the label a change heals under too; the
+    /// withdrawal is what the entry keeps, so a read refuses rather than
+    /// waiting for a `Ready` that no longer follows from the one it served.
+    #[test]
+    fn a_hold_that_withdraws_trust_and_then_heals_refuses_a_read() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.withdraw_trust(UntrustedReason::WatcherOverflow);
+            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        }
+        let stance = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .read_stance();
+        assert_eq!(
+            stance,
+            ReadStance::Refuse,
+            "an entry whose trust was withdrawn settles a read"
+        );
+    }
+
+    /// **A read waits for the connection no longer than its bound.** One read
+    /// holds the entry's connection and does not end; a second read over the
+    /// same `Ready` entry waits for it, and refuses as reader-unavailable when
+    /// its bound runs out, while the first read still holds the connection.
+    #[test]
+    fn a_read_waiting_for_the_connection_refuses_at_its_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(50);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let (refusal, took) = thread::scope(|scope| {
+            let reading = scope.spawn(|| {
+                let refusal = host
+                    .begin_read(&name)
+                    .expect_err("a read took a connection another read holds");
+                (refusal, started.elapsed())
+            });
+            // A read that waits past its bound is let go by the first read's
+            // end, so the case fails rather than hanging.
+            let refused = wait_until(
+                "the waiting read to refuse at its bound",
+                lifecycle_wait_budget(),
+                || match reading.is_finished() {
+                    true => Observed::Met(()),
+                    false => Observed::pending("the read is still waiting"),
+                },
+            );
+            if let Err(failure) = refused {
+                drop(first);
+                panic!("{failure}");
+            }
+            let answered = reading.join().expect("the read finished");
+            drop(first);
+            answered
+        });
+        assert!(took >= bound, "the read refused {took:?} before its bound");
+        let ReadRefusal::ReaderUnavailable(unavailable) = &refusal else {
+            panic!("a read past its bound on the connection refused as {refusal:?}");
+        };
+        assert!(
+            unavailable.detail().contains("connection"),
+            "the refusal names something other than the connection: {unavailable}"
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.reader_waits, reading.reads_served),
+            (1, 0),
+            "the account holds another shape than one wait and no read served"
+        );
+    }
+
+    /// **A zero bound refuses at once where the connection is held.** The
+    /// read does not wait for the connection at all.
+    #[test]
+    fn a_read_with_a_zero_bound_refuses_at_once_where_the_connection_is_held() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read took a connection another read holds");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "a read with a zero bound waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read with a zero bound refused as {refusal:?}"
+        );
+        assert_eq!(
+            host.read_evidence().since(before).reader_waits,
+            0,
+            "a read with a zero bound waited for the connection"
+        );
+        drop(first);
+    }
+
+    /// **A zero bound refuses at once where the entry settles.** The entry is
+    /// taking in a change, and a read with no time to wait refuses as still
+    /// indexing without waiting for it.
+    #[test]
+    fn a_read_with_a_zero_bound_refuses_at_once_where_the_entry_settles() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read answered from an entry still indexing a change");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "a read with a zero bound waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::Unsettled(_)),
+            "a read with a zero bound refused as {refusal:?}"
+        );
+        let reading = host.read_evidence().since(before);
+        assert_eq!(
+            (reading.settle_waits, reading.settle_expiries),
+            (0, 1),
+            "a read with a zero bound waited for the change"
+        );
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **The bound is one bound, from the read's first hold, across the settle
+    /// wait and the wait for the connection.** A read meets a change
+    /// and waits for it; the change lands while another read holds the
+    /// connection, so the read goes on to wait for that. The deadline that
+    /// wait is given is the one the first hold set, not a fresh bound from
+    /// where the wait for the connection began.
+    #[test]
+    fn a_read_that_settles_and_then_waits_for_the_connection_keeps_one_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let first = host.begin_read(&name).expect("the first read");
+        hold_a_change_in_flight(&ops, &host, &name);
+
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let began = Instant::now();
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            let settling = Instant::now();
+            // The change lands a moment after the read began waiting, so a
+            // bound taken afresh where the connection wait begins lies past
+            // one taken at the first hold.
+            thread::sleep(Duration::from_millis(20));
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            wait_until(
+                "the settled read to wait for the connection",
+                lifecycle_wait_budget(),
+                || match host.read_evidence().since(before).reader_waits {
+                    0 => Observed::pending("no wait for the connection yet"),
+                    _ => Observed::Met(()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let deadline = ops
+                .readers
+                .waited_until
+                .lock()
+                .expect("a fake reader's deadline")
+                .expect("the wait for the connection was given a deadline");
+            assert!(
+                deadline >= began + LONG_SETTLE && deadline <= settling + LONG_SETTLE,
+                "the wait for the connection was given a bound of its own"
+            );
+            drop(first);
+            drop(
+                reading
+                    .join()
+                    .expect("the read finished")
+                    .expect("the read was refused once the connection came back"),
+            );
+        });
     }
 
     /// Every read against one entry runs on that entry's one handle. A read in
@@ -20167,10 +22108,12 @@ mod tests {
     }
 
     /// A batch reported without a rescan is work whatever it carries: the poll
-    /// hands it to a reconcile, and the entry stops serving until that reconcile
-    /// runs — healing, not overflowed. The batch here carries nothing at all,
-    /// which is the corner of that arm: the entry publishes the phase and owes
-    /// the reconcile on the strength of the report alone.
+    /// hands it to a reconcile, and the entry withholds the snapshot the batch
+    /// made stale until that reconcile runs — healing, not overflowed. A read
+    /// that arrives meanwhile waits for the reconcile and answers from the
+    /// `Ready` it ends at. The batch here carries nothing at all, which is the
+    /// corner of that arm: the entry publishes the phase and owes the
+    /// reconcile on the strength of the report alone.
     #[test]
     fn a_polled_batch_without_a_rescan_publishes_healing() {
         let ops = Arc::new(FakeOps::default());
@@ -20181,14 +22124,31 @@ mod tests {
         // The reconcile the poll schedules is blocked, so the state read below
         // is the one the poll published rather than the one that cleared it.
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
         assert_eq!(
             host.state(&name),
             answered(TrustState::warming(WarmingPhase::Healing, 0, None)),
             "the entry went on serving against facts nothing had reconciled"
         );
 
-        ops.reconcile_release.store(true, Ordering::SeqCst);
+        let before = host.read_evidence();
+        thread::scope(|scope| {
+            let reading = scope.spawn(|| host.begin_read(&name));
+            wait_for_settle_waits(&host, before, 1);
+            assert!(
+                !reading.is_finished(),
+                "a read answered from the snapshot the batch made stale"
+            );
+            ops.reconcile_release.store(true, Ordering::SeqCst);
+            let hold = reading
+                .join()
+                .expect("the read finished")
+                .expect("the read waiting on the reconcile was refused");
+            assert_eq!(
+                hold.reading().published(),
+                &Demand::State(TrustState::Ready)
+            );
+        });
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
     }
@@ -20357,8 +22317,9 @@ mod tests {
                 coverage,
                 "the entry does not hold the coverage this shape is about"
             );
-            state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
-            state.pending = Batch::rescan(RescanScope::Vault);
+            state.withdraw_trust(UntrustedReason::WatcherOverflow);
+            state.pending.clear();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
             if recovery {
                 state.require_recovery();
             }
@@ -20662,6 +22623,7 @@ mod tests {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
                 watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
             },
         )
         .unwrap();
@@ -21397,6 +23359,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap()
@@ -22804,6 +24767,7 @@ mod tests {
                     idle_after: Duration::from_secs(60),
                     worker_slots: 1,
                     watch_poll_interval: Duration::from_secs(60),
+                    read_settle_bound: crate::READ_SETTLE_BOUND,
                 },
             )
             .unwrap()

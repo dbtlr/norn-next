@@ -19,9 +19,11 @@
 //! caller reads how far the entry has come and asks again — so it is a state
 //! that crosses, not an envelope. What becomes an envelope is a state that
 //! polling does not walk out of: one standing until a re-heal, a client
-//! demanding one, or an environment that stops refusing retires it. Reads
-//! answer from a warming entry no more than from an untrusted one, so what
-//! reads can do with a state is not the line; what retires the state is.
+//! demanding one, or an environment that stops refusing retires it. A read
+//! answers from a warming entry no more than from an untrusted one, save where
+//! it waits out a change and the entry has derived every fact the read met —
+//! so what reads can do with a state is not the line; what retires the state
+//! is.
 //!
 //! **A refusal a request earns renders here; the host being gone does not.**
 //! [`ReloadRefusal::answer`] hands back an envelope for everything a reload
@@ -37,7 +39,9 @@
 //! back as a state, because a poll walks out of it. A read is not a poll: it
 //! has nothing to read from either entry, so [`ReadRefusal::answer`] takes the
 //! same states through [`TrustState::not_ready`] and files them under
-//! `host/entry-not-ready`.
+//! `host/entry-not-ready` — as an entry that holds nothing to answer from yet,
+//! or, for a read that waited out its settle bound over a change, as a vault
+//! still indexing that change.
 //!
 //! **Two demands reach `host/entry-untrusted`, and deliberately.** An entry
 //! standing untrusted carries the reason its trust state carries. A root the
@@ -463,20 +467,35 @@ impl ReadRefusal {
     /// else.
     pub fn answer(self, name: &VaultName) -> ErrorEnvelope {
         match self {
-            ReadRefusal::NotServing(demand) => match demand.answer(name) {
-                Err(envelope) => envelope,
-                Ok(state) => match state.not_ready() {
-                    Some(not_ready) => ErrorEnvelope::new(
-                        "this vault holds nothing to answer the read from yet",
-                        ErrorDetail::entry_not_ready(not_ready),
-                    ),
-                    None => reader_unavailable(
-                        "the entry published `ready` and served every surface but this read",
-                    ),
-                },
-            },
+            ReadRefusal::NotServing(demand) => refused_over(
+                demand,
+                name,
+                "this vault holds nothing to answer the read from yet",
+            ),
+            ReadRefusal::Unsettled(demand) => {
+                refused_over(demand, name, "this vault is still indexing a change")
+            }
             ReadRefusal::ReaderUnavailable(reason) => reader_unavailable(reason.detail()),
         }
+    }
+}
+
+/// A read refused over the demand its entry published, with `message` where
+/// that demand is a state a poll walks out of.
+///
+/// The two shapes a read refuses over a demand differ in the message alone:
+/// an entry that holds nothing to answer from yet, and an entry still
+/// indexing a change a read waited on past its bound. Both file the state
+/// under `host/entry-not-ready` with the counters a poll would read.
+fn refused_over(demand: Demand, name: &VaultName, message: &str) -> ErrorEnvelope {
+    match demand.answer(name) {
+        Err(envelope) => envelope,
+        Ok(state) => match state.not_ready() {
+            Some(not_ready) => ErrorEnvelope::new(message, ErrorDetail::entry_not_ready(not_ready)),
+            None => reader_unavailable(
+                "the entry published `ready` and served every surface but this read",
+            ),
+        },
     }
 }
 
@@ -1464,6 +1483,27 @@ mod read_tests {
             );
             assert!(!envelope.message().is_empty());
         }
+    }
+
+    /// A read that waited out its settle bound over a change is refused as
+    /// still indexing: the code and the detail a warming refusal carries,
+    /// under the message that says the vault has served and is catching up.
+    /// The control is the same state refused as not serving, which says the
+    /// entry holds nothing to answer from.
+    #[test]
+    fn a_read_past_its_settle_bound_renders_as_still_indexing() {
+        let warming = TrustState::warming(WarmingPhase::Healing, 3, Some(9));
+        let envelope =
+            ReadRefusal::Unsettled(Demand::State(warming.clone())).answer(&name("notes"));
+        assert_eq!(envelope.code(), &ReasonCode::HostEntryNotReady);
+        assert_eq!(
+            envelope.detail(),
+            &ErrorDetail::entry_not_ready(NotReady::warming(WarmingPhase::Healing, 3, Some(9)))
+        );
+        assert_eq!(envelope.message(), "this vault is still indexing a change");
+
+        let control = ReadRefusal::NotServing(Demand::State(warming)).answer(&name("notes"));
+        assert_ne!(control.message(), envelope.message());
     }
 
     /// A demand that is already a refusal keeps its own refusal: the read does
