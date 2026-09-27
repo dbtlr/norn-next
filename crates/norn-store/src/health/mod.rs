@@ -47,7 +47,9 @@
 //! every distinct key's head ([`statement::heads_sql`]), and one counts the
 //! keys whose head filled ([`statement::totals_sql`]). What a key names is
 //! kept ([`KeySummaries`]), so a judgment taken in chunks of links resolves a
-//! key the first chunk resolved in no later one. The links cost their
+//! key the first chunk resolved in no later one; the changeset's re-decision
+//! keeps a key only while the chunks holding it run on, and resolves it again
+//! where a chunk that does not hold it came between ([`redecide`]). The links cost their
 //! own seeks, and each key its class, so the work is the links plus the
 //! candidates they resolve against. Resolving each link against its class, as
 //! a read's links column does, would cost the links times the candidates.
@@ -209,7 +211,8 @@ struct Summary {
 /// resolved and not forgotten, each a head of at most [`CANDIDATE_HEAD`]
 /// documents, and a name for at most those heads' documents, so the caller
 /// bounds its size by the keys it chooses to resolve against it: the
-/// re-decision forgets each key once no link it has yet to judge can hold it.
+/// re-decision forgets, after each chunk it files, every key that chunk's
+/// links do not hold.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 #[derive(Debug, Default)]
@@ -243,19 +246,17 @@ impl KeySummaries {
         })
     }
 
-    /// Forget every suffix key from `lower` up to `below`, and the names of
-    /// the candidates their heads held. A key forgotten is resolved again if
-    /// a later judgment holds it, so forgetting one costs work only where a
-    /// link still to be judged holds it.
-    fn forget_suffix_keys(&mut self, lower: &str, below: &str) {
-        if lower >= below {
-            return;
-        }
+    /// Forget every key no link in `links` holds, and the names of the
+    /// candidates their heads held. A key forgotten is resolved again if a
+    /// later judgment holds it, so forgetting one costs work only where a
+    /// later chunk holds it and the chunk before that one does not.
+    fn keep_only_keys_of(&mut self, links: &[Held]) {
+        let held: BTreeSet<&Key> = links.iter().flat_map(|held| &held.keys).collect();
         let forgotten: Vec<Key> = self
             .summaries
-            .range((lower.to_string(), None)..(below.to_string(), None))
-            .filter(|((_, segments), _)| segments.is_some())
-            .map(|(key, _)| key.clone())
+            .keys()
+            .filter(|key| !held.contains(key))
+            .cloned()
             .collect();
         for key in forgotten {
             self.forget(&key);
@@ -433,7 +434,8 @@ impl<'a> Pages<'a> {
 pub(crate) struct Redecided {
     /// Links judged, each once however many ways the changeset reached it.
     pub(crate) links: u64,
-    /// Distinct keys resolved, each once across every chunk.
+    /// Keys resolved: each key once across a run of consecutive chunks
+    /// holding it, and once more for each later run.
     pub(crate) keys_resolved: u64,
     /// Candidates the resolution read: the documents each key names, summed
     /// over the keys resolved.
@@ -487,21 +489,22 @@ pub(crate) struct Redecided {
 /// of the links they judged.
 ///
 /// Each arm is read a chunk of [`LINK_HEALTH_CHUNK`] links at a time, judged
-/// and filed before the next is read, against one set of key summaries kept
-/// across the whole changeset ([`KeySummaries`]), so each distinct key is
-/// resolved once. A class's two passes and a path key's pass each run only
+/// and filed before the next is read, against one set of key summaries
+/// ([`KeySummaries`]) passed from chunk to chunk. A class's two passes and a path key's pass each run only
 /// where [`occupied`] finds something they would read, so a key nothing is
 /// held under costs a share of one statement and no pass.
 ///
-/// **A link holds at most one key in any class**: its keys are one per
-/// reduction of its target, and two reductions name two stems, so two
-/// classes. A class's keyed pass walks its keys in order, so once the walk
-/// has passed a key no link it has yet to judge holds that key — every other
-/// link holding it belongs to this pass and was read already, or to an
-/// earlier arm — and the pass forgets it; a path key's pass forgets its key
-/// when it ends. So what is held at once is a chunk, a page's keys of the
-/// walk under way, and the keys of the written documents' links and of the
-/// links a class's findings pass judged, never the re-decided set.
+/// **What is kept between chunks is the keys the last chunk held.** After a
+/// chunk is filed, every summary no link in it holds is forgotten, in every
+/// arm alike, so what is held at once is a chunk and the keys of two chunks
+/// at most, never the re-decided set. A link holds a key in each class its
+/// reductions name and one per path its rooted name spells, and those other
+/// classes and paths fall outside the walk under way, so no walk order tells
+/// when one of them is passed; the chunk that held it is what does. A key
+/// held by consecutive chunks is resolved once across them — a hub class's
+/// one key, and a key every page of its walk carries — and a key a later
+/// chunk holds after a chunk that did not is resolved again: its head read
+/// once more, and its total counted once more where its head filled.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 pub(crate) fn redecide(
@@ -525,6 +528,11 @@ pub(crate) fn redecide(
             request::write_finding(transaction, &finding)?;
             redecided.findings += 1;
         }
+        // What the next chunk may reuse is what this one held: a key it
+        // holds too is resolved once between them, and a key it does not
+        // hold is resolved again, so what is kept is two chunks' keys at
+        // most, whatever the changeset re-decides.
+        summaries.keep_only_keys_of(&links);
         // The point a re-decision can be torn at: a chunk filed, the
         // transaction open, nothing committed. A build without the
         // `induced-failure` feature carries no check here.
@@ -591,7 +599,6 @@ pub(crate) fn redecide(
             if !occupied.class_links.contains(&at) {
                 continue;
             }
-            let (lower, upper) = class.bounds();
             let mut pages = Pages::new(LinkSelection::Class(class));
             while let Some(mut links) = pages.next(transaction, work, key)? {
                 links.retain(|held| {
@@ -604,15 +611,6 @@ pub(crate) fn redecide(
                         })
                 });
                 file(links, &mut summaries)?;
-                // The walk is in key order and a link holds one key in a class,
-                // so a key the walk has passed is one no link still to be judged
-                // holds: every later link holding it belongs to this class's pass
-                // and was read already.
-                let passed = pages
-                    .after
-                    .as_ref()
-                    .map_or(upper.as_str(), |after| after.text.as_str());
-                summaries.forget_suffix_keys(&lower, passed);
             }
         }
     }
@@ -632,8 +630,6 @@ pub(crate) fn redecide(
                 });
                 file(links, &mut summaries)?;
             }
-            // Every link holding the key after this pass belongs to it.
-            summaries.forget(&(path.as_str().to_string(), None));
         }
     }
     redecided.keys_resolved = summaries.keys_resolved();

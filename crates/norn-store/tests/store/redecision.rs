@@ -1448,6 +1448,43 @@ fn a_writes_work_follows_the_neighborhood_not_the_vault() {
     }
 }
 
+/// **A key the chunks hold in turn is resolved once.** Six hundred documents
+/// each link `[[hub.v1]]`, which is held under `hub/` and under `hub.v1/`, so
+/// writing one more document the stem `hub` names walks the class `hub/` in
+/// three chunks, each holding both keys. The re-decision keeps only the keys
+/// the chunk it last filed held, and each chunk holds the one the next reads,
+/// so each key is resolved once and its candidates are read once.
+#[test]
+fn a_key_every_chunk_holds_is_resolved_once() {
+    let mut vault = Vault::new("redecide-cross-class-chunks", Sensitive);
+    let mut documents: Vec<(String, &str)> = (0..2)
+        .map(|at| (format!("m/{at:03}/hub.md"), "hub\n"))
+        .collect();
+    documents.extend((0..600).map(|at| (format!("h/{at:03}.md"), "[[hub.v1]]\n")));
+    vault.apply(
+        documents
+            .iter()
+            .map(|(at, body)| Change::Upsert(derived(at, body)))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(derived("new/hub.md", "hub\n"))],
+            &[],
+            &declared(),
+        )
+        .expect("writing one more hub");
+    let counters = request.finish();
+    assert_eq!(counted(&counters, "links_redecided"), 600);
+    assert_eq!(counted(&counters, "link_health_keys_resolved"), 2);
+    // `hub/` names the three hubs, and `hub.v1/` names nothing.
+    assert_eq!(counted(&counters, "link_health_candidates_read"), 3);
+    assert_eq!(counted(&counters, "findings_written"), 600);
+}
+
 /// What writing `hub.md` cost a store holding twenty documents that link
 /// `[[hub]]` beside `beside` documents that each link a path under the folder
 /// `folder`: the counters it moved and the steps its re-decision took.

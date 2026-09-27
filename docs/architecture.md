@@ -2048,13 +2048,13 @@ of them takes it before its link is judged again. Only the store files a link-he
 or a finding about a link: a caller's door refuses both, and refuses a discard or a
 replacement whose scope reaches a link-health kind.
 
-**The re-decision holds a chunk and the keys it still needs.** It reads, judges and files a
-chunk of links at a time, and keeps what each distinct key names so each is resolved once.
-A class's walk and a path key's walk run in key order, and a link holds one key per class, so
-a key the walk has passed is forgotten: the heap a hub costs is a chunk and a page's keys,
-never its in-links. The keys of the written documents' links, and of the links re-judged
-through a candidate's naming class, are kept for the changeset, so what those two hold at
-once is bounded by the written set and by those links' distinct keys. Its statements follow
+**The re-decision holds a chunk and the keys the last chunk held.** It reads, judges and files
+a chunk of links at a time, and after each chunk forgets what every key that chunk's links do
+not hold names, in every arm alike: the heap a hub costs is a chunk and two chunks' keys, never
+its in-links, and a link's keys outside the walk under way — the class of its other reduction,
+the other path its rooted name spells — are held no longer than it is. A key held by
+consecutive chunks is resolved once across them, and a key a later chunk holds after a chunk
+that did not is resolved again. Its statements follow
 the keys something is held under: the affected classes and paths are asked about a chunk at a
 time, one statement a chunk, and each walk runs only over a key a link or a finding is held
 under, so a key nothing is held under — most of what a mass delete names — costs a share of

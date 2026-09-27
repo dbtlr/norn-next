@@ -100,7 +100,8 @@ pub(crate) enum Counter {
     /// Links a changeset re-decided the link health of, each once however
     /// many ways the changeset reached it.
     LinksRedecided,
-    /// Distinct keys the re-decision resolved, each once per changeset.
+    /// Keys the re-decision resolved: each once across a run of consecutive
+    /// chunks holding it, and once more for each later run.
     LinkHealthKeysResolved,
     /// Candidates the re-decision's resolution read: the documents each key
     /// it resolved names, summed over the keys.
