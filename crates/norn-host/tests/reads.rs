@@ -505,11 +505,15 @@ fn attach_over_the_unreadable_schema(vault: &attach::Vault) -> attach::ServingHo
     host
 }
 
-/// **Counts over a schema no recovery can read answer the cause.** The attach
-/// reads a schema this build cannot declare and publishes it as untrusted;
-/// once the watcher has settled, counts that follow, spaced apart, are each
-/// refused as untrusted with that cause, rather than as not ready under a
-/// recovery each of them restarted.
+/// **Counts over a schema no recovery can read answer the cause, and start
+/// no recovery.** The attach reads a schema this build cannot declare and
+/// publishes it as untrusted; once the watcher has settled, counts that
+/// follow, spaced apart, are each refused as untrusted with that cause, rather
+/// than as not ready under a recovery each of them restarted. A recovery a
+/// count started and that failed again before the next count would still
+/// leave the cause standing, so the host's cumulative count of recoveries run
+/// is read too, where the account is readable: it does not move across the
+/// counts.
 #[test]
 fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
     let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-polled");
@@ -517,6 +521,8 @@ fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
         .expect("write an unreadable schema");
     let host = attach_over_the_unreadable_schema(&vault);
 
+    #[cfg(feature = "induced-failure")]
+    let recoveries_before = host.evidence().recoveries_run;
     for count in 0..3 {
         let refused = host
             .count(&a_count(vault.name()))
@@ -527,6 +533,12 @@ fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
+    #[cfg(feature = "induced-failure")]
+    assert_eq!(
+        host.evidence().recoveries_run,
+        recoveries_before,
+        "the counts over an unreadable schema ran a recovery"
+    );
 }
 
 /// **A corrected vault schema is a change a read acts on.** Counts over an
