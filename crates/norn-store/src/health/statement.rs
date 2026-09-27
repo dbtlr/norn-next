@@ -75,7 +75,8 @@ pub(crate) fn links_sql(key: SuffixKey, selected: Selected) -> String {
         Selected::Class => (
             "link_keys AS s CROSS JOIN links AS l CROSS JOIN documents AS d",
             format!(
-                "s.{link_key} >= ?1 AND s.{link_key} < ?2 AND l.id = s.link AND d.id = l.document"
+                "s.segments IS NOT NULL AND s.{link_key} >= ?1 AND s.{link_key} < ?2 \
+                 AND l.id = s.link AND d.id = l.document"
             ),
         ),
         Selected::Path => (

@@ -937,6 +937,60 @@ fn a_link_is_judged_alike_by_its_document_and_by_the_key_it_is_held_under() {
     }
 }
 
+/// **A class selection never reaches a path-addressed link.** `[[glossary]]`
+/// is held under the suffix key that opens the class `glossary/`; the
+/// Markdown link `[a](../glossary/y.md)` and the rooted wikilink
+/// `[[vault://glossary/z]]` are held under the path keys `glossary/y.md` and
+/// `glossary/z.md`, which sort inside that same class's byte range without
+/// being one of its keys — `link_keys` shares one column for both key kinds
+/// ([`crate::ddl::facts`]). All three name a document nothing at this vault
+/// holds, so all three are broken were they judged; a class selection judges
+/// only the first, and a path selection only the link keyed exactly at it.
+#[test]
+fn a_class_selection_never_reaches_a_path_keyed_link() {
+    for order in [Sensitive, Folding] {
+        let documents = vec![derived(
+            "src/h.md",
+            &body_of(&[
+                "[[glossary]]",
+                "[a](../glossary/y.md)",
+                "[[vault://glossary/z]]",
+            ]),
+        )];
+        let mut judging = Judging::new(&format!("health-class-path-{order:?}"), order, &documents);
+
+        let class = ClassKey::new("glossary/").expect("a class key");
+        let by_class = judging.selected(LinkSelection::Class(&class));
+        let ordinals: BTreeSet<u64> = by_class
+            .iter()
+            .filter_map(|finding| finding.ordinal)
+            .collect();
+        assert_eq!(
+            ordinals,
+            BTreeSet::from([0]),
+            "{order:?}: the class `glossary/` selects only its suffix-addressed link: {by_class:?}"
+        );
+        assert!(
+            by_class
+                .iter()
+                .all(|finding| finding.kind == FindingKind::Broken),
+            "{order:?}: {by_class:?}"
+        );
+
+        let at = PathKey::new("glossary/y.md").expect("a path key");
+        let by_path = judging.selected(LinkSelection::Path(&at));
+        let ordinals: BTreeSet<u64> = by_path
+            .iter()
+            .filter_map(|finding| finding.ordinal)
+            .collect();
+        assert_eq!(
+            ordinals,
+            BTreeSet::from([1]),
+            "{order:?}: the path key `glossary/y.md` selects only the link spelling it: {by_path:?}"
+        );
+    }
+}
+
 /// **A judgment taken in chunks resolves each key once.** Ten documents each
 /// hold `[[hub]]` and a path link to one of the documents it names, so their
 /// links hold two keys between them. Judged in two chunks of five documents
