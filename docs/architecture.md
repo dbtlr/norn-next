@@ -2368,11 +2368,12 @@ Four contracts inside that flow carry weight:
   the bar binds on the counters that could differ.
 - **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
   forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
-  drops operations whose targets all landed, re-resolves the rest against what the vault
-  holds, and lists an operation that no longer resolves as unresolved. After an
-  interruption a drifted target may already carry the plan's change, so the forecast marks
-  it and applying the fresh plan is the caller's decision. Auto-rebase on drift is
-  deliberately rejected: a changed world deserves a re-plan.
+  drops operations whose targets all landed and re-resolves only operations none of whose
+  targets landed; an operation part-landed, one that no longer resolves, and one requiring
+  either are listed as unresolved for the caller. Hashes cannot tell whether a drifted
+  target already carries the plan's change, so the forecast marks every drifted target and
+  applying the fresh plan is the caller's decision. Auto-rebase on drift is deliberately
+  rejected: a changed world deserves a re-plan.
 
 ---
 

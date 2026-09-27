@@ -36,13 +36,15 @@ one planner and the one applier invariant 4 names.
 - **No publication destroys content a later publication needs.** Where one target's
   content is drawn from another target's before-state — a move, or a chain of moves — the
   source is not replaced or removed until every other target drawing on it has durably
-  landed, its parent directory synced. A plan
+  landed, its directory and every folder the plan made for it synced. A plan
   whose content dependencies form a cycle, such as two documents exchanging places, is
   refused at planning; the caller splits it into plans that each finish.
 - **Conditions the planning read travel with the plan.** A plan whose effect depends on
   facts it does not write — the documents a link target resolves to, the backlinks a
-  removal would break, the finding generation a repair was planned against — carries them
-  as conditions. Planning records each condition as the vault would stand with every
+  removal would break, the findings a repair acts on — carries them as conditions; a repair
+  plan also cites the finding generation it read, as provenance rather than a condition.
+  An author's condition on a file the plan writes is checked at planning and becomes that
+  target's before-state. Planning records each condition as the vault would stand with every
   target of the plan at its after-state, and the applier checks it the same way, landed or
   not, after taking in the filesystem facts the watcher has delivered; so a plan's own
   progress never changes a condition, and only a change to a file outside the plan's
@@ -86,14 +88,15 @@ one planner and the one applier invariant 4 names.
   to their before-states applies again.
 - **Refuse-and-refresh.** A target at neither state is drift: the apply refuses, naming each
   drifted target, and answers with a fresh resolved plan and its forecast. The fresh plan
-  drops every operation whose targets all hold their after-states and re-resolves every
-  other operation against what the vault now holds, a landed leg of a move whose source
-  changed included, so its destination carries the source's current content. An operation
-  that no longer resolves, such as an edit whose anchor is gone, is listed as unresolved,
-  never dropped. When the refused plan had been interrupted, a drifted target may already
-  carry this plan's change, and hashes cannot tell a target edited after this plan landed
-  on it from one edited before: the forecast marks each such target, and applying the fresh
-  plan is the caller's decision. Auto-rebase stays rejected.
+  drops every operation whose targets all hold their after-states, and re-resolves against
+  what the vault now holds only an operation none of whose targets holds its after-state.
+  An operation with a target at its after-state and another that is not, an operation
+  that no longer resolves (an edit whose anchor is gone), and an operation that requires
+  either, are listed as unresolved, never re-resolved or dropped; the caller disposes of
+  them. Hashes cannot tell a target edited after this plan landed on it from one edited
+  before, and the host keeps no record of an earlier attempt, so the forecast marks every
+  drifted target as possibly already carrying this plan's change. Applying the fresh plan
+  is the caller's decision. Auto-rebase stays rejected.
 - **A plan refuses the schema violations it introduces.** A violation on a field the plan
   writes, or one that did not stand before the plan, refuses; an unrelated violation
   already present in a target does not. A plan that changes a vault control file changes
