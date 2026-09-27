@@ -48,8 +48,10 @@
 //! keys whose head filled ([`statement::totals_sql`]). What a key names is
 //! kept ([`KeySummaries`]), so a judgment taken in chunks of links resolves a
 //! key the first chunk resolved in no later one; the changeset's re-decision
-//! keeps a key only while the chunks holding it run on, and resolves it again
-//! where a chunk that does not hold it came between ([`redecide`]). The links cost their
+//! keeps a key's head only while the chunks holding it run on, and reads the
+//! head again where a chunk that does not hold it came between, while a
+//! filled key's total is kept and counted once per changeset ([`redecide`]).
+//! The links cost their
 //! own seeks, and each key its class, so the work is the links plus the
 //! candidates they resolve against. Resolving each link against its class, as
 //! a read's links column does, would cost the links times the candidates.
@@ -212,7 +214,9 @@ struct Summary {
 /// documents, and a name for at most those heads' documents, so the caller
 /// bounds its size by the keys it chooses to resolve against it: the
 /// re-decision forgets, after each chunk it files, every key that chunk's
-/// links do not hold.
+/// links do not hold. What forgetting leaves is the exact total of each key
+/// whose head filled, one key and one count each, so a key resolved again
+/// reads its bounded head and never counts what it names twice.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 #[derive(Debug, Default)]
@@ -221,6 +225,10 @@ pub struct KeySummaries {
     /// How each candidate a finding carried is named, by its document's row
     /// id: at most the heads of the keys resolved.
     names: HashMap<i64, CandidateName>,
+    /// The exact total of each key resolved whose head filled, which
+    /// forgetting the key leaves: a key resolved again reads its head alone,
+    /// so what a key names is counted once per set.
+    totals: HashMap<Key, u64>,
     resolved: u64,
     candidates: u64,
 }
@@ -232,8 +240,8 @@ impl KeySummaries {
         self.resolved
     }
 
-    /// How many candidates resolving those keys read: the documents each key
-    /// names, summed over the keys, each key counted once.
+    /// How many candidates resolving those keys read: each resolution's head,
+    /// and each filled key's whole total the one time it is counted.
     pub fn candidates_read(&self) -> u64 {
         self.candidates
     }
@@ -437,8 +445,8 @@ pub(crate) struct Redecided {
     /// Keys resolved: each key once across a run of consecutive chunks
     /// holding it, and once more for each later run.
     pub(crate) keys_resolved: u64,
-    /// Candidates the resolution read: the documents each key names, summed
-    /// over the keys resolved.
+    /// Candidates the resolution read: each resolution's head, and each
+    /// filled key's whole total the one time it is counted.
     pub(crate) candidates_read: u64,
     /// Findings filed.
     pub(crate) findings: u64,
@@ -503,8 +511,11 @@ pub(crate) struct Redecided {
 /// when one of them is passed; the chunk that held it is what does. A key
 /// held by consecutive chunks is resolved once across them — a hub class's
 /// one key, and a key every page of its walk carries — and a key a later
-/// chunk holds after a chunk that did not is resolved again: its head read
-/// once more, and its total counted once more where its head filled.
+/// chunk holds after a chunk that did not is resolved again: its head, at
+/// most [`CANDIDATE_HEAD`] rows, is read once more. A filled key's exact
+/// total outlives its head, so what a key names is counted once per
+/// changeset and the work stays the links plus the candidates: the totals
+/// kept are one per distinct filled key the re-decided links hold.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 pub(crate) fn redecide(
@@ -958,14 +969,18 @@ fn resolve_keys(
     }
 
     // A head cut below its bound is the whole of what its key names; only a
-    // filled head is counted.
+    // filled head is counted, and only where no earlier resolution counted it.
     let mut filled: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
     for (arm, heads) in read.iter_mut().enumerate() {
         for (index, summary) in heads.iter_mut().enumerate() {
             summary.head.sort_by(Named::ladder);
             summary.total = summary.head.len() as u64;
-            if summary.head.len() >= CANDIDATE_HEAD {
-                filled[arm].push(index);
+            if summary.head.len() < CANDIDATE_HEAD {
+                continue;
+            }
+            match summaries.totals.get(listed[arm][index]) {
+                Some(total) => summary.total = *total,
+                None => filled[arm].push(index),
             }
         }
     }
@@ -1001,10 +1016,16 @@ fn resolve_keys(
         }
     }
 
-    for (keys, read) in listed.into_iter().zip(read) {
-        for (key, summary) in keys.into_iter().zip(read) {
+    for ((keys, read), counted) in listed.into_iter().zip(read).zip(filled) {
+        for (index, (key, summary)) in keys.into_iter().zip(read).enumerate() {
             summaries.resolved += 1;
-            summaries.candidates += summary.total;
+            // Each arm's counted positions were listed in order.
+            if counted.binary_search(&index).is_ok() {
+                summaries.candidates += summary.total;
+                summaries.totals.insert(key.clone(), summary.total);
+            } else {
+                summaries.candidates += summary.head.len() as u64;
+            }
             summaries.summaries.insert(key.clone(), summary);
         }
     }

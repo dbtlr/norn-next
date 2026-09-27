@@ -41,6 +41,8 @@ struct Shape {
     target: fn(usize) -> String,
     /// Whether the write files a finding about every link, or about none.
     filed: bool,
+    /// How many documents the stem `hub` names before the write.
+    hubs: usize,
 }
 
 /// A document at `at` holding `links` links written with `protocol`, the
@@ -96,6 +98,7 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
         protocol,
         target,
         filed,
+        hubs,
     } = shape;
     let scratch = Scratch::new(&format!("norn-store-heap-{label}-{links}"));
     let mut store = Store::open_throwaway(
@@ -120,7 +123,7 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
             })
             .collect();
         if chunk[0] == 0 {
-            changes.push(Change::Upsert(hub("m/hub.md")));
+            changes.extend((0..hubs).map(|at| Change::Upsert(hub(&format!("m/{at}/hub.md")))));
         }
         store
             .begin_request()
@@ -156,9 +159,11 @@ fn hub_write_peak(links: usize, shape: Shape) -> usize {
 /// **A hub write holds a chunk on the heap, never the neighborhood.** Writing
 /// a second document the stem `hub` names re-decides every link into its
 /// class and every link to its path, five thousand links and then fifty
-/// thousand, four ways:
+/// thousand, five ways:
 ///
-/// - every link is `[[hub]]`, one key, and each is filed ambiguous;
+/// - every link is `[[hub]]`, one key, and each is filed ambiguous, once
+///   where the stem names two documents and once where it names nine, which
+///   fills the key's head so its total is counted;
 /// - every link is `[[dNNNNN/hub]]`, a key of its own in the class, and each
 ///   is filed broken;
 /// - every link is `[[hub.vNNNNN]]`, which the class holds under `hub/` and
@@ -181,24 +186,35 @@ fn a_hub_write_holds_heap_within_a_chunk() {
             protocol: None,
             target: |_| "hub".to_string(),
             filed: true,
+            hubs: 1,
+        },
+        Shape {
+            label: "filled-key",
+            protocol: None,
+            target: |_| "hub".to_string(),
+            filed: true,
+            hubs: 8,
         },
         Shape {
             label: "distinct-keys",
             protocol: None,
             target: |n| format!("d{n:05}/hub"),
             filed: true,
+            hubs: 1,
         },
         Shape {
             label: "cross-class-keys",
             protocol: None,
             target: |n| format!("hub.v{n:05}"),
             filed: true,
+            hubs: 1,
         },
         Shape {
             label: "cross-path-keys",
             protocol: Some("vault"),
             target: |n| format!("new/hub.v{n:05}"),
             filed: false,
+            hubs: 1,
         },
     ];
     for shape in shapes {

@@ -2054,7 +2054,9 @@ not hold names, in every arm alike: the heap a hub costs is a chunk and two chun
 its in-links, and a link's keys outside the walk under way — the class of its other reduction,
 the other path its rooted name spells — are held no longer than it is. A key held by
 consecutive chunks is resolved once across them, and a key a later chunk holds after a chunk
-that did not is resolved again. Its statements follow
+that did not has its bounded head read again. What a key names is counted once per changeset:
+the exact total of each key whose head filled is kept, one count per distinct filled key, so a
+key resolved again never counts its candidates twice. Its statements follow
 the keys something is held under: the affected classes and paths are asked about a chunk at a
 time, one statement a chunk, and each walk runs only over a key a link or a finding is held
 under, so a key nothing is held under — most of what a mass delete names — costs a share of

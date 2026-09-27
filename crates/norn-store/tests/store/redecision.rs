@@ -1485,6 +1485,48 @@ fn a_key_every_chunk_holds_is_resolved_once() {
     assert_eq!(counted(&counters, "findings_written"), 600);
 }
 
+/// **A key's total is counted once per changeset, however its chunks fall.**
+/// Sixty documents the stem `hub` names fill the head of `hub/`, so what it
+/// names is counted rather than read whole. One changeset writes six
+/// documents of 256 links each, so its written documents are read in six
+/// chunks, and only the first, third and fifth hold `[[hub]]`: the chunks
+/// between hold `[[elsewhere]]`. The key is resolved in each chunk that holds
+/// it, and only its first resolution counts the sixty; the other two read its
+/// head alone, five rows each.
+#[test]
+fn a_filled_keys_total_is_counted_once_across_chunks_apart() {
+    let mut vault = Vault::new("redecide-filled-key-apart", Sensitive);
+    vault.apply(
+        (0..60)
+            .map(|at| Change::Upsert(derived(&format!("m/{at:03}/hub.md"), "hub\n")))
+            .collect::<Vec<_>>(),
+    );
+
+    let hubs = "[[hub]]\n".repeat(256);
+    let elsewhere = "[[elsewhere]]\n".repeat(256);
+    let written: Vec<Change> = (0..6)
+        .map(|at| {
+            let body = if at % 2 == 0 { &hubs } else { &elsewhere };
+            Change::Upsert(derived(&format!("w/{at}.md"), body))
+        })
+        .collect();
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(IncrementProvenance::Derived, written, &[], &declared())
+        .expect("writing six documents");
+    let counters = request.finish();
+    assert_eq!(counted(&counters, "links_redecided"), 6 * 256);
+    // `hub/` in the three chunks that hold it, and `elsewhere/` in the three
+    // between: no chunk holds a key the chunk before it held.
+    assert_eq!(counted(&counters, "link_health_keys_resolved"), 6);
+    // The sixty counted once, and a head of five read twice more.
+    assert_eq!(
+        counted(&counters, "link_health_candidates_read"),
+        60 + 2 * 5
+    );
+    assert_eq!(counted(&counters, "findings_written"), 6 * 256);
+}
+
 /// What writing `hub.md` cost a store holding twenty documents that link
 /// `[[hub]]` beside `beside` documents that each link a path under the folder
 /// `folder`: the counters it moved and the steps its re-decision took.
