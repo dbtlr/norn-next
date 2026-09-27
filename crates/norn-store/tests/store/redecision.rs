@@ -699,10 +699,15 @@ fn assert_rebuilds(
     );
 }
 
+/// One step of a naming script: the changes it makes, each a path beside the
+/// body it is written with or `None` for its death, and the suffixes the
+/// findings at the watched path name their candidates by after it.
+type NamingStep<'a> = (&'a [(&'a str, Option<&'a str>)], &'a [&'a [&'a str]]);
+
 /// Run `script` on both roots, a changeset per step — `Some(body)` writes the
 /// path, `None` kills it — and after each step hold the suffixes the findings
 /// at `at` carry to the step's `expected`, and the store to a rebuild.
-fn candidates_named_after(label: &str, at: &str, script: &[(&[(&str, Option<&str>)], &[&[&str]])]) {
+fn candidates_named_after(label: &str, at: &str, script: &[NamingStep<'_>]) {
     for order in [Sensitive, Folding] {
         let mut vault = Vault::new(&format!("{label}-{order:?}"), order);
         let mut held: BTreeMap<String, String> = BTreeMap::new();

@@ -15,9 +15,12 @@
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
 //! query is composed, save one rule [ADR 0027] rules into it: link health,
-//! judged in SQL and filed inside every changeset ([`health`]). It takes
+//! judged in SQL and filed inside every changeset
+//! ([`Request::apply_increment`]). It takes
 //! **typed facts rather than documents**: parsing is orchestration's job, so
 //! nothing here reads document text.
+//!
+//! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 //!
 //! # Where to start
 //!
