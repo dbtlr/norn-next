@@ -790,16 +790,13 @@
       "name": "parse-failure-is-not-absence",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A parse failure is a distinct, propagated state and is never collapsed into absence. Every consumer surfaces the diagnostic before treating fields as missing, an unparseable document is never silently dropped from a query result, and no two mutation arms disagree about whether one document is legible.",
+      "property": "A parse failure is a distinct, propagated state and is never collapsed into absence: it is carried into derived state rather than dropping the document, and it is never silently dropped from a query result. A validate answers a finding for it, which is the state's surfacing — a field part or a field sort that judges the document as missing the key adds nothing beyond it, because a find carries the same finding beside the row, in its findings column and through has_finding. Carve-out: a frontmatter tag string the grammar does not describe yields no tag and no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
       "sources": ["NRN-42"],
       "binding": {
-        "status": "dormant",
-        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. A query result exists now, and it does not drop the document: crates/norn-store/src/find/mod.rs pages every document a part admits. It does collapse the state, and that is a known violation carried to the filed task NORN-247: a document whose frontmatter did not read holds no field, so a field part or a field sort judges it as missing the key, and the diagnostic that says why is carried beside it only in the row's findings column, or reached through a separate has_finding part. The consumers that could collapse the state have no verb to do it through, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
-        "grounds": [
-          { "present": "crates/norn-text/src/diagnostic.rs" },
-          { "present": "crates/norn-host/src/production.rs" },
-          { "present": "crates/norn-store/src/find/mod.rs" },
-          { "absent": "crates/norn-serve" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/validate.rs::with_no_predicates_every_finding_standing_answers_in_kind_path_position_id_order",
+          "crates/norn-store/tests/store/find_rows.rs::a_rows_findings_column_carries_what_validate_answers_at_its_path"
         ]
       }
     },

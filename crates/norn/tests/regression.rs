@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "f2513273aab55d61478814337c44ab61c8e04f8f5f3dbffd5e44854614295b26";
+const CONTRACT_DIGEST: &str = "e7bbea534b2b0c73d340b8ba2e6fed96538fd9d796b6c9f825def28cb8097074";
 
 /// The cases carried by tests today, by name.
 ///
@@ -123,6 +123,7 @@ const BOUND_CASES: &[&str] = &[
     "narrowing-arguments-narrow-work",
     "no-in-memory-query-layer",
     "one-field-edit-is-a-one-field-diff",
+    "parse-failure-is-not-absence",
     "per-file-atomicity-and-durability",
     "predicate-filtering-in-sql-is-the-known-good-shape",
     "reads-are-not-blocked-by-writes",
