@@ -1549,6 +1549,21 @@ pub(crate) fn check_finding_bounds(finding: &FindingFacts) -> Result<(), StoreEr
     Ok(())
 }
 
+/// Refuse where `holds` is false: the shape [`check_finding_classes`] and
+/// [`check_finding_paths`] both answer with, each over its own axis and its
+/// own refusal message.
+fn refuse_outside_key_space(
+    holds: bool,
+    what: &'static str,
+    order: StoredPathOrder,
+) -> Result<(), StoreError> {
+    if holds {
+        Ok(())
+    } else {
+        Err(StoreError::KeySpace { what, order })
+    }
+}
+
 /// Refuse a finding filed under a class key outside the key space a store
 /// derived under `order` files its findings in.
 ///
@@ -1560,14 +1575,11 @@ pub(crate) fn check_finding_classes(
     order: StoredPathOrder,
 ) -> Result<(), StoreError> {
     let space = SuffixKey::under(order);
-    if finding.class_keys.iter().all(|class| space.holds(class)) {
-        Ok(())
-    } else {
-        Err(StoreError::KeySpace {
-            what: "a finding's class key",
-            order,
-        })
-    }
+    refuse_outside_key_space(
+        finding.class_keys.iter().all(|class| space.holds(class)),
+        "a finding's class key",
+        order,
+    )
 }
 
 /// Refuse a finding filed under a path key outside the key space a store
@@ -1581,14 +1593,11 @@ pub(crate) fn check_finding_paths(
     order: StoredPathOrder,
 ) -> Result<(), StoreError> {
     let space = SuffixKey::under(order);
-    if finding.path_keys.iter().all(|path| space.holds_path(path)) {
-        Ok(())
-    } else {
-        Err(StoreError::KeySpace {
-            what: "a finding's path key",
-            order,
-        })
-    }
+    refuse_outside_key_space(
+        finding.path_keys.iter().all(|path| space.holds_path(path)),
+        "a finding's path key",
+        order,
+    )
 }
 
 /// Write one finding, its candidate head, its class memberships and its path
