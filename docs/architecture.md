@@ -2309,7 +2309,7 @@ sequenceDiagram
   H->>H: resolve operations → one transition per file (before-state, after-state), conditions read
   H->>W: resolved plan (a preview answers here and writes nothing)
   W->>F: check and stage every target: states, conditions, schema, shadow (protocol owned by norn-fs)
-  Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh forecast)
+  Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh resolved plan and forecast)
   W->>F: publish creates, then replacements, then removals, each verified again
   W->>D: write-through increment: one changeset for an uninterrupted apply, scoped to blast radius
   Note over W,D: mark-invariant — the same counters under either mark
@@ -2330,10 +2330,11 @@ each target's before- and after-state, and the conditions its planning read, nev
 bytes of a file it did not author. Every template value resolves at planning, so the
 applier recomposes each target as a pure function of the before-states and the operations
 and refuses unless the result hashes to the after-state. A source is not replaced or
-removed until every target drawing content from it has landed, and a plan whose content
-dependencies form a cycle is refused at planning. Conditions are checked after taking in
-the facts the watcher has delivered, with the plan's own landed targets read at their
-after-states.
+removed until every other target drawing content from it has durably landed, and a plan
+whose content dependencies form a cycle is refused at planning. Each condition is recorded
+and checked as the vault would stand with every target of the plan at its after-state,
+after taking in the facts the watcher has delivered, so a plan's own progress never
+changes one.
 Applies run as a job holding the entry's claim, one at a time per registration; the request
 waits for the outcome, and a caller that stops waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
@@ -2354,9 +2355,8 @@ Four contracts inside that flow carry weight:
   names holding the document.
 - **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
   is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
-  interrupted completes it with no journal and no rollback. When a foreign edit reached a
-  target, the re-send refuses with a fresh resolved plan covering only the transitions that
-  did not land. An apply that stops after a target landed is interrupted, not refused. An
+  interrupted completes it with no journal and no rollback. An attempt that stops after
+  one of its targets landed is interrupted, not refused. An
   uninterrupted apply commits one changeset to its registration's store, so a read there
   sees the whole state before or after it. Re-sending operations is a new change.
 - **Write-through.** The worker composed the post-state, so the increment writes it —
@@ -2367,8 +2367,12 @@ Four contracts inside that flow carry weight:
   encoding rather than recomputation and runs the identical code path under both marks — so
   the bar binds on the counters that could differ.
 - **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
-  forecast; the fresh plan's before-states are the compare-and-swap its apply rides.
-  Auto-rebase on drift is deliberately rejected: a changed world deserves a re-plan.
+  forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
+  drops operations whose targets all landed, re-resolves the rest against what the vault
+  holds, and lists an operation that no longer resolves as unresolved. After an
+  interruption a drifted target may already carry the plan's change, so the forecast marks
+  it and applying the fresh plan is the caller's decision. Auto-rebase on drift is
+  deliberately rejected: a changed world deserves a re-plan.
 
 ---
 

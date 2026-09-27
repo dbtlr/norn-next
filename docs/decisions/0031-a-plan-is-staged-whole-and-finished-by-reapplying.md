@@ -35,22 +35,24 @@ one planner and the one applier invariant 4 names.
   author.
 - **No publication destroys content a later publication needs.** Where one target's
   content is drawn from another target's before-state — a move, or a chain of moves — the
-  source is not replaced or removed until every target drawing on it has landed. A plan
+  source is not replaced or removed until every other target drawing on it has durably
+  landed, its parent directory synced. A plan
   whose content dependencies form a cycle, such as two documents exchanging places, is
   refused at planning; the caller splits it into plans that each finish.
 - **Conditions the planning read travel with the plan.** A plan whose effect depends on
   facts it does not write — the documents a link target resolves to, the backlinks a
   removal would break, the finding generation a repair was planned against — carries them
-  as conditions. The applier takes in the filesystem facts the watcher has delivered, then
-  checks every condition against the store with every landed target of the same plan read
-  at its after-state, so a plan's own progress never refuses its re-send. A foreign change
-  the watcher has not yet reported is outside what a condition can see; a link it breaks
-  surfaces as a link-health finding.
+  as conditions. Planning records each condition as the vault would stand with every
+  target of the plan at its after-state, and the applier checks it the same way, landed or
+  not, after taking in the filesystem facts the watcher has delivered; so a plan's own
+  progress never changes a condition, and only a change to a file outside the plan's
+  targets refuses one. A foreign change the watcher has not yet reported is outside what a
+  condition can see; a link it breaks surfaces as a link-health finding.
 - **A request states its mode.** A request either previews, answering with the resolved
   plan and its forecast and writing nothing, or applies. There is no default mode at the
   wire.
 - **An apply accepts operations or a resolved plan.** Operations are planned and applied in
-  one request, planned inside the apply serialization, and carry no confirmation beyond
+  one request, planned inside the registration's apply serialization, and carry no confirmation beyond
   their own conditions: re-sending them is a new change. A caller that needs a write it can
   safely re-send previews and applies the resolved plan, or gives its operations
   conditions, so a re-send refuses rather than repeats. A resolved plan is applied only
@@ -60,28 +62,38 @@ one planner and the one applier invariant 4 names.
   publication the applier checks every target's state and every condition, validates every
   composed result against the vault schema, and stages every written target — a created
   document included — as a shadow. A refusal found in this phase publishes nothing and
-  answers with a fresh resolved plan and its forecast. No handle is held from staging to
+  answers as refuse-and-refresh below. No handle is held from staging to
   publication: each publication verifies its target again.
 - **Publication order and what can still stop it.** Creates publish first, each by an
   exclusive, atomic publication that never replaces a name, with any parent folder it
   needs made just before it; replacements follow; removals come last, and a folder the
-  plan's removals leave empty is removed after them. Folders are not transitions, and the
+  plan's removals leave empty is removed after them, on a re-send too. A folder made for a
+  create that then refuses is removed if it is empty. Folders are not transitions, and the
   forecast and the report name them. Four things can stop publication part-way: a crash;
   an I/O failure; a create whose name another writer took after staging; and a foreign
   edit reaching a target after its staging, which that target's verification refuses. A
   foreign write landing between a target's verification and its rename is overwritten:
   this is the per-file protocol's stated residual race, and the watcher converges the
-  store on what the path holds. An apply that stops before any target lands is a refusal;
-  one that stops after at least one target landed is **interrupted**, and its report names
-  every target that landed.
+  store on what the path holds. An attempt that stops before any target lands has written
+  nothing: a refusal when a check stopped it, a failure when I/O did. An attempt that stops
+  after at least one of its targets landed is **interrupted**, and its report names every
+  target that landed.
 - **A target at its after-state is landed.** A removal is landed when its path is absent. A
   move is landed when its destination holds its after-state and its source is absent, each
   leg recognized on its own. A target at its after-state is landed whichever writer put it
   there. Re-applying a resolved plan treats a landed target as done, so re-sending a plan
-  a crash or an I/O failure interrupted finishes it. When a foreign edit reached a target
-  of an interrupted plan, the re-send refuses with a fresh resolved plan covering only the
-  transitions that did not land, resolved against what those targets now hold. A resolved
-  plan whose targets return to their before-states applies again.
+  a crash or an I/O failure interrupted finishes it. A resolved plan whose targets return
+  to their before-states applies again.
+- **Refuse-and-refresh.** A target at neither state is drift: the apply refuses, naming each
+  drifted target, and answers with a fresh resolved plan and its forecast. The fresh plan
+  drops every operation whose targets all hold their after-states and re-resolves every
+  other operation against what the vault now holds, a landed leg of a move whose source
+  changed included, so its destination carries the source's current content. An operation
+  that no longer resolves, such as an edit whose anchor is gone, is listed as unresolved,
+  never dropped. When the refused plan had been interrupted, a drifted target may already
+  carry this plan's change, and hashes cannot tell a target edited after this plan landed
+  on it from one edited before: the forecast marks each such target, and applying the fresh
+  plan is the caller's decision. Auto-rebase stays rejected.
 - **A plan refuses the schema violations it introduces.** A violation on a field the plan
   writes, or one that did not stand before the plan, refuses; an unrelated violation
   already present in a target does not. A plan that changes a vault control file changes
