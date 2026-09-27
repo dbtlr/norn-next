@@ -963,12 +963,13 @@ struct EntryState<A: SnapshotSource> {
     /// healing without it entered warming from untrusted, or has never
     /// served, and a read refuses at once.
     ///
-    /// Written as every hold of the entry gate ends, by
-    /// [`EntryState::end_hold`], from the state that hold left: set by a hold
-    /// that ends at `Ready`, kept by one that ends healing, and cleared by
-    /// every other. [`EntryState::install_coverage`] and [`begin_release`]
-    /// clear it where they run, because the coverage it speaks of is the
-    /// coverage they replace or give back.
+    /// Set only by [`EntryState::end_hold`], as a hold ends at `Ready`.
+    /// Cleared where trust breaks: by [`EntryState::withdraw_trust`], which is
+    /// every withdrawal; by [`EntryState::install_coverage`],
+    /// [`EntryState::remint_coverage`] and [`begin_release`], because the
+    /// coverage it speaks of is the coverage they replace or give back; and by
+    /// `end_hold` where a hold ends at a state that neither serves nor
+    /// settles.
     trust_unbroken_since_ready: bool,
     /// The entry's coverage, and who holds it.
     coverage: Coverage<A>,
@@ -1209,12 +1210,15 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// Record whether trust has stood unbroken since `Ready`, from the state
     /// this hold left.
     ///
-    /// A hold that ends healing keeps what the holds before it recorded,
-    /// because healing is entered both from `Ready` and from untrusted and
-    /// only the history tells the two apart. Every hold that could have
-    /// withdrawn trust ends at a state other than healing — untrusted,
-    /// unattached, parked, installing or releasing coverage — or owes a rung,
-    /// and is cleared here.
+    /// **This is the one place the flag is set**: by a hold that ends at
+    /// `Ready` over an entry in service and unparked. The flag is cleared by
+    /// every move that breaks trust, where that move is made —
+    /// [`EntryState::withdraw_trust`], [`EntryState::install_coverage`],
+    /// [`EntryState::remint_coverage`] and [`begin_release`] — and here by a
+    /// hold that ends at any state but `Ready` or healing, or ends healing
+    /// parked, out of service or owing a rung. A hold that ends healing
+    /// otherwise keeps it, because healing is entered from `Ready` and from
+    /// untrusted alike, and the flag is what tells the two apart.
     fn end_hold(&mut self) {
         self.trust_unbroken_since_ready = match &self.trust {
             TrustState::Ready => !self.stands_parked() && self.out_of_service().is_none(),
@@ -1282,7 +1286,32 @@ impl<A: SnapshotSource> EntryState<A> {
     /// opens a file to discard.
     fn withdraw_trust_for_damage(&mut self, detail: impl Into<String>) {
         self.require_rebuild();
-        self.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+        self.withdraw_trust(UntrustedReason::store_damaged_rebuilding(detail));
+    }
+
+    /// Withdraw the entry's trust for `reason`: publish it untrusted, and
+    /// record that trust no longer stands unbroken since `Ready`.
+    ///
+    /// **Every withdrawal of trust is this call.** The flag is cleared at the
+    /// write rather than read back off the label where the hold ends, so a
+    /// hold that withdraws trust and then publishes healing within itself
+    /// leaves an entry that refuses a read, as a withdrawal must.
+    fn withdraw_trust(&mut self, reason: UntrustedReason) {
+        self.trust = TrustState::untrusted(reason);
+        self.trust_unbroken_since_ready = false;
+    }
+
+    /// Publish what the facts standing in the entry leave it at while a
+    /// reconcile of them is owed: an overflow withdraws trust until the rescan
+    /// among them is reread, and anything else is healing on the document
+    /// side of the ladder, because coverage is installed and the facts it
+    /// delivered are what is left to derive.
+    fn publish_pending_reconcile(&mut self) {
+        if self.pending.rescans().is_empty() {
+            self.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        } else {
+            self.withdraw_trust(UntrustedReason::WatcherOverflow);
+        }
     }
 
     /// Whether the entry owes a rung of the ladder, which is work no ordinary
@@ -1478,6 +1507,7 @@ impl<A: SnapshotSource> EntryState<A> {
     /// the coverage is the lock that publishes the trust label a read pairs the
     /// handle with.
     fn remint_coverage<O: EntryOps<Attachment = A>>(&mut self, ops: &O, leg: u64, attachment: A) {
+        self.trust_unbroken_since_ready = false;
         self.close_reader();
         self.mint_for_a_leg(ops, &attachment);
         self.coverage.park_by(leg, attachment);
@@ -1847,16 +1877,6 @@ fn root_moved(error: &WatchError) -> bool {
     matches!(error, WatchError::CoverageLost(_))
 }
 
-fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
-    if pending.rescans().is_empty() {
-        // Coverage is installed and the facts it delivered are what is left to
-        // derive, so the entry is warming on the document side of the ladder.
-        TrustState::warming(WarmingPhase::Healing, 0, None)
-    } else {
-        TrustState::untrusted(UntrustedReason::WatcherOverflow)
-    }
-}
-
 /// The work a demand lease is owed, read off what the entry holds.
 ///
 /// The job follows what the entry needs rather than which door the demand came
@@ -1929,8 +1949,8 @@ impl DemandedWork {
         }
     }
 
-    /// What the entry publishes while this work is scheduled and running, or
-    /// `None` where what already stands is what the work runs under.
+    /// Publish what the entry stands at while this work is scheduled and
+    /// running, or leave what already stands where the work runs under it.
     ///
     /// An attach and a recover both establish coverage before they read a
     /// document, so the phase they warm under is the prologue that counts
@@ -1944,15 +1964,13 @@ impl DemandedWork {
     /// the rung that resolves it has. Warming over the verdict would retire the
     /// reason before anything addressed it, and leave a caller unable to tell a
     /// vault being derived again from one that never lost its store.
-    fn scheduled_state(self, pending: &Batch) -> Option<TrustState> {
+    fn publish_scheduled<A: SnapshotSource>(self, state: &mut EntryState<A>) {
         match self {
-            Self::Attach | Self::Recover => Some(TrustState::warming(
-                WarmingPhase::InstallingCoverage,
-                0,
-                None,
-            )),
-            Self::Rebuild => None,
-            Self::Reconcile => Some(trust_for_pending_reconcile(pending)),
+            Self::Attach | Self::Recover => {
+                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+            }
+            Self::Rebuild => {}
+            Self::Reconcile => state.publish_pending_reconcile(),
         }
     }
 }
@@ -1961,9 +1979,7 @@ impl DemandedWork {
 /// publishing the state that work warms under.
 fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
-    if let Some(scheduled) = work.scheduled_state(&state.pending) {
-        state.trust = scheduled;
-    }
+    work.publish_scheduled(state);
     state.claim.schedule(|epoch| work.job(name, epoch))
 }
 
@@ -2590,7 +2606,7 @@ fn reclaim_unwound_leg<O: EntryOps>(
     );
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.trust == TrustState::Unattached && state.parked().is_none() {
-        state.trust = TrustState::untrusted(UntrustedReason::leg_unwound(detail));
+        state.withdraw_trust(UntrustedReason::leg_unwound(detail));
     }
 }
 
@@ -2933,7 +2949,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 /// middle of.
 fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: String) {
     state.identity_refused = Some(detail.clone());
-    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
 }
 
 /// Classify one entry's root against every root the host serves, and park the
@@ -5152,11 +5168,11 @@ fn poll_claimed_entry<O: EntryOps>(
                     let rescan = !batch.rescans().is_empty();
                     state.pending.merge(batch);
                     if !state.owes_a_rung() {
-                        state.trust = if rescan {
-                            TrustState::untrusted(UntrustedReason::WatcherOverflow)
+                        if rescan {
+                            state.withdraw_trust(UntrustedReason::WatcherOverflow);
                         } else {
-                            TrustState::warming(WarmingPhase::Healing, 0, None)
-                        };
+                            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+                        }
                     }
                     state.coverage.park_by(epoch, attachment);
                     if !state.owes_a_rung() {
@@ -5204,7 +5220,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     state.coverage.park_by(epoch, attachment);
                 }
                 Err(JobFailure::Environmental(detail)) => {
@@ -5212,8 +5228,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.claim.end_poll(epoch);
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     state.coverage.park_by(epoch, attachment);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -5222,8 +5237,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.require_recovery_keeping_demands();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     state.coverage.park_by(epoch, attachment);
                 }
                 // Damaged derived state is not what a poll retries into.
@@ -5657,11 +5671,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // wait in `pending` for the heal that recovery runs.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                         let next = state
                             .claim
                             .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
@@ -5683,16 +5697,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.trust = TrustState::Unattached;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                 }
                 Err(JobFailure::Environmental(detail)) => {
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                 }
                 Err(JobFailure::Reload(error)) => {
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                 }
                 // An attach runs rung 3 against the database it opened, so
                 // damage reaching here is damage that rung could not resolve.
@@ -5703,9 +5715,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // demand is what resumes it, rather than the one that says the
                 // entry is already rebuilding.
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.trust = TrustState::untrusted(
-                        UntrustedReason::store_damaged_awaiting_demand(detail),
-                    );
+                    state.withdraw_trust(UntrustedReason::store_damaged_awaiting_demand(detail));
                 }
             }
             None
@@ -5864,7 +5874,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // for once the schema is corrected.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -5912,15 +5922,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -5928,8 +5937,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::StoreDamaged(detail)) => {
@@ -6031,7 +6039,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         // that reads the declaration again owed beside it.
                         state.require_recovery();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(reason);
+                        state.withdraw_trust(reason);
                         schedule_due_detach(&mut state, &name)
                     } else if state.detach_due {
                         state.trust = TrustState::Ready;
@@ -6040,7 +6048,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         state.trust = TrustState::Ready;
                         None
                     } else {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                         Some(
                             state
                                 .claim
@@ -6123,7 +6131,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     record_advisories(&mut state, &*shared.ops, &attachment);
                     state.coverage.park_by(epoch, attachment);
                     if handoff_saturated || !state.pending.is_empty() {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                     }
                     if state.detach_due {
                         state.claim.release();
@@ -6195,7 +6203,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     // The watcher this leg drained reported that the root
@@ -6215,8 +6223,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -6230,8 +6237,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -6313,7 +6319,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if handoff_saturated || !state.pending.is_empty() {
-                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        state.publish_pending_reconcile();
                         next = Some(
                             state
                                 .claim
@@ -6361,7 +6367,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     reclassify = root_moved(&error);
-                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.withdraw_trust(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
@@ -6369,8 +6375,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Reload(error)) => {
@@ -6379,8 +6384,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     let detail = state.record_reload_error(error);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 // Maintenance is where a verification the warm path never runs
@@ -6666,7 +6670,7 @@ fn run_reload_job<O: EntryOps>(
             if !ready {
                 state.require_recovery();
                 state.pending.merge(Batch::rescan(RescanScope::Vault));
-                state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
             }
             Err(ReloadRefusal::Core(error))
         }
@@ -6748,7 +6752,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.trust = TrustState::untrusted(watcher_lost(error));
+            state.withdraw_trust(watcher_lost(error));
             state.claim.release();
             drop(state);
             if reclassify {
@@ -6763,7 +6767,7 @@ fn apply_reload_runtime_failure<O: EntryOps>(
             state.park_coverage(&*shared.ops, epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
             Err(ReloadRefusal::Runtime(failure))
         }
         JobFailure::StoreDamaged(detail) => {
@@ -19514,6 +19518,31 @@ mod tests {
         assert_eq!(
             hold.reading().published(),
             &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A withdrawal of trust breaks it, whatever the same hold publishes
+    /// after.** One hold over a `Ready` entry withdraws trust and then
+    /// publishes healing, which is the label a change heals under too; the
+    /// withdrawal is what the entry keeps, so a read refuses rather than
+    /// waiting for a `Ready` that no longer follows from the one it served.
+    #[test]
+    fn a_hold_that_withdraws_trust_and_then_heals_refuses_a_read() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.withdraw_trust(UntrustedReason::WatcherOverflow);
+            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        }
+        let stance = entry.gate.lock().expect("entry gate poisoned").read_stance();
+        assert_eq!(
+            stance,
+            ReadStance::Refuse,
+            "an entry whose trust was withdrawn settles a read"
         );
     }
 
