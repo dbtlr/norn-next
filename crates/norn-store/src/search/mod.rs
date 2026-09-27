@@ -80,7 +80,7 @@
 
 mod candidates;
 mod statement;
-mod words;
+pub(crate) mod words;
 
 pub use candidates::{Candidate, Candidates, FeedRows, Held, HitRows};
 

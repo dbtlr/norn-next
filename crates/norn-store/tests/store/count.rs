@@ -986,6 +986,32 @@ fn a_part_a_count_cannot_apply_is_reported_as_a_find_reports_it() {
     );
 }
 
+/// **A match part whose query parses but holds no word is reported, and the
+/// tally reads no document it would have narrowed**, the same report a find
+/// or a search earns for it.
+#[test]
+fn a_wordless_match_part_is_reported_and_a_counts_tally_reads_nothing_it_narrowed() {
+    let counting_store = Counting::new("count-wordless-query");
+    let open = Predicate::equal_to("status", "open");
+    let wordless = Predicate::matches("\"!!!\"");
+
+    let ungrouped = counting_store.count(&counting(Vec::new()).with_predicates([wordless.clone()]));
+    assert_eq!(ungrouped.tallies, vec![tally(&[], 0)]);
+    assert_eq!(
+        ungrouped.unsatisfied,
+        vec![Unsatisfied::query_names_no_word("\"!!!\"")]
+    );
+
+    let beside = counting_store.count(
+        &counting(vec![field("aliases")]).with_predicates([wordless, open]),
+    );
+    assert_eq!(beside.tallies, Vec::new());
+    assert_eq!(
+        beside.unsatisfied,
+        vec![Unsatisfied::query_names_no_word("\"!!!\"")]
+    );
+}
+
 /// **A `by` key outside the field universe still answers**: no document
 /// carries it, so every one of the fixture's seven documents groups under
 /// `null`, and the key is reported with its near key. **A known key carries

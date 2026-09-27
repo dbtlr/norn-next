@@ -32,6 +32,115 @@ pub(crate) fn holds_word(term: &str) -> bool {
     term.chars().any(begins_word)
 }
 
+/// Whether `expression` holds a word, read as FTS5 match syntax: whether any
+/// phrase it names holds one, by the rule [`holds_word`] states.
+///
+/// **A phrase is what FTS5 tokenizes as content; everything else is syntax
+/// read past.** A double-quoted string is one phrase, its content read
+/// between the quotes with a doubled `""` read as one literal quote. Outside
+/// quotes, the expression splits into tokens at whitespace, `(` and `)`; the
+/// case-sensitive keywords `AND`, `OR`, `NOT`, `NEAR` and `NEAR/<digits>` are
+/// operators and name no phrase, and every other token is one, read past a
+/// trailing `*` (a prefix match) and a `column:` filter's column name, which
+/// are syntax rather than what the token names. A multi-column brace group,
+/// `{col1 col2}:`, is not specially read: its names, split at the space
+/// between them, are read as bare tokens rather than a filter, which only
+/// ever makes this answer `true` where the narrower reading would not, never
+/// the reverse.
+///
+/// An expression with at least one word-holding phrase holds a word; one
+/// whose every phrase holds none, empty expressions and expressions naming no
+/// phrase at all included, does not — the same reading [`holds_word`] gives a
+/// plain term.
+pub(crate) fn expression_holds_word(expression: &str) -> bool {
+    phrases(expression).any(|phrase| holds_word(&phrase))
+}
+
+/// The phrases `expression` names, in the reading [`expression_holds_word`]
+/// documents.
+fn phrases(expression: &str) -> impl Iterator<Item = String> + '_ {
+    let mut rest = expression;
+    std::iter::from_fn(move || {
+        loop {
+            rest = rest.trim_start_matches(|character: char| {
+                character.is_whitespace() || character == '(' || character == ')'
+            });
+            if rest.is_empty() {
+                return None;
+            }
+            if let Some(after_quote) = rest.strip_prefix('"') {
+                let (content, after) = read_quoted(after_quote);
+                rest = after;
+                return Some(content);
+            }
+            let end = rest
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || character == '('
+                        || character == ')'
+                        || character == '"'
+                })
+                .unwrap_or(rest.len());
+            let (token, after) = rest.split_at(end);
+            rest = after;
+            if let Some(phrase) = phrase_of(token) {
+                return Some(phrase.to_string());
+            }
+        }
+    })
+}
+
+/// The content of a double-quoted phrase whose opening quote is already read,
+/// and what stands after its closing quote. A doubled `""` reads as one
+/// literal quote and the phrase continues; an unterminated phrase reads to
+/// the expression's end.
+fn read_quoted(mut rest: &str) -> (String, &str) {
+    let mut content = String::new();
+    loop {
+        match rest.find('"') {
+            None => {
+                content.push_str(rest);
+                return (content, "");
+            }
+            Some(at) => {
+                content.push_str(&rest[..at]);
+                rest = &rest[at + 1..];
+                match rest.strip_prefix('"') {
+                    Some(after) => {
+                        content.push('"');
+                        rest = after;
+                    }
+                    None => return (content, rest),
+                }
+            }
+        }
+    }
+}
+
+/// The phrase a bare (unquoted) token names, or `None` where it is an
+/// operator naming none.
+fn phrase_of(token: &str) -> Option<&str> {
+    if is_operator(token) {
+        return None;
+    }
+    let token = token.strip_suffix('*').unwrap_or(token);
+    let token = match token.split_once(':') {
+        Some((_column, phrase)) => phrase,
+        None => token,
+    };
+    Some(token)
+}
+
+/// Whether a bare token is an FTS5 operator rather than a phrase: `AND`,
+/// `OR`, `NOT`, `NEAR`, or `NEAR` followed by `/` and one or more digits, its
+/// proximity.
+fn is_operator(token: &str) -> bool {
+    matches!(token, "AND" | "OR" | "NOT" | "NEAR")
+        || token
+            .strip_prefix("NEAR/")
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// Whether the tokenizer begins a word at `character`.
 fn begins_word(character: char) -> bool {
     let code = u32::from(character);
@@ -460,7 +569,7 @@ const WORD_STARTS: &[(u32, u32)] = &[
 mod tests {
     use norn_testkit::scratch::Scratch;
 
-    use super::{WORD_STARTS, holds_word};
+    use super::{WORD_STARTS, expression_holds_word, holds_word};
     use crate::{Store, StoredPathOrder};
 
     /// The store's own full-text index, holding the word `anchor` and no
@@ -615,5 +724,51 @@ mod tests {
     /// or the first past the surrogates.
     fn follows(last: u32, code: u32) -> bool {
         code == last + 1 || (last == 0xD7FF && code == 0xE000)
+    }
+
+    /// **A match expression holds a word exactly where one of its phrases
+    /// does**, past `AND`, `OR`, `NOT`, `NEAR`, a prefix `*` and a `column:`
+    /// filter, which are syntax rather than a phrase's own content. Every
+    /// expression here is one FTS5's own parser reads: [`holds_word`]'s
+    /// tests already pin the tokenizer table this rule stands on, so this
+    /// test is of the phrase reading alone, not of parsing.
+    #[test]
+    fn an_expression_holds_a_word_exactly_where_one_of_its_phrases_does() {
+        let holding = [
+            "foo",
+            "\"foo\"",
+            "\"foo\" AND \"!!!\"",
+            "\"!!!\" AND \"foo\"",
+            "\"foo\" OR \"!!!\"",
+            "\"foo\" NOT \"!!!\"",
+            "NEAR(\"foo\" \"!!!\")",
+            "foo*",
+            "body:foo",
+            "body:\"foo\"",
+        ];
+        for expression in holding {
+            assert!(
+                expression_holds_word(expression),
+                "{expression:?} was read as holding no word"
+            );
+        }
+        let wordless = [
+            "",
+            "   ",
+            "\"!!!\"",
+            "\"!!!\" AND \"???\"",
+            "\"!!!\" OR \"???\"",
+            "\"!!!\" NOT \"???\"",
+            "NEAR(\"!!!\" \"???\")",
+            "\"!!!\"*",
+            "body:\"!!!\"",
+            "\"\" \"!!!\"",
+        ];
+        for expression in wordless {
+            assert!(
+                !expression_holds_word(expression),
+                "{expression:?} was read as holding a word"
+            );
+        }
     }
 }

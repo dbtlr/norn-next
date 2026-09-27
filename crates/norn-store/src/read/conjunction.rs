@@ -20,6 +20,7 @@ use crate::json::{FrontmatterValue, canonical_json};
 use crate::link::keys_naming;
 use crate::path::{DirectoryPrefix, DocumentPath, SuffixKey};
 use crate::resolve::TargetClass;
+use crate::search::words::expression_holds_word;
 use crate::store::Snapshot;
 
 /// Where a request named a key.
@@ -283,11 +284,19 @@ impl Snapshot {
                 };
                 filter(shape, vec![text(key), Value::Text(bound)])
             }
+            // A query the engine parses can still hold no word — a quoted run
+            // of punctuation, or every phrase of an `AND`, `OR`, `NOT` or
+            // `NEAR` alike — which FTS5 reads as a phrase of no token, so the
+            // part is reported the same way an unsatisfiable search query is,
+            // rather than answered as an empty match in silence.
             Predicate::Matches { query, .. } => match self.match_problem(query, lookups)? {
                 Some(problem) => Ok(Part::MatchesNothing(Unsatisfied::malformed_query(
                     query.clone(),
                     problem,
                 ))),
+                None if !expression_holds_word(query) => Ok(Part::MatchesNothing(
+                    Unsatisfied::query_names_no_word(query.clone()),
+                )),
                 None => filter(ReadFilter::FullText, vec![text(query)]),
             },
             Predicate::Path { glob, .. } => match Pattern::parse(glob) {

@@ -962,6 +962,36 @@ fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
     );
 }
 
+/// **A match part whose query parses but holds no word is reported, and the
+/// answer holds no finding it would have narrowed**, the same report a find
+/// or a search earns for it.
+#[test]
+fn a_wordless_match_part_is_reported_and_a_validates_answer_holds_no_finding() {
+    let validating_store = Validating::new("validate-wordless-query");
+    let open = Predicate::equal_to("status", "open");
+    let wordless = validating().with_predicates([Predicate::matches("\"!!!\""), open]);
+
+    let answered = validating_store.validate(&wordless);
+    assert_eq!(
+        answered.unsatisfied,
+        vec![Unsatisfied::query_names_no_word("\"!!!\"")]
+    );
+    assert_eq!(
+        answered.answer,
+        Validation::Findings {
+            rows: Vec::new(),
+            next: None,
+            moved: Vec::new()
+        }
+    );
+    assert_eq!(answered.work.rows_read, 0, "no page statement ran");
+    assert_eq!(
+        validating_store.summary(&wordless),
+        Vec::new(),
+        "a summary over a wordless match tallies nothing"
+    );
+}
+
 /// Each finding's kind and severity, tallied in that order.
 fn tallies_of(rows: &[FindingRow]) -> Vec<(FindingKind, Severity, u64)> {
     let mut counted: BTreeMap<(&str, &str), (FindingKind, Severity, u64)> = BTreeMap::new();
