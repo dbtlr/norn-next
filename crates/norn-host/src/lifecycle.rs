@@ -3609,7 +3609,8 @@ impl HoldReading {
 /// schedules the attach it owes, so what such an entry refuses with is the
 /// warming state of that attach. The second is the demand an entry taking in
 /// a change published when the read's settle bound ran out. The third is an
-/// entry serving every surface but this one.
+/// entry serving every surface but this one, or a read another holder kept
+/// from the entry past its bound.
 ///
 /// **No wire rendering is written here.** A demand renders through
 /// [`Demand::answer`], the one mapping every surface renders a demand
@@ -3629,7 +3630,9 @@ pub enum ReadRefusal {
     /// bound, what the read last read under it.
     Unsettled(Demand),
     /// The entry is serving and its read seam is not: the mint that would have
-    /// given it a handle failed, or the snapshot could not be established.
+    /// given it a handle failed, or the snapshot could not be established. A
+    /// read whose way to the entry another holder kept past its bound — the
+    /// entry's gate, or its one connection — is refused the same way.
     ReaderUnavailable(ReaderUnavailable),
 }
 
@@ -3708,20 +3711,23 @@ impl<O: EntryOps> DemandLease<O> {
 }
 
 impl<O: EntryOps> Drop for DemandLease<O> {
-    /// **The caller holds no hold of this entry's gate**: this blocks on that
-    /// gate, and the gate is not reentrant.
+    /// Give the lease back under the next hold of its entry's gate, without
+    /// waiting for that gate.
     ///
-    /// On an unwinding thread the serving set and the gate are both read
-    /// through a poison, because a panic inside a drop there aborts the
-    /// process and either lock may be poisoned by then: an unwind on another
-    /// thread under either one poisons it for every later taker. Nothing
-    /// recovers a poisoned gate, so the give-back written through one is read
-    /// by no later holder; reading through it is defense in depth that keeps
-    /// this drop from panicking. The unwinds that reach a lease with its gate
-    /// poisoned are a read's acquisition unwinding outside the gate — in its
-    /// wait for the connection, in its retake of the gate, or in the dispatch a
-    /// refusal sends, whose gate take and job-sender lock both panic on a
-    /// poison — and a read's query work unwinding under its [`ReadHold`].
+    /// **This is the one way a lease goes back outside a hold of its gate**,
+    /// and it never waits for the gate: the gate's `run_under_the_next_hold`
+    /// runs the give-back at once where the gate is free, and otherwise leaves
+    /// it for the next take, which runs it before its taker reads the entry.
+    /// So no caller has to prove it holds no hold of the gate, a read whose
+    /// retake the bound turned away gives its lease back by dropping it, and
+    /// whatever reads the entry's leases next reads this one given back.
+    ///
+    /// On an unwinding thread the serving set is read through a poison,
+    /// because a panic inside a drop there aborts the process and an unwind on
+    /// another thread under that lock poisons it for every later taker. The
+    /// gate's own route reads through a poison too; nothing recovers a
+    /// poisoned gate, so a give-back written through one is read by no later
+    /// holder.
     fn drop(&mut self) {
         let Some(shared) = self.held.take() else {
             return;
@@ -3729,8 +3735,10 @@ impl<O: EntryOps> Drop for DemandLease<O> {
         let Some(entry) = shared.entries.get_in_a_drop(&self.name) else {
             return;
         };
-        let mut state = entry.gate.lock_in_a_drop();
-        give_back_demand(&mut state, self.recovery_demand);
+        let recovery_demand = self.recovery_demand;
+        entry
+            .gate
+            .run_under_the_next_hold(move |state| give_back_demand(state, recovery_demand));
     }
 }
 
@@ -3754,10 +3762,10 @@ fn give_back_demand<A: SnapshotSource>(state: &mut EntryState<A>, recovery_deman
 /// its lease**: this one owns the guard beside the lease, and
 /// [`AcquisitionOutsideTheGate`] owns no guard at all. The acquisition moves
 /// between them only by [`AcquisitionUnderTheGate::let_the_gate_go`] and
-/// [`AcquisitionOutsideTheGate::take_the_gate_again`], so no give-back can ask
-/// for a gate its own acquisition holds: the give-back under the gate is
-/// written through the guard this owns, and the give-back outside it takes a
-/// gate no guard of the acquisition's holds.
+/// [`AcquisitionOutsideTheGate::take_the_gate_again_by`]. The give-back under
+/// the gate is written through the guard this owns, so the hold that reads
+/// the lease gone is this one; the give-back outside it is the lease's own
+/// drop, which never waits for the gate.
 ///
 /// **The lease goes back under the guard, before the guard goes**, on every
 /// way out while the gate is held — a refusal that returns under it, and an
@@ -3781,22 +3789,11 @@ struct AcquisitionUnderTheGate<'g, O: EntryOps> {
 /// holds across the wait outside it.
 ///
 /// **It owns no guard**, so the lease's own drop is what gives the lease back
-/// where this drops: in the wait for the entry's connection, in the retake of
-/// the gate, in the dispatch a refusal sends, or after the establishing round.
-/// Blocking on the gate from that drop is safe because the thread holds no
-/// hold of it:
-///
-/// - [`Host::begin_read`] takes the gate with a blocking take of a
-///   non-reentrant lock before it records the lease, so no caller of it holds
-///   that gate: one that did would never get past that take;
-/// - a callee that took the gate has its guard dropped by an unwind before the
-///   unwind reaches the acquisition;
-/// - and the acquisition's own guard is only ever owned by an
-///   [`AcquisitionUnderTheGate`], which gives this lease up as it lets that
-///   guard go.
-///
-/// Nothing the thread still holds is what a gate holder waits for: no holder
-/// of the gate waits for a connection.
+/// where this drops: in the wait for the entry's connection, in a retake of
+/// the gate the bound turned away, in the dispatch a refusal sends, or after
+/// the establishing round. That drop never waits for the gate: where the gate
+/// is held, it leaves the give-back for the next hold, which runs it before
+/// anything reads the entry.
 struct AcquisitionOutsideTheGate<'g, O: EntryOps> {
     gate: &'g EntryGate<EntryState<O::Attachment>>,
     lease: DemandLease<O>,
@@ -3882,33 +3879,20 @@ impl<'g, O: EntryOps> AcquisitionOutsideTheGate<'g, O> {
     /// **The read's bound covers this wait too.** A holder of the gate can
     /// keep it for as long as a mint's open under it takes, so a retake that
     /// waited for the gate unbounded would hold the read past its bound. The
-    /// lease this acquisition holds is given back without waiting for the
-    /// gate either: it is left for the next hold of the gate, which gives it
-    /// back before anything reads the entry.
+    /// lease this acquisition holds goes back by its own drop, which waits for
+    /// the gate no more than this does: it is left for the next hold of the
+    /// gate, which gives it back before anything reads the entry.
     ///
     /// A poisoned gate panics here with this acquisition still owning its
     /// lease, so the unwind gives the lease back through the poison.
     fn take_the_gate_again_by(self, deadline: Instant) -> Option<AcquisitionUnderTheGate<'g, O>> {
-        let Some(state) = self.gate.lock_until(deadline) else {
-            self.leave_the_lease_to_the_next_hold();
-            return None;
-        };
+        let state = self.gate.lock_until(deadline)?;
         let state = state.expect("entry gate poisoned");
         Some(AcquisitionUnderTheGate {
             gate: self.gate,
             state: Some(state),
             lease: Some(self.lease),
         })
-    }
-
-    /// Give the lease back under the next hold of the gate, without waiting
-    /// for it.
-    fn leave_the_lease_to_the_next_hold(mut self) {
-        let recovery_demand = self.lease.recovery_demand;
-        if self.lease.held.take().is_some() {
-            self.gate
-                .run_under_the_next_hold(move |state| give_back_demand(state, recovery_demand));
-        }
     }
 
     /// Wait, holding no hold of the gate, for the entry's stance to move past
@@ -4817,8 +4801,10 @@ impl<O: EntryOps> Host<O> {
     /// handle the entry serves now where that is another one, and refuses
     /// where the entry refuses.
     ///
-    /// **The settle bound runs from the first hold and covers every wait.**
-    /// A settling read that meets its bound refuses as
+    /// **The settle bound runs from the read's first take of the gate and
+    /// covers every wait, that take among them.** A first take that finds the
+    /// gate held past the bound refuses as [`ReadRefusal::ReaderUnavailable`]
+    /// and records nothing. A settling read that meets its bound refuses as
     /// [`ReadRefusal::Unsettled`] with what the entry publishes. A wait for
     /// the connection ends when the connection comes back or when the bound
     /// runs out, whichever is first, and a read that finds the connection
@@ -4870,10 +4856,16 @@ impl<O: EntryOps> Host<O> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReadRefusal::NotServing(Demand::UnknownVault));
         };
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        // The bound on every wait this read takes runs from here, its first
-        // hold of the gate.
+        // The bound on every wait this read takes runs from here, as it asks
+        // for the gate the first time: the first take is a wait too.
         let deadline = settle_deadline(self.shared.read_settle_bound);
+        // A gate held past the bound refuses the read before it records any
+        // demand: the entry may be serving, and only this read's way to it
+        // was held.
+        let Some(state) = entry.gate.lock_until(deadline) else {
+            return Err(ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()));
+        };
+        let mut state = state.expect("entry gate poisoned");
         // The readings this round of the gate opens on, taken as the gate is
         // taken and before anything runs under it: what SQLite has begun on
         // this thread, and the gate's take count. The connection's turn is
@@ -4904,11 +4896,12 @@ impl<O: EntryOps> Host<O> {
         // code.
         //
         // The lease is recorded under this first hold and is held across the
-        // gate being given back and taken again. Its own drop takes that same
-        // gate and the gate is not reentrant, so from here the guard and the
-        // lease are owned together: an [`AcquisitionUnderTheGate`] gives the
-        // lease back through the guard it owns, and an
-        // [`AcquisitionOutsideTheGate`] owns no guard to be asked for.
+        // gate being given back and taken again. Its own drop leaves the
+        // give-back for the next hold of a gate it finds held, so from here
+        // the guard and the lease are owned together: an
+        // [`AcquisitionUnderTheGate`] gives the lease back through the guard
+        // it owns, in the hold a refusal answers from, and an
+        // [`AcquisitionOutsideTheGate`] lets the lease's own drop give it back.
         let lease = DemandLease {
             outcome: state.published_demand(),
             name: name.clone(),
@@ -5044,9 +5037,7 @@ impl<O: EntryOps> Host<O> {
             // go, and only its read seam was taken. The turn, where the wait
             // took one, goes back as it drops.
             let Some(round) = rounds.take_the_gate_again(outside, earlier, deadline) else {
-                return Err(ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                    "this entry's gate was held past this read's bound",
-                )));
+                return Err(ReadRefusal::ReaderUnavailable(gate_held_past_the_bound()));
             };
             (state, opening, stance) = round;
             // A wait the bound ended took no connection, and the loop answers
@@ -5325,12 +5316,21 @@ impl Drop for AcquisitionRounds<'_> {
     }
 }
 
-/// The instant a read's settle bound runs out, for a read whose first hold of
-/// the entry gate is now. A bound past what the clock can hold is no bound.
+/// The instant a read's settle bound runs out, for a read that asks for the
+/// entry gate the first time now. A bound past what the clock can hold is no
+/// bound.
 fn settle_deadline(bound: Duration) -> Instant {
     let now = Instant::now();
     now.checked_add(bound)
         .unwrap_or_else(|| now + Duration::from_secs(60 * 60 * 24 * 365))
+}
+
+/// What a read is refused with where another holder kept the entry gate past
+/// the read's bound, at its first take or at a retake after waiting for the
+/// connection: the entry may serve every surface, and only this read's way to
+/// it was held.
+fn gate_held_past_the_bound() -> ReaderUnavailable {
+    ReaderUnavailable::new("this entry's gate was held past this read's bound")
 }
 
 /// Statements an acquisition's earlier rounds of the entry gate ran, carried
@@ -20192,6 +20192,91 @@ mod tests {
         assert_eq!(
             hold.reading().published(),
             &Demand::State(TrustState::Ready)
+        );
+    }
+
+    /// **A lease dropped while its gate is held goes back without waiting for
+    /// the gate.** Another holder keeps the gate; the lease's drop returns at
+    /// once, writes nothing under the hold it did not take, and the next hold
+    /// reads the lease given back.
+    #[test]
+    fn a_lease_dropped_under_a_held_gate_goes_back_with_the_next_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let held = entry.gate.lock().expect("entry gate poisoned");
+        assert_eq!(held.demand_leases, 1);
+        let (dropped, dropped_at) = mpsc::channel::<()>();
+        let dropper = thread::spawn(move || {
+            drop(lease);
+            dropped.send(()).expect("the case waits for the drop");
+        });
+        dropped_at
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the lease's drop waited for a held gate");
+        assert_eq!(
+            held.demand_leases, 1,
+            "the give-back ran under a hold it did not take"
+        );
+        drop(held);
+        dropper.join().expect("the dropper");
+        assert_eq!(
+            demand_leases(&entry),
+            0,
+            "the next hold read the dropped lease still standing"
+        );
+    }
+
+    /// **A read's first take of the entry gate ends at its bound.** Another
+    /// holder has the gate when the read arrives and keeps it far past the
+    /// read's bound. The read refuses as reader-unavailable within its bound
+    /// rather than once the holder lets go, and records no demand: it never
+    /// held the gate a demand is recorded under.
+    #[test]
+    fn a_reads_first_take_of_a_gate_held_past_its_bound_refuses_within_the_bound() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_millis(300);
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), bound);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        // The holder keeps the gate until the case lets it go or ten seconds
+        // pass.
+        let (holding, held) = mpsc::channel::<()>();
+        let (let_go, holder_released) = mpsc::channel::<()>();
+        let holder_entry = Arc::clone(&entry);
+        let holder = thread::spawn(move || {
+            let hold = holder_entry.gate.lock().expect("entry gate poisoned");
+            holding.send(()).expect("the case waits for the hold");
+            let _ = holder_released.recv_timeout(Duration::from_secs(10));
+            drop(hold);
+        });
+        held.recv().expect("the holder took the gate");
+
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("a read that met a held gate was served");
+        let waited = started.elapsed();
+        // A holder that kept the gate its whole ten seconds has gone already.
+        let _ = let_go.send(());
+        holder.join().expect("the holder let the gate go");
+        assert!(
+            waited < bound + Duration::from_secs(2),
+            "the read waited {waited:?} for a gate held past its bound of {bound:?}"
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read whose first take ran out its bound was refused as {refusal:?}"
+        );
+        assert_eq!(
+            demand_leases(&entry),
+            0,
+            "a read that never took the gate recorded a demand"
         );
     }
 

@@ -6,11 +6,12 @@
 //! [`EntryGate::lock`], or its bounded form [`EntryGate::lock_until`] — and
 //! every take counts itself. The mutex is private to this module, so no lock
 //! site elsewhere can take the state without moving the count, and the count
-//! moves while the taker holds the gate. A holder that reads [`EntryGate::times_taken`] twice without giving
-//! the gate back reads the same number both times; a holder that gave it back
-//! and took it again between the two readings reads a difference of at least
-//! one, its own retake. That difference is how a read attests that the
-//! statement it establishes on ran under one continuous hold.
+//! moves while the taker holds the gate. A holder that reads
+//! [`EntryGate::times_taken`] twice without giving the gate back reads the
+//! same number both times; a holder that gave it back and took it again
+//! between the two readings reads a difference of at least one, its own
+//! retake. That difference is how a read attests that the statement it
+//! establishes on ran under one continuous hold.
 //!
 //! **Every hold ends in [`GateHold`]'s drop, and that is where the signal
 //! moves.** A hold reads the state's [`Stanced::stance`] as it is taken and
@@ -25,8 +26,9 @@
 //! [`EntryGate::lock_until`] waits for the gate no later than a deadline:
 //! every hold's end, once the gate is back, wakes the takers waiting that way,
 //! and a taker waiting that way holds nothing but the lock that counts it, so
-//! it never waits on the gate while holding it. A caller the deadline turned
-//! away that still owes the state a write leaves it with
+//! it never waits on the gate while holding it. A caller that owes the state
+//! a write and must not wait for the gate — a demand lease going back from its
+//! drop, whatever thread drops it — leaves it with
 //! [`EntryGate::run_under_the_next_hold`], and the next take of the gate runs
 //! it before its taker reads the state.
 
@@ -307,10 +309,12 @@ impl<T: Stanced> EntryGate<T> {
     /// taker reads the state; and run it now, under a hold of its own, where
     /// the gate is free.
     ///
-    /// **It never waits for the gate.** It is what a caller that
-    /// [`EntryGate::lock_until`] turned away uses to make a write it still
-    /// owes, so the write lands with whichever hold comes next rather than
-    /// holding that caller until the gate is free.
+    /// **It never waits for the gate**, so a caller can make a write it owes
+    /// from anywhere: from a drop, from a thread a deadline turned away from
+    /// the gate, or from a thread that holds the gate itself. The write lands
+    /// with whichever hold comes next rather than holding that caller until
+    /// the gate is free, and every reader of the state is a later hold, so no
+    /// reader misses it. A poisoned gate is read through, as a drop must.
     pub(super) fn run_under_the_next_hold(&self, work: impl FnOnce(&mut T) + Send + 'static) {
         {
             let mut deferred = self.deferred.lock().unwrap_or_else(PoisonError::into_inner);
