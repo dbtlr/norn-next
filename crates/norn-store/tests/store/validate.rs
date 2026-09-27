@@ -18,8 +18,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::common::{
-    DOCUMENT_PAYLOAD, Scratch, ambiguity, ambiguity_for_target, assert_covers_every_driving_shape,
-    document, driving_parts, narrowable, reads_of, unread_block, violation, write_documents,
+    DOCUMENT_PAYLOAD, Scratch, assert_covers_every_driving_shape, document, driving_parts,
+    narrowable, path_names_no_document_for_target, path_names_no_document_in_class, reads_of,
+    unread_block, violation, write_documents,
 };
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
@@ -86,14 +87,14 @@ fn seed(store: &mut Store) {
     for finding in [
         violation("broken.md"),
         unread_block("notes/d.md"),
-        ambiguity(
+        path_names_no_document_in_class(
             "notes/c.md",
             "glossary",
             "glossary/",
             &["g/1.md", "g/2.md", "g/3.md", "g/4.md", "g/5.md"],
             7,
         ),
-        ambiguity_for_target("a.md", "v1.2", &["v/v1.2.md"], 1),
+        path_names_no_document_for_target("a.md", "v1.2", &["v/v1.2.md"], 1),
         undeclared("a.md", "draft"),
         undeclared("a.md", "idea"),
         undeclared("b.md", "other"),
@@ -779,33 +780,69 @@ fn drain_in_folded_order(order: StoredPathOrder) {
 
 /// **A finding row carries the bounded head the pillar stores, the total it
 /// heads, and the hint that names the `find` enumerating its class.** The
-/// `glossary` finding heads five of seven candidates in the order they were
-/// recorded and hints `glossary`; the `v1.2` finding is in two classes, and
-/// hints the address whose probe opens both; a finding in no class carries
-/// an empty head of none and no hint.
+/// fixture's two resolution findings stand under a kind that is not
+/// `link/ambiguous`, and each is recorded again as an ambiguous link's
+/// finding at `notes/d.md`. The `glossary` finding heads five of seven
+/// candidates in the order they were recorded; the ambiguous one hints
+/// `glossary`, and the other kind hints nothing. The ambiguous `v1.2`
+/// finding is in two classes, and hints the address whose probe opens both.
+/// A finding in no class carries an empty head of none and no hint.
 #[test]
 fn a_finding_row_carries_its_bounded_head_its_total_and_its_hint() {
-    let validating_store = Validating::new("validate-head");
+    let mut validating_store = Validating::new("validate-head");
+    for (target, mut finding) in [
+        (
+            "glossary",
+            path_names_no_document_in_class(
+                "notes/d.md",
+                "glossary",
+                "glossary/",
+                &["g/1.md", "g/2.md", "g/3.md", "g/4.md", "g/5.md"],
+                7,
+            ),
+        ),
+        (
+            "v1.2",
+            path_names_no_document_for_target("notes/d.md", "v1.2", &["v/v1.2.md", "v/v1.md"], 2),
+        ),
+    ] {
+        finding.kind = FindingKind::Ambiguous;
+        finding.target = Some(target.to_string());
+        validating_store.stand(&finding);
+    }
     let rows = validating_store.rows(&validating());
-    let by_target: BTreeMap<Option<String>, &FindingRow> =
-        rows.iter().map(|row| (row.target.clone(), row)).collect();
-    let glossary = by_target[&Some("glossary".to_string())];
-    assert_eq!(
-        glossary
-            .head
-            .candidates()
-            .iter()
-            .map(|candidate| candidate.path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["g/1.md", "g/2.md", "g/3.md", "g/4.md", "g/5.md"]
-    );
-    assert_eq!(glossary.head.total(), 7);
-    assert!(glossary.head.is_truncated());
+    let by_target: BTreeMap<(&str, Option<String>), &FindingRow> = rows
+        .iter()
+        .map(|row| ((row.kind.as_str(), row.target.clone()), row))
+        .collect();
     let target = |text: &str| ResolutionTarget::new(text).expect("a target");
-    assert_eq!(glossary.hint, Some(Hint::resolves(target("glossary"))));
-    let dotted = by_target[&Some("v1.2".to_string())];
+    let read = |kind: FindingKind, text: &str| by_target[&(kind.as_str(), Some(text.to_string()))];
+    for kind in [FindingKind::Ambiguous, FindingKind::PathNamesNoDocument] {
+        let glossary = read(kind, "glossary");
+        assert_eq!(
+            glossary
+                .head
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g/1.md", "g/2.md", "g/3.md", "g/4.md", "g/5.md"]
+        );
+        assert_eq!(glossary.head.total(), 7);
+        assert!(glossary.head.is_truncated());
+    }
+    assert_eq!(
+        read(FindingKind::Ambiguous, "glossary").hint,
+        Some(Hint::resolves(target("glossary")))
+    );
+    assert_eq!(
+        read(FindingKind::PathNamesNoDocument, "glossary").hint,
+        None
+    );
+    let dotted = read(FindingKind::Ambiguous, "v1.2");
     assert_eq!(dotted.hint, Some(Hint::resolves(target("v1.2"))));
-    assert_eq!(dotted.head.total(), 1);
+    assert_eq!(dotted.head.total(), 2);
+    assert_eq!(read(FindingKind::PathNamesNoDocument, "v1.2").hint, None);
 
     let unreadable = &rows[0];
     assert_eq!(unreadable.path.as_str(), "broken.md");

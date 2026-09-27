@@ -13,7 +13,9 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use crate::common::{Scratch, ambiguity, document, violation, write_documents};
+use crate::common::{
+    Scratch, document, path_names_no_document_in_class, violation, write_documents,
+};
 use norn_store::{
     BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
     FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, LinkFact, LinkFamily,
@@ -1153,7 +1155,7 @@ fn judge_hydration(mut seeded: Seeded) {
     write_documents(&mut writing, &[full]);
     for _ in 0..NESTED_ROW_CEILING {
         writing
-            .record_finding(&ambiguity(
+            .record_finding(&path_names_no_document_in_class(
                 "long/full.md",
                 "glossary",
                 "glossary/",

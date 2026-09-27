@@ -81,7 +81,8 @@ use crate::facts::{
     StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
     TagFact, TagSource, VaultSchemaPin,
 };
-use crate::fields::{FieldContainer, FieldRow, FieldRows, OffsetSpelling};
+use crate::fields::{ContentModel, FieldContainer, FieldRow, FieldRows, OffsetSpelling};
+use crate::health::{self, KeySummaries, LinkSelection};
 use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey, SuffixProbe};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
@@ -168,7 +169,7 @@ pub struct Request<'a> {
 /// Each count is a [`Cell`] because the readers take `&self` — the connection
 /// they borrow is a field of the same struct.
 #[derive(Default)]
-struct ReadWork {
+pub(crate) struct ReadWork {
     steps: Cell<u64>,
     statements: Cell<u64>,
 }
@@ -1242,6 +1243,74 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The link-health findings about every link the documents at
+    /// `documents` hold: [`Request::judge_selected_links`] over those
+    /// documents, against key summaries of its own.
+    pub fn judge_link_health(
+        &self,
+        documents: &[DocumentPath],
+        declared: &ContentModel,
+    ) -> Result<Vec<FindingFacts>, StoreError> {
+        self.judge_selected_links(
+            LinkSelection::Documents(documents),
+            &mut KeySummaries::default(),
+            declared,
+        )
+    }
+
+    /// The link-health findings about every link `selection` selects —
+    /// broken, ambiguous, or missing the place its anchor names — judged
+    /// against the documents this store holds now under the ambiguity-ignore
+    /// globs `declared` names, in the order of the holding path, then the
+    /// link's ordinal. Nothing is written: the findings are handed back.
+    ///
+    /// Each finding is a warning at the link's ordinal and span, carrying the
+    /// link as written as its target and keyed by exactly the link's keys. An
+    /// ambiguous finding carries a head of at most [`crate::CANDIDATE_HEAD`]
+    /// candidates beside the exact total, and a missing anchor's the one
+    /// document it names. A link is judged alike whichever selection reaches
+    /// it.
+    ///
+    /// The work is a cost per link plus a cost per candidate: each distinct
+    /// key the links hold is resolved once, and kept in `summaries`, so a
+    /// judgment taken in chunks against one set of summaries resolves each
+    /// key once across them ([`KeySummaries`]). A class or path key spelled
+    /// outside the store's key space is refused.
+    ///
+    /// **A dormant carrier.** Its consuming layer is the re-decision
+    /// [ADR 0027] rules into [`Request::apply_increment`], which selects the
+    /// links a changeset reaches — its written documents' links, and the links
+    /// held under the classes and paths it changes — and files these findings
+    /// in its transaction. That re-decision is not built, so only the suite
+    /// calls this.
+    ///
+    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
+    pub fn judge_selected_links(
+        &self,
+        selection: LinkSelection<'_>,
+        summaries: &mut KeySummaries,
+        declared: &ContentModel,
+    ) -> Result<Vec<FindingFacts>, StoreError> {
+        let order = self.store.path_order();
+        match selection {
+            LinkSelection::Documents(_) => {}
+            LinkSelection::Class(class) => refuse_outside_key_space(
+                SuffixKey::under(order).holds(class),
+                "a judged class key",
+                order,
+            )?,
+            LinkSelection::Path(path) => self.check_path_key(path)?,
+        }
+        health::judge(
+            self.store.connection(),
+            &self.read_work,
+            order,
+            declared.ambiguity_ignore(),
+            selection,
+            summaries,
+        )
+    }
+
     /// Every finding belonging to an ambiguity class the probe opens.
     ///
     /// This is what scopes findings maintenance: a changed path names a class,
@@ -1426,7 +1495,7 @@ impl<'a> Request<'a> {
 
     /// The same, on a connection the caller names — a read snapshot's own
     /// transaction — with the steps and the statement still this request's.
-    fn read_all_on<T>(
+    pub(crate) fn read_all_on<T>(
         connection: &Connection,
         work: &ReadWork,
         sql: &str,
@@ -2639,7 +2708,7 @@ pub(crate) fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
 
 /// A link row as [`Request::stored_facts`] reads it: the link, and the address
 /// kind stored beside it after the columns [`stored_link`] reads.
-fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
+pub(crate) fn stored_link_row(row: &Row<'_>) -> Reading<StoredLink> {
     let written: String = row.get(12)?;
     let Some(address) = LinkAddressKind::ALL
         .into_iter()

@@ -13,13 +13,15 @@
 //! the finding's candidate rows, which were bounded at
 //! [`crate::CANDIDATE_HEAD`] when they were written, and the total beside them
 //! is the one the finding was recorded with; no class is resolved again at
-//! read time. The hint names the address the finding's longest class key
-//! reads back as ([`crate::ClassKey::address`]): a target's reductions differ
-//! only in the leaf, the leaf as written is the longer key, and its address's
-//! probe opens every class the target's probe did. A finding in no class has
-//! no hint, and neither does one whose address a request could not spell: an
-//! address holding `#` reads as a target with an anchor, which names another
-//! address.
+//! read time. Only an ambiguous link's finding (`link/ambiguous`) carries a
+//! hint, because only its candidates run past a head a request can enumerate.
+//! The hint names the address the finding's longest class key reads back as
+//! ([`crate::ClassKey::address`]): a target's reductions differ only in the
+//! leaf, the leaf as written is the longer key, and its address's probe opens
+//! every class the target's probe did. An ambiguous finding in no class — a
+//! rooted name's, keyed by paths alone — has no hint, and neither does one
+//! whose address a request could not spell: an address holding `#` reads as a
+//! target with an anchor, which names another address.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -209,17 +211,31 @@ impl Snapshot {
                 // order; the statement states none, so the order is taken
                 // here, over a head the pillar bounded.
                 head.sort_by_key(|(rank, _)| *rank);
-                let hint = classes.get(&base.id).and_then(hint_of);
-                finding_row(base, head.into_iter().map(|(_, candidate)| candidate), hint)
+                let classes = classes.remove(&base.id).unwrap_or_default();
+                finding_row(
+                    base,
+                    head.into_iter().map(|(_, candidate)| candidate),
+                    &classes,
+                )
             })
             .collect()
     }
 }
 
-/// The request that enumerates the classes `classes` holds: a `find` resolving
-/// the address the longest of them reads back as, ties to the byte-least.
-/// `None` for no class, and for an address a target cannot spell.
-fn hint_of(classes: &BTreeSet<ClassKey>) -> Option<Hint> {
+/// The request that enumerates the classes a finding of `kind` in `classes` is
+/// about: a `find` resolving the address the longest of them reads back as,
+/// ties to the byte-least. Only an ambiguous link's finding has candidates
+/// past its head to enumerate, so every other kind has none; and neither has a
+/// finding in no class, nor one whose address a target cannot spell.
+///
+/// An ambiguous finding in a class — a suffix-addressed link's — carries the
+/// hint whether or not its head holds the whole total: the hint names the
+/// class, not the candidates the head left out. An ambiguous rooted name is
+/// keyed by paths alone, stands in no class, and so carries none.
+fn hint_of(kind: FindingKind, classes: &BTreeSet<ClassKey>) -> Option<Hint> {
+    if kind != FindingKind::Ambiguous {
+        return None;
+    }
     let longest = classes
         .iter()
         .rev()
@@ -231,14 +247,16 @@ fn hint_of(classes: &BTreeSet<ClassKey>) -> Option<Hint> {
     ResolutionTarget::new(address).ok().map(Hint::resolves)
 }
 
-/// The row `base` reads as, over its candidate head and its hint.
+/// The row `base` reads as, over its candidate head and the hint its kind
+/// and `classes` give it.
 fn finding_row(
     base: FindingBase,
     candidates: impl Iterator<Item = Candidate>,
-    hint: Option<Hint>,
+    classes: &BTreeSet<ClassKey>,
 ) -> Result<FindingRow, StoreError> {
     let kind = FindingKind::try_from(base.kind.as_str())
         .map_err(|_| unreadable("findings.kind", &base.kind))?;
+    let hint = hint_of(kind, classes);
     let severity = Severity::try_from(base.severity.as_str())
         .map_err(|_| unreadable("findings.severity", &base.severity))?;
     let path = norn_wire::DocumentPath::new(&base.path)
@@ -277,8 +295,9 @@ mod tests {
     }
 
     /// **A hint names the address the longest class reads back as**, whose
-    /// probe opens every class the finding is in; a finding in no class, and
-    /// one whose address carries `#`, has none.
+    /// probe opens every class the ambiguous finding is in; a finding in no
+    /// class, one whose address carries `#`, and a finding of any other kind
+    /// has none.
     #[test]
     fn a_hint_names_the_address_whose_probe_opens_every_class() {
         let target = |hint: Option<Hint>| match hint {
@@ -286,14 +305,22 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            target(hint_of(&classes(&["glossary/norn/"]))),
+            target(hint_of(
+                FindingKind::Ambiguous,
+                &classes(&["glossary/norn/"])
+            )),
             Some("norn/glossary".to_string())
         );
         assert_eq!(
-            target(hint_of(&classes(&["v1/", "v1.2/"]))),
+            target(hint_of(FindingKind::Ambiguous, &classes(&["v1/", "v1.2/"]))),
             Some("v1.2".to_string())
         );
-        assert_eq!(hint_of(&BTreeSet::new()), None);
-        assert_eq!(hint_of(&classes(&["a#b/"])), None);
+        assert_eq!(hint_of(FindingKind::Ambiguous, &BTreeSet::new()), None);
+        assert_eq!(hint_of(FindingKind::Ambiguous, &classes(&["a#b/"])), None);
+        for kind in FindingKind::ALL {
+            if kind != FindingKind::Ambiguous {
+                assert_eq!(hint_of(kind, &classes(&["glossary/"])), None, "{kind}");
+            }
+        }
     }
 }

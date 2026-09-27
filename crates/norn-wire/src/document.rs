@@ -646,7 +646,15 @@ impl LinkHealth {
     /// This is the whole of the derivation, so a producer cannot file one
     /// reading of a link and a consumer another.
     pub fn of_link(family: LinkFamily, protocol: Option<&str>, target: &str, targets: u64) -> Self {
-        match (LinkAddress::of(family, protocol, target).kind(), targets) {
+        Self::of_address(LinkAddress::of(family, protocol, target).kind(), targets)
+    }
+
+    /// The health of a link whose address is of `kind` and whose target
+    /// resolved to `targets` documents: [`LinkHealth::of_link`]'s judgment,
+    /// read from the address kind a store holds beside the link rather than
+    /// from the link as written.
+    pub const fn of_address(kind: LinkAddressKind, targets: u64) -> Self {
+        match (kind, targets) {
             (LinkAddressKind::Elsewhere, _) | (LinkAddressKind::Attachment, 0) => {
                 LinkHealth::NotJudged
             }

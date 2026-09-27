@@ -23,21 +23,27 @@ use norn_db::EmittedPlan;
 use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
 
-use crate::anchor::link_anchor_held_sql;
+use std::collections::BTreeMap;
+
 use crate::ddl;
+use crate::facts::CANDIDATE_HEAD;
+use crate::health::statement::{self as health, Selected};
+use crate::path::ClassKey;
+use crate::read::SuffixSpellings;
+use crate::resolve::AmbiguityIgnore;
 
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
     DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
     FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
     STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
-    SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass, class_discard_sql,
-    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
-    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
-    finding_page_sql, finding_paths_sql, finding_subject_parameters, finding_subjects_sql,
-    findings_in_class_sql, probe_parameters, stored_document_sql, stored_facts_document_sql,
-    stored_findings_sql, subject_discard_parameters, subject_discard_sql, suffix_candidates_sql,
-    text_page_parameters, tombstone_feed_sql,
+    SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
+    class_discard_sql, document_feed_sql, document_page_parameters, document_page_sql,
+    feed_page_parameters, finding_candidates_sql, finding_classes_sql, finding_id_parameters,
+    finding_page_parameters, finding_page_sql, finding_paths_sql, finding_subject_parameters,
+    finding_subjects_sql, findings_in_class_sql, probe_parameters, stored_document_sql,
+    stored_facts_document_sql, stored_findings_sql, subject_discard_parameters,
+    subject_discard_sql, suffix_candidates_sql, text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -109,6 +115,10 @@ impl<'a> Request<'a> {
             ExplainedStatement::PathDiscard(path) => self.check_path_key(path)?,
             _ => {}
         }
+        // The judgment's statements are spelled in the key space the store's
+        // order selects, as the judgment spells them.
+        let order = self.store.path_order();
+        let key = SuffixKey::under(order);
         let sql = match statement {
             ExplainedStatement::SuffixCandidates(resolution) => suffix_candidates_sql(resolution),
             ExplainedStatement::FindingsInClass(probe) => {
@@ -144,7 +154,13 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingCandidates(ids) => finding_candidates_sql(ids.get()),
             ExplainedStatement::FindingClasses(ids) => finding_classes_sql(ids.get()),
             ExplainedStatement::FindingPaths(ids) => finding_paths_sql(ids.get()),
-            ExplainedStatement::LinkAnchorHeld => link_anchor_held_sql(),
+            ExplainedStatement::LinkHealthLinks => health::links_sql(key, Selected::Documents),
+            ExplainedStatement::LinkHealthClassLinks => health::links_sql(key, Selected::Class),
+            ExplainedStatement::LinkHealthPathLinks => health::links_sql(key, Selected::Path),
+            ExplainedStatement::LinkHealthHeads => health::heads_sql(key),
+            ExplainedStatement::LinkHealthTotals => health::totals_sql(key),
+            ExplainedStatement::LinkHealthSuffixes => explained_suffixes(order)?.0,
+            ExplainedStatement::LinkHealthAnchors => health::anchors_sql(),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -257,11 +273,50 @@ impl<'a> Request<'a> {
                 let chunk: Vec<i64> = (EXPLAINED_FIRST_FINDING_ID..).take(ids.get()).collect();
                 database.emitted_plan(&sql, finding_id_parameters(&chunk))
             }
+            // Each judgment statement is explained over a list of one entry:
+            // the statement text does not branch on the list's length, and
+            // each entry costs its own seeks.
+            ExplainedStatement::LinkHealthLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::documents_parameters(&[EXPLAINED_PAGE_CURSOR_LEAF])?),
+            ),
+            ExplainedStatement::LinkHealthClassLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::class_parameters(&ClassKey::new(
+                    EXPLAINED_CLASS_KEY,
+                )?)),
+            ),
+            ExplainedStatement::LinkHealthPathLinks => database.emitted_plan(
+                &sql,
+                params_from_iter(health::path_parameters(&PathKey::new(
+                    EXPLAINED_PAGE_CURSOR_LEAF,
+                )?)),
+            ),
+            ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => {
+                let head =
+                    (statement == ExplainedStatement::LinkHealthHeads).then_some(CANDIDATE_HEAD);
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::keys_parameters(
+                        &[(EXPLAINED_CLASS_KEY, 1)],
+                        &[EXPLAINED_PAGE_CURSOR_LEAF],
+                        &AmbiguityIgnore::none(),
+                        order,
+                        head,
+                    )?),
+                )
+            }
+            ExplainedStatement::LinkHealthSuffixes => {
+                database.emitted_plan(&sql, params_from_iter(explained_suffixes(order)?.1))
+            }
             // The link and its target are keyed by row ids no caller above
             // this crate holds, so both are bound as a fact read's id is.
-            ExplainedStatement::LinkAnchorHeld => database.emitted_plan(
+            ExplainedStatement::LinkHealthAnchors => database.emitted_plan(
                 &sql,
-                params![EXPLAINED_DOCUMENT_ROW, 0, EXPLAINED_DOCUMENT_ROW],
+                params_from_iter(health::anchors_parameters(&[(
+                    EXPLAINED_DOCUMENT_ROW,
+                    EXPLAINED_DOCUMENT_ROW,
+                )])?),
             ),
         }?)
     }
@@ -432,12 +487,32 @@ pub enum ExplainedStatement<'a> {
     /// [`ExplainedStatement::FindingCandidates`] by the same three readers,
     /// and spelled by a nonzero width for the same reason.
     FindingPaths(NonZeroUsize),
-    /// Whether one document holds the place one link's anchor names: the
-    /// predicate the link-health judgment embeds, over the link a document's
-    /// row id and an ordinal name and the target document's row id. The store
-    /// judges no finding yet, so no reader runs it; it is named here so the
-    /// indexes it seeks are barred until the judgment runs it.
-    LinkAnchorHeld,
+    /// The links a link-health judgment judges
+    /// ([`Request::judge_selected_links`]) selected by the documents holding
+    /// them: every link a list of documents holds, beside the keys the link
+    /// index holds each under.
+    LinkHealthLinks,
+    /// The links a judgment judges selected by a class: every link held under
+    /// a key in one class's range, beside every key it is held under.
+    LinkHealthClassLinks,
+    /// The links a judgment judges selected by a path key: every link held
+    /// under exactly that key, beside every key it is held under.
+    LinkHealthPathLinks,
+    /// The head of what each distinct key a judgment's links hold names, at
+    /// most [`crate::CANDIDATE_HEAD`] documents of a suffix key's class or at
+    /// a path key's path, in the resolution ladder's order.
+    LinkHealthHeads,
+    /// How many documents each key a judgment reads names, for the keys whose
+    /// head filled.
+    LinkHealthTotals,
+    /// The minimal disambiguating suffixes of the candidates a judgment's
+    /// findings carry: the statement a read names its candidates by, run on
+    /// the writer.
+    LinkHealthSuffixes,
+    /// Whether the one document each link naming one document names holds the
+    /// place that link's anchor names, for the links carrying an anchor: the
+    /// anchor predicate over a list of links and their targets.
+    LinkHealthAnchors,
 }
 
 /// How many keyed point reads this seam names.
@@ -451,7 +526,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 30;
+pub const STATEMENTS: usize = 36;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -511,7 +586,13 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingClasses(ids),
             Self::PathDiscard(path_key),
             Self::FindingPaths(ids),
-            Self::LinkAnchorHeld,
+            Self::LinkHealthLinks,
+            Self::LinkHealthClassLinks,
+            Self::LinkHealthPathLinks,
+            Self::LinkHealthHeads,
+            Self::LinkHealthTotals,
+            Self::LinkHealthSuffixes,
+            Self::LinkHealthAnchors,
         ]
     }
 
@@ -553,7 +634,13 @@ impl<'a> ExplainedStatement<'a> {
             Self::FindingClasses(_) => 26,
             Self::PathDiscard(_) => 27,
             Self::FindingPaths(_) => 28,
-            Self::LinkAnchorHeld => 29,
+            Self::LinkHealthLinks => 29,
+            Self::LinkHealthClassLinks => 30,
+            Self::LinkHealthPathLinks => 31,
+            Self::LinkHealthHeads => 32,
+            Self::LinkHealthTotals => 33,
+            Self::LinkHealthSuffixes => 34,
+            Self::LinkHealthAnchors => 35,
         };
         assert!(
             slot < STATEMENTS,
@@ -625,9 +712,30 @@ impl<'a> ExplainedStatement<'a> {
             | Self::FindingClasses(_)
             | Self::PathDiscard(_)
             | Self::FindingPaths(_)
-            | Self::LinkAnchorHeld => false,
+            | Self::LinkHealthLinks
+            | Self::LinkHealthClassLinks
+            | Self::LinkHealthPathLinks
+            | Self::LinkHealthHeads
+            | Self::LinkHealthTotals
+            | Self::LinkHealthSuffixes
+            | Self::LinkHealthAnchors => false,
         }
     }
+}
+
+/// The suffix key a judgment's key statements are explained with: a class
+/// key, bound rather than null, for the reason [`explained_page_cursor`]
+/// states.
+const EXPLAINED_CLASS_KEY: &str = "explained/";
+
+/// The candidate-suffix statement a judgment runs, as its text and values,
+/// over one candidate: the statement a read names candidates by, spelled
+/// through the same [`SuffixSpellings`].
+fn explained_suffixes(
+    order: StoredPathOrder,
+) -> Result<(String, Vec<norn_db::rusqlite::types::Value>), StoreError> {
+    let named = BTreeMap::from([(EXPLAINED_DOCUMENT_ROW, EXPLAINED_PAGE_CURSOR_LEAF)]);
+    SuffixSpellings::new(&named, &AmbiguityIgnore::none(), order)?.statement()
 }
 
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.
