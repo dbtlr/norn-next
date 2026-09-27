@@ -47,7 +47,8 @@ pub struct LifecyclePolicy {
     /// Cadence of the one host-wide nonblocking watcher scan.
     pub watch_poll_interval: Duration,
     /// Longest a read waits for an entry taking in a change, from the read's
-    /// first hold of the entry gate, across every wait the read takes.
+    /// first take of the entry gate, across every wait the read takes, that
+    /// take among them.
     /// Operational containment: past it the read refuses.
     pub read_settle_bound: Duration,
 }
@@ -21353,11 +21354,11 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// **The bound is one bound, from the read's first hold, across the settle
-    /// wait and the wait for the connection.** A read meets a change
+    /// **The bound is one bound, from the read's first take of the gate,
+    /// across the settle wait and the wait for the connection.** A read meets a change
     /// and waits for it; the change lands while another read holds the
     /// connection, so the read goes on to wait for that. The deadline that
-    /// wait is given is the one the first hold set, not a fresh bound from
+    /// wait is given is the one the first take set, not a fresh bound from
     /// where the wait for the connection began.
     #[test]
     fn a_read_that_settles_and_then_waits_for_the_connection_keeps_one_bound() {
@@ -21376,7 +21377,7 @@ mod tests {
             let settling = Instant::now();
             // The change lands a moment after the read began waiting, so a
             // bound taken afresh where the connection wait begins lies past
-            // one taken at the first hold.
+            // one set as the read first took the gate.
             thread::sleep(Duration::from_millis(20));
             ops.reconcile_release.store(true, Ordering::SeqCst);
             wait_until(

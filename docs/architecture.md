@@ -1802,11 +1802,12 @@ including the warming of a recovery or a rebuild entered from untrusted, as abov
 label does not say how warming was entered, so the entry's own state holds that fact: every
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
 moves the gate's stance signal where the hold changed the stance or how far the entry has
-derived the facts it took in. The bound runs from the read's first hold of the entry gate and
-covers every wait the read takes, the wait for the connection and the wait for the change
-together, and the retake of the gate after each. A read whose retake after the wait for the
-change meets a gate held past the bound refuses as still indexing, with the demand it last
-read under the gate. Every batch the entry takes in that carries a fact moves its position in its fact
+derived the facts it took in. The bound runs from the read's first take of the entry gate and
+covers every wait the read takes: that first take, the wait for the connection and the wait
+for the change together, and the retake of the gate after each. A first take that finds the
+gate held past the bound refuses as reader-unavailable before the read records any demand,
+and a read whose retake after the wait for the change meets a gate held past the bound
+refuses as still indexing, with the demand it last read under the gate. Every batch the entry takes in that carries a fact moves its position in its fact
 stream, and a reconcile turn that commits records that it has derived through the position it took its facts
 at. A settling read records that position under the first hold that finds the entry settling,
 gives the gate back, waits outside it on the signal, takes the gate again and reads the stance
@@ -1853,14 +1854,20 @@ chain: the attach where the entry holds no coverage, and under that the rebuild 
 recovery beneath that, and the reconcile where it owes neither. **A read's demand neither
 raises nor schedules a recovery only a change to the vault can answer while nothing has
 changed**, as [ADR 0030](decisions/0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md)
-rules. That recovery is the one owed where the entry's own declaration withholds trust — a
-schema this build cannot read — and reading the same bytes again reaches the same verdict.
+rules. A cause is held back when re-reading the vault's own bytes reaches the same verdict
+and the change that heals it is a fact the watcher reports; every other cause retries. That
+recovery is the one owed where the entry's own declaration withholds trust — a vault schema
+this build cannot read.
 The attach, recovery or rebuild that publishes that cause records the entry's position in the
 stream of facts it takes in, unless it took in a fact while it ran; while the position stands
 there, a read is refused as `host/entry-untrusted` with the cause and restarts nothing. No
 reconcile runs over an entry owing a recovery, so a watcher fact is the one thing that moves
-the position, and the next read's demand then asks for the recovery again. A client's demand
-reads none of this, and every other recovery a read meets is demanded as before. The read then answers under
+the position, and the next read's demand then asks for the recovery again. Any fact moves it,
+not only one about a control file, because editors replace a control file through a
+temporary file and a rename. A client's demand reads none of this, and every other recovery
+a read meets is demanded as before. A vault schema whose `schema_source` lies outside the
+watcher's coverage yields no fact when it changes, so only a client's demand or a reload
+reads it again. The read then answers under
 the state that work publishes, or under the state it found where the work publishes none —
 an entry holding no coverage answers a read with the warming state of the attach the read
 asked for, so the unattached state is one no read renders — and a workload of reads alone
@@ -2177,8 +2184,9 @@ makes the vault `Untrusted`. The reload does not restore an earlier candidate.
 Watcher facts for both control files are discarded before they reach the lifecycle. They do
 not read, validate, activate, or record control-file drift. The one exception is an attachment
 whose declaration withholds trust: it has no active declaration to replace, and a changed
-control file is the change that can heal it, so there a control-file fact reaches the
-lifecycle as a schema fact. A reconcile holds that fact inert; what it moves is the entry's
+control file is the change that can heal it, so there a control-file fact — or a rescan of
+the schema source, which the watcher reports where the folder a vault schema outside the
+vault sits in is replaced — reaches the lifecycle as a schema fact. A reconcile holds that fact inert; what it moves is the entry's
 position in its fact stream, which is what makes the recovery owed to a read's demand again. An internal query computes drift
 on demand by fingerprinting the authored files without parsing them. It reports current,
 reload pending, or unreadable relative to the active fingerprints.
