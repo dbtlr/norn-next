@@ -443,15 +443,34 @@ fn a_read_after_a_recovery_compiles_against_the_schema_the_recovery_pinned() {
     assert_eq!(answered.answer.reading.trust, TrustState::Ready);
 }
 
-/// **Counts over a schema no recovery can read answer the cause.** The attach
-/// reads a schema this build cannot declare and publishes it as untrusted;
-/// counts that follow, spaced apart, are each refused as untrusted with that
-/// cause, rather than as not ready under a recovery each of them restarted.
-#[test]
-fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
-    let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-polled");
-    let schema = vault.path().join(".norn/schema.yaml");
-    std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
+/// Whether `refused` is the refusal of an entry whose vault schema this
+/// build cannot read, carrying that cause.
+fn refused_with_the_unreadable_schema(refused: &norn_wire::ErrorEnvelope) -> bool {
+    refused.code() == &ReasonCode::HostEntryUntrusted
+        && matches!(
+            refused.detail(),
+            ErrorDetail::EntryUntrusted {
+                reason: UntrustedReason::SchemaUnreadable { .. },
+                ..
+            }
+        )
+}
+
+/// How long counts over an entry whose vault schema withholds trust answer
+/// the cause, unbroken, before the watcher is taken to have delivered what
+/// it will of the writes made before the attach.
+const WATCHER_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Attach `vault` over the unreadable vault schema it holds, and settle the
+/// watcher over the cause the attach publishes.
+///
+/// **The platform watcher can deliver the fixture's own writes after the
+/// attach**, and over an entry whose vault schema withholds trust each one is
+/// a fact that makes the recovery owed to a read again. So counts are taken
+/// until they have answered the cause for [`WATCHER_SETTLE`] unbroken; a count
+/// refused as not ready restarted a recovery over such a fact, and the
+/// stretch starts again after it.
+fn attach_over_the_unreadable_schema(vault: &attach::Vault) -> attach::ServingHost {
     let host = vault.host();
     drop(
         host.demand(vault.name(), AttachMode::Durable)
@@ -462,28 +481,77 @@ fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
         matches!(reason, UntrustedReason::SchemaUnreadable { .. }),
         "the attach withheld trust for another reason: {reason:?}"
     );
+    let mut answering_since = None;
+    wait_until(
+        "counts to answer the cause with the watcher settled",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Err(refused) if refused_with_the_unreadable_schema(&refused) => {
+                let since = *answering_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= WATCHER_SETTLE {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the counts have answered the cause for too short a time")
+                }
+            }
+            Err(refused) if refused.code() == &ReasonCode::HostEntryNotReady => {
+                answering_since = None;
+                Observed::pending(format!("a count restarted a recovery: {refused:?}"))
+            }
+            other => panic!("a count over an unreadable schema answered {other:?}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    host
+}
+
+/// **Counts over a schema no recovery can read answer the cause.** The attach
+/// reads a schema this build cannot declare and publishes it as untrusted;
+/// once the watcher has settled, counts that follow, spaced apart, are each
+/// refused as untrusted with that cause, rather than as not ready under a
+/// recovery each of them restarted.
+#[test]
+fn counts_over_a_schema_no_recovery_can_read_answer_the_cause() {
+    let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-polled");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), b"\tinvalid: yaml\n")
+        .expect("write an unreadable schema");
+    let host = attach_over_the_unreadable_schema(&vault);
 
     for count in 0..3 {
         let refused = host
             .count(&a_count(vault.name()))
             .expect_err("a count over an unreadable schema answered");
-        assert_eq!(
-            refused.code(),
-            &ReasonCode::HostEntryUntrusted,
-            "count {count} was refused with another code than the cause: {refused:?}"
-        );
         assert!(
-            matches!(
-                refused.detail(),
-                ErrorDetail::EntryUntrusted {
-                    reason: UntrustedReason::SchemaUnreadable { .. },
-                    ..
-                }
-            ),
+            refused_with_the_unreadable_schema(&refused),
             "count {count} was refused without the cause: {refused:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
+}
+
+/// **A corrected vault schema is a change a read acts on.** Counts over an
+/// unreadable vault schema answer the cause and restart no recovery; the
+/// schema is then corrected on disk, the watcher reports that change to a
+/// control file as a fact, and a count that follows restarts the recovery
+/// that reads the corrected schema and is then served.
+#[test]
+fn a_count_is_served_once_the_unreadable_schema_is_corrected() {
+    let (_sandbox, vault) = a_vault("host-reads-unreadable-schema-corrected");
+    let schema = vault.path().join(".norn/schema.yaml");
+    std::fs::write(&schema, b"\tinvalid: yaml\n").expect("write an unreadable schema");
+    let host = attach_over_the_unreadable_schema(&vault);
+
+    std::fs::write(&schema, attach::SCHEMA).expect("correct the vault schema");
+    let answered = wait_until(
+        "a count to be served after the schema is corrected",
+        attach::state_budget(attach::READY_LIMIT),
+        || match host.count(&a_count(vault.name())) {
+            Ok(answered) => Observed::Met(answered),
+            Err(refused) => Observed::pending(format!("the count was refused with {refused:?}")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(answered.answer.reading.trust, TrustState::Ready);
 }
 
 /// Make every page of the `documents` table and its indexes unreadable, the

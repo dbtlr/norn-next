@@ -280,7 +280,13 @@ pub trait EntryOps: Send + Sync + 'static {
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure>;
     /// Apply one coalesced document envelope. A rescan widens rather than
-    /// discarding uncertainty. Control-file facts do not reach this method.
+    /// discarding uncertainty.
+    ///
+    /// A control-file fact reaches this method only as the schema fact an
+    /// attachment whose vault schema withholds trust takes one in as. That
+    /// fact can stand pending across the recovery that heals the attachment
+    /// and reach the reconcile after it, where it is inert: a reconcile
+    /// derives documents and reads no control file.
     fn reconcile(
         &self,
         name: &VaultName,
@@ -15255,7 +15261,9 @@ mod tests {
     /// reads the same answer they do: coverage the ops say nothing may be
     /// derived under owes the recovery that reads the declaration again, and
     /// the entry says so. What the rung built is kept — the store it replaced
-    /// is gone — and the verdict it resolved is retired with it.
+    /// is gone — and the verdict it resolved is retired with it. The rung
+    /// took in no fact while it ran, so a read that follows restarts no
+    /// recovery and is refused with the cause, as after an attach.
     ///
     /// The case arms the withholding while the rung is running, which is the
     /// one moment an attach or a recovery cannot have answered it: what the
@@ -15319,6 +15327,14 @@ mod tests {
         assert!(state.coverage.in_hand(), "the rung's coverage was not kept");
         drop(state);
         drop(lease);
+
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("a read over withheld trust was served"),
+            refused_for_withheld_trust(),
+            "a read after the rung restarted a recovery nothing had changed for"
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
     }
 
     /// The verdict a watcher poll reports reaches the same rung, and the entry
@@ -19425,17 +19441,7 @@ mod tests {
             refused_for_withheld_trust(),
             "a read after an attempt that took in a fact restarted no recovery"
         );
-        wait_until(
-            "the recovery to run and publish the withheld reason again",
-            lifecycle_wait_budget(),
-            || match (ops.recovers.load(Ordering::SeqCst), host.state(&name)) {
-                (1, state) if state == answered(withheld_state()) => Observed::Met(()),
-                (recovers, state) => {
-                    Observed::pending(format!("{recovers} recoveries, the entry is {state:?}"))
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_one_withheld_recovery(&ops, &host, &name);
         assert_eq!(
             host.begin_read(&name)
                 .expect_err("a read over withheld trust was served"),
@@ -19446,6 +19452,73 @@ mod tests {
             1,
             "a read restarted a recovery nothing had changed for"
         );
+    }
+
+    /// An entry whose attach withheld trust, over a host with no ambient
+    /// polling, and a read that was refused with the cause.
+    fn withheld_and_refused_to_a_read() -> (Arc<FakeOps>, Host<Arc<FakeOps>>, VaultName) {
+        let ops = Arc::new(FakeOps::default());
+        ops.withholds_trust.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_withheld_trust(&host, &name);
+        assert_eq!(
+            host.begin_read(&name)
+                .expect_err("a read over withheld trust was served"),
+            refused_for_withheld_trust()
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        (ops, host, name)
+    }
+
+    /// Wait until `ops` has run one recovery and the entry publishes the
+    /// withheld reason it ends with.
+    fn wait_for_one_withheld_recovery(ops: &FakeOps, host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        wait_until(
+            "the recovery to run and publish the withheld reason again",
+            lifecycle_wait_budget(),
+            || match (ops.recovers.load(Ordering::SeqCst), host.state(name)) {
+                (1, state) if state == answered(withheld_state()) => Observed::Met(()),
+                (recovers, state) => {
+                    Observed::pending(format!("{recovers} recoveries, the entry is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// **A client's demand runs the recovery a read holds back.** After a
+    /// read over a declaration no recovery can read is refused with the
+    /// cause, and with nothing changed since, a client's demand schedules the
+    /// recovery all the same: a client asking is itself the evidence that the
+    /// attempt is wanted.
+    #[test]
+    fn a_clients_demand_runs_the_recovery_a_read_holds_back() {
+        let (ops, host, name) = withheld_and_refused_to_a_read();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_one_withheld_recovery(&ops, &host, &name);
+        drop(lease);
+    }
+
+    /// **A client's demand asks for the recovery a read holds back, where a
+    /// claim holds the entry.** The demand arrives while a watcher poll holds
+    /// the entry, so nothing is scheduled at the demand; what the demand
+    /// recorded is what the poll's end schedules the recovery for.
+    #[test]
+    fn a_clients_demand_under_a_held_poll_asks_for_the_recovery_a_read_holds_back() {
+        let (ops, host, name) = withheld_and_refused_to_a_read();
+        *ops.poll_gate.lock().unwrap() = Some(name.clone());
+        let polling = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&polling));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        *ops.poll_gate.lock().unwrap() = None;
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        wait_for_one_withheld_recovery(&ops, &host, &name);
+        drop(lease);
     }
 
     /// **An entry whose trust is withheld holds coverage, and a read still
