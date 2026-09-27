@@ -13988,6 +13988,16 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
+        // The attach leg that published Ready ends after publishing, so the
+        // case waits for its registration to clear before standing its own.
+        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
+            if entry.gate.lock().unwrap().claim.leg().is_none() {
+                Observed::Met(())
+            } else {
+                Observed::pending("the attach leg is still registered")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -14040,6 +14050,16 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
+        // The attach leg that published Ready ends after publishing, so the
+        // case waits for its registration to clear before standing its own.
+        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
+            if entry.gate.lock().unwrap().claim.leg().is_none() {
+                Observed::Met(())
+            } else {
+                Observed::pending("the attach leg is still registered")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
 
         // The poll holding the entry's coverage.
         let (holder, attachment) = {
