@@ -2325,9 +2325,15 @@ were planned against, and repair reads the live ambiguity class rather than a fi
 snapshot. A request states whether it previews or applies; the wire has no default mode.
 
 A plan is a self-contained value naming its vault by address and carrying the vault's root
-identity: the host holds no plan between requests. A resolved plan carries each target's
-before- and after-state and the conditions its planning read, never file content; the
-applier recomposes each target and refuses unless the result hashes to the after-state.
+identity: the host holds no plan between requests. A resolved plan carries its operations,
+each target's before- and after-state, and the conditions its planning read, never the
+bytes of a file it did not author. Every template value resolves at planning, so the
+applier recomposes each target as a pure function of the before-states and the operations
+and refuses unless the result hashes to the after-state. A source is not replaced or
+removed until every target drawing content from it has landed, and a plan whose content
+dependencies form a cycle is refused at planning. Conditions are checked after taking in
+the facts the watcher has delivered, with the plan's own landed targets read at their
+after-states.
 Applies run as a job holding the entry's claim, one at a time per registration; the request
 waits for the outcome, and a caller that stops waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
@@ -2348,8 +2354,11 @@ Four contracts inside that flow carry weight:
   names holding the document.
 - **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
   is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
-  interrupted completes it with no journal and no rollback; a target a foreign edit reached
-  refuses as drift and is re-planned. Re-sending operations is a new change.
+  interrupted completes it with no journal and no rollback. When a foreign edit reached a
+  target, the re-send refuses with a fresh resolved plan covering only the transitions that
+  did not land. An apply that stops after a target landed is interrupted, not refused. An
+  uninterrupted apply commits one changeset to its registration's store, so a read there
+  sees the whole state before or after it. Re-sending operations is a new change.
 - **Write-through.** The worker composed the post-state, so the increment writes it —
   database updates scoped to the blast radius, composing supplied facts and re-deriving
   nothing. The bar is **mark-invariance**: the same changeset reads the same derivation
@@ -2357,9 +2366,9 @@ Four contracts inside that flow carry weight:
   computation is the canonical-JSON projection of supplied frontmatter, which is storage
   encoding rather than recomputation and runs the identical code path under both marks — so
   the bar binds on the counters that could differ.
-- **Refuse-and-refresh.** Detected drift refuses and returns a fresh forecast whose content
-  hash rides the confirmation as an implicit compare-and-swap. Auto-rebase on drift is
-  deliberately rejected: a changed world deserves a re-plan.
+- **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
+  forecast; the fresh plan's before-states are the compare-and-swap its apply rides.
+  Auto-rebase on drift is deliberately rejected: a changed world deserves a re-plan.
 
 ---
 
