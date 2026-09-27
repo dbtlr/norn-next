@@ -166,20 +166,27 @@ struct Summary {
 
 /// What each key a judgment has resolved names, so a judgment taken in chunks
 /// resolves each distinct key once between them, however many chunks hold a
-/// link under it ([ADR 0027]'s fifth condition).
+/// link under it ([ADR 0027]'s fifth condition) — and the suffix each
+/// candidate its findings carried is named by, so a candidate is named once
+/// too.
 ///
 /// A summary is what the store held when it was read, under the store's key
 /// space and the ignore set the judgment was taken under. One set is valid
 /// only within one transaction or snapshot — the read that filled it and
 /// every judgment that reuses it see the same store, under the same
 /// declaration, with no write between them — and a judgment after a write
-/// takes a new one. It holds one summary per distinct key it has resolved, so
-/// the caller bounds its size by the keys it chooses to resolve against it.
+/// takes a new one. It holds one summary per distinct key it has resolved,
+/// each a head of at most [`CANDIDATE_HEAD`] documents, and a suffix for at
+/// most those heads' documents, so the caller bounds its size by the keys it
+/// chooses to resolve against it.
 ///
 /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 #[derive(Debug, Default)]
 pub struct KeySummaries {
     summaries: HashMap<Key, Summary>,
+    /// The minimal disambiguating suffix of each candidate a finding carried,
+    /// by its document's row id: at most the heads of the keys resolved.
+    suffixes: HashMap<i64, String>,
     resolved: u64,
     candidates: u64,
 }
@@ -507,7 +514,12 @@ fn judge_links(
             _ => {}
         }
     }
-    let suffixes = candidate_suffixes(connection, work, order, ignore, &named)?;
+    // Each candidate is named once per set of summaries: a candidate an
+    // earlier chunk named keeps the suffix it was named by.
+    named.retain(|id, _| !summaries.suffixes.contains_key(id));
+    let named = candidate_suffixes(connection, work, order, ignore, &named)?;
+    summaries.suffixes.extend(named);
+    let suffixes = &summaries.suffixes;
 
     let mut findings = Vec::new();
     for (at, (held, verdict)) in links.iter().zip(verdicts).enumerate() {
@@ -521,7 +533,7 @@ fn judge_links(
             }
             Some(Verdict::One(_)) | None => continue,
         };
-        findings.push(finding(held, kind, &head, total, message, &suffixes)?);
+        findings.push(finding(held, kind, &head, total, message, suffixes)?);
     }
     Ok(findings)
 }
