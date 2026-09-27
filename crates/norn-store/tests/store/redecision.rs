@@ -1478,7 +1478,7 @@ fn a_mass_delete_no_link_reaches_costs_a_constant_per_key() {
 
 /// The steps a class or a path a changeset names, which no link and no
 /// finding is held under, costs its re-decision at most.
-const STEPS_PER_EMPTY_KEY: u64 = 1_000_000;
+const STEPS_PER_EMPTY_KEY: u64 = 20;
 
 // ---- a tear inside the re-decision ----
 

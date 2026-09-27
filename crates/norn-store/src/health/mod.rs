@@ -75,7 +75,11 @@
 //! each class it changed, the findings standing under the class, discarded a
 //! chunk at a time with the links they were about that no key of the class
 //! reaches, and the links the class selects; then the links each path key it
-//! changed selects, read a chunk at a time too.
+//! changed selects, read a chunk at a time too. A class or a path key is
+//! walked only where something is held under it: the classes and paths are
+//! asked about a chunk at a time first ([`statement::occupied_sql`]), so a
+//! mass delete's classes and paths that no link and no finding is held under
+//! cost a share of one statement each, and no walk.
 //! [`crate::Request::judge_selected_links`] is the door that judges
 //! a selection and files nothing, and the plan seam bars each statement
 //! either runs.
@@ -484,7 +488,9 @@ pub(crate) struct Redecided {
 /// Each arm is read a chunk of [`LINK_HEALTH_CHUNK`] links at a time, judged
 /// and filed before the next is read, against one set of key summaries kept
 /// across the whole changeset ([`KeySummaries`]), so each distinct key is
-/// resolved once.
+/// resolved once. A class's two passes and a path key's pass each run only
+/// where [`occupied`] finds something they would read, so a key nothing is
+/// held under costs a share of one statement and no pass.
 ///
 /// **A link holds at most one key in any class**: its keys are one per
 /// reduction of its target, and two reductions name two stems, so two
@@ -530,95 +536,167 @@ pub(crate) fn redecide(
     while let Some(links) = written.next(transaction, work, key)? {
         file(links, &mut summaries)?;
     }
-    for class in classes {
-        // The findings standing under the class go first, a page at a time,
-        // and each link one of them was about is judged here where no arm
-        // reaches it by a key: the finding was keyed under the class only by
-        // a candidate's name.
-        let mut after = After::class_start(class);
-        loop {
-            let page = Request::read_all_on(
-                transaction,
-                work,
-                &statement::class_findings_sql(),
-                params_from_iter(statement::class_findings_parameters(
-                    class,
-                    &after,
-                    generation,
-                    LINK_HEALTH_CHUNK,
-                )),
-                |row| {
-                    Ok(Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    )))
-                },
-                "reading the findings standing under a class",
-            )?;
-            let last = page.len() < LINK_HEALTH_CHUNK;
-            let Some((text, finding, _)) = page.last() else {
-                break;
-            };
-            after = After {
-                text: text.clone(),
-                first: *finding,
-                second: 0,
-            };
-            let findings: BTreeSet<i64> = page.iter().map(|(_, finding, _)| *finding).collect();
-            let links: BTreeSet<i64> = page.iter().filter_map(|(_, _, link)| *link).collect();
-            redecided.discarded += discard(transaction, &findings)?;
-            let mut links = read_links_by_id(transaction, work, key, &links)?;
-            links.retain(|held| !reached_by_a_class(held, classes));
-            file(links, &mut summaries)?;
-            if last {
-                break;
+    // A pass runs only over a key it could read something under, a chunk of
+    // the keys asked about at a time.
+    let listed: Vec<&ClassKey> = classes.iter().collect();
+    for chunk in listed.chunks(LINK_HEALTH_CHUNK) {
+        let occupied = occupied(transaction, work, key, chunk, &[])?;
+        for (at, class) in chunk.iter().copied().enumerate() {
+            // The findings standing under the class go first, where any
+            // stands, a page at a time, and each link one of them was about is
+            // judged here where no arm reaches it by a key: the finding was
+            // keyed under the class only by a candidate's name.
+            let mut after = After::class_start(class);
+            while occupied.class_findings.contains(&at) {
+                let page = Request::read_all_on(
+                    transaction,
+                    work,
+                    &statement::class_findings_sql(),
+                    params_from_iter(statement::class_findings_parameters(
+                        class,
+                        &after,
+                        generation,
+                        LINK_HEALTH_CHUNK,
+                    )),
+                    |row| {
+                        Ok(Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        )))
+                    },
+                    "reading the findings standing under a class",
+                )?;
+                let last = page.len() < LINK_HEALTH_CHUNK;
+                let Some((text, finding, _)) = page.last() else {
+                    break;
+                };
+                after = After {
+                    text: text.clone(),
+                    first: *finding,
+                    second: 0,
+                };
+                let findings: BTreeSet<i64> = page.iter().map(|(_, finding, _)| *finding).collect();
+                let links: BTreeSet<i64> = page.iter().filter_map(|(_, _, link)| *link).collect();
+                redecided.discarded += discard(transaction, &findings)?;
+                let mut links = read_links_by_id(transaction, work, key, &links)?;
+                links.retain(|held| !reached_by_a_class(held, classes));
+                file(links, &mut summaries)?;
+                if last {
+                    break;
+                }
+            }
+
+            if !occupied.class_links.contains(&at) {
+                continue;
+            }
+            let (lower, upper) = class.bounds();
+            let mut pages = Pages::new(LinkSelection::Class(class));
+            while let Some(mut links) = pages.next(transaction, work, key)? {
+                links.retain(|held| {
+                    held.generation != generation
+                        && !held.keys.iter().any(|(text, segments)| {
+                            segments.is_some()
+                                && class_of(text).is_some_and(|other| {
+                                    other < class.as_str() && classes_hold(classes, other)
+                                })
+                        })
+                });
+                file(links, &mut summaries)?;
+                // The walk is in key order and a link holds one key in a class,
+                // so a key the walk has passed is one no link still to be judged
+                // holds: every later link holding it belongs to this class's pass
+                // and was read already.
+                let passed = pages
+                    .after
+                    .as_ref()
+                    .map_or(upper.as_str(), |after| after.text.as_str());
+                summaries.forget_suffix_keys(&lower, passed);
             }
         }
-
-        let (lower, upper) = class.bounds();
-        let mut pages = Pages::new(LinkSelection::Class(class));
-        while let Some(mut links) = pages.next(transaction, work, key)? {
-            links.retain(|held| {
-                held.generation != generation
-                    && !held.keys.iter().any(|(text, segments)| {
-                        segments.is_some()
-                            && class_of(text).is_some_and(|other| {
-                                other < class.as_str() && classes_hold(classes, other)
-                            })
-                    })
-            });
-            file(links, &mut summaries)?;
-            // The walk is in key order and a link holds one key in a class,
-            // so a key the walk has passed is one no link still to be judged
-            // holds: every later link holding it belongs to this class's pass
-            // and was read already.
-            let passed = pages
-                .after
-                .as_ref()
-                .map_or(upper.as_str(), |after| after.text.as_str());
-            summaries.forget_suffix_keys(&lower, passed);
-        }
     }
-    for path in paths {
-        let mut pages = Pages::new(LinkSelection::Path(path));
-        while let Some(mut links) = pages.next(transaction, work, key)? {
-            links.retain(|held| {
-                held.generation != generation
-                    && !held.keys.iter().any(|(text, segments)| {
-                        segments.is_none()
-                            && text.as_str() < path.as_str()
-                            && PathKey::new(text).is_ok_and(|other| paths.contains(&other))
-                    })
-            });
-            file(links, &mut summaries)?;
+    let listed: Vec<&PathKey> = paths.iter().collect();
+    for chunk in listed.chunks(LINK_HEALTH_CHUNK) {
+        let occupied = occupied(transaction, work, key, &[], chunk)?;
+        for path in occupied.paths.into_iter().map(|at| chunk[at]) {
+            let mut pages = Pages::new(LinkSelection::Path(path));
+            while let Some(mut links) = pages.next(transaction, work, key)? {
+                links.retain(|held| {
+                    held.generation != generation
+                        && !held.keys.iter().any(|(text, segments)| {
+                            segments.is_none()
+                                && text.as_str() < path.as_str()
+                                && PathKey::new(text).is_ok_and(|other| paths.contains(&other))
+                        })
+                });
+                file(links, &mut summaries)?;
+            }
+            // Every link holding the key after this pass belongs to it.
+            summaries.forget(&(path.as_str().to_string(), None));
         }
-        // Every link holding the key after this pass belongs to it.
-        summaries.forget(&(path.as_str().to_string(), None));
     }
     redecided.keys_resolved = summaries.keys_resolved();
     redecided.candidates_read = summaries.candidates_read();
     Ok(redecided)
+}
+
+/// Which of the keys a re-decision was handed its passes could reach
+/// anything under: positions in the lists [`occupied`] was asked about.
+#[derive(Debug, Default)]
+struct Occupied {
+    /// The classes a suffix key the root probes falls in.
+    class_links: BTreeSet<usize>,
+    /// The classes a finding is held under.
+    class_findings: BTreeSet<usize>,
+    /// The path keys a link is held under.
+    paths: BTreeSet<usize>,
+}
+
+/// Which of `classes` and of `paths` a re-decision's passes could reach
+/// anything under ([`statement::occupied_sql`]).
+///
+/// Most classes and paths a mass delete names are ones no link and no finding
+/// is held under, and their passes would each run a statement to read
+/// nothing. So the re-decision asks about its keys [`LINK_HEALTH_CHUNK`] at a
+/// time, one statement a chunk, and runs a pass only over a key that pass
+/// would read something under: a key nothing is held under costs its share
+/// of that statement and no statement of its own. Passing a pass over changes
+/// nothing another pass decides, since each such decision asks whether a link
+/// holds a key under a class or at a path, and no link holds one under a key
+/// whose pass is passed over.
+fn occupied(
+    connection: &Connection,
+    work: &ReadWork,
+    key: SuffixKey,
+    classes: &[&ClassKey],
+    paths: &[&PathKey],
+) -> Result<Occupied, StoreError> {
+    let rows = Request::read_all_on(
+        connection,
+        work,
+        &statement::occupied_sql(key),
+        params_from_iter(statement::occupied_parameters(classes, paths)?),
+        |row| Ok(Ok((row.get::<_, i64>(0)?, row.get::<_, usize>(1)?))),
+        "asking which keys a re-decision reaches anything under",
+    )?;
+    let mut occupied = Occupied::default();
+    for (arm, at) in rows {
+        let held = match arm {
+            statement::CLASS_ARM => Some((&mut occupied.class_links, classes.len())),
+            statement::FINDINGS_ARM => Some((&mut occupied.class_findings, classes.len())),
+            statement::PATH_ARM => Some((&mut occupied.paths, paths.len())),
+            _ => None,
+        };
+        match held {
+            Some((held, listed)) if at < listed => held.insert(at),
+            _ => {
+                return Err(StoreError::Damaged {
+                    what: format!("an occupancy read answered a key it was not asked, {arm}:{at}"),
+                });
+            }
+        };
+    }
+    Ok(occupied)
 }
 
 /// Whether `held` holds a suffix key in one of `classes`: a link the class arm
@@ -636,13 +714,12 @@ fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u6
         return Ok(0);
     }
     let ids: Vec<i64> = findings.iter().copied().collect();
-    Ok(transaction
-        .execute(
-            &statement::discard_sql(),
-            params_from_iter(statement::ids_parameters(&ids)?),
-        )
-        .map_err(|error| crate::error::sql("discarding the findings under a class", error))?
-        as u64)
+    let values = statement::ids_parameters(&ids)?;
+    let discarded = transaction
+        .prepare_cached(&statement::discard_sql())
+        .and_then(|mut discard| discard.execute(params_from_iter(values)))
+        .map_err(|error| crate::error::sql("discarding the findings under a class", error))?;
+    Ok(discarded as u64)
 }
 
 /// The links whose row ids `links` holds, read as [`read_links`] reads them.
@@ -1122,4 +1199,71 @@ fn written(link: &LinkFact) -> String {
         None => String::new(),
     };
     format!("{protocol}{}{anchor}", link.target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{Change, ContentModel, DocumentFacts, IncrementProvenance, Provenance, Store};
+
+    /// **A mass delete no link reaches runs a statement per chunk of its keys,
+    /// never one per key.** Six hundred documents, none linked and none named
+    /// by a finding, are killed in one changeset. Its re-decision reads the
+    /// links the changeset wrote, then asks about its six hundred classes and
+    /// six hundred paths [`LINK_HEALTH_CHUNK`] at a time, and runs no pass:
+    /// one statement, then three for the classes and three for the paths.
+    #[test]
+    fn a_mass_delete_no_link_reaches_runs_a_statement_per_chunk_of_its_keys() {
+        const DEATHS: usize = 600;
+        let root = norn_testkit::scratch::Scratch::new("norn-store-redecide-mass-delete");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let declared = ContentModel::under("mass-delete");
+        let at = |index: usize| DocumentPath::new(&format!("d/{index:05}.md")).expect("a path");
+        let mut request = store.begin_request();
+        request
+            .pin_vault_schema(b"mass-delete", "mass-delete")
+            .expect("pinning a schema");
+        request
+            .apply_increment(
+                IncrementProvenance::Derived,
+                (0..DEATHS).map(|index| {
+                    Change::Upsert(DocumentFacts::new(
+                        at(index),
+                        format!("{index}"),
+                        "alpha\n",
+                        6,
+                    ))
+                }),
+                &[],
+                &declared,
+            )
+            .expect("writing the documents");
+
+        let before = request.read_statements();
+        request
+            .apply_increment(
+                IncrementProvenance::Derived,
+                (0..DEATHS).map(|index| Change::Death {
+                    path: at(index),
+                    provenance: Provenance::WatcherRemoval,
+                }),
+                &[],
+                &declared,
+            )
+            .expect("the mass delete");
+        let chunks = DEATHS.div_ceil(LINK_HEALTH_CHUNK) as u64;
+        assert_eq!(
+            request.read_statements() - before,
+            1 + 2 * chunks,
+            "a re-decision over {DEATHS} classes and {DEATHS} paths nothing is held under is \
+             the written links' read and one occupancy read per chunk of {LINK_HEALTH_CHUNK} \
+             keys"
+        );
+    }
 }

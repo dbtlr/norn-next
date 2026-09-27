@@ -1165,7 +1165,7 @@ fn judgment_work_is_links_plus_candidates() {
 // ---- the plan bars ----
 
 /// The statements the judgment runs, each of which the bar below judges.
-pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 11] = [
+pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 12] = [
     ExplainedStatement::LinkHealthLinks,
     ExplainedStatement::LinkHealthClassLinks,
     ExplainedStatement::LinkHealthPathLinks,
@@ -1177,6 +1177,7 @@ pub(crate) const LINK_HEALTH: [ExplainedStatement<'static>; 11] = [
     ExplainedStatement::LinkHealthClassFindings,
     ExplainedStatement::LinkHealthFoundLinks,
     ExplainedStatement::LinkHealthDiscard,
+    ExplainedStatement::LinkHealthOccupied,
 ];
 
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -1288,6 +1289,19 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             seek("k", Access::Index("link_keys_link"), "(link=?)"),
         ],
         ExplainedStatement::LinkHealthDiscard => vec![seek("findings", Access::RowId, "(rowid=?)")],
+        ExplainedStatement::LinkHealthOccupied => vec![
+            seek(
+                "sc",
+                Access::Index(suffix_index),
+                &format!("({link_key}>? AND {link_key}<?)"),
+            ),
+            seek(
+                "fc",
+                Access::Index("finding_classes_class_key"),
+                "(class_key>? AND class_key<?)",
+            ),
+            seek("sp", Access::Index(link_index), &format!("({link_key}=?)")),
+        ],
         ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),

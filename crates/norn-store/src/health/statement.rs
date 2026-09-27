@@ -3,8 +3,9 @@
 //! ([`crate::ExplainedStatement`]).
 //!
 //! Every statement is driven by a list a `json_each` walks — the documents,
-//! the links or findings by row id, the distinct keys, the candidates'
-//! spellings, the links with one target — or by one range or equality seek:
+//! the links or findings by row id, the distinct keys, the classes and paths
+//! a changeset changed, the candidates' spellings, the links with one target —
+//! or by one range or equality seek:
 //! a class's range of the suffix keys, a path key, or a class's range of the
 //! findings' class keys. `CROSS JOIN` keeps that driver the outer loop, so
 //! each entry costs its own seeks and nothing is read end to end.
@@ -269,6 +270,62 @@ pub(crate) fn class_findings_parameters(
         Value::Integer(generation),
         Value::Integer(i64::try_from(limit).expect("a page bound fits i64")),
     ]
+}
+
+/// Which arm of [`occupied_sql`] a row came from: a class some finding is
+/// held under.
+pub(crate) const FINDINGS_ARM: i64 = 2;
+
+/// [`crate::ExplainedStatement::LinkHealthOccupied`]: which of the classes
+/// `?1` lists and the path keys `?2` lists a re-decision's passes could reach
+/// anything under, each row the arm and the key's index in its list.
+///
+/// Three arms, one per pass: [`CLASS_ARM`] answers each class a suffix key the
+/// root probes falls in, [`FINDINGS_ARM`] each class a finding is held under a
+/// class key in, and [`PATH_ARM`] each path key a link is held under exactly.
+/// These are the rows each pass reads first, so a key an arm answers no row
+/// for is one that arm's pass would read nothing under. The class arms walk
+/// the `[lower, upper]` bounds `?1` lists, each a range seek of the suffix
+/// index or of `finding_classes_class_key`; the path arm an equality seek of
+/// the link index per key. Each seek stops at its first row.
+pub(crate) fn occupied_sql(key: SuffixKey) -> String {
+    let link_key = resolve::link_key_column(key);
+    format!(
+        "SELECT {CLASS_ARM}, j.key FROM json_each(?1) AS j
+         WHERE EXISTS (SELECT 1 FROM link_keys AS sc
+                       WHERE sc.{link_key} >= json_extract(j.value, '$[0]')
+                         AND sc.{link_key} < json_extract(j.value, '$[1]')
+                         AND sc.segments IS NOT NULL)
+         UNION ALL
+         SELECT {FINDINGS_ARM}, j.key FROM json_each(?1) AS j
+         WHERE EXISTS (SELECT 1 FROM finding_classes AS fc
+                       WHERE fc.class_key >= json_extract(j.value, '$[0]')
+                         AND fc.class_key < json_extract(j.value, '$[1]'))
+         UNION ALL
+         SELECT {PATH_ARM}, j.key FROM json_each(?2) AS j
+         WHERE EXISTS (SELECT 1 FROM link_keys AS sp WHERE sp.{link_key} = j.value)"
+    )
+}
+
+/// The values [`occupied_sql`] binds: each class's bounds, and the path keys.
+pub(crate) fn occupied_parameters(
+    classes: &[&ClassKey],
+    paths: &[&PathKey],
+) -> Result<Vec<Value>, StoreError> {
+    let bounds = canonical_json(&FrontmatterValue::Sequence(
+        classes
+            .iter()
+            .map(|class| {
+                let (lower, upper) = class.bounds();
+                FrontmatterValue::Sequence(vec![
+                    FrontmatterValue::String(lower),
+                    FrontmatterValue::String(upper),
+                ])
+            })
+            .collect(),
+    ))?;
+    let paths: Vec<&str> = paths.iter().map(|path| path.as_str()).collect();
+    Ok(vec![Value::Text(bounds), path_list(&paths)?])
 }
 
 /// [`crate::ExplainedStatement::LinkHealthDiscard`]: discard the findings

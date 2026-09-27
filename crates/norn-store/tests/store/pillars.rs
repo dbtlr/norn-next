@@ -816,7 +816,8 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthWrittenLinks
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
-        | ExplainedStatement::LinkHealthDiscard => {
+        | ExplainedStatement::LinkHealthDiscard
+        | ExplainedStatement::LinkHealthOccupied => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
     }
@@ -1510,7 +1511,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthWrittenLinks
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
-        | ExplainedStatement::LinkHealthDiscard => None,
+        | ExplainedStatement::LinkHealthDiscard
+        | ExplainedStatement::LinkHealthOccupied => None,
     }
 }
 

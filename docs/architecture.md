@@ -2048,7 +2048,11 @@ A class's walk and a path key's walk run in key order, and a link holds one key 
 a key the walk has passed is forgotten: the heap a hub costs is a chunk and a page's keys,
 never its in-links. The keys of the written documents' links, and of the links re-judged
 through a candidate's naming class, are kept for the changeset, so what those two hold at
-once is bounded by the written set and by those links' distinct keys.
+once is bounded by the written set and by those links' distinct keys. Its statements follow
+the keys something is held under: the affected classes and paths are asked about a chunk at a
+time, one statement a chunk, and each walk runs only over a key a link or a finding is held
+under, so a key nothing is held under — most of what a mass delete names — costs a share of
+that one statement and no walk of its own.
 
 The links table stores **syntactic facts only** — raw target, family, protocol, title, anchor,
 span — beside two readings of them computed at the write, and resolution runs at query time

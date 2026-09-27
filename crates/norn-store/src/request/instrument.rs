@@ -166,6 +166,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthClassFindings => health::class_findings_sql(),
             ExplainedStatement::LinkHealthFoundLinks => health::links_sql(key, Selected::Links),
             ExplainedStatement::LinkHealthDiscard => health::discard_sql(),
+            ExplainedStatement::LinkHealthOccupied => health::occupied_sql(key),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -366,6 +367,16 @@ impl<'a> Request<'a> {
                 database.emitted_plan(
                     &sql,
                     params_from_iter(health::ids_parameters(&[EXPLAINED_DOCUMENT_ROW])?),
+                )
+            }
+            // Both lists hold one key, so every arm is explained over a key
+            // it walks.
+            ExplainedStatement::LinkHealthOccupied => {
+                let class = ClassKey::new(EXPLAINED_CLASS_KEY)?;
+                let path = PathKey::new(EXPLAINED_PAGE_CURSOR_LEAF)?;
+                database.emitted_plan(
+                    &sql,
+                    params_from_iter(health::occupied_parameters(&[&class], &[&path])?),
                 )
             }
         }?)
@@ -583,6 +594,11 @@ pub enum ExplainedStatement<'a> {
     /// The discard of a page of findings by their row ids, which the second
     /// arm runs over each page of a class's findings.
     LinkHealthDiscard,
+    /// Which of a chunk of the classes and path keys a changeset changed the
+    /// re-decision's passes could read anything under: the one statement a
+    /// key no link and no finding is held under costs a share of, and no
+    /// pass beside it.
+    LinkHealthOccupied,
 }
 
 /// How many keyed point reads this seam names.
@@ -596,7 +612,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 40;
+pub const STATEMENTS: usize = 41;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -667,6 +683,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthClassFindings,
             Self::LinkHealthFoundLinks,
             Self::LinkHealthDiscard,
+            Self::LinkHealthOccupied,
         ]
     }
 
@@ -719,6 +736,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthClassFindings => 37,
             Self::LinkHealthFoundLinks => 38,
             Self::LinkHealthDiscard => 39,
+            Self::LinkHealthOccupied => 40,
         };
         assert!(
             slot < STATEMENTS,
@@ -800,7 +818,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthWrittenLinks
             | Self::LinkHealthClassFindings
             | Self::LinkHealthFoundLinks
-            | Self::LinkHealthDiscard => false,
+            | Self::LinkHealthDiscard
+            | Self::LinkHealthOccupied => false,
         }
     }
 }
