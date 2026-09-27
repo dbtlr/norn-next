@@ -1805,8 +1805,14 @@ label does not say how warming was entered, so the entry's own state holds that 
 hold of the entry gate ends by recording whether trust has stood unbroken since `Ready`, and
 moves the gate's stance signal where the hold changed the stance or how far the entry has
 derived the facts it took in. The bound runs from the read's first take of the entry gate and
-covers every wait the read takes: that first take, the wait for the connection and the wait
-for the change together, and the retake of the gate after each. A first take that finds the
+covers the waits the read takes to establish its snapshot or to refuse: that first take, the
+wait for the connection and the wait for the change together, and the retake of the gate after
+each. Three takes of the entry gate on a read's path are plain locks outside the bound, so a
+gate held past it holds the read there for as long as it is held: `dispatch_pending`'s take in
+`begin_read`'s branch that schedules the entry's owed work and refuses, taken after the read
+gives the gate back and before it answers; `withdraw_for_read_damage`'s take, where a read
+that met damage in the store publishes it after its query work returned; and `ReadHold`'s
+drop, through `lock_in_a_drop`, which unpins the entry after the snapshot has ended. A first take that finds the
 gate held past the bound refuses as reader-unavailable before the read records any demand,
 and a read whose retake after the wait for the change meets a gate held past the bound
 refuses as still indexing, with the demand it last read under the gate. Every batch the entry takes in that carries a fact moves its position in its fact
