@@ -14,7 +14,7 @@
 //! re-ranking have no runtime here, so no enabled set holds them and an exact
 //! set naming one is refused `engine/not-enabled` before any engine is
 //! sampled. The vector rung is sampled once, under the engine slot's lock,
-//! together with its answer ([`SemanticEngines::nearest_among`]), and the
+//! together with its answer ([`crate::semantic::SemanticEngines::nearest_among`]), and the
 //! selection is resolved against that one sample:
 //!
 //! - An exact set naming the vector rung is refused where the sample refuses,
