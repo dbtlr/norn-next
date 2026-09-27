@@ -501,7 +501,6 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/tests/churn.rs::a_hubs_stem_class_change_and_its_rename_converges_on_a_build_from_zero",
-          "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
           "crates/norn-store/tests/store/health.rs::judgment_agrees_with_the_links_column_health",
           "crates/norn-store/tests/store/health.rs::the_link_health_judgment_seeks_every_row_it_reads",
           "crates/norn-store/tests/store/redecision.rs::a_new_document_resolves_a_broken_link_in_an_untouched_document",
