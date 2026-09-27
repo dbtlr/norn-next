@@ -1,8 +1,9 @@
 //! `search`: the ladder a request selects, resolved against what the host
 //! holds for the vault when it answers, run over one snapshot, and fused.
 //!
-//! **A search answers through the read seam.** It takes one hold on a ready
-//! entry, so a vault that is not ready is refused with the ordinary
+//! **A search answers through the read seam.** It takes one hold on an entry
+//! the seam serves (ready, or settling once it has derived the facts the read
+//! met), so a vault the seam refuses is refused with the ordinary
 //! answer-reading refusal before any rung runs, and every rung reads the
 //! vault's store through the one snapshot that hold established.
 //!

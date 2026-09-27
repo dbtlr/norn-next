@@ -35,7 +35,7 @@
 //!   delivery the vault's entry committed with the fingerprints it publishes
 //!   ([`DeliveredEngine`]), so it never reads this set. The `search` verb
 //!   composes it through the read seam, so a search's vector rung answers only
-//!   for a ready entry, beside the snapshot its hold established.
+//!   for an entry the seam serves, beside the snapshot its hold established.
 //! - **An answer carries its own reading.** A nearest answer is sampled under
 //!   the slot's lock together with the model it ran, the sidecar revision it
 //!   was taken from and the engine's watermarks, so no drain lands between
@@ -241,9 +241,9 @@ pub fn compose_vector_refusal(refusal: SemanticRefusal) -> ErrorEnvelope {
 /// selection named the rung: a selection naming the rung exactly is refused
 /// with [`VectorRefusal::envelope`], and the enabled selection leaves a rung
 /// its set does not hold out silently, skips an unavailable one with
-/// [`VectorRefusal::skip_reason`], and is refused by a failed one. The entry is
-/// ready wherever this is reached: the read seam refuses a vault that is not
-/// with the ordinary answer-reading refusal before any rung runs.
+/// [`VectorRefusal::skip_reason`], and is refused by a failed one. The read seam
+/// serves the entry wherever this is reached: it refuses a vault it does not
+/// serve with the ordinary answer-reading refusal before any rung runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum VectorRefusal {
     /// The vault's enabled set does not hold the vector rung.
