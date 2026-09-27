@@ -753,7 +753,9 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
         let mut in_string = false;
         let mut at = 0;
         while at < bytes.len() {
-            if !in_string && text[at..].starts_with(needle) {
+            // Compared as bytes: `at` walks bytes and can stand inside a
+            // multi-byte character, where a `str` slice would panic.
+            if !in_string && bytes[at..].starts_with(needle.as_bytes()) {
                 return Some(at);
             }
             match bytes[at] {
@@ -792,6 +794,16 @@ fn the_pinned_sources_are_every_module_the_crate_declares() {
     assert!(
         declares_a_module(r#"#[doc = "see a//b"] mod foo;"#),
         "a `//` inside an attribute's string was read as a trailing comment"
+    );
+    // A non-ASCII character outside any string: the scan walks bytes, and a
+    // lead byte must not leave it slicing inside the character it begins.
+    assert!(
+        declares_a_module("mod café; // é"),
+        "a non-ASCII character before a trailing comment was not read past"
+    );
+    assert!(
+        !declares_a_module("/* é */ let x = 1;"),
+        "a non-ASCII line that declares nothing was read as a declaration"
     );
     let text = |file: &str| {
         SOURCES
