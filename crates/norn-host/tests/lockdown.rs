@@ -2256,11 +2256,18 @@ fn document_path(at: &str) -> DocumentPath {
     DocumentPath::new(at).expect("a document path")
 }
 
+/// The findings standing at `at` about the document or place itself. A
+/// finding about one of its links is left out: every readable document here
+/// links `[[note-000]]`, which no vault holds, so its link health is a finding
+/// at every place that reads.
 fn findings_at(store: &mut Store, at: &str) -> Vec<norn_store::StoredFinding> {
     store
         .begin_request()
         .stored_findings(&document_path(at))
         .expect("reading the findings at a path")
+        .into_iter()
+        .filter(|finding| finding.ordinal.is_none())
+        .collect()
 }
 
 /// Every derived row, a bounded page at a time.
