@@ -434,27 +434,34 @@ mod tests {
     /// discard ranges over.
     #[test]
     fn a_path_addressed_link_is_keyed_by_path_key_in() {
-        let document = at("Dir/T.md");
-        let raw = document.path_key_in(SuffixKey::Raw);
-        let folded = document.path_key_in(SuffixKey::Folded);
         let holder = at("holder.md");
+        for (path, stem) in [("Dir/T.md", "Dir/T"), ("Été/Ü.md", "Été/Ü")] {
+            let document = at(path);
+            let raw = document.path_key_in(SuffixKey::Raw);
+            let folded = document.path_key_in(SuffixKey::Folded);
 
-        let markdown = link_keys(
-            &written(crate::facts::LinkFamily::Markdown, None, "Dir/T.md"),
-            &holder,
-        );
-        let wikilink = link_keys(
-            &written(crate::facts::LinkFamily::Wikilink, Some("vault"), "Dir/T"),
-            &holder,
-        );
+            let markdown = link_keys(
+                &written(crate::facts::LinkFamily::Markdown, None, path),
+                &holder,
+            );
+            let wikilink = link_keys(
+                &written(crate::facts::LinkFamily::Wikilink, Some("vault"), stem),
+                &holder,
+            );
 
-        for (label, keys) in [
-            ("`[x](Dir/T.md)`", &markdown),
-            ("`[[vault://Dir/T]]`", &wikilink),
-        ] {
-            assert_eq!(keys.len(), 1, "{label} named {keys:?}");
-            assert_eq!(keys[0].key, raw.as_str(), "{label}'s raw key");
-            assert_eq!(keys[0].folded_key, folded.as_str(), "{label}'s folded key");
+            for (family, keys) in [("markdown", &markdown), ("wikilink", &wikilink)] {
+                assert_eq!(keys.len(), 1, "{family} link to {path} named {keys:?}");
+                assert_eq!(
+                    keys[0].key,
+                    raw.as_str(),
+                    "{family} link to {path}'s raw key"
+                );
+                assert_eq!(
+                    keys[0].folded_key,
+                    folded.as_str(),
+                    "{family} link to {path}'s folded key"
+                );
+            }
         }
     }
 

@@ -11,7 +11,7 @@
 //! **[`Request::apply_increment`] is where documents are written, and a
 //! changeset lands whole or not at all** — that entry point states the shape of
 //! the guarantee in full. Every other write here is whole on its own: a finding
-//! and its candidate and class rows, a schema pin and the discard the new key
+//! and its candidate, class and path-key rows, a schema pin and the discard the new key
 //! implies. So a request that performed three acts and then failed has
 //! three whole acts at rest, and what a request never was is a way to group them
 //! into one.
@@ -2517,8 +2517,8 @@ fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {
     }))
 }
 
-/// A finding and its row id, which is what its candidates and its classes are
-/// read by.
+/// A finding and its row id, which is what its candidates, its classes and its
+/// path keys are read by.
 fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let id: i64 = row.get(0)?;
     let kind: String = row.get(1)?;

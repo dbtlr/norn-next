@@ -2370,13 +2370,13 @@ const DRAINED_ROWS: usize = 400;
 /// pair, and the document feed reads five columns off the index where the death
 /// feed reads three.
 ///
-/// `per_row` is about three times that widest reading, and `floor` absorbs the
+/// `per_row` is between two and three times that widest reading, and `floor` absorbs the
 /// empty page every advancing drain ends on. **The absorber is deliberately
 /// wide** because a step count is engine-version sensitive: the same statement
 /// over the same rows steps a different number of times under a different SQLite
 /// build. What this bar separates is a line from a parabola, and the full-prefix
-/// controls beside it come in at 1200 to 7500 steps per row against a ceiling of
-/// 162 — seven to forty-six times it — so a coefficient loose enough to survive
+/// controls beside it come in at about 1400 to 9300 steps per row against a
+/// ceiling of 162 — nine to fifty-seven times it — so a coefficient loose enough to survive
 /// an engine bump still fails the shape the bar exists to exclude. What gives a
 /// passing reading its authority is the control and the row count it is taken
 /// at, not the tightness of this number.
