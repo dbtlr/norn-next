@@ -264,6 +264,26 @@ mod tests {
         );
     }
 
+    /// **A hold that unwinds still moves the signal.** The hold changes the
+    /// stance and then unwinds; its end runs on the unwinding thread as on
+    /// any other, so a waiter is woken by a change an unwind left behind.
+    #[test]
+    fn a_hold_that_unwinds_after_changing_the_stance_moves_the_signal() {
+        let gate = EntryGate::new(Dial::default());
+        let seen = gate.stance_generation();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut held = gate.lock().expect("a fresh gate");
+            held.stance = 1;
+            panic!("the hold unwinds after changing the stance");
+        }));
+        assert!(unwound.is_err(), "the hold did not unwind");
+        assert_eq!(
+            gate.stance_generation(),
+            seen.wrapping_add(1),
+            "a hold that unwound after changing the stance did not move the signal"
+        );
+    }
+
     /// **The signal moves with the stance and with nothing else.** A hold
     /// that writes the state without changing its stance leaves the
     /// generation where it was; a hold that ends at another stance moves it

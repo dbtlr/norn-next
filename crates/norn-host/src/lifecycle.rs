@@ -3170,6 +3170,11 @@ struct Shared<O: EntryOps> {
     /// one whose asker the turn it handed on to answers.
     #[cfg(test)]
     panic_after_reload_handoff: AtomicBool,
+    /// Run once by the next settling read, as soon as it has let the gate go
+    /// and before it waits for the stance to move: the window a change
+    /// published there has to wake the read from.
+    #[cfg(test)]
+    before_settle_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Held across every registration change, from the checks it answers on
     /// through the registry write and the serving-set change it makes.
     ///
@@ -3984,6 +3989,8 @@ impl<O: EntryOps> Host<O> {
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             panic_after_reload_handoff: AtomicBool::new(false),
+            #[cfg(test)]
+            before_settle_wait: Mutex::new(None),
             registration_gate: Mutex::new(()),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
@@ -4674,6 +4681,16 @@ impl<O: EntryOps> Host<O> {
                     // published after the gate goes back moves past it.
                     let seen = state.gate().stance_generation();
                     let (earlier, outside) = opening.let_the_gate_go(state);
+                    #[cfg(test)]
+                    if let Some(hook) = self
+                        .shared
+                        .before_settle_wait
+                        .lock()
+                        .expect("settle hook poisoned")
+                        .take()
+                    {
+                        hook();
+                    }
                     // Accounted where the wait begins, so a reading taken
                     // while this read waits names it.
                     self.shared.reads.count_settle_wait();
@@ -19077,8 +19094,17 @@ mod tests {
                 !reading.is_finished(),
                 "the read answered while the change it met was still being indexed"
             );
+            let released = Instant::now();
             ops.reconcile_release.store(true, Ordering::SeqCst);
-            reading.join().expect("the read finished")
+            let answered = reading.join().expect("the read finished");
+            // The bound is a minute, so a read answering well inside it was
+            // woken by the change rather than by its bound running out.
+            assert!(
+                released.elapsed() < LONG_SETTLE / 4,
+                "the read answered {:?} after the change landed",
+                released.elapsed()
+            );
+            answered
         })
         .expect("a read that met a change was refused once the change was indexed");
 
@@ -19097,6 +19123,54 @@ mod tests {
             (reading.reads_served, reading.settle_expiries),
             (1, 0),
             "the read was not served inside its bound"
+        );
+    }
+
+    /// **A change published between the read letting the gate go and its
+    /// wait still wakes the read.** The generation the read waits past is
+    /// read under the gate, so a `Ready` published in that window has already
+    /// moved past it, and the wait answers at once. The bound is a minute, so
+    /// a read answering well inside it was not left to wait its bound out.
+    #[test]
+    fn a_change_published_before_a_settling_read_waits_still_wakes_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), LONG_SETTLE);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_change_in_flight(&ops, &host, &name);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        {
+            let ops = Arc::clone(&ops);
+            let entry = Arc::clone(&entry);
+            *host
+                .shared
+                .before_settle_wait
+                .lock()
+                .expect("settle hook poisoned") = Some(Box::new(move || {
+                ops.reconcile_release.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while entry.gate.lock().expect("entry gate poisoned").trust != TrustState::Ready {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the change did not land while the read had the gate let go"
+                    );
+                    thread::yield_now();
+                }
+            }));
+        }
+
+        let started = Instant::now();
+        let hold = host
+            .begin_read(&name)
+            .expect("a read whose change landed before it waited was refused");
+        assert!(
+            started.elapsed() < LONG_SETTLE / 4,
+            "the read waited {:?} for a change that had already landed",
+            started.elapsed()
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready)
         );
     }
 
