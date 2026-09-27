@@ -2035,12 +2035,15 @@ fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
     .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
 }
 
-/// The kinds of every finding standing at `path`, sorted.
+/// The kinds of every finding standing at `path` about the document or place
+/// itself, sorted. A finding about one of its links is left out: every
+/// document the workloads generate links a note no tree holds, so its link
+/// health is a finding at every place that reads.
 fn kinds_at(projection: &StoreProjection, path: &str) -> Vec<String> {
     let mut kinds: Vec<String> = projection
         .findings()
         .iter()
-        .filter(|finding| finding.path == path)
+        .filter(|finding| finding.path == path && finding.ordinal.is_none())
         .map(|finding| finding.kind.clone())
         .collect();
     kinds.sort();

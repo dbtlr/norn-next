@@ -3200,10 +3200,15 @@ impl Declaration {
     /// is stated as the floor it is rather than as a boundary a caller could
     /// reach either way, and the case below is what holds it.
     ///
-    /// A declaration no re-derivation is owed under answers yes for every row:
-    /// there is nothing to restore, so re-reading the vault would buy nothing.
+    /// **Every declaration owes it, whatever it declares.** A pin discards
+    /// every link-health finding in the vault with the rest of the findings
+    /// keyed by the fingerprint it replaced, and the store re-files a link's
+    /// finding in the changeset that writes the document holding it; so a row
+    /// below the pin is re-derived even under a schema that judges nothing
+    /// ([`VaultSchema::rederives_documents`] false), or the findings about its
+    /// links stay gone where a build from zero files them.
     fn judged(&self, generation: i64) -> bool {
-        !self.model.schema().rederives_documents() || generation > self.floor
+        generation > self.floor
     }
 }
 
@@ -5475,15 +5480,15 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **The control on the case above.** What re-derives a row whose bytes did
-    /// not move is the declaration judging it, not the pin moving: a vault that
-    /// declares nothing pins a new schema, discards nothing it can record
-    /// again, and leaves every row exactly where it stood. Without that half
-    /// every schema edit would re-derive the whole vault.
+    /// **The control on the case above.** A vault that declares nothing still
+    /// owes its rows their judgment after a pin: the pin discards the finding
+    /// about the broken link `note.md` holds, and the heal that follows
+    /// re-derives the row, whose bytes never moved, and the finding stands
+    /// again — while the tag the schema no longer reports raises nothing.
     #[test]
-    fn a_pin_under_a_vault_that_declares_nothing_rederives_no_row() {
+    fn a_pin_under_a_vault_that_declares_nothing_refiles_its_link_health() {
         let f = Fixture::new("facet-control");
-        fs::write(f.vault().join("note.md"), "# body\n#draft\n").unwrap();
+        fs::write(f.vault().join("note.md"), "# body\n#draft\n[[nowhere]]\n").unwrap();
         let (ops, name) = f.ops(64);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -5502,11 +5507,20 @@ mod tests {
         );
 
         let after = stored(&mut attachment, "note.md").expect("the document's row");
-        assert_eq!(
-            before.generation, after.generation,
-            "a schema that judges no document re-derived one anyway"
+        assert_eq!(before.content_hash, after.content_hash);
+        assert!(
+            after.generation > before.generation,
+            "the heal after the pin left the row the pin owed a judgment"
         );
-        assert!(findings_at(&mut attachment.store, "note.md").is_empty());
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            [FindingKind::Broken.as_str()],
+            "{findings:?}"
+        );
         ops.detach(&name, attachment);
     }
 
@@ -5547,8 +5561,8 @@ mod tests {
     /// column — and the least typed value is nine where the least raw text is
     /// `10`. A second declaration that moves the fingerprint clears the column in
     /// its pin and the heal fills it again. A declaration ordering the field as
-    /// text clears it and owes nothing: the row is not derived again, and what
-    /// stands is the raw half alone.
+    /// text clears it and fills nothing: the row is derived again, as every row
+    /// is after a pin, and what stands is the raw half alone.
     #[test]
     fn a_schema_reload_fills_the_typed_column_of_a_document_whose_bytes_never_moved() {
         let f = Fixture::new("typed-column");
@@ -5628,10 +5642,7 @@ mod tests {
             ReloadOutcome::SchemaChanged
         );
         let after = stored(&mut attachment, "note.md").expect("the document's row");
-        assert_eq!(
-            before.generation, after.generation,
-            "a declaration ordering the field as text derived the row again"
-        );
+        assert_eq!(before.content_hash, after.content_hash);
         assert_eq!(
             typed_values(&stored_fields(&mut attachment, "note.md")),
             untyped,
@@ -5642,8 +5653,8 @@ mod tests {
 
     /// The declaration's own rule, stated directly: a row stamped at or below
     /// the pin's generation owes its judgment again, and one stamped above it
-    /// carries the judgment the standing schema asks for. A declaration that
-    /// judges nothing answers yes for every row, whatever generation it holds.
+    /// carries the judgment the standing schema asks for — under a declaration
+    /// that judges nothing too, since the pin discarded its links' health.
     #[test]
     fn a_row_below_the_pins_generation_owes_its_judgment_again() {
         let judging = Declaration {
@@ -5661,7 +5672,8 @@ mod tests {
             model: Declared::unpinned(),
             floor: 7,
         };
-        assert!(silent.judged(6));
+        assert!(!silent.judged(6));
+        assert!(!silent.judged(7));
         assert!(silent.judged(8));
     }
 

@@ -210,10 +210,9 @@ impl VaultSchema {
     /// The globs match under the store's recorded path order: with ASCII case
     /// folded on a root that folds it, bytewise on a root that does not.
     ///
-    /// Link-health findings are the dormant consumer of the same exclusion:
-    /// the link-health unit of Layer 3 files them, reading a link target's
-    /// class through that one resolver. The current call graph does not reach
-    /// them, because no producer files a link-health finding yet.
+    /// Link-health findings read the same exclusion: the store judges each
+    /// link a changeset reaches through that one resolver, under the
+    /// declaration derivation hands it.
     pub fn ambiguity_ignore(&self) -> &[Pattern] {
         &self.ambiguity_ignore
     }
@@ -238,6 +237,15 @@ impl VaultSchema {
     /// joins this disjunction in the same change**: a schema answering `false`
     /// here while some derived state reads its declaration would leave that
     /// state derived under a schema the vault no longer declares.
+    ///
+    /// **A dormant carrier.** Its consuming layer is the host's heal after a
+    /// pin, once the store re-decides link health over every link at the pin
+    /// itself ([ADR 0027]). A pin discards every link-health finding whatever
+    /// the schema declares, and today only the re-derivation of the document
+    /// holding a link files its finding again, so the heal re-derives every
+    /// row below the pin and asks nothing of this.
+    ///
+    /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     pub fn rederives_documents(&self) -> bool {
         self.tags.reports_undeclared()
             || self
