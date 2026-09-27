@@ -6054,6 +6054,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         state.withdraw_trust(reason);
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.detach_due {
+                        // A teardown the entry is due can be withdrawn by a
+                        // demand before it runs, so what this recovery left is
+                        // published before the teardown is scheduled, exactly
+                        // as the rebuild, reconcile and maintenance legs
+                        // publish it: the reconcile owed where facts stand,
+                        // which the next demand or poll schedules, and `Ready`
+                        // where nothing is left. The coverage prologue this
+                        // recovery was scheduled under ends here either way.
+                        if handoff_saturated || !state.pending.is_empty() {
+                            state.publish_pending_reconcile();
+                        }
+                        state.publish_ready_where_nothing_is_left(handoff_saturated);
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
@@ -19749,6 +19761,27 @@ mod tests {
         bound: Duration,
         tick: Duration,
     ) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
+        a_leg_scheduled_due_a_teardown(ops, bound, tick, |state, subject| {
+            if let Some(batch) = pending {
+                state.pending.merge(batch);
+            }
+            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+            state.claim.schedule(|epoch| leg(subject.clone(), epoch))
+        })
+    }
+
+    /// Run the leg `schedule` publishes and schedules over a `Ready` entry on
+    /// this thread, with a teardown due, while the host's one worker is held
+    /// inside another vault's attach: the leg schedules the teardown, which
+    /// waits in the channel for a read to withdraw it. The dispatcher ticks
+    /// every `tick`. Answers the host, the entry the leg ran over, and the
+    /// lease on the vault holding the worker.
+    fn a_leg_scheduled_due_a_teardown(
+        ops: &Arc<FakeOps>,
+        bound: Duration,
+        tick: Duration,
+        schedule: impl FnOnce(&mut EntryState<FakeCoverage>, &VaultName) -> Job,
+    ) -> (Host<Arc<FakeOps>>, VaultName, DemandLease<Arc<FakeOps>>) {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let registry = RegistryRead::from_entries([&subject, &holding].map(|name| {
@@ -19781,12 +19814,8 @@ mod tests {
             .expect("the entry is served");
         let job = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if let Some(batch) = pending {
-                state.pending.merge(batch);
-            }
-            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
             state.detach_due = true;
-            state.claim.schedule(|epoch| leg(subject.clone(), epoch))
+            schedule(&mut state, &subject)
         };
         run_job(&host.shared, job);
         assert!(
@@ -19956,6 +19985,120 @@ mod tests {
     #[test]
     fn a_read_withdrawing_a_teardown_after_a_rebuild_that_left_nothing_answers() {
         a_read_withdrawing_a_teardown_after(Job::Rebuild, None);
+    }
+
+    /// Owe a recovery for an environment that refused the entry, publish the
+    /// warming a demand schedules that recovery under, and schedule it: the
+    /// state a recovery leg starts from. `rescan` says whether the rescan the
+    /// refusal owes stands pending beside it.
+    fn schedule_a_recovery(
+        state: &mut EntryState<FakeCoverage>,
+        subject: &VaultName,
+        rescan: bool,
+    ) -> Job {
+        state.require_recovery();
+        if rescan {
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+        }
+        state.withdraw_trust(UntrustedReason::environmental_refusal(
+            "the environment refused the entry",
+        ));
+        let job = schedule_demand(state, subject);
+        assert_eq!(
+            state.trust,
+            TrustState::warming(WarmingPhase::InstallingCoverage, 0, None),
+            "a scheduled recovery warms under the coverage prologue"
+        );
+        job
+    }
+
+    /// **A recovery that left nothing to derive publishes `Ready` though a
+    /// teardown is due**, so a read that withdraws the teardown answers,
+    /// rather than meeting the prologue the recovery was scheduled under
+    /// with nothing scheduled to end it.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_recovery_that_left_nothing_answers() {
+        let ops = Arc::new(FakeOps::default());
+        let bound = Duration::from_secs(2);
+        // The dispatcher does not tick inside the case, so nothing but the
+        // leg publishes over the entry before the read.
+        let (host, subject, holding_lease) = a_leg_scheduled_due_a_teardown(
+            &ops,
+            bound,
+            Duration::from_secs(60),
+            |state, subject| schedule_a_recovery(state, subject, false),
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+
+        let started = Instant::now();
+        let hold = host
+            .begin_read(&subject)
+            .expect("a read over a recovery with nothing left to derive was refused");
+        assert!(
+            started.elapsed() < bound,
+            "the read waited {:?} over an entry with nothing left to derive",
+            started.elapsed()
+        );
+        assert_eq!(
+            hold.reading().published(),
+            &Demand::State(TrustState::Ready),
+            "the recovery left the entry warming with nothing left to derive"
+        );
+        drop(hold);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        drop(holding_lease);
+    }
+
+    /// **A recovery that leaves its rescan owed publishes it before it
+    /// schedules a due teardown**, so a read that withdraws the teardown
+    /// schedules the reconcile the rescan is owed, and the entry reaches
+    /// `Ready` with no watcher poll and no reap between. The dispatcher does
+    /// not tick inside the case: only the dispatch retries the case drives
+    /// send the work, and they send only work the entry has scheduled.
+    #[test]
+    fn a_read_withdrawing_a_teardown_after_a_recovery_schedules_the_rescan_it_left() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, subject, holding_lease) = a_leg_scheduled_due_a_teardown(
+            &ops,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+            |state, subject| schedule_a_recovery(state, subject, true),
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+
+        let refusal = host
+            .begin_read(&subject)
+            .expect_err("a read over the rescan a recovery left owed was served");
+        assert!(
+            matches!(
+                refusal,
+                ReadRefusal::NotServing(Demand::State(TrustState::Untrusted {
+                    reason: UntrustedReason::WatcherOverflow,
+                    ..
+                }))
+            ),
+            "a read over a recovery's owed rescan was refused as {refusal:?}, not the rescan"
+        );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the rescan a recovery left owed to be reconciled",
+            lifecycle_wait_budget(),
+            || {
+                retry_pending_dispatches(&host.shared);
+                match host.state(&subject) {
+                    state if state == answered(TrustState::Ready) => Observed::Met(()),
+                    state => Observed::pending(format!("the state is {state:?}")),
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the rescan a recovery left owed was not reconciled once"
+        );
+        drop(holding_lease);
     }
 
     /// **A batch carrying no fact leaves the entry's position where it
