@@ -265,7 +265,7 @@ impl<'a> Request<'a> {
     /// There is no explicit index write, and adding one would be a second
     /// maintainer of the same rows.
     ///
-    /// **Findings are discarded on two axes**, both inside the one transaction:
+    /// **Findings are discarded on three axes**, all inside the one transaction:
     ///
     /// - *By subject path.* Every changed path — upserted or dead — takes the
     ///   findings recorded about it. A re-derivation's findings were read off
@@ -275,15 +275,21 @@ impl<'a> Request<'a> {
     ///   it belongs to, and the findings in the union of those classes go with
     ///   it — the resolution axis, where a document joining or leaving a class
     ///   invalidates findings written in documents that did not change.
+    /// - *By affected path key.* Every changed path also names itself as the
+    ///   exact path key a path-addressed link spells — a rename's old path
+    ///   included, since a rename is the old path's death beside the new path's
+    ///   write — and the findings keyed by any of those paths go with it. No
+    ///   class range reaches these: a path key is matched by equality alone.
     ///
-    /// The two axes are what make **discard-then-record** total. The store
+    /// The three axes are what make **discard-then-record** total. The store
     /// discards and never records: minting a finding is a reading of the vault
-    /// the caller performs, so [`IncrementOutcome::affected_classes`] reports
-    /// the class scope, and the subject scope needs no report because it is the
-    /// changeset the caller just built, entry by entry.
+    /// the caller performs, so [`IncrementOutcome::affected_classes`] and
+    /// [`IncrementOutcome::affected_paths`] report the class and path scopes,
+    /// and the subject scope needs no report because it is the changeset the
+    /// caller just built, entry by entry.
     ///
-    /// A finding in no class — a vault-schema violation, say — is outside the
-    /// resolution axis and reachable on the subject axis alone: it dies when the
+    /// A finding in no class and keyed by no path — a vault-schema violation,
+    /// say — is reachable on the subject axis alone: it dies when the
     /// document it is about changes, and survives every change to any other.
     /// None of this is a cascade. Nothing in the schema references `documents`
     /// from `findings`, so a finding about a path no document has is recordable
@@ -296,16 +302,17 @@ impl<'a> Request<'a> {
     /// them, so a caller streaming a heal hands over something that yields
     /// documents and the store holds one. What lives across entries is the
     /// prepared statements, which are a fixed cost, the running tally, which is
-    /// scalars, and [`IncrementOutcome::affected_classes`] — the one
-    /// changeset-sized accumulation, holding a key per distinct stem among the
-    /// changed paths.
+    /// scalars, and [`IncrementOutcome::affected_classes`] and
+    /// [`IncrementOutcome::affected_paths`] — the two changeset-sized
+    /// accumulations, holding a key per distinct stem and per distinct path
+    /// among the changed paths.
     ///
     /// **The write lock is held across the caller's whole iterator.** A
     /// changeset is atomic because it is one transaction, so however long the
     /// caller takes to produce its entries is how long no other writer on the
     /// database proceeds. A heal-scale changeset is therefore **chunked**: each
-    /// chunk is its own atomic changeset, which bounds both the lock and the
-    /// class set by the chunk rather than by the vault. Serializing writers
+    /// chunk is its own atomic changeset, which bounds the lock, the class set
+    /// and the path set by the chunk rather than by the vault. Serializing writers
     /// across *processes* is the maintainer file lock over this derived store,
     /// which is carved and not built (NORN-33); within one process the store's
     /// single connection is what serializes.
