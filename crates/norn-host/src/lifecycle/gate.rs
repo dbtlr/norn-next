@@ -55,6 +55,11 @@ pub(super) struct EntryGate<T> {
     signal: Mutex<u64>,
     /// Notified with every move of the signal.
     moved: Condvar,
+    /// A case's hook, run once by the next read acquisition that lets this
+    /// gate go, in the instant after the guard goes back: the window a change
+    /// published there has to wake the read from.
+    #[cfg(test)]
+    let_go_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// One hold of an entry gate: the state, reached through `Deref`, and the
@@ -109,6 +114,29 @@ impl<T> EntryGate<T> {
             taken: AtomicU64::new(0),
             signal: Mutex::new(0),
             moved: Condvar::new(),
+            #[cfg(test)]
+            let_go_hook: Mutex::new(None),
+        }
+    }
+
+    /// Run `hook` once, in the instant after the next read acquisition lets
+    /// this gate go.
+    #[cfg(test)]
+    pub(super) fn when_a_read_lets_go(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.let_go_hook.lock().expect("let-go hook poisoned") = Some(Box::new(hook));
+    }
+
+    /// Run the hook a case set, where it set one. The caller holds no hold of
+    /// this gate.
+    #[cfg(test)]
+    pub(super) fn run_the_let_go_hook(&self) {
+        let hook = self
+            .let_go_hook
+            .lock()
+            .expect("let-go hook poisoned")
+            .take();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
