@@ -1400,6 +1400,86 @@ fn a_class_walk_reads_no_path_link_spelled_inside_its_range() {
     );
 }
 
+/// What killing `deaths` documents `d/NNNNN.md` in one changeset cost a store
+/// holding them beside a hundred documents that each link `[[elsewhere]]`,
+/// and — where `neighborhood` — a document `h/NNNNN.md` for each that links
+/// it by its stem and by its path: the counters the changeset moved, the
+/// steps its re-decision took, and how long the changeset took.
+fn mass_delete(
+    deaths: usize,
+    neighborhood: bool,
+) -> (DerivationCounters, u64, std::time::Duration) {
+    let label = format!("redecide-mass-delete-{deaths}-{neighborhood}");
+    let mut vault = Vault::new(&label, Sensitive);
+    let mut documents: Vec<(String, String)> = (0..deaths)
+        .map(|at| (format!("d/{at:05}.md"), format!("alpha w{at}\n")))
+        .collect();
+    documents.extend((0..100).map(|at| (format!("u/{at:03}.md"), "[[elsewhere]]\n".to_string())));
+    if neighborhood {
+        documents.extend((0..deaths).map(|at| {
+            (
+                format!("h/{at:05}.md"),
+                format!("[[{at:05}]]\n\n[p](../d/{at:05}.md)\n"),
+            )
+        }));
+    }
+    vault.apply(
+        documents
+            .iter()
+            .map(|(at, body)| Change::Upsert(derived(at, body)))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut request = vault.store.begin_request();
+    let started = std::time::Instant::now();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            (0..deaths)
+                .map(|at| death(&format!("d/{at:05}.md")))
+                .collect::<Vec<_>>(),
+            &[],
+            &declared(),
+        )
+        .expect("the mass delete");
+    let took = started.elapsed();
+    let steps = request.read_steps();
+    (request.finish(), steps, took)
+}
+
+/// **A death no link reaches costs its re-decision a small constant.** A
+/// mass delete names a class and a path per document it kills, and most name
+/// ones no link points at: killing six hundred such documents re-decides no
+/// link, and its re-decision's steps stay within [`STEPS_PER_EMPTY_KEY`] per
+/// class and path it names. The same changeset beside a link to each by its
+/// stem and by its path re-decides those twelve hundred links, and what they
+/// cost is the links' own work on top.
+#[test]
+fn a_mass_delete_no_link_reaches_costs_a_constant_per_key() {
+    let (quiet, quiet_steps, quiet_took) = mass_delete(600, false);
+    let (busy, busy_steps, busy_took) = mass_delete(600, true);
+    eprintln!(
+        "600 deaths: no neighborhood {quiet_steps} steps in {quiet_took:?}, \
+         a link each {busy_steps} steps in {busy_took:?}"
+    );
+    assert_eq!(counted(&quiet, "links_redecided"), 0);
+    assert_eq!(counted(&busy, "links_redecided"), 1200);
+    let keys = 600 * 2;
+    assert!(
+        quiet_steps <= STEPS_PER_EMPTY_KEY * keys,
+        "six hundred deaths no link reaches took {quiet_steps} steps, more than \
+         {STEPS_PER_EMPTY_KEY} for each of the {keys} classes and paths they name"
+    );
+    assert!(
+        busy_steps > quiet_steps,
+        "the links the deaths reach cost nothing: {busy_steps} against {quiet_steps}"
+    );
+}
+
+/// The steps a class or a path a changeset names, which no link and no
+/// finding is held under, costs its re-decision at most.
+const STEPS_PER_EMPTY_KEY: u64 = 1_000_000;
+
 // ---- a tear inside the re-decision ----
 
 /// The environment variable that puts this suite's own binary in the child
