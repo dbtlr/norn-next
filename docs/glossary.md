@@ -32,8 +32,21 @@ Inclusion of a vault in the host's durable serving set. A vault included in that
 **Plan**:
 A declarative proposed vault mutation, including its intended effects and the conditions under which they remain safe.
 
+**Operation**:
+One requested change a plan is authored in: a kind, its fields, and optionally the conditions its author observed.
+_Avoid_: Step, op
+
+**Transition**:
+One file's resolved change within a plan: the state the file must hold before the write and the state it holds after, each either absent or a content hash.
+
+**Resolved plan**:
+A plan whose operations have been resolved into transitions, together with the conditions its resolution depended on. It is what a preview returns and what an apply can re-send.
+
 **Forecast**:
 A report of what a plan would do against a particular observed vault state.
+
+**Interrupted apply**:
+An apply attempt that stopped after at least one of its targets landed and before all of them did. It is not a refusal: it performed part of the requested mutation, and its report names what landed.
 
 **Refusal**:
 A resolved outcome in which Norn performs no requested mutation or answers no requested read because safety, trust, or preconditions are not satisfied.

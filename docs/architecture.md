@@ -2306,24 +2306,61 @@ sequenceDiagram
   participant D as SQLite (via norn-store)
   C->>S: HTTP (bearer; protocol shape)
   S->>H: verb params (wire)
-  H->>H: compile to typed plan (wire vocabulary)
-  H->>W: plan
-  W->>F: fingerprint → shadow → verify → swap (protocol owned by norn-fs)
-  Note over W,F: drift detected → refuse-and-refresh (fresh forecast, hash-CAS confirm)
-  W->>D: write-through increment, scoped to blast radius
+  H->>H: resolve operations → one transition per file (before-state, after-state), conditions read
+  H->>W: resolved plan (a preview answers here and writes nothing)
+  W->>F: check and stage every target: states, conditions, schema, shadow (protocol owned by norn-fs)
+  Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh resolved plan and forecast)
+  W->>F: publish creates, then replacements, then removals, each verified again
+  W->>D: write-through increment: one changeset for an uninterrupted apply, scoped to blast radius
   Note over W,D: mark-invariant — the same counters under either mark
   W-->>H: outcome
   H-->>S: report (wire)
   S-->>C: HTTP response
 ```
 
-`apply` is the same flow entered with an externally supplied plan. Repair is a planner over
+A write verb is a plan of one operation; `apply` is the same flow entered with an externally
+supplied plan, either operations or a resolved plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they
 were planned against, and repair reads the live ambiguity class rather than a finding's
-snapshot.
+snapshot. A request states whether it previews or applies; the wire has no default mode.
 
-Two contracts inside that flow carry weight:
+A plan is a self-contained value naming its vault by address and carrying the vault's root
+identity: the host holds no plan between requests. A resolved plan carries its operations,
+each target's before- and after-state, and the conditions its planning read, never the
+bytes of a file it did not author. Every template value resolves at planning, so the
+applier recomposes each target as a pure function of the before-states and the operations
+and refuses unless the result hashes to the after-state. A source is not replaced or
+removed until every other target drawing content from it has durably landed, and a plan
+whose content dependencies form a cycle is refused at planning. Each condition is recorded
+and checked as the vault would stand with every target of the plan at its after-state,
+after taking in the facts the watcher has delivered, so a plan's own progress never
+changes one.
+Applies run as a job holding the entry's claim, one at a time per registration; the request
+waits for the outcome, and a caller that stops waiting does not abort the apply. Mutation
+preconditions are checked against the states and conditions the plan carries, not against
+the snapshot a planner read through
+([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
 
+Four contracts inside that flow carry weight:
+
+- **Check and stage everything, then publish.** No target is published until every
+  target's state and every condition holds, every composed result passes the vault schema,
+  and every written target, a create included, is staged as a shadow. A refusal in that
+  phase publishes nothing. A plan refuses a violation on a field it writes or one that did
+  not stand before it. Publication is still a window: a crash, an I/O failure, a create
+  whose name another writer took after staging, or a foreign edit reaching a target after
+  its staging can stop it part-way, and the apply report names every target that landed. A
+  foreign write between a target's final verification and its rename is overwritten, the
+  write protocol's stated residual race. A move interrupted between its legs leaves both
+  names holding the document.
+- **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
+  is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
+  interrupted completes it with no journal and no rollback. A move's source found absent
+  while its destination is not at its after-state was removed by another writer: that is
+  drift, and the move is unresolved. An attempt that stops after
+  one of its targets landed is interrupted, not refused. An
+  uninterrupted apply commits one changeset to its registration's store, so a read there
+  sees the whole state before or after it. Re-sending operations is a new change.
 - **Write-through.** The worker composed the post-state, so the increment writes it —
   database updates scoped to the blast radius, composing supplied facts and re-deriving
   nothing. The bar is **mark-invariance**: the same changeset reads the same derivation
@@ -2331,9 +2368,15 @@ Two contracts inside that flow carry weight:
   computation is the canonical-JSON projection of supplied frontmatter, which is storage
   encoding rather than recomputation and runs the identical code path under both marks — so
   the bar binds on the counters that could differ.
-- **Refuse-and-refresh.** Detected drift refuses and returns a fresh forecast whose content
-  hash rides the confirmation as an implicit compare-and-swap. Auto-rebase on drift is
-  deliberately rejected: a changed world deserves a re-plan.
+- **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
+  forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
+  drops operations whose targets all landed and re-resolves only operations none of whose
+  targets landed; an operation part-landed, one that no longer resolves (a move whose
+  destination is no longer absent among them), and one requiring an unresolved operation,
+  directly or through others, are listed as unresolved for the caller. Hashes cannot tell whether a drifted
+  target already carries the plan's change, so the forecast marks every drifted target and
+  applying the fresh plan is the caller's decision. Auto-rebase on drift is deliberately
+  rejected: a changed world deserves a re-plan.
 
 ---
 
