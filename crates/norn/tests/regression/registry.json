@@ -1537,11 +1537,11 @@
       "name": "one-snapshot-per-request",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A request acquires exactly one substrate snapshot — the snapshot counter reads one — and the commit consumes the same snapshot the verb read. Two independent snapshots inside one confirmed mutation cost ~110 ms of a 182.9 ms operation.",
+      "property": "A request acquires exactly one substrate snapshot, and snapshots_opened reads one. An apply takes that snapshot while it holds its entry's claim, after the facts delivered before it are derived. No commit lands in its registration's store between that snapshot and the apply's changeset, so the changeset builds on exactly the state the verb planned or checked against. The plan carries the states and conditions that snapshot showed, and the applier checks them rather than re-reading them.",
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "half of this property now has a subject and half does not. A request acquires exactly one substrate snapshot: crates/norn-store/src/store.rs::SnapshotReader establishes one per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. The other half — the commit consuming the same snapshot the verb read — has no subject and is structurally refused rather than merely unbuilt: readers live beside the lifecycle-held writer connection precisely so a read never touches it, so no commit can consume a read's snapshot. The applier that would make such a commit is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier, and what the mutation seam guarantees is ruled with the apply seam this venue's layer lands.",
+        "reason": "half of this property has a subject and half waits for the applier. A request acquires exactly one substrate snapshot: crates/norn-store/src/store.rs::SnapshotReader establishes one per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. The other half does not ask a commit to share a reader's connection, which readers living beside the writer structurally refuse: the apply seam holds the changeset to the apply's snapshot by the entry's claim, under which nothing else commits to the registration's store. The applier that takes that snapshot inside the claim is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
         "grounds": [
           { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
           { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
