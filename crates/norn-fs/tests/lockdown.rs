@@ -39,6 +39,7 @@ use norn_fs::{
     Publication, Refusal, ShadowHome, Staging, Transition,
 };
 use norn_testkit::attestation::{Attestation, SEAM};
+use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
 use norn_testkit::process::{Run, RunStatus, Sandbox};
 
 /// The variable that tells a run it is the child, and where its tree is.
@@ -479,14 +480,7 @@ fn process_death_at_each_publication_position_leaves_the_documented_state() {
 #[test]
 fn process_death_at_the_respell_leaves_the_old_spelling() {
     let tree = Tree::new("position-respell");
-    if PathNormalizer::detect(&tree.vault())
-        .expect("the tree's case behavior")
-        .case_sensitivity()
-        != CaseSensitivity::Insensitive
-    {
-        eprintln!(
-            "process_death_at_the_respell_leaves_the_old_spelling: skipped, the root does not fold"
-        );
+    if !tree.folds("process_death_at_the_respell_leaves_the_old_spelling") {
         return;
     }
     let outcome = tree.spawn(&[(SCENARIO, "respell"), (ARMED, "respell=ends")]);
@@ -517,15 +511,7 @@ fn process_death_at_the_respell_leaves_the_old_spelling() {
 #[test]
 fn a_respell_whose_rename_fails_after_its_content_landed_is_interrupted() {
     let tree = Tree::new("respell-interrupted");
-    if PathNormalizer::detect(&tree.vault())
-        .expect("the tree's case behavior")
-        .case_sensitivity()
-        != CaseSensitivity::Insensitive
-    {
-        eprintln!(
-            "a_respell_whose_rename_fails_after_its_content_landed_is_interrupted: skipped, \
-             the root does not fold"
-        );
+    if !tree.folds("a_respell_whose_rename_fails_after_its_content_landed_is_interrupted") {
         return;
     }
     let outcome = tree.spawn(&[(SCENARIO, "respell-content"), (ARMED, "respell=fails")]);
@@ -856,6 +842,21 @@ impl Tree {
 
     fn vault(&self) -> PathBuf {
         self.root.join("vault")
+    }
+
+    /// Whether `case`, stated over a root that folds case, runs on this tree's
+    /// vault root: skipped where the root does not fold, and failed there on
+    /// macOS.
+    #[track_caller]
+    fn folds(&self, case: &str) -> bool {
+        let folding = match PathNormalizer::detect(&self.vault())
+            .expect("the tree's case behavior")
+            .case_sensitivity()
+        {
+            CaseSensitivity::Insensitive => Folding::Folded,
+            CaseSensitivity::Sensitive => Folding::Distinct,
+        };
+        runs_where_the_volume_folds(folding, case)
     }
 
     /// Run this binary again as the child, with `env` set.

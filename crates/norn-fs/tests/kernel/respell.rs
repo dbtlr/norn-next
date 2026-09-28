@@ -4,14 +4,16 @@
 //! they run only where the scratch root is detected to fold — which a default
 //! APFS volume does and a Linux temporary directory does not. They are gated on
 //! the detected behavior rather than on the platform, so a folding volume
-//! anywhere runs them and a case-sensitive one anywhere skips them. The cases
-//! about what a respell refuses run everywhere.
+//! anywhere runs them and a case-sensitive one skips them — except on macOS,
+//! where a case-sensitive scratch root fails them, so a green macOS run means
+//! they asserted. The cases about what a respell refuses run everywhere.
 
 use std::path::Path;
 
 use norn_fs::{
     AfterState, CaseSensitivity, PathNormalizer, Refusal, Staging, Transition, confirm_landed,
 };
+use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
 
 use crate::common::{Scratch, bytes_at, found, hash, identity_at, names_in, staged, wrote};
 
@@ -22,13 +24,17 @@ fn root_case(scratch: &Scratch) -> CaseSensitivity {
         .case_sensitivity()
 }
 
-/// Whether the scratch root folds, saying so where a case is skipped for it.
+/// Whether the scratch root folds, saying so where a case is skipped for it —
+/// and failing the case on macOS, where the scratch root is expected to fold.
+#[track_caller]
 fn folds(scratch: &Scratch, case: &str) -> bool {
-    let folds = root_case(scratch) == CaseSensitivity::Insensitive;
-    if !folds {
-        eprintln!("{case}: skipped, the scratch root does not fold case");
-    }
-    folds
+    runs_where_the_volume_folds(
+        match root_case(scratch) {
+            CaseSensitivity::Insensitive => Folding::Folded,
+            CaseSensitivity::Sensitive => Folding::Distinct,
+        },
+        case,
+    )
 }
 
 /// A respell of `note.md` to `Note.md`.

@@ -2343,6 +2343,7 @@ mod tests {
     use super::*;
     use crate::faults::Answer;
     use crate::scratch::Scratch;
+    use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
 
     /// Stage `transition` at `relative` in `scratch`'s vault under `faults`.
     fn stage_in(
@@ -2979,6 +2980,49 @@ mod tests {
         assert!(scratch.shadow_names().is_empty());
     }
 
+    /// **The bar on a create's shadow confirmation.** A shadow swapped for a
+    /// copy of its own bytes while the create makes its folders refuses the
+    /// create, and nothing is published at the name.
+    ///
+    /// The copy holds the staged content, so only its identity tells it apart.
+    /// The forbidden shape is confirming the shadow before making the folders:
+    /// the swap then lands after the confirmation, and the rename publishes a
+    /// file staging never made.
+    #[test]
+    fn a_shadow_swapped_while_a_create_makes_its_folders_refuses_the_create() {
+        let scratch = Scratch::new("write-create-shadow-swap");
+        let staged = staged_in(
+            &scratch,
+            "a/fresh.md",
+            Transition::Create { content: b"ours" },
+        );
+        let shadow = scratch
+            .shadows()
+            .directory()
+            .join(&scratch.shadow_names()[0]);
+        let mut swapped = false;
+        let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+            if window == Window::FolderMade && !swapped {
+                republish(&scratch, &shadow, b"ours");
+                swapped = true;
+            }
+        })
+        .expect_err("a create whose shadow was swapped");
+
+        assert!(swapped, "the window was never entered");
+        assert!(
+            matches!(
+                &refusal,
+                Refusal::Environment { operation, .. } if *operation == "confirming the shadow"
+            ),
+            "{refusal}"
+        );
+        assert!(
+            !scratch.exists(&scratch.at("a/fresh.md")),
+            "a file staging never made was published"
+        );
+    }
+
     /// **The bar on a create refused after making folders.** The folders it
     /// made that are still empty are removed, deepest first, and a made folder
     /// another writer put a file into stays with the file.
@@ -3213,6 +3257,37 @@ mod tests {
         );
     }
 
+    /// The same bar on a create whose exclusive rename finds the name taken
+    /// by its own after-state: the landing is found, and every folder from the
+    /// root down to it is synced, not only the one that holds it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: folders a crashed attempt made.
+    fn a_create_found_at_its_rename_syncs_every_folder_down_to_it() {
+        let scratch = Scratch::new("write-sync-raced");
+        std::fs::create_dir_all(scratch.at("a/b")).expect("folders a crash made");
+        let path = scratch.at("a/b/fresh.md");
+        let staged = staged_in(
+            &scratch,
+            "a/b/fresh.md",
+            Transition::Create { content: b"ours" },
+        );
+
+        let (found, synced) = syncs_of(|| {
+            publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+                if window == Window::Publishing {
+                    republish(&scratch, &path, b"ours");
+                }
+            })
+        });
+        assert!(matches!(found, Ok(Publication::Found(_))), "{found:?}");
+        assert_eq!(
+            synced
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            folders_of(&scratch, &["", "a", "a/b"])
+        );
+    }
+
     /// A create that makes its folders syncs each folder holding one it made,
     /// and the root holding the first.
     #[test]
@@ -3269,6 +3344,33 @@ mod tests {
                 folders_of(&scratch, &["a"])
             );
         }
+    }
+
+    /// **A removal whose folder became a file has landed.** A file standing
+    /// where a folder on the path was leaves nothing at the target's name, so
+    /// the publication finds the removal rather than refusing it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    fn a_remove_whose_folder_became_a_file_is_found() {
+        let scratch = Scratch::new("write-remove-folder-file");
+        std::fs::create_dir_all(scratch.at("a")).expect("a folder");
+        scratch.place("a/note.md", b"old");
+        let staged = staged_in(
+            &scratch,
+            "a/note.md",
+            Transition::Remove {
+                before: ContentHash::of(b"old"),
+            },
+        );
+        std::fs::remove_dir_all(scratch.at("a")).expect("a foreign removal");
+        scratch.place("a", b"a file where the folder was");
+
+        let publication = publish_in(&scratch, staged, Faults::NONE, &mut |_| {})
+            .expect("a removal whose folder became a file");
+        let Publication::Found(found) = publication else {
+            panic!("a removal nothing made was reported written: {publication:?}");
+        };
+        assert!(matches!(found.after, AfterState::Absent));
     }
 
     /// **A removal that finds its target gone at the unlink has been landed by
@@ -3460,16 +3562,22 @@ mod tests {
     /// first step landed, the answer is interrupted, carrying that drift.
     ///
     /// Runs where the scratch root folds case; elsewhere a respell refuses
-    /// before either step.
+    /// before either step, so the case skips — and fails on macOS, where the
+    /// scratch root is expected to fold.
     #[test]
     fn a_respell_whose_content_reverts_between_its_steps_is_interrupted_by_drift() {
         let scratch = Scratch::new("write-respell-revert");
-        if crate::PathNormalizer::detect(&scratch.at(""))
+        let folding = match crate::PathNormalizer::detect(&scratch.at(""))
             .expect("the scratch root's case behavior")
             .case_sensitivity()
-            != crate::CaseSensitivity::Insensitive
         {
-            eprintln!("skipped: the scratch root does not fold case");
+            crate::CaseSensitivity::Insensitive => Folding::Folded,
+            crate::CaseSensitivity::Sensitive => Folding::Distinct,
+        };
+        if !runs_where_the_volume_folds(
+            folding,
+            "a_respell_whose_content_reverts_between_its_steps_is_interrupted_by_drift",
+        ) {
             return;
         }
         let path = scratch.place("note.md", b"old");
