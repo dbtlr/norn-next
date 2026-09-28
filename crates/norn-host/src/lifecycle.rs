@@ -9423,10 +9423,8 @@ mod tests {
             Roots::Created(&[(&name, root.as_path())]),
             1,
         ));
-        for name in [&name] {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
-            wait_for_state(&host, name, TrustState::Ready);
-        }
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
 
         let asking = Arc::clone(&host);
         let asked = name.clone();
