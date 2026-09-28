@@ -882,8 +882,9 @@ fn judge_respell(
 
 /// Write `content` into a fresh shadow and get it onto the disk.
 ///
-/// A failure after the shadow exists removes it, so a staging refusal leaves
-/// nothing in the home.
+/// A failure after the shadow exists removes it while its name still means the
+/// file made here, so a staging refusal leaves nothing in the home; where the
+/// file cannot even be identified, the empty shadow is left to the home's sweep.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn stage_shadow(
     at: &StageAt<'_>,

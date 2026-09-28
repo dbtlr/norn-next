@@ -1489,15 +1489,6 @@ mod tests {
         }
     }
 
-    /// **An empty unreached table means the production path carries the arms.**
-    ///
-    /// The table's rows leave by a carrier arriving, so a table that emptied is
-    /// a table whose obligations moved into [`REQUIRED_CASES`] — met over a real
-    /// backend rather than over the fake entry operations a host is generic
-    /// over. Rows deleted without their carriers arriving would empty it too,
-    /// and read as "every arm is carried" while nothing had changed. So the two
-    /// facts are asserted together: the table is empty only while the
-    /// trust-transition suite holds cases in a real-watcher lane.
     /// A lane that asks only something of the filesystem carries nothing at the
     /// production path, however it narrows where its case is covered.
     #[test]
@@ -1509,6 +1500,15 @@ mod tests {
         assert!(Lane::RealWatcherBackendDecides.needs_real_watcher());
     }
 
+    /// **An empty unreached table means the production path carries the arms.**
+    ///
+    /// The table's rows leave by a carrier arriving, so a table that emptied is
+    /// a table whose obligations moved into [`REQUIRED_CASES`] — met over a real
+    /// backend rather than over the fake entry operations a host is generic
+    /// over. Rows deleted without their carriers arriving would empty it too,
+    /// and read as "every arm is carried" while nothing had changed. So the two
+    /// facts are asserted together: the table is empty only while the
+    /// trust-transition suite holds cases in a real-watcher lane.
     #[test]
     fn an_empty_unreached_table_stands_on_production_carriers() {
         if !UNREACHED_ARMS.is_empty() {
