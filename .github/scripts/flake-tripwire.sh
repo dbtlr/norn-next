@@ -17,6 +17,13 @@
 # A failure that matches nothing is recorded too, as the new failure it is.
 # Silence would otherwise read the same as a run nobody scanned.
 #
+# **Which bound a failed wait breached is named apart**, whether or not a
+# ledger entry matched, because the two are different claims with different
+# dispositions. A probe-bound breach is one evaluation that took longer than
+# its bound: a reading of the runner, which was not scheduled for that long. A
+# work-bound breach is a condition that never held while every probe answered
+# inside its bound: a reading of the subject.
+#
 # usage: flake-tripwire.sh <command> [argument...]
 
 set -uo pipefail
@@ -95,6 +102,62 @@ matches=$(awk -v output="$log" '
   END { flush() }
 ' "$ledger")
 
+# The phrases `norn-testkit`'s wait module renders for each bound, and for no
+# other: a probe-bound breach says `waiting for <what> stopped at probe <n>,
+# which took <d> and passed its <d> probe bound <d> into a <d> work bound`, and
+# a work-bound breach says `waiting for <what> passed its <d> work bound after
+# <d> and <n> probes`. A bare `probe bound` is not the phrase, because the wait
+# module's own assertions say it about waits that breached nothing. The probe
+# phrase is also the signature of the ledger's class-a-probe-bound entry.
+probe_bound_phrase="stopped at probe"
+work_bound_phrase="work bound after"
+
+# The lines of the run that carry `phrase`, read the way a signature is: a line
+# reporting a test that passed or was skipped is not scanned.
+lines_carrying() {
+  awk -v phrase="$1" '
+    /^[ \t]*test .+ [.][.][.] (ok|ignored)/ { next }
+    index($0, phrase) > 0 { print }
+  ' "$log"
+}
+
+# One job-summary block per bound a failed wait breached, naming what that
+# breach is a reading of and the lines that say so.
+name_the_breached_bounds() {
+  local starved elapsed line
+  starved=$(lines_carrying "$probe_bound_phrase")
+  elapsed=$(lines_carrying "$work_bound_phrase")
+  if [ -n "$starved" ]; then
+    {
+      echo
+      echo "### Flake tripwire: a probe bound was breached"
+      echo
+      echo "One evaluation of a wait's condition took longer than its probe bound. A probe"
+      echo "takes a reading and returns, so this is a reading of the runner rather than the"
+      echo "product: the process was not scheduled for that long. The run is a non-qualifying"
+      echo "evidence source on its own timing, and a rerun of it is deliberate and recorded."
+      echo
+      while IFS= read -r line; do
+        echo "- **line**: \`${line}\`"
+      done <<< "$starved"
+    } >> "$summary"
+  fi
+  if [ -n "$elapsed" ]; then
+    {
+      echo
+      echo "### Flake tripwire: a work bound was breached"
+      echo
+      echo "A wait's condition never held inside its work bound, and every probe it made"
+      echo "answered inside its probe bound. This is a reading of the subject rather than a"
+      echo "starved runner, and under a class-A ledger entry it reopens that ruling."
+      echo
+      while IFS= read -r line; do
+        echo "- **line**: \`${line}\`"
+      done <<< "$elapsed"
+    } >> "$summary"
+  fi
+}
+
 if [ -z "$matches" ]; then
   {
     echo
@@ -106,6 +169,7 @@ if [ -z "$matches" ]; then
     echo "- run: ${run}"
   } >> "$summary"
   echo "::notice title=Flake tripwire::this failure matched no ledgered signature, so it is a new one."
+  name_the_breached_bounds
   exit "$status"
 fi
 
@@ -127,5 +191,7 @@ while IFS=$'\t' read -r id signature class seen disposition matched; do
     echo "before rerunning: the ledger entry says what a recurrence means."
   } >> "$summary"
 done <<< "$matches"
+
+name_the_breached_bounds
 
 exit "$status"

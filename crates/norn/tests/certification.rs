@@ -1386,6 +1386,158 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
     }
 }
 
+/// **A starved probe is named as a probe-bound breach and meets its class-A
+/// entry.**
+///
+/// A probe-bound breach is a reading of the runner rather than of the product:
+/// one evaluation that took longer than its bound says the process was not
+/// scheduled for that long. The ruling makes such a run a non-qualifying
+/// evidence source on its own timing, and the record of that is the tripwire's
+/// to write, so a rerun of it is deliberate rather than quiet.
+///
+/// The failure is the one CI produced on 2026-09-28, rendered by the wait
+/// module itself, so the ledger's signature and the tripwire's reading are held
+/// to the text a starved wait really prints rather than to a copy of it.
+#[test]
+#[cfg(unix)]
+fn a_starved_probe_is_named_as_a_probe_bound_breach_and_meets_its_class_a_entry() {
+    let root = workspace_root();
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "flake-tripwire-probe",
+    )
+    .expect("a sandbox for the tripwire");
+    let starved = wait_failure(
+        norn_testkit::wait::FailureKind::ProbeOverran {
+            took: std::time::Duration::from_micros(255_400),
+        },
+        std::time::Duration::from_millis(3_880),
+        78,
+    );
+    assert!(
+        starved.contains(
+            "stopped at probe 78, which took 255.4ms and passed its 250ms probe bound 3.88s into \
+             a 900s work bound"
+        ),
+        "the wait module no longer renders a probe-bound breach the way CI recorded it: {starved}"
+    );
+
+    let (status, summary, annotations) = tripwire_over(
+        &sandbox,
+        &root,
+        "probe-bound",
+        &failed_run(
+            "a_walk_that_refuses_leaves_the_findings_in_its_scope_standing",
+            &starved,
+        ),
+    );
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    assert!(
+        annotations.contains(&format!("Ledgered flake recurred: {PROBE_BOUND_ENTRY}")),
+        "a starved probe recurred and the run carries no annotation naming \
+         `{PROBE_BOUND_ENTRY}`: {annotations}"
+    );
+    assert!(
+        summary.contains("a probe bound was breached"),
+        "a starved probe recurred and the job summary does not name the bound it breached: \
+         {summary}"
+    );
+    assert!(
+        !summary.contains("a work bound was breached"),
+        "a probe-bound breach was named as a work-bound one: {summary}"
+    );
+}
+
+/// **A work-bound breach is named as one, and is never read as a starved
+/// probe.**
+///
+/// A wait that passed its work bound answered every probe inside its probe
+/// bound: the runner was scheduled and the condition still never held. That is
+/// a claim about the subject, and under a class-A entry it reopens the ruling,
+/// so a tripwire that filed it with the starved probes would excuse exactly the
+/// failure the ruling keeps open.
+#[test]
+#[cfg(unix)]
+fn a_work_bound_breach_is_named_as_one_and_never_read_as_a_starved_probe() {
+    let root = workspace_root();
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "flake-tripwire-work",
+    )
+    .expect("a sandbox for the tripwire");
+    let elapsed = wait_failure(
+        norn_testkit::wait::FailureKind::Elapsed,
+        std::time::Duration::from_secs(900),
+        3_600,
+    );
+
+    let (status, summary, annotations) = tripwire_over(
+        &sandbox,
+        &root,
+        "work-bound",
+        &failed_run("a_case_whose_condition_never_held", &elapsed),
+    );
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    assert!(
+        !annotations.contains(PROBE_BOUND_ENTRY),
+        "a work-bound breach was reported as a starved probe: {annotations}"
+    );
+    assert!(
+        summary.contains("a work bound was breached"),
+        "a work-bound breach recurred and the job summary does not name the bound it breached: \
+         {summary}"
+    );
+    assert!(
+        !summary.contains("a probe bound was breached"),
+        "a work-bound breach was named as a probe-bound one: {summary}"
+    );
+}
+
+/// The ledger entry a probe-bound breach is matched to.
+#[cfg(unix)]
+const PROBE_BOUND_ENTRY: &str = "class-a-probe-bound";
+
+/// A failed wait on the real-watcher lease, as the wait module renders it, at
+/// the bounds the lease acquisition carries on a hosted runner.
+#[cfg(unix)]
+fn wait_failure(
+    kind: norn_testkit::wait::FailureKind,
+    elapsed: std::time::Duration,
+    probes: usize,
+) -> String {
+    norn_testkit::wait::WaitFailure {
+        what: "the real-watcher lease".to_owned(),
+        kind,
+        budget: norn_testkit::wait::Budget::new(
+            std::time::Duration::from_secs(900),
+            std::time::Duration::from_millis(250),
+        ),
+        elapsed,
+        probes,
+        last_state: "held by pid 4242 holding a lease since unix 0 for 3.8s".to_owned(),
+    }
+    .to_string()
+}
+
+/// A suite run in which `case` failed by panicking with `message`, in the
+/// shape libtest prints it.
+#[cfg(unix)]
+fn failed_run(case: &str, message: &str) -> String {
+    format!(
+        "running 1 test\ntest tests::{case} ... FAILED\n\nfailures:\n\n---- tests::{case} stdout \
+         ----\nthread 'tests::{case}' panicked at crates/norn-testkit/src/isolation.rs:298:59:\n\
+         {message}\n\nfailures:\n    tests::{case}\n\ntest result: FAILED. 0 passed; 1 failed\n"
+    )
+}
+
 /// Run the tripwire over `output` as a failing suite's own output, and hand
 /// back what the run left: its exit status, the job summary and the
 /// annotations.

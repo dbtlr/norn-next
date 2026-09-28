@@ -362,6 +362,12 @@ pub struct WaitFailure {
     pub last_state: String,
 }
 
+/// The diagnostic, which says which bound was passed in words CI reads.
+///
+/// `.github/scripts/flake-tripwire.sh` tells a probe-bound breach from a
+/// work-bound one by these renderings (`stopped at probe` and
+/// `work bound after`), and the flake ledger's class-a-probe-bound entry
+/// matches the first; `norn --test certification` holds both to this text.
 impl fmt::Display for WaitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let WaitFailure {

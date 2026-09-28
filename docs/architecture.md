@@ -2397,7 +2397,10 @@ Four contracts inside that flow carry weight:
   `.github/scripts/flake-tripwire.sh`, which matches a failing run's output against the
   ruled-on entries in `.github/flake-ledger` and writes each match into the run as an
   annotation and a job-summary block. It changes no verdict and retries nothing: what it
-  removes is the rerun that leaves a second occurrence unrecorded.
+  removes is the rerun that leaves a second occurrence unrecorded. It also names which bound a
+  failed wait breached, from the wait's own rendering: a probe-bound breach is a reading of
+  a runner that starved the probe, a non-qualifying evidence source for that run, and a
+  work-bound breach with no probe-bound breach behind it is a reading of the subject.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
   inventory of required cases and the table of trust-transition arms nothing reaches at the
   production path — empty as it stands, and kept as the shape the next one arrives in — the
