@@ -20717,11 +20717,26 @@ mod tests {
             .entries
             .get(&subject)
             .expect("the entry is served");
-        let job = {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.detach_due = true;
-            schedule(&mut state, &subject)
-        };
+        // A watcher poll holds the entry's claim and takes its coverage out
+        // while it runs, and a leg scheduled under that poll finds neither.
+        // The leg is scheduled under the lock that finds the claim free and
+        // the coverage in hand, and the claim it schedules keeps every later
+        // poll off the entry.
+        let mut schedule = Some(schedule);
+        let job = wait_until(
+            "a watcher poll to give the entry's claim and coverage back",
+            lifecycle_wait_budget(),
+            || {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if state.claim.is_held() || !state.coverage.in_hand() {
+                    return Observed::pending("the claim is held or the coverage is out");
+                }
+                state.detach_due = true;
+                let schedule = schedule.take().expect("the leg is scheduled once");
+                Observed::Met(schedule(&mut state, &subject))
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         run_job(&host.shared, job);
         assert!(
             entry
