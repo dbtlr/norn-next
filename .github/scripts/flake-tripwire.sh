@@ -135,7 +135,7 @@ elapsed=$(lines_carrying "$work_bound_phrase")
 # otherwise say so says this instead: the annotation and the summary block of
 # each wall-clock-starvation recurrence, and the probe-bound block.
 starvation_class="wall-clock starvation"
-not_cleared="This run also breached a work bound. That breach is its own reading and reopens the class-A ruling, so this run is not a non-qualifying evidence source, and a rerun does not clear it."
+not_cleared="This run breached a work bound. That breach is its own reading and reopens the class-A ruling, so this run is not a non-qualifying evidence source, and a rerun does not clear it."
 
 # One job-summary block per bound a failed wait breached, naming what that
 # breach is a reading of and the lines that say so.
