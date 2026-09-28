@@ -2356,23 +2356,30 @@ reply rides in the job. It differs from a reload where a write needs it to:
 - **Applies queue on the entry; a held claim does not refuse one.** Each entry keeps a
   first-in, first-out queue of admitted applies beside its claim. A reload refuses while the
   claim is held, but a reconcile turn holds it through much of any edit stream, so refusing
-  would hand every writer a retry. The queue's head takes the claim before any further
-  derivation: a reconcile leg consults the queue before each further turn and before each
-  hand-on, and hands the claim to the head under the held gate, as any leg giving the claim
-  back does. Applies run in the order they were admitted, so operations planned inside the
+  would hand every writer a retry. The queue goes ahead of routine derivation and of nothing
+  else: in the hold where a reconcile turn would begin — a reconcile leg's next turn, the
+  first turn an attach, a recovery, a rebuild or a maintenance scan hands on to — and where a
+  leg gives the claim back, the head takes the claim instead, under the held gate. It never
+  goes ahead of an attach, a recovery, a rebuild, a detach, or a schema reload and the turns
+  it hands on until it publishes `Ready`, because each of those owes work an apply's intake
+  does not do. Applies run in the order they were admitted, so operations planned inside the
   registration's serialization plan against a determined predecessor. The queue is the
   producer the claim's slot carrier (`crates/norn-host/src/lifecycle/claim.rs`) was kept for.
   Queued applies are demand, so no idle detach reaches their entry; an explicit reload
   refuses while any are queued, as it does while the claim is held; and `vault unregister`
   and `vault set` refuse as held while an apply is queued or running.
-- **The queue runs only where a read would be served.** The head reads the entry's stance
-  under the gate as it takes the claim, and runs only where a read would be answered or would
-  settle. Every publication of a cause admission refuses for — lost trust, damage, an attach
-  that failed, a park — and every release that leaves the entry holding nothing, a leg's
+- **The queue runs only where a read would be answered.** The head takes the claim only where
+  the entry is `Ready`, or taking in a change with a reader standing; anywhere else it leaves
+  the queue standing and the claim with the leg that holds it. The hold that ends a leg first
+  publishes any damage a read carried to the claim's end, and the rebuild it owes, before it
+  consults the queue. Every publication of a cause admission refuses for — lost trust,
+  damage, an attach that failed, a park — and every release that re-arms nothing, a leg's
   unwind cleanup and the host's destruction among them, answers every queued apply not
-  applied, with the cause it publishes, in the hold that publishes it. The warming of an
-  attach from unattached is not such a publication: it is what the queue waits behind. So no
-  apply pre-empts an owed recovery or rebuild, and none waits on an entry nothing will serve.
+  applied, with the cause it publishes, in the hold that publishes it. An idle release that
+  finishes with applies queued re-arms the attach their demand owes and keeps the queue, and
+  the warming of an attach from unattached is what the queue waits behind. So no apply
+  pre-empts an owed recovery or rebuild, none runs over a store known to be damaged, and none
+  waits on an entry nothing will serve.
 - **One snapshot, taken inside the claim.** An apply's first step derives, as its own commit
   and publishing as a reconcile turn does, the facts the watcher delivered before it. It then
   takes the request's one snapshot and plans its operations, or checks its resolved plan's
@@ -2385,7 +2392,8 @@ reply rides in the job. It differs from a reload where a write needs it to:
   intake that finds the store damaged answers the apply not applied, with the cause, and
   leaves the rebuild to run.
 - **The outcome.** `PendingApply::wait` blocks until the outcome, with no host-level bound:
-  applied; interrupted, naming the targets that landed; refused by a check, with a fresh
+  applied, which names whether its changeset committed or the entry is healing from what the
+  paths hold; interrupted, naming the targets that landed; refused by a check, with a fresh
   resolved plan, or with none where the vault's root identity does not match; not applied,
   with a lifecycle cause or the I/O failure that stopped it before any target landed; or
   unknown. Every outcome given after planning carries the resolved plan, so a caller that
@@ -2396,7 +2404,8 @@ reply rides in the job. It differs from a reload where a write needs it to:
   can drop the reply without an answer, so each apply keeps a progress record its waiter reads
   when that happens: the job sets the resolved plan in it once planning finishes, and marks it
   publishing before its first publication. Dropped before publication, the apply is not
-  applied, nothing is written, and the answer carries the cause an unanswered reload's would.
+  applied and no document is written; the answer carries the cause an unanswered reload's
+  would, and shadows it staged are left to the shadow home's sweep.
   Dropped after publication began, the outcome is unknown: it carries the resolved plan and
   says some targets may have landed, and re-sending that plan finishes them. It carries no
   landed list, because an unwind between a rename and the record's update would make one
