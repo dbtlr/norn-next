@@ -2982,7 +2982,9 @@ fn dispatch_taken_job<O: EntryOps>(
 ///
 /// - The reap schedules every due detach before it sends any. One it scheduled
 ///   and did not send stands as its entry's marker, with the gate held for it,
-///   and the retry step of this same tick sends it.
+///   and the first retry step to find room in the queue sends it: this tick's
+///   where the queue has room, and a later tick's where it is full, since a
+///   full queue refuses the retry's send and leaves the marker standing.
 /// - An unwind inside one entry's poll is caught per entry in
 ///   [`poll_watchers`], which reclaims the claim it held; the catch here
 ///   answers for the rest of that step.
@@ -12650,12 +12652,11 @@ mod tests {
     }
 
     /// Every catch site — the worker seam, the dispatcher's per-entry poll,
-    /// each step of [`dispatcher_tick`] and [`give_back`] — is
-    /// `catch_unwind`, which catches nothing
-    /// under a `panic = "abort"` profile: the process ends at the panic
-    /// instead, and every guarantee the cleanup carries goes with it. The
-    /// strategy is a build-time choice made outside this crate, so this is
-    /// where the crate says which one it is built under.
+    /// each step of [`dispatcher_tick`] and [`give_back`] — is `catch_unwind`,
+    /// which catches nothing under a `panic = "abort"` profile: the process
+    /// ends at the panic instead, and every guarantee the cleanup carries goes
+    /// with it. The strategy is a build-time choice made outside this crate, so
+    /// this is where the crate says which one it is built under.
     #[test]
     // The constant is the subject: this reads the build's own panic strategy,
     // and a profile that changed it is what makes the assertion false.
