@@ -193,10 +193,11 @@ belongs to, the capability lane a run has to schedule it in, the obligation it d
 the test that carries it and the feature that test compiles behind — and is reconciled in
 both directions against cargo's own list of what compiled: a case deleted, renamed, left
 behind a feature nothing turns on, or `#[ignore]`d fails, and so does a case a certification
-suite holds and the inventory does not name. Two lanes in it are the reason one machine
+suite holds and the inventory does not name. Three lanes in it are the reason one machine
 cannot certify the layer: a case whose required answer is the volume's own about case, and a
 case whose required refusal is the watcher backend's, are each covered only by a run of
-each. Beside the inventory is the committed table of **trust-transition arms nothing reaches
+each, and a case stated only over a volume that folds case is covered only by a run on one.
+Beside the inventory is the committed table of **trust-transition arms nothing reaches
 at the production path**, each naming what it awaits — arms nothing carries at all, and arms
 carried only against the fake entry operations a host is generic over. The reconciliation
 does not read that table: the certification suite's own unreached-arm case prints it under

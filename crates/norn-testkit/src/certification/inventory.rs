@@ -104,11 +104,17 @@ impl Suite {
 ///
 /// This is what a certification campaign reads to know a single machine cannot
 /// certify the layer: two of these lanes require the case to be *run twice*, on
-/// machines that answer differently.
+/// machines that answer differently, and one requires a run on a machine of one
+/// kind.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Lane {
     /// A filesystem and nothing else. One required outcome everywhere.
     Any,
+    /// A filesystem that folds case. The required outcome is stated over a
+    /// folding volume only, and on a case-sensitive one the carrier stands down
+    /// without asserting. **Covered only by a run on a folding volume**; a run
+    /// on a case-sensitive one passes the case and certifies nothing about it.
+    FoldingVolume,
     /// The machine's one real platform watcher, held under a cross-process
     /// lease: the case attaches a production host, so it contends with every
     /// other binary the runner started rather than only with its own threads.
@@ -130,6 +136,7 @@ impl Lane {
     pub fn name(&self) -> &'static str {
         match self {
             Lane::Any => "any",
+            Lane::FoldingVolume => "folding-volume",
             Lane::RealWatcher => "real-watcher",
             Lane::RealWatcherVolumeFoldingDecides => "real-watcher/volume-folding-decides",
             Lane::RealWatcherBackendDecides => "real-watcher/backend-decides",
@@ -580,7 +587,7 @@ pub const REQUIRED_CASES: &[Case] = &[
     Case {
         id: "induced-write-kernel-death-at-the-respell",
         suite: Suite::InducedFailure,
-        lane: Lane::Any,
+        lane: Lane::FoldingVolume,
         states: "process death at a respell's rename leaves the document under its old spelling \
                  with its bytes, on a root that folds case",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
@@ -590,7 +597,7 @@ pub const REQUIRED_CASES: &[Case] = &[
     Case {
         id: "induced-write-kernel-respell-interrupted",
         suite: Suite::InducedFailure,
-        lane: Lane::Any,
+        lane: Lane::FoldingVolume,
         states: "a respell whose rename fails after its content landed answers interrupted, naming \
                  the cause, with the new content under the old spelling, on a root that folds case",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
@@ -1409,12 +1416,13 @@ mod tests {
         );
     }
 
-    /// The two lanes a single machine cannot certify are carried by real cases.
+    /// The lanes a single machine cannot certify are carried by real cases.
     /// They are the whole reason a certification campaign is more than one run,
-    /// so a build that lost both would quietly turn the campaign into one.
+    /// so a build that lost them would quietly turn the campaign into one.
     #[test]
     fn the_platform_deciding_lanes_are_carried() {
         for lane in [
+            Lane::FoldingVolume,
             Lane::RealWatcherVolumeFoldingDecides,
             Lane::RealWatcherBackendDecides,
         ] {

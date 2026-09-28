@@ -1880,6 +1880,7 @@ fn the_inventory_reports_what_the_layer_requires() {
     }
     for lane in [
         Lane::Any,
+        Lane::FoldingVolume,
         Lane::RealWatcher,
         Lane::RealWatcherVolumeFoldingDecides,
         Lane::RealWatcherBackendDecides,
