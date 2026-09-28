@@ -12,13 +12,16 @@
 //!
 //! Some claims are checked from inside the crate rather than here, and all for
 //! the same reason: they need a stage of the protocol to fail, or a foreign
-//! writer to land in a window one call wide. Those are `src/write.rs`'s own
-//! unit tests, which reach the injection seams this file cannot — every identity
-//! confirmation, every cleanup arm, and the shadow name that is already taken.
+//! writer to land in a window one call wide inside publication. Those are
+//! `src/write.rs`'s own unit tests, which reach the injection seams this file
+//! cannot — the identity confirmation, the exclusive publication, every
+//! cleanup arm, a folder sync that fails, and the shadow name that is already
+//! taken. What lands *between* the two phases needs no seam: a case here acts
+//! between its calls to `stage` and `publish`.
 
 mod common;
 
-mod adjacent;
+mod anchoring;
 mod preconditions;
 mod publication;
 mod shadows;

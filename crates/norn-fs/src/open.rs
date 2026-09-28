@@ -51,7 +51,7 @@ pub(crate) fn anchor_flags() -> OFlags {
 }
 
 /// The flags the last component of a contained descent is opened with.
-fn regular_flags() -> OFlags {
+pub(crate) fn regular_flags() -> OFlags {
     OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK
 }
 

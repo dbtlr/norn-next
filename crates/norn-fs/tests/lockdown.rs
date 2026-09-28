@@ -1,4 +1,5 @@
-//! What a compare-and-swap publication leaves at rest when it does not finish.
+//! What a staged and published replacement leaves at rest when it does not
+//! finish.
 //!
 //! Every other suite over this crate's write protocol asks what a call
 //! *returned*. Three of the protocol's claims are not about a return value at
@@ -6,8 +7,8 @@
 //! at the stage that needs it, and a destination that moved out from under a
 //! precondition. The first of those cannot be stated by a caller — the process
 //! that meets it does not reach an assertion — so the case is two processes: a
-//! child arms one checkpoint through the environment the public entry point
-//! reads and attempts the publication, and this parent reads what is at rest
+//! child arms one checkpoint through the environment the public entry points
+//! read, stages and publishes, and this parent reads what is at rest
 //! afterwards.
 //!
 //! **The bar is the same for every checkpoint.** Whatever the child was armed
@@ -35,7 +36,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use norn_fs::{
-    ContentHash, Landed, MaintainershipKey, Placement, Precondition, Refusal, ShadowHome,
+    ContentHash, Durability, MaintainershipKey, Placement, Published, Refusal, ShadowHome, Staging,
+    Transition,
 };
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::process::{Run, RunStatus, Sandbox};
@@ -120,12 +122,17 @@ fn the_child_role_publishes_under_whatever_it_was_armed_at() {
     attested.assert_never_reached("a publication with nothing armed", &[(SEAM, WRITE_SEAM)]);
     attested.assert_reached(
         "a publication with nothing armed",
-        &[(SEAM, CHILD_SEAM), ("outcome", "written")],
+        &[
+            (SEAM, CHILD_SEAM),
+            ("outcome", "written"),
+            ("durability", "synced"),
+        ],
     );
     attested.assert_count("a publication with nothing armed", 1);
 }
 
-/// Publish through the public entry point and record what it answered.
+/// Stage and publish through the public entry points and record what they
+/// answered.
 ///
 /// The record is the child's own half of the attestation: the seam says which
 /// checkpoint the protocol reached, and this says what the call returned to a
@@ -141,20 +148,38 @@ fn publish(root: &Path) {
         _ => ContentHash::of(OLD),
     };
     let shadows = shadow_home(root);
-    let outcome = norn_fs::write(
-        &root.join("vault").join(DOCUMENT),
-        NEW,
-        Precondition::Replace(expected),
+    let vault = root.join("vault");
+    let outcome = norn_fs::stage(
+        &vault,
+        Path::new(DOCUMENT),
+        Transition::Replace {
+            before: expected,
+            content: NEW,
+        },
         &shadows,
-    );
+    )
+    .and_then(|staging| match staging {
+        Staging::Staged(staged) => norn_fs::publish(&vault, staged, &shadows).map(Some),
+        Staging::Landed(_) => Ok(None),
+    });
     record(root, &child_record(&outcome));
 }
 
 /// What the child says about a return it lived to see.
-fn child_record(outcome: &Result<Landed, Refusal>) -> String {
+fn child_record(outcome: &Result<Option<Published>, Refusal>) -> String {
     match outcome {
-        Ok(Landed::Written(_)) => format!("seam={CHILD_SEAM} outcome=written"),
-        Ok(Landed::Unchanged(_)) => format!("seam={CHILD_SEAM} outcome=unchanged"),
+        Ok(Some(published)) => match &published.durability {
+            Durability::Synced => format!("seam={CHILD_SEAM} outcome=written durability=synced"),
+            Durability::NotSynced(error) => {
+                let errno = if error.raw_os_error() == Some(libc::ENOSPC) {
+                    "ENOSPC"
+                } else {
+                    "other"
+                };
+                format!("seam={CHILD_SEAM} outcome=written durability=not-synced errno={errno}")
+            }
+        },
+        Ok(None) => format!("seam={CHILD_SEAM} outcome=landed"),
         Err(Refusal::Drifted { .. }) => format!("seam={CHILD_SEAM} outcome=drifted"),
         Err(refusal @ Refusal::Environment { .. }) => {
             let errno = if refusal.is_os_error(libc::ENOSPC) {
@@ -283,13 +308,15 @@ fn process_death_at_every_checkpoint_leaves_one_whole_document() {
 // A full disk
 // ---------------------------------------------------------------------------
 
-/// **A full disk at a staging checkpoint refuses, and publishes nothing.**
+/// **A full disk at a checkpoint before the swap refuses, and publishes
+/// nothing.**
 ///
 /// `ENOSPC` has no [`std::io::ErrorKind`] of its own, so the refusal carries the
 /// error number and the child reads its classification off that rather than off
-/// the message. Every one of these stages is before the swap, so the required
-/// outcome is one sentence: the destination is exactly what it was, and the
-/// shadow the refusal abandoned is removed on the way out.
+/// the message. The first three are staging's and the swap is publication's;
+/// every one is before the rename, so the required outcome is one sentence: the
+/// destination is exactly what it was, and the shadow the refusal abandoned is
+/// removed on the way out.
 #[test]
 fn a_full_disk_before_the_swap_refuses_and_leaves_the_destination_alone() {
     for (label, arm) in [
@@ -338,14 +365,15 @@ fn a_full_disk_before_the_swap_refuses_and_leaves_the_destination_alone() {
     }
 }
 
-/// **A full disk after the swap is not a write that did not happen.**
+/// **A full disk after the swap is not a write that did not happen, and it is
+/// not silent either.**
 ///
-/// The parent directory's fsync runs after the rename has already published the
-/// name, and this crate's protocol reports its failure nowhere: the change is at
-/// the name and every reader can see it, so a refusal would say something false
-/// about a file the caller can already read. What the bar holds is the half that
-/// is not silence — the destination holds the *complete* new document, never a
-/// prefix of it, and nothing is left staged.
+/// The folder's fsync runs after the rename has already published the name: the
+/// change is at the name and every reader can see it, so a refusal would say
+/// something false about a file the caller can already read. What the bar holds
+/// is both halves — the destination holds the *complete* new document, nothing
+/// is left staged, and the publication reports the change not synced, carrying
+/// the error number that says why.
 #[test]
 fn a_full_disk_at_the_parent_sync_leaves_the_new_document_published() {
     let tree = Tree::new("full-parent-sync");
@@ -371,7 +399,12 @@ fn a_full_disk_at_the_parent_sync_leaves_the_new_document_published() {
     );
     attested.assert_reached(
         "a full disk at the parent sync",
-        &[(SEAM, CHILD_SEAM), ("outcome", "written")],
+        &[
+            (SEAM, CHILD_SEAM),
+            ("outcome", "written"),
+            ("durability", "not-synced"),
+            ("errno", "ENOSPC"),
+        ],
     );
 }
 

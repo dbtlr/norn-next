@@ -22,7 +22,9 @@
 //! # Reaching it from outside
 //!
 //! One stage of the widening is taken and no more: under the `induced-failure`
-//! feature, [`write`](crate::write) arms itself from this process's environment
+//! feature, the write protocol's public entry points — [`stage`](crate::stage),
+//! [`publish`](crate::publish), [`confirm_landed`](crate::confirm_landed) and
+//! [`discard`](crate::discard) — arm themselves from this process's environment
 //! rather than passing [`Faults::NONE`]. That is what a lockdown suite's
 //! process-death bars need and what nothing else can give them — a stage whose
 //! required outcome is "this process does not survive here" cannot be reached
@@ -209,24 +211,25 @@ pub(crate) fn read_armed_pairs<S: PartialEq, A>(
 /// A point in the write protocol that can be made to fail.
 ///
 /// The stages are the ones whose failure has a *different* required outcome,
-/// which is what makes each of them worth naming. A failure before the swap
-/// refuses and leaves the destination alone; a failure after it has already
-/// published a name and must never read as a write that did not happen.
+/// which is what makes each of them worth naming. A failure while staging, or
+/// in publication before the rename, refuses and leaves the target alone; a
+/// failure after the rename has already published a name and must never read
+/// as a write that did not happen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stage {
-    /// Opening the shadow, or the destination of an exclusive create.
+    /// Opening a shadow, while staging.
     Create,
     /// Putting the content into it.
     Write,
     /// Getting those bytes onto the disk, before any name points at them.
     Sync,
-    /// The rename that publishes them.
+    /// The rename that publishes a create or a replace.
     Swap,
-    /// The parent directory's fsync, which happens after the name is already
-    /// live.
+    /// The target folder's fsync, which happens after the name is already
+    /// live — after a publication, and when a landing is confirmed.
     ParentSync,
-    /// Removing a shadow, or a destination a create could not finish. Injecting
-    /// here stands in for a removal the filesystem refused — the one condition
+    /// Removing a shadow a refusal or a discard abandons. Injecting here
+    /// stands in for a removal the filesystem refused — the one condition
     /// whose required behavior is to change nothing at all about the outcome.
     Cleanup,
 }
@@ -238,7 +241,8 @@ pub(crate) enum Stage {
 // set would be a different seam. The variants themselves carry no such gate:
 // the protocol names one at every stage it checks, in every build.
 impl Stage {
-    /// Every stage, in the order the replacement protocol runs them.
+    /// Every stage, in the order a replacement's staging and publication run
+    /// them.
     #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) const ALL: [Stage; 6] = [
         Stage::Create,
@@ -341,21 +345,16 @@ impl Answer {
 /// rather than races for it: the defense would otherwise be asserted instead of
 /// checked. The windows are the ones where something outside this process can
 /// make a statement the protocol is about to make untrue.
+///
+/// What lands *between* staging and publication needs no window: a case acts
+/// between its two calls. These are the windows inside publication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Window {
-    /// A replacement's precondition is satisfied and nothing is staged yet.
-    Composed,
-    /// A create has claimed its name and has not filled it.
-    Claimed,
-    /// A removal's precondition is satisfied and the bytes have not been
-    /// verified through the handle that was read.
-    Vacating,
-    /// A move's source has been read and the name has not been confirmed to
-    /// still resolve to the handle it was read through.
-    SourceRead,
-    /// A move's destination holds the document and its source has not been
-    /// removed yet.
-    BetweenLegs,
+    /// A target's bytes have been hashed through the handle that read them,
+    /// and the name has not been confirmed to still mean that file.
+    Verifying,
+    /// Every check has passed and the publication act is next.
+    Publishing,
 }
 
 /// Which stages of a write fail, and how.
@@ -371,6 +370,7 @@ pub(crate) struct Faults {
 
 impl Faults {
     /// A write that fails only where the machine makes it fail.
+    #[cfg(any(test, not(feature = "induced-failure")))]
     pub(crate) const NONE: Faults = Faults { injected: &[] };
 
     /// A write that answers each named stage the named way.

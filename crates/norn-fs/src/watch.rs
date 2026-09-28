@@ -22,7 +22,7 @@ use notify::{Config, Event, PollWatcher, RecursiveMode};
 use crate::exclusion::Exclusions;
 use crate::hash::hashed_from;
 use crate::path::{CaseSensitivity, NormalizedPath, PathError, PathNormalizer};
-use crate::write::{Landed, Moved, Vacated};
+use crate::write::{AfterState, Published};
 use crate::{Identity, PostState, path_identity};
 
 mod faults;
@@ -824,34 +824,25 @@ pub struct OwnWrites {
 }
 
 impl OwnWrites {
-    /// Records a successful publish. [`Landed::Unchanged`] records nothing.
+    /// Records a publication: a present after-state for a create or a
+    /// replace, and absence for a removal.
+    ///
+    /// **Only a [`Published`] is recorded.** A landing a re-send merely
+    /// [confirmed](crate::Confirmed) caused no filesystem event, and an entry
+    /// primed for one would absorb the next foreign change to that path — so
+    /// there is no method that takes one. A move is two publications, a create
+    /// at the destination and a removal at the source, and is recorded as the
+    /// two.
     ///
     /// `path` may be vault-relative or absolute beneath the watched vault root.
     /// An absolute path outside that root is refused as [`PathError::Absolute`].
-    pub fn landed(&self, path: &Path, landed: Landed) -> Result<(), PathError> {
+    pub fn published(&self, path: &Path, published: &Published) -> Result<(), PathError> {
         let path = self.normalize(path)?;
-        if landed.wrote() {
-            self.record(path, Expected::Present(landed.post_state()));
-        }
-        Ok(())
-    }
-
-    /// Records a successful removal, at a vault-relative or contained absolute path.
-    pub fn vacated(&self, path: &Path, vacated: Vacated) -> Result<(), PathError> {
-        let path = self.normalize(path)?;
-        let _ = vacated;
-        self.record(path, Expected::Absent);
-        Ok(())
-    }
-
-    /// Records both legs of a successful move.
-    ///
-    /// Both paths may be vault-relative or absolute beneath the watched root.
-    pub fn moved(&self, source: &Path, destination: &Path, moved: Moved) -> Result<(), PathError> {
-        let source = self.normalize(source)?;
-        let destination = self.normalize(destination)?;
-        self.record(destination, Expected::Present(moved.created));
-        self.record(source, Expected::Absent);
+        let expected = match published.after {
+            AfterState::Present(state) => Expected::Present(state),
+            AfterState::Absent => Expected::Absent,
+        };
+        self.record(path, expected);
         Ok(())
     }
 
@@ -4114,6 +4105,14 @@ mod tests {
         (scratch, ledger, recorder)
     }
 
+    /// A publication that landed durably at `after`.
+    fn published(after: AfterState) -> Published {
+        Published {
+            after,
+            durability: crate::write::Durability::Synced,
+        }
+    }
+
     #[allow(clippy::disallowed_methods)] // Test observation of the file arranged by Scratch.
     fn observed(path: &Path) -> PostState {
         let bytes = std::fs::read(path).expect("test bytes");
@@ -5256,16 +5255,6 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_outcome_never_primes_suppression() {
-        let (scratch, ledger, recorder) = own_write_harness("watch-unchanged");
-        let path = scratch.place("same.md", b"same");
-        recorder
-            .landed(&path, Landed::Unchanged(observed(&path)))
-            .unwrap();
-        assert!(ledger.lock().unwrap().entries.is_empty());
-    }
-
-    #[test]
     #[allow(clippy::disallowed_methods)] // Test arrangement for alternate absolute root spellings.
     fn own_writes_accept_an_absolute_path_under_the_canonical_root() {
         let (scratch, _ledger, mut recorder) = own_write_harness("watch-canonical-recorder");
@@ -5310,8 +5299,12 @@ mod tests {
         let (scratch, ledger, recorder) = own_write_harness("watch-latest");
         let path = scratch.place("note.md", b"before removal");
         let state = observed(&path);
-        recorder.landed(&path, Landed::Written(state)).unwrap();
-        recorder.vacated(&path, Vacated { removed: state }).unwrap();
+        recorder
+            .published(&path, &published(AfterState::Present(state)))
+            .unwrap();
+        recorder
+            .published(&path, &published(AfterState::Absent))
+            .unwrap();
         let normalized = recorder.normalize(&path).unwrap();
         assert!(matches!(
             ledger.lock().unwrap().entries[&normalized].expected,
@@ -5324,7 +5317,7 @@ mod tests {
         let (scratch, ledger, recorder) = own_write_harness("watch-unrelated");
         let path = scratch.place("ours.md", b"ours");
         recorder
-            .landed(&path, Landed::Written(observed(&path)))
+            .published(&path, &published(AfterState::Present(observed(&path))))
             .unwrap();
         let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["other.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
@@ -5421,20 +5414,18 @@ mod tests {
         assert_eq!(batch.vault_roots().len(), 1);
     }
 
+    /// A move is recorded as its two publications: the destination present
+    /// and the source absent.
     #[test]
-    fn moved_records_the_present_destination_and_absent_source() {
+    fn a_move_records_the_present_destination_and_absent_source() {
         let (scratch, ledger, recorder) = own_write_harness("watch-moved");
         let destination = scratch.place("to.md", b"moved");
         let state = observed(&destination);
         recorder
-            .moved(
-                &scratch.at("from.md"),
-                &destination,
-                Moved {
-                    created: state,
-                    vacated: state,
-                },
-            )
+            .published(&destination, &published(AfterState::Present(state)))
+            .unwrap();
+        recorder
+            .published(&scratch.at("from.md"), &published(AfterState::Absent))
             .unwrap();
         let ledger = ledger.lock().unwrap();
         assert!(matches!(
