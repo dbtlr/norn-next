@@ -28,7 +28,9 @@
 //! - **A build artifact is never executed where it lies.** [`Sandbox::install_binary`]
 //!   copies it to a private path first. A binary that a concurrent build may
 //!   rewrite is not a stable thing to exec, and the failure is a spurious one
-//!   in whichever suite happens to be running.
+//!   in whichever suite happens to be running. The copy is written by a child
+//!   process, so no fork of the test process can carry a writer to it and
+//!   make its exec fail with `ETXTBSY`.
 //! - **The direct child's peak resident set is measured**, by reaping it through
 //!   `wait4` and reading the kernel's accounting rather than sampling. This
 //!   measurement includes descendants that the child waited on. It does not
@@ -176,6 +178,19 @@ impl Sandbox {
     /// it.** The artifact is a file a concurrent build is entitled to
     /// rewrite, and executing a file while it is being written is a failure
     /// of the harness rather than of the program.
+    ///
+    /// **The copy is written by a `cp` child, and this process never holds a
+    /// writer to it.** The kernel refuses to exec a file that any process
+    /// holds open for writing, and a child forked by any thread of this
+    /// process holds every descriptor this process held at the fork until
+    /// that child execs or exits; close-on-exec does not close the gap,
+    /// because the gap ends at the exec. A test process spawns from many
+    /// threads, through this harness and around it, so a writer held here
+    /// for even the length of the copy can make the copy unexecutable for as
+    /// long as some unrelated child sits between its fork and its exec. The
+    /// `cp` child's writer is its own and is gone when it has been reaped,
+    /// and the child is a [`Run`] of this sandbox, so its wait is bounded
+    /// like every other.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: installing the artifact under test.
     pub fn install_binary(&self, source: &Path) -> io::Result<PathBuf> {
         let name = source.file_name().ok_or_else(|| {
@@ -185,7 +200,23 @@ impl Sandbox {
             )
         })?;
         let installed = self.tree.join("bin").join(name);
-        std::fs::copy(source, &installed)?;
+        // The child starts in the sandbox's work directory, so a relative
+        // source is resolved against this process's directory first.
+        let source = std::path::absolute(source)?;
+        let copied = Run::new(self, "cp")
+            .arg("--")
+            .arg(&source)
+            .arg(&installed)
+            .wait()?;
+        if copied.status != RunStatus::Exited(0) {
+            return Err(io::Error::other(format!(
+                "copying {} to {} ended {:?}: {}",
+                source.display(),
+                installed.display(),
+                copied.status,
+                copied.stderr_text().trim()
+            )));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -615,6 +646,134 @@ mod tests {
             "the copy listed: {}",
             outcome.stdout_text()
         );
+    }
+
+    /// Children forked by one thread of this process and held short of exec
+    /// until the guard drops.
+    ///
+    /// Each child keeps a copy of every descriptor this process held at its
+    /// fork, which is what any spawn in a test process holds between its fork
+    /// and its exec, `O_CLOEXEC` or not: close-on-exec closes a descriptor at
+    /// the exec, and a held child has not reached it.
+    #[cfg(target_os = "linux")]
+    struct HeldForks {
+        wait_end: libc::c_int,
+        release_end: libc::c_int,
+        pids: Vec<libc::pid_t>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl HeldForks {
+        fn new() -> Self {
+            let mut ends = [0; 2];
+            let piped = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+            assert_eq!(piped, 0, "a release pipe: {}", io::Error::last_os_error());
+            HeldForks {
+                wait_end: ends[0],
+                release_end: ends[1],
+                pids: Vec::new(),
+            }
+        }
+
+        /// Fork one child that waits for the release and then exits without
+        /// ever calling exec.
+        fn fork_one(&mut self) {
+            match unsafe { libc::fork() } {
+                0 => unsafe {
+                    // Only async-signal-safe calls between here and `_exit`: the
+                    // child of a multithreaded process may take no lock.
+                    libc::close(self.release_end);
+                    let mut byte = 0u8;
+                    libc::read(self.wait_end, (&raw mut byte).cast(), 1);
+                    libc::_exit(0);
+                },
+                -1 => panic!("fork: {}", io::Error::last_os_error()),
+                pid => self.pids.push(pid),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for HeldForks {
+        /// Closing the last release end is the release: every held child's
+        /// read then sees end of file.
+        fn drop(&mut self) {
+            unsafe { libc::close(self.release_end) };
+            for pid in &self.pids {
+                let mut status = 0;
+                unsafe { libc::waitpid(*pid, &mut status, 0) };
+            }
+            unsafe { libc::close(self.wait_end) };
+        }
+    }
+
+    /// Whether this process holds a descriptor naming anything under
+    /// `directory`.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods)] // Reads this process's own descriptor listing.
+    fn holds_a_descriptor_under(directory: &Path) -> bool {
+        let Ok(listing) = std::fs::read_dir("/proc/self/fd") else {
+            return false;
+        };
+        listing.flatten().any(|entry| {
+            std::fs::read_link(entry.path()).is_ok_and(|target| target.starts_with(directory))
+        })
+    }
+
+    /// The kernel refuses to exec a file that any process holds open for
+    /// writing, and a child forked by any thread of the installing process
+    /// holds whatever that process held at the fork. So the installed copy
+    /// is exec-safe only if this process never holds a writer to it at all:
+    /// a watcher thread forks and holds a child the moment it sees this
+    /// process holding any descriptor under the sandbox's `bin`, and the
+    /// copy must still run while that child is held.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_installed_binary_runs_while_a_child_forked_during_its_install_is_held_short_of_exec() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let sandbox = sandbox("installed-beside-a-fork");
+        let source = std::env::current_exe().expect("this suite's own executable");
+        #[allow(clippy::disallowed_methods)] // The form `/proc/self/fd` names a file by.
+        let bin = std::fs::canonicalize(sandbox.root().join("bin")).expect("the sandbox's bin");
+        {
+            // A read-only descriptor the watcher must see, so a watcher that
+            // sees nothing fails here rather than passing the case unexercised.
+            #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+            let _seen = std::fs::File::open(&bin).expect("opening the sandbox's bin");
+            assert!(
+                holds_a_descriptor_under(&bin),
+                "the watcher cannot see a descriptor this process holds under {}",
+                bin.display()
+            );
+        }
+
+        let install_returned = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let install_returned = Arc::clone(&install_returned);
+            std::thread::spawn(move || {
+                let mut held = HeldForks::new();
+                while !install_returned.load(Ordering::Acquire) {
+                    if holds_a_descriptor_under(&bin) {
+                        held.fork_one();
+                        break;
+                    }
+                }
+                held
+            })
+        };
+        let installed = sandbox.install_binary(&source);
+        install_returned.store(true, Ordering::Release);
+        let held = watcher.join().expect("the forking watcher");
+        let installed = installed.expect("installing a binary");
+
+        let outcome = Run::new(&sandbox, &installed)
+            .arg("--list")
+            .wait()
+            .expect("running the installed copy while a child forked during its install is held");
+        drop(held);
+        outcome.assert_success();
     }
 
     #[test]

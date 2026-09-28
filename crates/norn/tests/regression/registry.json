@@ -140,7 +140,7 @@
       "name": "harness-processes-are-bounded-and-exec-safe",
       "kind": "defect-class",
       "venue": 0,
-      "property": "A spawned child is bounded and its outcome is legible: output is captured up to a declared limit, an exit code and a terminating signal are reported apart, and a binary written and then executed runs from a path whose writer is closed, so an exec never races ETXTBSY.",
+      "property": "A spawned child is bounded and its outcome is legible: output is captured up to a declared limit, an exit code and a terminating signal are reported apart, and a binary written and then executed runs from a path the executing process never held a writer to, so no child forked beside the write carries that writer into an exec that races ETXTBSY.",
       "sources": ["NRN-401", "NRN-490", "NRN-471"],
       "binding": {
         "status": "bound",
