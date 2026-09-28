@@ -19098,9 +19098,11 @@ mod tests {
     /// that read takes the gate: the attach leg that published `Ready` has
     /// ended, the teardown has run to its end, and the first read's snapshot
     /// ends by hand, which hands the connection on and takes no gate. The
-    /// first read's own give-back runs once the refusal is joined: its lease
-    /// goes back from a drop, which takes the gate only where it finds the
-    /// gate free, so beside the retake it costs a round or none.
+    /// first read's hold drops once the count is read, so its rounds fall
+    /// outside the bracket: the hold's drop takes the gate to unpin, and its
+    /// lease then goes back from a drop of its own, which takes the gate
+    /// again only where it finds the gate free, so the first read costs one
+    /// round or two.
     #[test]
     fn a_refusal_under_the_gate_gives_its_lease_back_in_the_same_hold() {
         let ops = Arc::new(FakeOps::default());
