@@ -505,9 +505,9 @@ pub struct Subscription {
     control: Arc<(Mutex<SubscriptionState>, Condvar)>,
     state: Arc<Mutex<State>>,
     /// Signalled under the state lock whenever a closed batch can move: the
-    /// coalescer hands one over, a receive makes room in the delivery slot, a
-    /// closing heal window takes the batch waiting unplaced, or the
-    /// subscription is dropped.
+    /// coalescer hands one over, a receive makes room in the delivery slot or
+    /// takes the batch waiting unplaced, a closing heal window takes that
+    /// batch, or the subscription is dropped.
     handoff: Arc<Condvar>,
     wake: Option<mpsc::SyncSender<()>>,
     faults: WatchFaults,
@@ -693,6 +693,10 @@ impl Subscription {
     }
 
     /// Receive one already-settled batch without waiting.
+    ///
+    /// With no heal window open, a batch waiting for room behind an empty
+    /// delivery slot is received directly, so a receive reports no batch only
+    /// when nothing settled is left to take.
     pub fn try_recv(&self) -> Result<Option<Batch>, WatchError> {
         let received = {
             let mut state = self.state.lock().expect("watch state poisoned");
@@ -701,13 +705,26 @@ impl Subscription {
                 .as_ref()
                 .expect("subscription receiver present")
                 .try_recv();
-            if matches!(received, Ok(Ok(_))) {
-                state.settled_in_slot -= 1;
-                // The slot has room again, for a batch the coalescer is
-                // holding behind it.
-                self.handoff.notify_all();
+            match received {
+                Ok(Ok(_)) => {
+                    state.settled_in_slot -= 1;
+                    // The slot has room again, for a batch the coalescer is
+                    // holding behind it.
+                    self.handoff.notify_all();
+                    received
+                }
+                // Every batch waiting behind the slot is newer than what the
+                // slot held, so an empty slot puts it next in order. The
+                // coalescer holding it goes on once it is taken.
+                Err(mpsc::TryRecvError::Empty) if !state.healing => match state.unplaced.take() {
+                    Some(batch) => {
+                        self.handoff.notify_all();
+                        Ok(Ok(batch))
+                    }
+                    None => received,
+                },
+                _ => received,
             }
-            received
         };
         match received {
             Ok(Ok(batch)) => Ok(Some(batch)),
@@ -1924,8 +1941,8 @@ impl Drop for CoalescerExit<'_> {
 /// that meets an open window is held for it. The batch is out of the
 /// coalescer's hands the moment this takes the lock, so a closing window never
 /// waits on a consumer to make room. The coalescer then waits, releasing the
-/// lock, until a receive makes room or the closing window takes the batch;
-/// the backend callback is never held behind a slow consumer.
+/// lock, until a receive makes room or takes the batch, or the closing window
+/// takes it; the backend callback is never held behind a slow consumer.
 fn hand_over(
     state: &Mutex<State>,
     handoff: &Condvar,
@@ -1956,7 +1973,8 @@ fn hand_over(
             }
         }
         if locked.unplaced.is_none() {
-            // Taken by the heal window it was held for.
+            // Taken by the heal window it was held for, or by a receive that
+            // found the slot empty.
             return true;
         }
         locked = handoff.wait(locked).expect("watch state poisoned");
@@ -2450,18 +2468,23 @@ mod tests {
         assert_eq!(subscription.try_recv(), Ok(None));
     }
 
-    /// **A receive that empties the delivery slot lets the batch waiting
-    /// behind it in**, on a quiet tree with no later report to wake the
-    /// coalescer.
+    /// **Receiving until no batch is reported takes every settled batch**,
+    /// the one waiting behind the slot included, with no wait for the coalescer
+    /// to move it in.
     #[test]
-    fn a_receive_that_empties_the_slot_lets_the_batch_waiting_behind_it_in() {
-        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("slot-room");
+    fn receiving_until_no_batch_takes_the_batch_waiting_behind_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("slot-drained");
 
         let placed = subscription.try_recv().unwrap().expect("the placed batch");
-        let held = received(&subscription, "the batch waiting behind the slot");
+        let held = subscription
+            .try_recv()
+            .unwrap()
+            .expect("the batch waiting behind the slot");
 
         assert!(names(&placed, "placed.md"), "{placed:?}");
         assert!(names(&held, "held.md"), "{held:?}");
+        assert_eq!(subscription.try_recv(), Ok(None));
+        assert!(!subscription.holds_a_settled_batch());
     }
 
     /// **Closing a heal with no window open returns at once**, and takes
