@@ -3277,7 +3277,13 @@ mod tests {
     fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path, hits: &Path) {
         let already_reported = open_a_heal_window(subscription);
         std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change the heal window is open across");
-        wait_for_the_window_to_take_up(label, subscription, hits, TAKEN_UP, &already_reported);
+        wait_for_the_window_to_take_up(
+            label,
+            &subscription.state,
+            hits,
+            TAKEN_UP,
+            &already_reported,
+        );
         subscription
             .finish_heal()
             .expect("the heal window closes over live coverage");
@@ -3334,7 +3340,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
     fn wait_for_the_window_to_take_up(
         label: &str,
-        subscription: &Subscription,
+        state: &Mutex<State>,
         hits: &Path,
         named: &str,
         already_reported: &BTreeSet<RescanScope>,
@@ -3349,7 +3355,7 @@ mod tests {
                      was spent inside the window rather than past it: {}",
                     recorded(hits)
                 );
-                let state = subscription.state.lock().expect("watch state poisoned");
+                let state = state.lock().expect("watch state poisoned");
                 let Some(pending) = state.pending.as_ref() else {
                     return norn_testkit::wait::Observed::Pending("nothing taken up".to_string());
                 };
@@ -3620,7 +3626,7 @@ mod tests {
                 .expect("a change the heal window is open across");
             wait_for_the_window_to_take_up(
                 label,
-                &subscription,
+                &subscription.state,
                 &hits,
                 "healed",
                 &already_reported,
@@ -3659,6 +3665,74 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// **The first heal window stays open to the arm while its close waits out
+    /// a suppression.** A delivery arriving during that wait belongs to the
+    /// heal, so an arm that answered it would be absorbed by the heal instead
+    /// of standing in place of a change the consumer meets.
+    ///
+    /// Suppression takes the own-write ledger's lock, so holding that lock
+    /// pins the coalescer inside it and keeps the closing heal waiting.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_waiting_out_a_suppression_leaves_the_stream_arm_owed() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-stream-closing-heal");
+        let (subscription, _lease) = established_past_the_boundary(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+        );
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let suppression = ledger.lock().unwrap();
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until(
+            "the coalescer to take the batch up",
+            watch_budget(),
+            || {
+                if subscription.state.lock().unwrap().closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is not suppressing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let already_reported = open_a_heal_window(&subscription);
+        let state = subscription.state.clone();
+
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let healed = subscription.finish_heal();
+            let _ = done.send((subscription, healed));
+        });
+        // The grace in which the closing heal reaches its wait. It decides only
+        // how surely an arm made eligible before the wait is caught, never
+        // whether a heal that keeps it ineligible passes.
+        let early = finished.recv_timeout(watch_budget().probe());
+        assert!(
+            early.is_err(),
+            "the heal closed while a batch was being suppressed"
+        );
+        std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change during the closing heal");
+        wait_for_the_window_to_take_up("polling", &state, &hits, TAKEN_UP, &already_reported);
+        // Released before the heal is read: the heal waits on the coalescer
+        // this lock pins.
+        drop(suppression);
+        let (_subscription, healed) = finished
+            .recv_timeout(watch_budget().work())
+            .expect("the heal to close once suppression finished");
+
+        let healed = healed.unwrap();
+        assert!(names(&healed, "suppressing.md"), "{healed:?}");
+        assert!(names(&healed, TAKEN_UP), "{healed:?}");
+        assert!(healed.rescans().is_empty(), "{healed:?}");
+        assert!(
+            std::fs::metadata(&hits).is_err(),
+            "the stream arm answered a delivery the closing heal took: {}",
+            recorded(&hits)
+        );
     }
 
     /// **An armed stream failure is the last thing the subscription carries.**
