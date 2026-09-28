@@ -1537,7 +1537,7 @@
       "name": "one-snapshot-per-request",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A request acquires exactly one substrate snapshot, and snapshots_opened reads one. An apply takes that snapshot while it holds its entry's claim, after the facts delivered before it are derived. No commit lands in its registration's store between that snapshot and the apply's changeset, so the changeset builds on exactly the state the verb planned or checked against. The plan carries the states and conditions that snapshot showed, and the applier checks them rather than re-reading them.",
+      "property": "A request acquires exactly one substrate snapshot, and snapshots_opened reads one. An apply takes that snapshot while it holds its entry's claim, after the facts delivered before it are derived. No commit lands in its registration's store between that snapshot and the apply's changeset, so the changeset builds on exactly the state the verb planned or checked against. The states and conditions the applier checks come from planning, and are never re-derived at apply: for operations, the ones that snapshot showed; for a resolved plan, the ones its preview recorded, which the applier checks against that snapshot and the files.",
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",

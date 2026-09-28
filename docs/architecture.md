@@ -2345,35 +2345,53 @@ the snapshot a planner read through
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
 reply rides in the job. It differs from a reload where a write needs it to:
 
-- **Admission is a read's.** `Host::apply` admits an apply the way the read seam admits a
-  read. Its hold is demand, raising the attach or recovery the entry owes under ADR 0030's
-  chain. A park, withheld trust or an unknown vault refuses at once with the code a read
-  would carry. An entry that settles is waited for up to the same settle bound, past which the
-  apply refuses as a read does and nothing is written. So a write meets no lifecycle stance a
-  read does not also meet. Admission returns a `PendingApply` once the apply is queued; the
-  host call blocks no longer than admission.
+- **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
+  raises, under ADR 0030's chain, and refuses at once with the code a read would carry where
+  the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
+  unknown vault, or a registration change holding the entry. Everywhere else it queues the
+  apply at once and returns a `PendingApply`, with no settle wait: over an entry taking in a
+  change, the apply's own intake derives those facts; over an entry that is unattached, or
+  attaching from unattached, the apply queues behind the attach, so a write never refuses
+  because its vault went idle. The host call blocks no longer than admission.
 - **Applies queue on the entry; a held claim does not refuse one.** Each entry keeps a
   first-in, first-out queue of admitted applies beside its claim. A reload refuses while the
   claim is held, but a reconcile turn holds it through much of any edit stream, so refusing
-  would hand every writer a retry. When a leg gives the claim back, the queue's head takes it
-  before any further derivation, and applies run in the order they were admitted, so
-  operations planned inside the registration's serialization plan against a determined
-  predecessor. The queue is the producer the claim's slot carrier
-  (`crates/norn-host/src/lifecycle/claim.rs`) was kept for. Queued applies are demand, so no
-  idle detach reaches their entry, and an explicit reload refuses while any are queued, as it
-  does while the claim is held.
-- **One snapshot, taken inside the claim.** An apply's first step derives, as its own commit,
-  the facts the watcher delivered before it. It then takes the request's one snapshot and
-  plans its operations, or checks its resolved plan's conditions, against it. No commit lands
-  in the registration's store between that snapshot and the apply's changeset, so the
-  changeset builds on exactly the state the apply read. A preview takes its one snapshot the
-  ordinary way and takes no claim. An intake that finds the store damaged answers the apply
-  not applied, with the cause, and leaves the rebuild to run; the apply does not wait for it.
+  would hand every writer a retry. The queue's head takes the claim before any further
+  derivation: a reconcile leg consults the queue before each further turn and before each
+  hand-on, and hands the claim to the head under the held gate, as any leg giving the claim
+  back does. Applies run in the order they were admitted, so operations planned inside the
+  registration's serialization plan against a determined predecessor. The queue is the
+  producer the claim's slot carrier (`crates/norn-host/src/lifecycle/claim.rs`) was kept for.
+  Queued applies are demand, so no idle detach reaches their entry; an explicit reload
+  refuses while any are queued, as it does while the claim is held; and `vault unregister`
+  and `vault set` refuse as held while an apply is queued or running.
+- **The queue runs only where a read would be served.** The head reads the entry's stance
+  under the gate as it takes the claim, and runs only where a read would be answered or would
+  settle. Every publication of a cause admission refuses for — lost trust, damage, an attach
+  that failed, a park — and every release that leaves the entry holding nothing, a leg's
+  unwind cleanup and the host's destruction among them, answers every queued apply not
+  applied, with the cause it publishes, in the hold that publishes it. The warming of an
+  attach from unattached is not such a publication: it is what the queue waits behind. So no
+  apply pre-empts an owed recovery or rebuild, and none waits on an entry nothing will serve.
+- **One snapshot, taken inside the claim.** An apply's first step derives, as its own commit
+  and publishing as a reconcile turn does, the facts the watcher delivered before it. It then
+  takes the request's one snapshot and plans its operations, or checks its resolved plan's
+  states and conditions, against it and the files. No commit lands in the registration's
+  store between that snapshot and the apply's changeset, so the changeset builds on exactly
+  the state the apply read. From planning to its changeset the entry stays `Ready`, as it does
+  under maintenance, because an in-flight write must not serialize the read surface: a read
+  meanwhile answers the state before the apply, and a fact delivered meanwhile is derived by
+  the next turn. A preview takes its one snapshot the ordinary way and takes no claim. An
+  intake that finds the store damaged answers the apply not applied, with the cause, and
+  leaves the rebuild to run.
 - **The outcome.** `PendingApply::wait` blocks until the outcome, with no host-level bound:
-  applied; interrupted, with the targets that landed; refused, with a fresh resolved plan;
-  not applied, with a cause; or unknown. Client-facing timeouts are the serving layer's.
-  Dropping `PendingApply` is how a caller stops waiting: the job ignores the failed send and
-  finishes.
+  applied; interrupted, naming the targets that landed; refused by a check, with a fresh
+  resolved plan, or with none where the vault's root identity does not match; not applied,
+  with a lifecycle cause or the I/O failure that stopped it before any target landed; or
+  unknown. Every outcome given after planning carries the resolved plan, so a caller that
+  sent operations can finish an interrupted apply by re-sending it. Client-facing timeouts
+  are the serving layer's. Dropping `PendingApply` is how a caller stops waiting: the job
+  ignores the failed send and finishes.
 - **An unanswered apply is answered from its progress.** A worker unwind or a supersession
   can drop the reply without an answer, so each apply keeps a progress record its waiter reads
   when that happens: the job sets the resolved plan in it once planning finishes, and marks it
@@ -2382,16 +2400,14 @@ reply rides in the job. It differs from a reload where a write needs it to:
   Dropped after publication began, the outcome is unknown: it carries the resolved plan and
   says some targets may have landed, and re-sending that plan finishes them. It carries no
   landed list, because an unwind between a rename and the record's update would make one
-  wrong; without the plan, a caller that sent operations could not tell whether a retry
-  repeats the change.
-- **Teardown answers what has not published and lets publication finish.** A park, an
-  unregistration and the host's destruction answer every queued apply not applied at once,
-  with their own cause, and never wait for one, as no teardown waits for a read. A running
-  apply that has not begun publishing stops at its next epoch check, removes its shadows and
-  answers the same. One that has begun publishing finishes its publication and its changeset
-  before it gives the claim back: publication is a rename per staged target, and finishing it
-  leaves an applied plan where stopping would hand a routine park's caller an interrupted one
-  to re-send.
+  wrong.
+- **Teardown answers what has not published and lets publication finish.** A park and the
+  host's destruction answer every queued apply not applied at once, with their own cause, and
+  never wait for one, as no teardown waits for a read. A running apply that has not begun
+  publishing stops at its next epoch check, removes its shadows and answers the same. One that
+  has begun publishing finishes its publication and its changeset before it gives the claim
+  back: publication is a rename per staged target, and finishing it leaves an applied plan
+  where stopping would hand a routine park's caller an interrupted one to re-send.
 
 Four contracts inside that flow carry weight:
 
