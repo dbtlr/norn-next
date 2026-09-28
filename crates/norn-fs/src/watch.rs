@@ -2471,19 +2471,20 @@ mod tests {
         // A closing heal that does not wait returns inside this grace; one
         // that waits cannot return inside it at all. The grace decides only
         // how surely the first is caught, never whether the second passes.
-        assert!(
-            matches!(
-                finished.recv_timeout(watch_budget().probe()),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            ),
-            "the heal closed while the batch taken before it was being suppressed"
-        );
+        let early = finished.recv_timeout(watch_budget().probe());
+        // Released before anything is asserted: the subscription's drop joins
+        // the coalescer this lock pins.
         drop(suppression);
-        let (subscription, healed) = finished
-            .recv_timeout(watch_budget().work())
+        let returned_early = early.is_ok();
+        let (subscription, healed) = early
+            .or_else(|_| finished.recv_timeout(watch_budget().work()))
             .expect("the heal to close once suppression finished");
 
         let healed = healed.unwrap();
+        assert!(
+            !returned_early,
+            "the heal closed while the batch taken before it was being suppressed: {healed:?}"
+        );
         assert!(names(&healed, "suppressing.md"), "{healed:?}");
         assert!(!subscription.holds_a_settled_batch());
         assert_eq!(subscription.try_recv(), Ok(None));
