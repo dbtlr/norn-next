@@ -8710,8 +8710,33 @@ mod tests {
         (host, name)
     }
 
-    /// The fixture above over the named vaults and the given number of worker
-    /// slots, with the dispatcher standing down the same way.
+    /// Where the roots a test host registers stand on the filesystem.
+    enum Roots<'a> {
+        /// One root per named vault that the filesystem answers for with
+        /// nothing, which the registry reads as registrable and not yet
+        /// present.
+        Absent(&'a [&'a VaultName]),
+        /// The root given for each named vault, created before the host reads
+        /// the registry.
+        Created(&'a [(&'a VaultName, &'a std::path::Path)]),
+    }
+
+    /// A host over `roots` with `worker_slots` workers, whose dispatcher never
+    /// ticks inside a test's own run: no ambient watcher poll, no idle reap,
+    /// and no retry of a dispatch a full queue refused.
+    ///
+    /// A caller here drives those duties itself, which is what makes the
+    /// interleaving under test the one the test set up rather than the one a
+    /// tick arrived at first. A watcher poll holds an entry's claim and its
+    /// coverage for as long as it runs, so a case that expects a reload
+    /// admitted, or reads an entry's claim, queue slot or coverage at one
+    /// instant and expects it settled, runs here and drives any poll it needs
+    /// itself.
+    ///
+    /// Standing down the dispatcher costs its other duties too, so a test
+    /// here also assumes nothing it dispatches is refused for a full queue:
+    /// the tick that would retry such a dispatch is a minute away, past any
+    /// wait budget in this suite.
     ///
     /// A vault here is a case's subject, a bystander whose state the case
     /// asserts, or an occupant of a worker slot: a job blocked on one entry is
@@ -8719,15 +8744,18 @@ mod tests {
     /// drive the window around it.
     fn host_without_ambient_polling(
         ops: Arc<FakeOps>,
-        names: &[&VaultName],
+        roots: Roots<'_>,
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = RegistryRead::from_entries(names.iter().map(|name| {
-            RegistryEntry::new(
-                (*name).clone(),
-                VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
-            )
-        }));
+        let registry = match roots {
+            Roots::Absent(names) => RegistryRead::from_entries(names.iter().map(|name| {
+                RegistryEntry::new(
+                    (*name).clone(),
+                    VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
+                )
+            })),
+            Roots::Created(roots) => registry_over_created_roots(roots),
+        };
         Host::new(
             registry,
             ops,
@@ -8751,31 +8779,17 @@ mod tests {
         Scratch::new(&format!("norn-host-{label}"))
     }
 
-    /// A host over roots the filesystem answers for. Every root is created
-    /// before the host reads the registry.
-    fn rooted_host(
-        ops: Arc<FakeOps>,
-        roots: &[(&VaultName, &std::path::Path)],
-        worker_slots: usize,
-        watch_poll_interval: Duration,
-    ) -> Host<Arc<FakeOps>> {
+    /// A registry over roots the filesystem answers for. Every root is created
+    /// before the registry is read.
+    fn registry_over_created_roots(roots: &[(&VaultName, &std::path::Path)]) -> RegistryRead {
         for (_, root) in roots {
             std::fs::create_dir_all(root).unwrap();
         }
-        let registry = RegistryRead::from_entries(roots.iter().map(|(name, root)| {
-            RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
-        }));
-        Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots,
-                watch_poll_interval,
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
+        RegistryRead::from_entries(
+            roots.iter().map(|(name, root)| {
+                RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
+            }),
         )
-        .unwrap()
     }
 
     /// A host over roots the filesystem answers for, with the dispatcher
@@ -8785,19 +8799,17 @@ mod tests {
         roots: &[(&VaultName, &std::path::Path)],
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        rooted_host(ops, roots, worker_slots, Duration::from_millis(2))
-    }
-
-    /// A host over roots the filesystem answers for, without ambient polling.
-    ///
-    /// A case that drives a watcher signal itself needs the dispatcher's own
-    /// tick out of the way: the fake holds one terminal report, and which leg
-    /// consumes it is what such a case pins.
-    fn quiet_host_over_roots(
-        ops: Arc<FakeOps>,
-        roots: &[(&VaultName, &std::path::Path)],
-    ) -> Host<Arc<FakeOps>> {
-        rooted_host(ops, roots, 2, Duration::from_secs(60))
+        Host::new(
+            registry_over_created_roots(roots),
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap()
     }
 
     /// Retarget a vault root to a symlink that resolves to itself. The identity
@@ -9418,7 +9430,15 @@ mod tests {
         ops.block_reload.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let root = scratch.root().join(name.as_str());
-        let host = one_worker_host_over(&ops, scratch.root(), &[&name]);
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            1,
+        ));
+        for name in [&name] {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
 
         let asking = Arc::clone(&host);
         let asked = name.clone();
@@ -9590,14 +9610,13 @@ mod tests {
         let base = scratch.root();
         let reloaded_root = base.join("reloaded");
         let sibling_root = base.join("sibling");
-        let host = Arc::new(rooted_host(
+        let host = Arc::new(host_without_ambient_polling(
             Arc::clone(&ops),
-            &[
+            Roots::Created(&[
                 (&reloaded, reloaded_root.as_path()),
                 (&sibling, sibling_root.as_path()),
-            ],
+            ]),
             1,
-            Duration::from_secs(60),
         ));
         let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
         wait_for_state(&host, &reloaded, TrustState::Ready);
@@ -9911,7 +9930,11 @@ mod tests {
             let root = scratch.root().join("root");
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &root)]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, &root)]),
+                2,
+            );
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let parked = park_entry(&host, &name, &root, park);
@@ -9999,7 +10022,8 @@ mod tests {
     /// none wanting attention.
     #[test]
     fn a_host_serving_nothing_rolls_up_to_nothing() {
-        let host = host_without_ambient_polling(Arc::new(FakeOps::default()), &[], 1);
+        let host =
+            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[]), 1);
         let roll_up = rolled_up(&host);
         assert_eq!(roll_up, norn_wire::RollUp::of(&[]));
         assert_eq!(roll_up.vaults(), 0);
@@ -10016,7 +10040,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[&ready, &idle, &parked, &untrusted],
+            Roots::Absent(&[&ready, &idle, &parked, &untrusted]),
             1,
         );
 
@@ -10088,12 +10112,13 @@ mod tests {
         let scratch = temp_base("doctor-sound");
         let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[
+            Roots::Created(&[
                 (&beta, &scratch.root().join("beta")),
                 (&alpha, &scratch.root().join("alpha")),
-            ],
+            ]),
+            2,
         );
         let _lease = host.demand(&alpha, AttachMode::Durable).unwrap();
         wait_for_state(&host, &alpha, TrustState::Ready);
@@ -10149,9 +10174,10 @@ mod tests {
             scratch.root().join("exposed"),
         );
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&ignoring, &ignoring_root), (&exposed, &exposed_root)],
+            Roots::Created(&[(&ignoring, &ignoring_root), (&exposed, &exposed_root)]),
+            2,
         );
         std::fs::write(ignoring_root.join(".gitignore"), "/.norn/\n").unwrap();
         *ops.advisories.lock().unwrap() = vec![falling_back()];
@@ -10217,7 +10243,11 @@ mod tests {
             scratch.root().join("covered"),
         );
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &registered)]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, &registered)]),
+            2,
+        );
         std::fs::create_dir_all(&covered).unwrap();
         std::fs::write(registered.join(".gitignore"), "notes/\n").unwrap();
         std::fs::write(covered.join(".gitignore"), "/.norn/\n").unwrap();
@@ -10679,35 +10709,6 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
     }
 
-    /// Vaults over roots of their own, each `Ready`, on a host with one worker
-    /// and no dispatcher tick of its own, so a job blocked on one entry holds
-    /// every other entry's job behind it for as long as a case drives, and no
-    /// ambient poll holds an entry a case asks a reload of.
-    #[cfg(unix)]
-    fn one_worker_host_over(
-        ops: &Arc<FakeOps>,
-        base: &std::path::Path,
-        names: &[&VaultName],
-    ) -> Arc<Host<Arc<FakeOps>>> {
-        let roots: Vec<_> = names.iter().map(|name| base.join(name.as_str())).collect();
-        let pairs: Vec<_> = names
-            .iter()
-            .copied()
-            .zip(roots.iter().map(std::path::PathBuf::as_path))
-            .collect();
-        let host = Arc::new(rooted_host(
-            Arc::clone(ops),
-            &pairs,
-            1,
-            Duration::from_secs(60),
-        ));
-        for name in names {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
-            wait_for_state(&host, name, TrustState::Ready);
-        }
-        host
-    }
-
     /// Ask `vault reload` of `name` on a thread of its own.
     fn reload_on_a_thread(
         host: &Arc<Host<Arc<FakeOps>>>,
@@ -10779,7 +10780,20 @@ mod tests {
             let holding = VaultName::new("holding").unwrap();
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+            let queued_root = scratch.root().join("queued");
+            let holding_root = scratch.root().join("holding");
+            let host = Arc::new(host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[
+                    (&queued, queued_root.as_path()),
+                    (&holding, holding_root.as_path()),
+                ]),
+                1,
+            ));
+            for name in [&queued, &holding] {
+                drop(host.demand(name, AttachMode::Durable).unwrap());
+                wait_for_state(&host, name, TrustState::Ready);
+            }
             ops.block_reload.store(true, Ordering::SeqCst);
             let held = reload_on_a_thread(&host, &holding, dry_run);
             wait_for_flag("reload_started", &ops.reload_started);
@@ -10829,7 +10843,22 @@ mod tests {
             let filling = VaultName::new("filling").unwrap();
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding, &filling]);
+            let queued_root = scratch.root().join("queued");
+            let holding_root = scratch.root().join("holding");
+            let filling_root = scratch.root().join("filling");
+            let host = Arc::new(host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[
+                    (&queued, queued_root.as_path()),
+                    (&holding, holding_root.as_path()),
+                    (&filling, filling_root.as_path()),
+                ]),
+                1,
+            ));
+            for name in [&queued, &holding, &filling] {
+                drop(host.demand(name, AttachMode::Durable).unwrap());
+                wait_for_state(&host, name, TrustState::Ready);
+            }
             ops.block_reload.store(true, Ordering::SeqCst);
             let held = reload_on_a_thread(&host, &holding, dry_run);
             wait_for_flag("reload_started", &ops.reload_started);
@@ -11700,7 +11729,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&a, &b]), 1);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
 
@@ -11725,7 +11754,11 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&a, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&a, root.as_path())]),
+            2,
+        );
 
         ops.panic_in_attach.store(true, Ordering::SeqCst);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -11880,7 +11913,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("z").unwrap();
         let bystander = VaultName::new("a").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&name, &bystander], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &bystander]), 1);
         let entry = host.shared.entries.get(&name).expect("z is registered");
 
         *ops.panic_in_attach_at.lock().unwrap() = Some(name.clone());
@@ -11951,11 +11985,10 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let ops = Arc::new(FakeOps::default());
-        let host = rooted_host(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, root_a.as_path()), (&b, root_b.as_path())],
+            Roots::Created(&[(&a, root_a.as_path()), (&b, root_b.as_path())]),
             1,
-            Duration::from_secs(60),
         );
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
@@ -12050,7 +12083,7 @@ mod tests {
     fn a_detach_panic_under_a_read_completes_the_release_with_the_reads_pin_standing() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -12094,7 +12127,7 @@ mod tests {
     fn an_attach_that_unwinds_gives_back_no_pin_it_never_took() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -13069,9 +13102,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         // Only b is attached, so the coverage the poll below reports on is b's.
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13121,9 +13155,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
@@ -13173,9 +13208,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
@@ -13235,9 +13271,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13304,9 +13341,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13366,7 +13404,11 @@ mod tests {
         let previous = scratch.root().join("previous");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -13408,7 +13450,11 @@ mod tests {
         let root = scratch.root().join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -13455,9 +13501,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13737,8 +13784,11 @@ mod tests {
         let working = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let holding_too = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding, &holding_too], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &holding, &holding_too]),
+            2,
+        );
         let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -15648,7 +15698,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let damaged = VaultName::new("damaged").unwrap();
         let sibling = VaultName::new("sibling").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&damaged, &sibling], 2);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&damaged, &sibling]), 2);
         drop(host.demand(&damaged, AttachMode::Durable).unwrap());
         drop(host.demand(&sibling, AttachMode::Durable).unwrap());
         wait_for_state(&host, &damaged, TrustState::Ready);
@@ -17278,7 +17329,11 @@ mod tests {
         let previous = scratch.root().join("previous");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         ops.block_attach.store(true, Ordering::SeqCst);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -17792,7 +17847,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("working").unwrap();
         let occupied = VaultName::new("occupied").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &occupied]),
+            1,
+        );
         drop(host.demand(&working, AttachMode::Durable).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -22010,7 +22069,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&a, &b]), 1);
         // One vault attaches at a time: the single queue slot this fixture
         // gives is the one the attaches would otherwise contend for, and a
         // send this fixture refuses waits for a tick a minute away.
@@ -22257,7 +22316,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject, &holding]), 1);
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22339,8 +22399,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &holding, &attaching]),
+            2,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22418,8 +22481,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &holding, &attaching]),
+            2,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22486,8 +22552,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let working = VaultName::new("b").unwrap();
         let waiting = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &working, &waiting], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &working, &waiting]),
+            1,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22588,7 +22657,7 @@ mod tests {
         let second_slot = VaultName::new("c").unwrap();
         let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[&working, &first_slot, &second_slot],
+            Roots::Absent(&[&working, &first_slot, &second_slot]),
             2,
         );
         let lease = host.demand(&working, AttachMode::Durable).unwrap();
@@ -22752,7 +22821,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&working, &holding]), 1);
         let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
         let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
@@ -22900,7 +22970,11 @@ mod tests {
         let first = VaultName::new("a").unwrap();
         let second = VaultName::new("b").unwrap();
         let working = VaultName::new("c").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&first, &second, &working], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&first, &second, &working]),
+            2,
+        );
         for name in [&first, &second, &working] {
             drop(host.demand(name, AttachMode::Durable).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
@@ -23118,7 +23192,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("working").unwrap();
         let occupied = VaultName::new("occupied").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &occupied]),
+            1,
+        );
         drop(host.demand(&working, AttachMode::Durable).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -23794,8 +23872,11 @@ mod tests {
             let leaving = VaultName::new("leaving").unwrap();
             let occupied = VaultName::new("occupied").unwrap();
             let after = VaultName::new("after").unwrap();
-            let host =
-                host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &occupied, &after], 1);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Absent(&[&leaving, &occupied, &after]),
+                1,
+            );
 
             // The one worker, held inside an attach: the job the demand below
             // dispatches waits in the channel for the whole of the sequence.
@@ -23870,7 +23951,11 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let leaving = VaultName::new("leaving").unwrap();
             let bystander = VaultName::new("bystander").unwrap();
-            let host = host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &bystander], 1);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Absent(&[&leaving, &bystander]),
+                1,
+            );
             let epoch = host
                 .shared
                 .entries
@@ -24511,7 +24596,7 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&vault, &link).unwrap();
             let canonical = VaultRoot::new(std::fs::canonicalize(&vault).unwrap()).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let joined = VaultName::new("joined").unwrap();
 
             let report = register(&host, &joined, &link).expect("the vault is registered");
@@ -24630,7 +24715,7 @@ mod tests {
             let sealed = scratch.root().join("sealed");
             std::fs::create_dir_all(&sealed).unwrap();
             std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("refused").unwrap();
 
             let answers = [scratch.root().join("missing"), file, sealed.clone()]
@@ -24656,7 +24741,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             ops.registry_unwritable.store(true, Ordering::SeqCst);
             let scratch = temp_base("register-unwritable");
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("joined").unwrap();
 
             let refusal = register(&host, &name, scratch.root())
@@ -24687,7 +24772,7 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let first = VaultName::new("first").unwrap();
             let second = VaultName::new("second").unwrap();
             let start = std::sync::Barrier::new(2);
@@ -24851,9 +24936,10 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, link.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, link.as_path())]),
+                2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -24884,9 +24970,10 @@ mod tests {
             let root = scratch.root().join("root");
             std::fs::create_dir_all(&root).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, root.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, root.as_path())]),
+                2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -25181,7 +25268,20 @@ mod tests {
                 let holding = VaultName::new("holding").unwrap();
                 let ops = Arc::new(FakeOps::default());
                 ops.reload_supported.store(true, Ordering::SeqCst);
-                let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+                let queued_root = scratch.root().join("queued");
+                let holding_root = scratch.root().join("holding");
+                let host = Arc::new(host_without_ambient_polling(
+                    Arc::clone(&ops),
+                    Roots::Created(&[
+                        (&queued, queued_root.as_path()),
+                        (&holding, holding_root.as_path()),
+                    ]),
+                    1,
+                ));
+                for name in [&queued, &holding] {
+                    drop(host.demand(name, AttachMode::Durable).unwrap());
+                    wait_for_state(&host, name, TrustState::Ready);
+                }
                 ops.block_reload.store(true, Ordering::SeqCst);
                 let held = reload_on_a_thread(&host, &holding, dry_run);
                 wait_for_flag("reload_started", &ops.reload_started);
@@ -25312,7 +25412,7 @@ mod tests {
         fn a_name_the_registry_file_records_is_refused_and_the_file_keeps_it() {
             let ops = Arc::new(FakeOps::default());
             let scratch = temp_base("register-recorded");
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("joined").unwrap();
             let theirs = RegistryEntry::new(
                 name.clone(),
@@ -25399,13 +25499,14 @@ mod tests {
                 VaultName::new("b").unwrap(),
                 VaultName::new("leaving").unwrap(),
             );
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[
+                Roots::Created(&[
                     (&a, root.as_path()),
                     (&b, link.as_path()),
                     (&leaving, other.as_path()),
-                ],
+                ]),
+                2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -25470,11 +25571,10 @@ mod tests {
                 VaultName::new("busy").unwrap(),
                 VaultName::new("notes").unwrap(),
             );
-            let host = rooted_host(
+            let host = host_over_roots(
                 Arc::clone(&ops),
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
-                Duration::from_millis(2),
             );
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
@@ -25528,7 +25628,11 @@ mod tests {
             let root = scratch.root().join("root");
             std::fs::create_dir_all(&root).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, root.as_path())]),
+                2,
+            );
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             refuse_root_identity(&root);
@@ -25869,7 +25973,11 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&new, &link).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, old.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, old.as_path())]),
+                2,
+            );
             record_startup(&host, &ops, &name);
             let directory = VaultRoot::new(std::fs::canonicalize(&new).unwrap()).unwrap();
 
@@ -25902,7 +26010,11 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, link.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, link.as_path())]),
+                2,
+            );
 
             let report = set(
                 &host,
@@ -26385,11 +26497,10 @@ mod tests {
                 VaultName::new("busy").unwrap(),
                 VaultName::new("notes").unwrap(),
             );
-            let host = rooted_host(
+            let host = host_over_roots(
                 Arc::clone(&ops),
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
-                Duration::from_millis(2),
             );
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
@@ -26496,9 +26607,10 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, link.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, link.as_path())]),
+                2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -26548,9 +26660,10 @@ mod tests {
                 VaultName::new("notes").unwrap(),
                 VaultName::new("other").unwrap(),
             );
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&name, root.as_path()), (&other, theirs.as_path())],
+                Roots::Created(&[(&name, root.as_path()), (&other, theirs.as_path())]),
+                2,
             );
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
