@@ -1715,29 +1715,24 @@ fn poll_subscription(
     }
 }
 
-/// How many settled batches one drain of the delivery slot takes.
-///
-/// The slot holds one batch and the coalescer needs a quiet window to settle
-/// the next, so a drain that finds this many in a row is reading a tree
-/// changing faster than the drain is worth spending time on. Stopping leaves
-/// the rest where they are, for the polling that follows.
-const HEAL_RESIDUE_LIMIT: usize = 8;
-
 /// Every batch already settled at the subscription, taken without waiting.
+///
+/// Called with a heal window open, when no batch enters the delivery slot:
+/// the drain takes what the slot held as the window opened and ends at the
+/// first receive that finds it empty.
 ///
 /// The failure comes back beside the facts rather than in place of them: a
 /// terminal watch error ends the stream, and the batches taken before it are
 /// still what the vault did. The caller decides where each of the two lands.
 fn drain_settled(subscription: &norn_fs::Subscription) -> (norn_fs::Batch, Option<WatchError>) {
     let mut settled = norn_fs::Batch::default();
-    for _ in 0..HEAL_RESIDUE_LIMIT {
+    loop {
         match subscription.try_recv() {
             Ok(Some(batch)) => settled.merge(batch),
             Ok(None) => return (settled, None),
             Err(error) => return (settled, Some(error)),
         }
     }
-    (settled, None)
 }
 
 /// Heal the whole vault at `root` into `store`, and answer the symbolic links
