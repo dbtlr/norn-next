@@ -42,19 +42,25 @@ id: class-a-recovery-handoff
 signature: recovery_handoff_reconciles_an_event_observed_during_the_heal
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17. The 15s work bound stands and is not widened or load-scaled; the host-health preflight gates the evidence instead, so a starved host is a non-qualifying evidence source. A recurrence in CI is not a starved workstation and reopens that ruling.
+disposition: Ruled 2026-08-17. The 15s work bound stands and is not widened or load-scaled; the host-health preflight gates the evidence instead, so a starved host is a non-qualifying evidence source. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
 
 id: class-a-directory-roots
 signature: directory_roots_merge_add_remove_and_rename_without_touching_siblings
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17, with class-a-recovery-handoff and on the same terms. A recurrence in CI reopens the ruling.
+disposition: Ruled 2026-08-17, with class-a-recovery-handoff and on the same terms. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
 
 id: class-a-watcher-canary
 signature: the backend reported no event for the canary itself
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI reopens the ruling.
+disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
+
+id: class-a-probe-bound
+signature: stopped at probe
+class: wall-clock starvation
+first-seen: 2026-09-21
+disposition: Opened 2026-09-21 off a hosted runner (run 35568591459), where the real-watcher lease acquisition in `crates/norn-testkit/src/isolation.rs` stopped at probe 85, which took 317.834376ms and passed its 250ms probe bound 4.288784299s into a 900s work bound. It recurred 2026-09-28 (PR #238, run 36377364917, in `a_walk_that_refuses_leaves_the_findings_in_its_scope_standing`) at probe 78, which took 255.4ms against the same 250ms bound 3.88s into the same 900s. Ruled 2026-09-21: the probe bound is not load-scaled and the work bound is not widened. Each of those probes is one non-blocking try-lock, so a probe that took 318ms is a reading of the runner rather than of the product: the process was not scheduled. The class-A disposition of 2026-08-17 extends to hosted runners on that reading: a runner that starves a probe is a non-qualifying evidence source for that run, and the evidence is the probe's own rendering of its duration and bound. The case that fails differs per run, so the signature is the phrase the wait module renders for a probe-bound breach and never for a work-bound one. A recurrence is non-qualifying on its own timing, and its rerun is deliberate and recorded here, not quiet. A work-bound breach with no probe-bound breach behind it is not this entry, and under a class-A entry it reopens that ruling.
 
 id: class-b-armed-stream-discarded-delivery
 signature: an_armed_stream_answers_nothing_for_a_delivery_that_reaches_no_batch
@@ -78,7 +84,7 @@ id: class-a-lease-changing-hands
 signature: a_queue_that_keeps_changing_hands_outlives_the_patience_bound
 class: wall-clock starvation
 first-seen: 2026-09-14
-disposition: Opened 2026-09-14 off the hosted `build and test` job (ubuntu-latest, run 34866765125, job 104052422851), where the case's own writer thread was starved: it handed the record over 269 times, and the waiter still read one holder as unchanged for 503.726504ms against a 500ms patience, so the wait ended at the patience instead of the 2s wall. The case already guards its own gaps, and the guard passed — the writer's widest measured gap was inside the patience while the waiter's observation window, which carries the probe cadence on top of the gap, was not. Ruled with the class-A entries above: the bound is not widened and the case is not load-scaled, because a patience that absorbs a starved runner no longer states the re-arm. A recurrence in CI reopens that ruling and makes the observation-window arithmetic the subject.
+disposition: Opened 2026-09-14 off the hosted `build and test` job (ubuntu-latest, run 34866765125, job 104052422851), where the case's own writer thread was starved: it handed the record over 269 times, and the waiter still read one holder as unchanged for 503.726504ms against a 500ms patience, so the wait ended at the patience instead of the 2s wall. The case already guards its own gaps, and the guard passed — the writer's widest measured gap was inside the patience while the waiter's observation window, which carries the probe cadence on top of the gap, was not. Ruled with the class-A entries above: the bound is not widened and the case is not load-scaled, because a patience that absorbs a starved runner no longer states the re-arm. It recurred 2026-09-21 in CI (PR #176, run 35668830907), where the waiter read one holder as unchanged for 501.1ms against the same 500ms patience. The patience renders as a work bound, so a recurrence is read by the bound it ended on: a recurrence that ends on a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet, as ruled 2026-09-21 under class-a-probe-bound; one that ends on the patience with no probe-bound breach behind it still reopens that ruling and makes the observation-window arithmetic the subject.
 
 id: class-c-case-only-parent-rename
 signature: a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero
