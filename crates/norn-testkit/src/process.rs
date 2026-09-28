@@ -740,7 +740,10 @@ mod tests {
     /// write is longer than a pipe holds, so when it returns the copier has
     /// read part of the source and waits on the rest: whatever a copy opens
     /// before it reads is open at that moment, whether this process makes the
-    /// copy or a child of it does, and under whatever name it is written.
+    /// copy or a child of it does, and under whatever name it is written. A
+    /// copy that refuses a pipe for its source, as `std::fs::copy` does, fails
+    /// here: a copy that cannot be held in progress cannot be read in the
+    /// middle of it.
     ///
     /// `mid_copy` is handed the pipe's write end. It must not close it, and a
     /// child it forks must, or the copy never reads to its end.
