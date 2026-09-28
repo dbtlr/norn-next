@@ -1463,6 +1463,11 @@ fn a_starved_probe_is_named_as_a_probe_bound_breach_and_meets_its_class_a_entry(
         "a run that starved a probe and breached nothing else is not named non-qualifying: {}",
         unread(&summary)
     );
+    assert!(
+        !summary.contains(NOT_CLEARED) && !annotations.contains(NOT_CLEARED),
+        "a run that breached no work bound is said to be left uncleared by one: {}",
+        unread(&summary)
+    );
 }
 
 /// **A work-bound breach is named as one, and is never read as a starved
@@ -1536,19 +1541,32 @@ fn a_work_bound_breach_is_named_as_one_and_never_read_as_a_starved_probe() {
     }
 }
 
-/// **A run that breached both bounds is recorded under both, and takes neither
-/// reading of the run.**
+/// **A run that also breached a work bound is not cleared by a starved probe,
+/// on any surface the tripwire writes.**
 ///
 /// The ruling reads a run that starved a probe as a non-qualifying evidence
-/// source, and a work-bound breach with no probe-bound breach behind it as
-/// reopening a class-A ruling. It does not say whether a probe that starved in
-/// one wait stands behind a work bound that passed in another, so a summary
-/// that called the run non-qualifying in one block and qualifying in the next
-/// would be deciding that question twice, both ways.
+/// source, and a work-bound breach as its own reading, which under a class-A
+/// entry reopens that ruling. A run that holds both is therefore not
+/// non-qualifying: the starved probe is recorded, and it does not clear the
+/// work bound passed beside it. A run whose annotation called it
+/// non-qualifying while its summary said otherwise would be read by whichever
+/// surface a person opened first, so each one is read here: every ledgered
+/// recurrence's annotation, and every block of the summary.
+///
+/// The starved probe is in a test a class-A entry names, so the entry matched
+/// by test name is held to the same reading as the one matched by the probe
+/// bound's phrase.
 #[test]
 #[cfg(unix)]
-fn a_run_that_breached_both_bounds_is_recorded_under_both_and_takes_neither_reading() {
+fn a_run_that_also_breached_a_work_bound_is_not_cleared_by_its_starved_probe() {
     let root = workspace_root();
+    let ledger =
+        std::fs::read_to_string(root.join(".github/flake-ledger")).expect("reading the ledger");
+    let named_case = ledger_entries(&ledger)
+        .into_iter()
+        .find(|fields| ledger_field(fields, "id") == NAMED_CLASS_A_ENTRY)
+        .map(|fields| ledger_field(&fields, "signature").to_owned())
+        .unwrap_or_else(|| panic!("the flake ledger holds no `{NAMED_CLASS_A_ENTRY}`"));
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "flake-tripwire-both",
@@ -1568,36 +1586,81 @@ fn a_run_that_breached_both_bounds_is_recorded_under_both_and_takes_neither_read
     );
     let output = format!(
         "{}{}",
-        failed_run("a_case_whose_probe_starved", &starved),
+        failed_run(&named_case, &starved),
         failed_run("a_case_whose_condition_never_held", &elapsed)
     );
 
-    let (status, summary, _) = tripwire_over(&sandbox, &root, "both", &output);
+    let (status, summary, annotations) = tripwire_over(&sandbox, &root, "both", &output);
     assert_eq!(
         status,
         norn_testkit::process::RunStatus::Exited(101),
         "the tripwire changed the suite's own verdict"
     );
-    for bound in ["a probe bound was breached", "a work bound was breached"] {
+
+    let recurrences: Vec<&str> = annotations
+        .lines()
+        .filter(|line| line.contains("Ledgered flake recurred"))
+        .collect();
+    for entry in [PROBE_BOUND_ENTRY, NAMED_CLASS_A_ENTRY] {
         assert!(
-            summary.contains(bound),
-            "a run that breached both bounds has no summary block saying `{bound}`: {}",
+            recurrences
+                .iter()
+                .any(|line| line.contains(&format!("Ledgered flake recurred: {entry}"))),
+            "a run that starved a probe carries no annotation naming `{entry}`: {}",
+            unread(&annotations)
+        );
+    }
+    for line in &recurrences {
+        assert!(
+            line.contains(NOT_CLEARED) && !line.contains("non-qualifying on its own timing"),
+            "a run that also breached a work bound is annotated as cleared by its starved probe: \
+             {}",
+            unread(line)
+        );
+    }
+
+    let blocks: Vec<&str> = summary.split("\n### ").skip(1).collect();
+    for heading in [
+        format!("Flake tripwire: `{PROBE_BOUND_ENTRY}` recurred"),
+        format!("Flake tripwire: `{NAMED_CLASS_A_ENTRY}` recurred"),
+        "Flake tripwire: a probe bound was breached".to_owned(),
+        "Flake tripwire: a work bound was breached".to_owned(),
+    ] {
+        assert!(
+            blocks.iter().any(|block| block.starts_with(&heading)),
+            "a run that breached both bounds has no summary block `{heading}`: {}",
             unread(&summary)
+        );
+    }
+    for block in &blocks {
+        assert!(
+            !block.contains("non-qualifying") || block.contains(NOT_CLEARED),
+            "a summary block reads a run that also breached a work bound as non-qualifying: {}",
+            unread(block)
+        );
+        assert!(
+            !block.contains("This run is a non-qualifying") && !block.contains("takes neither"),
+            "a summary block leaves open or clears a run that also breached a work bound: {}",
+            unread(block)
+        );
+        let heading = block.lines().next().unwrap_or_default();
+        let names_the_run = heading == "Flake tripwire: a probe bound was breached"
+            || heading.ends_with("` recurred");
+        assert!(
+            !names_the_run || block.contains(NOT_CLEARED),
+            "a summary block about the starved probe does not say it leaves the run uncleared: \
+             {}",
+            unread(block)
         );
     }
     assert!(
-        summary.contains("both breached") && summary.contains("not ruled"),
-        "a run that breached both bounds does not say the ruling leaves its reading open: {}",
+        blocks
+            .iter()
+            .any(|block| block.starts_with("Flake tripwire: a work bound")
+                && block.contains("reopens that ruling")),
+        "the work-bound block of a run that breached both does not say it reopens the ruling: {}",
         unread(&summary)
     );
-    for decided in ["This run is a non-qualifying", "is not a non-qualifying"] {
-        assert!(
-            !summary.contains(decided),
-            "a run that breached both bounds was read one way (`{decided}`) by a summary that \
-             records it under both: {}",
-            unread(&summary)
-        );
-    }
 }
 
 /// **A tripwire case that fails is read by the tripwire as a failure of no
@@ -1690,6 +1753,14 @@ const BOUND_PHRASES: [&str; 2] = ["stopped at probe", "work bound after"];
 /// The ledger entry a probe-bound breach is matched to.
 #[cfg(unix)]
 const PROBE_BOUND_ENTRY: &str = "class-a-probe-bound";
+
+/// A class-A entry whose signature is a test name rather than a bound's phrase.
+#[cfg(unix)]
+const NAMED_CLASS_A_ENTRY: &str = "class-a-recovery-handoff";
+
+/// What every surface of a run that also breached a work bound says of it.
+#[cfg(unix)]
+const NOT_CLEARED: &str = "this run is not a non-qualifying evidence source";
 
 /// A failed wait on the real-watcher lease, as the wait module renders it, at
 /// the bounds the lease acquisition carries on a hosted runner.

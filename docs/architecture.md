@@ -2401,9 +2401,9 @@ Four contracts inside that flow carry weight:
   failed wait breached, from the wait's own rendering: a probe-bound breach is a reading of
   a runner that starved the probe, a non-qualifying evidence source for that run, and a
   work-bound breach with no probe-bound breach behind it reopens a class-A ruling. A run
-  that breached both is recorded under both and takes neither reading, because the ruling
-  does not say whether a probe starved in one wait stands behind a work bound passed in
-  another.
+  that breached both is not cleared by its starved probe: the work-bound breach is its own
+  reading, so the run's class-A annotations and summary blocks all say it is not a
+  non-qualifying evidence source.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
   inventory of required cases and the table of trust-transition arms nothing reaches at the
   production path — empty as it stands, and kept as the shape the next one arrives in — the

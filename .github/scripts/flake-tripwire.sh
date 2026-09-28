@@ -23,8 +23,10 @@
 # its bound: a reading of the runner, which was not scheduled for that long. A
 # work-bound breach is a condition that never held, with no probe-bound breach
 # rendered behind it: that wait carries no evidence of a starved probe, so under
-# a class-A entry it reopens that ruling. A run that breached both is recorded
-# under both and takes neither reading of the run.
+# a class-A entry it reopens that ruling. A run that breached both is not
+# cleared by its starved probe: the work-bound breach is its own reading, so
+# every surface of that run, each class-A recurrence's annotation included,
+# says the run is not a non-qualifying evidence source.
 #
 # usage: flake-tripwire.sh <command> [argument...]
 
@@ -114,26 +116,31 @@ matches=$(awk -v output="$log" '
 probe_bound_phrase="stopped at probe"
 work_bound_phrase="work bound after"
 
-# The lines of the run that carry `phrase`, read the way a signature is: a line
-# reporting a test that passed or was skipped is not scanned.
+# The distinct lines of the run that carry `phrase`, read the way a signature
+# is: a line reporting a test that passed or was skipped is not scanned.
 lines_carrying() {
   awk -v phrase="$1" '
     /^[ \t]*test .+ [.][.][.] (ok|ignored)/ { next }
-    index($0, phrase) > 0 { print }
+    index($0, phrase) > 0 && !seen[$0]++ { print }
   ' "$log"
 }
 
+starved=$(lines_carrying "$probe_bound_phrase")
+elapsed=$(lines_carrying "$work_bound_phrase")
+
+# **A run that breached a work bound is not cleared by a starved probe.** The
+# work-bound breach is its own reading, and under a class-A entry it reopens
+# that ruling, so the class-A dispositions' reading of a starved probe as a
+# non-qualifying run does not hold for this one. Every surface that would
+# otherwise say so says this instead: the annotation and the summary block of
+# each wall-clock-starvation recurrence, and the probe-bound block.
+starvation_class="wall-clock starvation"
+not_cleared="This run also breached a work bound. That breach is its own reading and reopens the class-A ruling, so this run is not a non-qualifying evidence source, and a rerun does not clear it."
+
 # One job-summary block per bound a failed wait breached, naming what that
-# breach is a reading of and the lines that say so. A run that breached both
-# gets a third block and no verdict on the run from either of the first two:
-# the ruling reads a run that starved a probe as non-qualifying and a work-bound
-# breach with no probe-bound breach behind it as reopening a class-A ruling, and
-# does not say whether a probe starved in one wait stands behind a work bound
-# passed in another.
+# breach is a reading of and the lines that say so.
 name_the_breached_bounds() {
-  local starved elapsed line
-  starved=$(lines_carrying "$probe_bound_phrase")
-  elapsed=$(lines_carrying "$work_bound_phrase")
+  local line
   if [ -n "$starved" ]; then
     {
       echo
@@ -144,10 +151,12 @@ name_the_breached_bounds() {
       echo "product: the process was not scheduled for that long. A probe that breaches its"
       echo "bound run after run is the structural cost the bound exists to catch, and these"
       echo "records are what show it."
+      echo
       if [ -z "$elapsed" ]; then
-        echo
         echo "This run is a non-qualifying evidence source on its own timing, and a rerun of"
         echo "it is deliberate and recorded."
+      else
+        echo "$not_cleared"
       fi
       echo
       while IFS= read -r line; do
@@ -169,18 +178,6 @@ name_the_breached_bounds() {
       done <<< "$elapsed"
     } >> "$summary"
   fi
-  if [ -n "$starved" ] && [ -n "$elapsed" ]; then
-    {
-      echo
-      echo "### Flake tripwire: a probe bound and a work bound were both breached"
-      echo
-      echo "The ruling reads a run that starved a probe as a non-qualifying evidence source,"
-      echo "and a work-bound breach with no probe-bound breach behind it as reopening a"
-      echo "class-A ruling. Whether a probe that starved in one wait stands behind a work"
-      echo "bound passed in another is not ruled, so this run is recorded under both and"
-      echo "takes neither reading: the ledger rules on it before it is rerun."
-    } >> "$summary"
-  fi
 }
 
 if [ -z "$matches" ]; then
@@ -200,11 +197,18 @@ fi
 
 while IFS=$'\t' read -r id signature class seen disposition matched; do
   [ -n "$id" ] || continue
-  echo "::error title=Ledgered flake recurred: ${id}::${disposition}"
+  reading=$disposition
+  if [ "$class" = "$starvation_class" ] && [ -n "$elapsed" ]; then
+    reading=$not_cleared
+  fi
+  echo "::error title=Ledgered flake recurred: ${id}::${reading}"
   {
     echo
     echo "### Flake tripwire: \`${id}\` recurred"
     echo
+    if [ "$reading" != "$disposition" ]; then
+      echo "- **this run**: ${reading}"
+    fi
     echo "- **class**: ${class}"
     echo "- **first seen**: ${seen}"
     echo "- **signature**: \`${signature}\`"
