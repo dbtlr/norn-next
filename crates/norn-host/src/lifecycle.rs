@@ -8696,6 +8696,40 @@ mod tests {
         /// The root given for each named vault, created before the host reads
         /// the registry.
         Created(&'a [(&'a VaultName, &'a std::path::Path)]),
+        /// Registrations a case built itself, read as they stand: a root the
+        /// case left missing, aliased or shared stays that way.
+        Registered(&'a [RegistryEntry]),
+    }
+
+    impl Roots<'_> {
+        /// The registry a host over these roots starts from.
+        fn registry(self) -> RegistryRead {
+            match self {
+                Roots::Absent(names) => RegistryRead::from_entries(names.iter().map(|name| {
+                    RegistryEntry::new(
+                        (*name).clone(),
+                        VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
+                    )
+                })),
+                Roots::Created(roots) => registry_over_created_roots(roots),
+                Roots::Registered(registrations) => {
+                    RegistryRead::from_entries(registrations.iter().cloned())
+                }
+            }
+        }
+    }
+
+    /// The policy of a host whose dispatcher never ticks inside a test's own
+    /// run, with `worker_slots` workers: its tick, and with it every ambient
+    /// watcher poll and idle reap, is a minute away. A case whose subject is
+    /// one other field of the policy names that field over this one.
+    fn no_ambient_poll_policy(worker_slots: usize) -> LifecyclePolicy {
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(60),
+            worker_slots,
+            watch_poll_interval: Duration::from_secs(60),
+            read_settle_bound: crate::READ_SETTLE_BOUND,
+        }
     }
 
     /// A host over `roots` with `worker_slots` workers, whose dispatcher never
@@ -8724,34 +8758,15 @@ mod tests {
         roots: Roots<'_>,
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = match roots {
-            Roots::Absent(names) => RegistryRead::from_entries(names.iter().map(|name| {
-                RegistryEntry::new(
-                    (*name).clone(),
-                    VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
-                )
-            })),
-            Roots::Created(roots) => registry_over_created_roots(roots),
-        };
-        Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap()
+        Host::new(roots.registry(), ops, no_ambient_poll_policy(worker_slots)).unwrap()
     }
 
     /// A directory of one case's own, removed when the handle drops.
     ///
-    /// The roots the fixtures above name resolve to nothing, which the registry
-    /// reads as a root that is registrable and not yet present. A case whose
-    /// subject is what the registry reads off a root needs a root the
-    /// filesystem answers for, and this is where those live.
+    /// An absent root resolves to nothing, which the registry reads as a root
+    /// that is registrable and not yet present. A case whose subject is what
+    /// the registry reads off a root needs a root the filesystem answers for,
+    /// and this is where those live.
     fn temp_base(label: &str) -> Scratch {
         Scratch::new(&format!("norn-host-{label}"))
     }
@@ -10278,25 +10293,18 @@ mod tests {
         std::os::unix::fs::symlink(&shared, &alias).unwrap();
         let [alpha, beta, gone] =
             ["alpha", "beta", "gone"].map(|name| VaultName::new(name).unwrap());
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
-            RegistryEntry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
-            RegistryEntry::new(
-                gone.clone(),
-                VaultRoot::new(scratch.root().join("gone")).unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
+        let host = host_without_ambient_polling(
             Arc::new(FakeOps::default()),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+            Roots::Registered(&[
+                RegistryEntry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
+                RegistryEntry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
+                RegistryEntry::new(
+                    gone.clone(),
+                    VaultRoot::new(scratch.root().join("gone")).unwrap(),
+                ),
+            ]),
+            1,
+        );
 
         for name in [&alpha, &beta] {
             drop(host.demand(name, AttachMode::Durable).unwrap());
@@ -11379,27 +11387,7 @@ mod tests {
     fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(
-                a.clone(),
-                VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
-            ),
-            RegistryEntry::new(
-                b.clone(),
-                VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+        let host = host_without_ambient_polling(ops, Roots::Absent(&[&a, &b]), 2);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         drop(host.demand(&b, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
@@ -17429,26 +17417,14 @@ mod tests {
         let base = scratch.root();
         let healthy_root = base.join("healthy");
         let refused_root = base.join("refused");
-        std::fs::create_dir_all(&healthy_root).unwrap();
-        std::fs::create_dir_all(&refused_root).unwrap();
         let ops = Arc::new(FakeOps::default());
         let healthy = VaultName::new("healthy").unwrap();
         let refused = VaultName::new("refused").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
-            RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
-        ]);
-        let host = Host::new(
-            registry,
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+            Roots::Created(&[(&healthy, &healthy_root), (&refused, &refused_root)]),
+            2,
+        );
         let healthy_lease = host.demand(&healthy, AttachMode::Durable).unwrap();
         let refused_lease = host.demand(&refused, AttachMode::Durable).unwrap();
         wait_for_state(&host, &healthy, TrustState::Ready);
@@ -17576,19 +17552,12 @@ mod tests {
     /// under test is the one the case calls, at the moment it calls it.
     fn fixture_reaped_on_demand(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
-        let entry = RegistryEntry::new(
-            name.clone(),
-            VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
-        );
-        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
-            registry,
+            Roots::Absent(&[&name]).registry(),
             ops,
             LifecyclePolicy {
                 idle_after: Duration::ZERO,
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
+                ..no_ambient_poll_policy(1)
             },
         )
         .unwrap();
@@ -19893,25 +19862,20 @@ mod tests {
     /// read answering inside a case was woken rather than timed out.
     const LONG_SETTLE: Duration = Duration::from_secs(60);
 
-    /// The fixture without ambient polling, with the read settle bound a case
-    /// names.
+    /// One vault, `notes`, over an absent root, on a host with one worker
+    /// whose dispatcher never ticks inside a case's own run, and whose reads
+    /// settle within the bound a case names.
     fn fixture_settling_within(
         ops: Arc<FakeOps>,
         read_settle_bound: Duration,
     ) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
-        let entry = RegistryEntry::new(
-            name.clone(),
-            VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
-        );
         let host = Host::new(
-            RegistryRead::from_entries([entry]),
+            Roots::Absent(&[&name]).registry(),
             ops,
             LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound,
+                ..no_ambient_poll_policy(1)
             },
         )
         .unwrap();
@@ -20718,8 +20682,8 @@ mod tests {
         // A watcher poll holds the entry's claim and takes its coverage out
         // while it runs, and a leg scheduled under that poll finds neither.
         // The leg is scheduled under the lock that finds the claim free and
-        // the coverage in hand, and the claim it schedules keeps every later
-        // poll off the entry.
+        // the coverage in hand, and the claim it schedules keeps any poll off
+        // the entry from then until the leg runs.
         let mut schedule = Some(schedule);
         let job = wait_until(
             "a watcher poll to give the entry's claim and coverage back",
@@ -24484,17 +24448,11 @@ mod tests {
         }
 
         fn host_serving(registrations: Vec<RegistryEntry>) -> Host<Arc<FakeOps>> {
-            Host::new(
-                RegistryRead::from_entries(registrations),
+            host_without_ambient_polling(
                 Arc::new(FakeOps::default()),
-                LifecyclePolicy {
-                    idle_after: Duration::from_secs(60),
-                    worker_slots: 1,
-                    watch_poll_interval: Duration::from_secs(60),
-                    read_settle_bound: crate::READ_SETTLE_BOUND,
-                },
+                Roots::Registered(&registrations),
+                1,
             )
-            .unwrap()
         }
 
         /// A resolution answers from the set as it stands: a vault that joined
@@ -25939,17 +25897,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(registration.name.clone(), registration.clone());
-            Host::new(
-                RegistryRead::from_entries([registration.clone()]),
+            host_without_ambient_polling(
                 Arc::clone(ops),
-                LifecyclePolicy {
-                    idle_after: Duration::from_secs(60),
-                    worker_slots: 1,
-                    watch_poll_interval: Duration::from_secs(60),
-                    read_settle_bound: crate::READ_SETTLE_BOUND,
-                },
+                Roots::Registered(std::slice::from_ref(registration)),
+                1,
             )
-            .unwrap()
         }
 
         fn schema_source(path: &str) -> SchemaSource {
