@@ -3995,9 +3995,15 @@ impl<O: EntryOps> Drop for Host<O> {
         // phase here and Unattached below, once they are back. The window has a
         // reader — a demand lease holds the shared state itself, so it outlives
         // the host and reads the entry through its own handle.
+        //
+        // An entry whose gate a panic poisoned is torn down like any other,
+        // through the poison: its state is what the panicking hold left, and
+        // whatever coverage that state still holds is given back to the ops
+        // rather than left out when the host is gone. Nothing reads the entry
+        // afterwards, so the teardown releases its resources and nothing more.
         let mut releasing = Vec::new();
         for entry in self.shared.entries.snapshot() {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let mut state = entry.gate.lock_for_destruction();
             state.claim.invalidate();
             state.claim.open();
             state.pending.clear();
@@ -4048,18 +4054,12 @@ impl<O: EntryOps> Drop for Host<O> {
             // A leg that ended between the loop above and its join gave its
             // attachment back to the entry rather than to the ops, so the
             // entry is asked again for what it holds.
-            let attachment = attachment.or_else(|| {
-                entry
-                    .gate
-                    .lock()
-                    .expect("entry gate poisoned")
-                    .coverage
-                    .give_up()
-            });
+            let attachment =
+                attachment.or_else(|| entry.gate.lock_for_destruction().coverage.give_up());
             if let Some(attachment) = attachment {
                 give_back(self.shared.ops.as_ref(), entry.name(), attachment);
             }
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let mut state = entry.gate.lock_for_destruction();
             // Coverage still out with a leg is that leg's to give back, and the
             // window stays open for it: the leg reaches the same release every
             // other one does and publishes there, once the resources are back.
@@ -12131,7 +12131,8 @@ mod tests {
     /// first in the set, so a step that met its poison rather than passing it
     /// by would reach none of the others: the idle entry the reap sends a
     /// detach for, the held entry the poll reaches, and the entry whose
-    /// reload only the retry sends.
+    /// reload only the retry sends. The host is dropped over the gate still
+    /// poisoned, which its destruction reads through.
     #[test]
     fn a_poisoned_entry_gate_leaves_every_dispatcher_step_serving_the_entries_after_it() {
         let ops = Arc::new(FakeOps::default());
@@ -12160,8 +12161,7 @@ mod tests {
         }
         let answer = a_reload_left_to_the_retry(&host, &reloading);
         let polled = polls_of(&ops, &held);
-        let poisoned_entry = PoisonClearedOnDrop(host.shared.entries.get(&poisoned).unwrap());
-        poison_the_gate(&poisoned_entry.0);
+        poison_the_gate(&host.shared.entries.get(&poisoned).unwrap());
 
         dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
 
@@ -12175,18 +12175,6 @@ mod tests {
             wait_for_reload_answer(&answer),
             Ok(fake_judgment(ReloadOutcome::ConfigOnly))
         );
-    }
-
-    /// An entry whose gate's poison is cleared where this drops. A case that
-    /// poisons a gate holds one declared after its host, so the clearing runs
-    /// before the host's own drop takes every gate, whether the case passed
-    /// or unwound.
-    struct PoisonClearedOnDrop(Arc<Entry<FakeCoverage>>);
-
-    impl Drop for PoisonClearedOnDrop {
-        fn drop(&mut self) {
-            self.0.gate.clear_poison();
-        }
     }
 
     /// A refusal that finds the coverage out with a leg opens the release
@@ -14438,6 +14426,60 @@ mod tests {
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.in_hand());
+    }
+
+    /// **Destruction reads through a poisoned entry gate and releases every
+    /// entry, the poisoned one included.** The poisoned entry comes first in
+    /// the set, so a destruction that stopped at its poison would give back
+    /// neither its coverage nor the coverage of the entry after it.
+    ///
+    /// The host is dropped under `catch_unwind` on a thread that is not
+    /// unwinding, so a take that panics on the poison is caught and answered
+    /// here as a failure; the same panic from a drop on an unwinding thread
+    /// would abort the binary instead. Destruction reads through the poison
+    /// on every thread, so the case on a thread that is not unwinding stands
+    /// for both.
+    #[test]
+    fn destruction_over_a_poisoned_entry_gate_releases_every_entry_without_panicking() {
+        let ops = Arc::new(FakeOps::default());
+        let poisoned = VaultName::new("a").unwrap();
+        let bystander = VaultName::new("b").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&poisoned, &bystander]),
+            1,
+        );
+        for name in [&poisoned, &bystander] {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+        let shared = Arc::clone(&host.shared);
+        let poisoned_entry = shared.entries.get(&poisoned).unwrap();
+        let bystander_entry = shared.entries.get(&bystander).unwrap();
+        wait_for_the_attach_leg_to_end(&poisoned_entry);
+        wait_for_the_attach_leg_to_end(&bystander_entry);
+        poison_the_gate(&poisoned_entry);
+
+        let destruction = std::panic::catch_unwind(AssertUnwindSafe(move || drop(host)));
+
+        assert!(
+            destruction.is_ok(),
+            "destruction panicked on the poisoned entry gate"
+        );
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            2,
+            "destruction did not give back the coverage of both entries"
+        );
+        let bystander_state = bystander_entry.gate.lock().unwrap();
+        assert_eq!(bystander_state.trust, TrustState::Unattached);
+        assert!(!bystander_state.coverage.in_hand());
+        let poisoned_state = match poisoned_entry.gate.lock() {
+            Err(poisoned) => poisoned.into_inner(),
+            Ok(_) => panic!("the entry gate is no longer poisoned"),
+        };
+        assert_eq!(poisoned_state.trust, TrustState::Unattached);
+        assert!(!poisoned_state.coverage.in_hand());
     }
 
     /// A leg reaching for coverage another leg holds takes none, and the record

@@ -358,6 +358,20 @@ impl<T: Stanced> EntryGate<T> {
         }
     }
 
+    /// Take the gate for the host's destruction, waiting for it, and count the
+    /// take.
+    ///
+    /// **It reads through a poisoned gate on every thread**, unwinding or not.
+    /// Destruction takes every entry's gate in turn and gives back what each
+    /// holds, so a panic on one entry's poison would strand the coverage of
+    /// every entry after it and the workers destruction joins; on an unwinding
+    /// thread it would abort the process as well. What destruction writes
+    /// through the poison is read by no later holder, as with
+    /// [`EntryGate::lock_in_a_drop`].
+    pub(super) fn lock_for_destruction(&self) -> GateHold<'_, T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Take the gate where it is free, counting the take the way
     /// [`EntryGate::lock`] does. A case's probe of whether a hold stands.
     #[cfg(test)]
