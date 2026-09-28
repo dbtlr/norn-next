@@ -1223,8 +1223,16 @@ impl SkippedLinks {
 /// coordinates the lock is: the lock is keyed by sitting inside
 /// [`ConfigDirs::derived_dir`], and this is what carries that directory's own
 /// identity to a home the device comparison may place anywhere.
+///
+/// **The data base is digested at its [`canonical_spelling`].** The lock is a
+/// file the filesystem resolves, so every spelling of one data directory — a
+/// symbolic link, a `..`, a doubled separator — takes one lock; the canonical
+/// spelling is what gives them one key too, and so one fallback home that a
+/// discard under any of them reaches. A data directory already at its
+/// canonical spelling is digested as it is held. Every caller holds the lock
+/// inside that directory, so the directory stands and resolves whole.
 fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey {
-    let key = dirs.derived_key(name);
+    let key = dirs.derived_key(name, canonical_spelling);
     MaintainershipKey::new(key.channel(), key.vault(), key.data_base())
         .expect("a channel name, a vault name and a hex digest are each one path component")
 }
@@ -4250,12 +4258,21 @@ mod tests {
     /// directory's whole path; a key that dropped the data base would have two
     /// hosts running out of two data bases take two locks and resolve one
     /// fallback home — the exact sharing the key exists to prevent.
+    ///
+    /// The data base here is already at its canonical spelling, and its third
+    /// part is the digest of the data directory exactly as it is held: a data
+    /// base that needs no resolving keys what it keyed before the key was
+    /// canonical.
     #[test]
     fn the_maintainership_key_carries_the_derived_directory_s_own_coordinates() {
-        let dirs = ConfigDirs::new("/config", "/data/base").expect("two bases");
+        let f = Fixture::watcherless("maintainership-key-coordinates");
+        fs::create_dir_all(f.root.join("data")).unwrap();
+        let base = canonical_spelling(&f.root.join("data"));
+        let dirs = ConfigDirs::new(f.root.join("config"), base).expect("two bases");
+        fs::create_dir_all(dirs.data_dir()).unwrap();
         let name = VaultName::new("notes").expect("a name");
         let derived = dirs.derived_dir(&name);
-        let expected = dirs.derived_key(&name);
+        let expected = dirs.derived_key(&name, Path::to_path_buf);
 
         let key = maintainership_key(&dirs, &name);
         let parts: Vec<_> = key
@@ -4291,7 +4308,7 @@ mod tests {
         assert_eq!(
             parts[2],
             expected.data_base(),
-            "the third part is not the digest of the data base"
+            "the third part is not the digest of the data base as it is held"
         );
         assert_ne!(
             key,
@@ -4301,6 +4318,97 @@ mod tests {
             ),
             "two data bases spell one key"
         );
+    }
+
+    /// Two [`ConfigDirs`] over one data directory, reached as it is spelled,
+    /// through a symbolic link to it, through a `..` after that link, and with
+    /// a doubled separator.
+    #[cfg(unix)]
+    fn one_data_directory_spelled_four_ways(f: &Fixture) -> [ConfigDirs; 4] {
+        fs::create_dir_all(f.root.join("data")).unwrap();
+        std::os::unix::fs::symlink(f.root.join("data"), f.root.join("link")).unwrap();
+        let config = f.root.join("config");
+        let doubled = PathBuf::from(format!("{}//data", f.root.root().display()));
+        [
+            f.root.join("data"),
+            f.root.join("link"),
+            f.root.join("link/../data"),
+            doubled,
+        ]
+        .map(|data| ConfigDirs::new(&config, data).expect("two bases"))
+    }
+
+    /// **The bar on the data-base coordinate.** The maintainer lock sits inside
+    /// the derived directory, so every spelling of one data directory takes the
+    /// one lock the filesystem resolves them all to; the key the fallback home
+    /// is placed by is therefore one key across those spellings, and so is the
+    /// home.
+    ///
+    /// The forbidden shape is a key digested from the data base as a caller
+    /// spelled it. Two hosts started under two spellings then contend for one
+    /// lock and stage into two fallback homes, and a discard under either
+    /// spelling leaves the other's home behind.
+    #[cfg(unix)]
+    #[test]
+    fn every_spelling_of_one_data_base_keys_one_maintainership_and_one_fallback_home() {
+        let f = Fixture::watcherless("data-base-spellings-key");
+        let name = VaultName::new("notes").expect("a name");
+        let spellings = one_data_directory_spelled_four_ways(&f);
+        let [direct, others @ ..] = &spellings;
+
+        let key = maintainership_key(direct, &name);
+        let home = f.vault().join(norn_fs::FALLBACK).join(key.as_path());
+        for dirs in others {
+            assert_ne!(
+                dirs.data_dir().as_os_str(),
+                direct.data_dir().as_os_str(),
+                "the case spells one data directory once"
+            );
+            let theirs = maintainership_key(dirs, &name);
+            assert_eq!(
+                theirs,
+                key,
+                "{} keys another maintainership than {}",
+                dirs.data_dir().display(),
+                direct.data_dir().display()
+            );
+            assert_eq!(
+                f.vault().join(norn_fs::FALLBACK).join(theirs.as_path()),
+                home,
+                "{} resolves another fallback home",
+                dirs.data_dir().display()
+            );
+        }
+    }
+
+    /// A discard under one spelling of the data base takes the fallback home a
+    /// host running under another spelling of it staged into.
+    #[cfg(unix)]
+    #[test]
+    fn a_discard_under_one_data_base_spelling_takes_the_home_another_staged_into() {
+        let f = Fixture::watcherless("data-base-spellings-discard");
+        let name = VaultName::new("notes").expect("a name");
+        let [direct, others @ ..] = one_data_directory_spelled_four_ways(&f);
+        let home = f
+            .vault()
+            .join(norn_fs::FALLBACK)
+            .join(maintainership_key(&direct, &name).as_path());
+
+        for dirs in others {
+            fs::create_dir_all(&home).unwrap();
+            fs::write(home.join("norn-shadow-99999-1"), b"staged bytes").unwrap();
+            let spelled = dirs.data_dir().display().to_string();
+            let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+
+            ops.discard_state(&f.registration(), &[])
+                .expect("the discard went through");
+
+            assert!(
+                fs::symlink_metadata(&home).is_err(),
+                "a discard under {spelled} left the home {} staged into",
+                direct.data_dir().display()
+            );
+        }
     }
 
     #[test]
@@ -15146,18 +15254,16 @@ mod tests {
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
-            let key = dirs.derived_key(&notes());
-            let parent = f
+            let link = f
                 .vault()
                 .join(norn_fs::FALLBACK)
-                .join(key.channel())
-                .join(key.vault());
-            fs::create_dir_all(&parent).unwrap();
+                .join(maintainership_key(&dirs, &notes()).as_path());
+            let parent = link.parent().expect("the key's directory above the home");
+            fs::create_dir_all(parent).unwrap();
             let elsewhere = f.root.join("another-home");
             fs::create_dir_all(&elsewhere).unwrap();
             let foreign = elsewhere.join("norn-shadow-99999-1");
             fs::write(&foreign, b"another write's staged bytes").unwrap();
-            let link = parent.join(key.data_base());
             std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
 
             let report = unregister_once_idle(&host, &UnregisterParams::new(notes()))
@@ -15190,13 +15296,10 @@ mod tests {
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
             attach_and_idle(&host);
-            let key = dirs.derived_key(&notes());
             let home = f
                 .vault()
                 .join(norn_fs::FALLBACK)
-                .join(key.channel())
-                .join(key.vault())
-                .join(key.data_base());
+                .join(maintainership_key(&dirs, &notes()).as_path());
             fs::create_dir_all(&home).unwrap();
             let shadow = home.join("norn-shadow-99999-1");
             fs::write(&shadow, b"staged bytes").unwrap();
@@ -15238,13 +15341,10 @@ mod tests {
             let f = Fixture::watcherless("unregister-fallback-root");
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
-            let key = dirs.derived_key(&notes());
             let home = f
                 .vault()
                 .join(norn_fs::FALLBACK)
-                .join(key.channel())
-                .join(key.vault())
-                .join(key.data_base());
+                .join(maintainership_key(&dirs, &notes()).as_path());
             fs::create_dir_all(&home).unwrap();
             let other = VaultName::new("other").unwrap();
             host.vault_register(&RegisterParams::new(Registration::new(
@@ -15305,13 +15405,10 @@ mod tests {
             let f = Fixture::watcherless("unregister-fallback-recorded-root");
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
-            let key = dirs.derived_key(&notes());
             let home = f
                 .vault()
                 .join(norn_fs::FALLBACK)
-                .join(key.channel())
-                .join(key.vault())
-                .join(key.data_base());
+                .join(maintainership_key(&dirs, &notes()).as_path());
             fs::create_dir_all(&home).unwrap();
             norn_config::registry::mutate(&dirs, |registry| {
                 registry.insert(Registration::new(
@@ -15821,13 +15918,10 @@ mod tests {
             let f = Fixture::watcherless("set-into-fallback-home");
             let (host, dirs) = empty_host(&f);
             register(&host, &f.vault()).expect("the vault is registered");
-            let key = dirs.derived_key(&notes());
             let home = f
                 .vault()
                 .join(norn_fs::FALLBACK)
-                .join(key.channel())
-                .join(key.vault())
-                .join(key.data_base());
+                .join(maintainership_key(&dirs, &notes()).as_path());
             fs::create_dir_all(&home).unwrap();
             let staged = home.join("norn-shadow-99999-1");
             fs::write(&staged, b"a file in the vault moved to").unwrap();
