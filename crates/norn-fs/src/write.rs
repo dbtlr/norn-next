@@ -435,7 +435,7 @@ pub fn publish(
     staged: Staged,
     shadows: &ShadowHome,
 ) -> Result<Publication, Refusal> {
-    publish_disturbed(anchor, staged, shadows, Faults::entry(), &mut |_| {})
+    publish_disturbed(anchor, staged, shadows, Faults::publication(), &mut |_| {})
 }
 
 /// Verify a target staging found already landed, and sync its folder again.
@@ -466,7 +466,14 @@ pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refus
 /// plan-apply). Nothing outside `norn-fs` calls it until then.
 pub fn discard(staged: Staged, shadows: &ShadowHome) {
     if let Some(shadow) = staged.pending.shadow() {
-        remove_shadow(shadows, shadow, Faults::entry());
+        remove_shadow(
+            shadows,
+            shadow,
+            Faulted {
+                faults: Faults::entry(),
+                path: &staged.path,
+            },
+        );
     }
 }
 
@@ -504,6 +511,7 @@ fn stage_where(
     shadows: &ShadowHome,
     faults: Faults,
 ) -> Result<Staging, Refusal> {
+    let faults = Faulted { faults, path };
     let full = anchor.join(path);
     let target = Target::of(path, &full)?;
     let respelled = match &transition {
@@ -688,7 +696,7 @@ fn stage_respell(
     (root, path): (Identity, PathBuf),
     full: &Path,
     shadows: &ShadowHome,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<Staging, Refusal> {
     let after = content.map_or(before, ContentHash::of);
     let Folder::Reached(folder) = folder else {
@@ -787,7 +795,7 @@ fn stage_shadow(
     shadows: &ShadowHome,
     content: &[u8],
     mode: Option<u32>,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<StagedShadow, Refusal> {
     let home = open_home(shadows)?;
     let (name, file) = create_shadow(
@@ -841,7 +849,7 @@ fn create_shadow(
     home: BorrowedFd<'_>,
     shadows: &ShadowHome,
     next: &mut dyn FnMut() -> OsString,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<(OsString, OwnedFd), Refusal> {
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW;
     let mut last = None;
@@ -849,7 +857,7 @@ fn create_shadow(
         let name = next();
         let shadow = shadows.directory().join(&name);
         faults
-            .check(Stage::Create)
+            .check(Stage::ShadowCreate)
             .map_err(|error| environment("creating", &shadow, &error))?;
         // The mode an ordinary create takes, so a created document comes out
         // as the umask says and a replacement's is carried over it.
@@ -870,15 +878,15 @@ fn fill(
     file: &mut std::fs::File,
     content: &[u8],
     path: &Path,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<(), Refusal> {
     faults
-        .check(Stage::Write)
+        .check(Stage::ShadowWrite)
         .map_err(|error| environment("writing", path, &error))?;
     file.write_all(content)
         .map_err(|error| environment("writing", path, &error))?;
     faults
-        .check(Stage::Sync)
+        .check(Stage::ShadowSync)
         .map_err(|error| environment("syncing", path, &error))?;
     // `sync_all` is `F_FULLFSYNC` on macOS, which is what reaches the platter.
     file.sync_all()
@@ -932,6 +940,10 @@ fn publish_disturbed(
     faults: Faults,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
+    let faults = Faulted {
+        faults,
+        path: &staged.path,
+    };
     let publication = publish_checked(anchor, &staged, shadows, faults, disturb);
     // A publication that wrote consumed its shadow, except a respell's that
     // was found halfway and had nothing left to write.
@@ -954,13 +966,15 @@ fn publish_checked(
     anchor: &Path,
     staged: &Staged,
     shadows: &ShadowHome,
-    faults: Faults,
+    faults: Faulted<'_>,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
     let full = anchor.join(&staged.path);
     let target = Target::of(&staged.path, &full)?;
     let root = open_staged_root(anchor, staged.root)?;
     let folder = descend(root, &target, anchor, &full)?;
+    #[cfg(any(test, feature = "induced-failure"))]
+    act_as_foreign_writer(&folder, &target, &staged.pending, faults);
     let at = Place {
         anchor,
         target: &target,
@@ -1014,7 +1028,7 @@ struct Place<'a> {
     anchor: &'a Path,
     target: &'a Target<'a>,
     full: &'a Path,
-    faults: Faults,
+    faults: Faulted<'a>,
 }
 
 /// A confirmed shadow: the home's handle, the shadow, and the identity it will
@@ -1022,7 +1036,7 @@ struct Place<'a> {
 type ConfirmedShadow<'a> = (BorrowedFd<'a>, &'a StagedShadow, PostState);
 
 /// A landing another writer made: report it, syncing the folder that holds it.
-fn found_landed(after: AfterState, folder: BorrowedFd<'_>, faults: Faults) -> Publication {
+fn found_landed(after: AfterState, folder: BorrowedFd<'_>, faults: Faulted<'_>) -> Publication {
     Publication::Found(Confirmed {
         after,
         durability: sync_folder(folder, faults),
@@ -1072,7 +1086,7 @@ fn publish_create(
     disturb(Window::Publishing);
     if let Err(refusal) = publish_exclusively(home, shadow, folder, name, at.full, at.faults) {
         if let Some(made) = &made {
-            made.remove_empty();
+            made.remove_empty(at.faults);
         }
         // The name was taken at the last moment. Where what took it is this
         // create's own after-state, the create has landed.
@@ -1142,6 +1156,9 @@ fn publish_remove(
     }
     judge_before(found, before, at.full)?;
     disturb(Window::Publishing);
+    at.faults
+        .check(Stage::Unlink)
+        .map_err(|error| environment("removing", at.full, &error))?;
     match unlinkat(folder.as_fd(), at.target.name, AtFlags::empty()) {
         Ok(()) => Ok(wrote(
             AfterState::Absent,
@@ -1207,6 +1224,9 @@ fn publish_respell(
         Respelled::Before { state, .. } if after == before => state,
         Respelled::Before { state, .. } => return Err(drifted(at.full, after, Some(state))),
     };
+    at.faults
+        .check(Stage::Respell)
+        .map_err(|error| environment("respelling", at.full, &error))?;
     renameat(folder, from, folder, to)
         .map_err(|errno| errno_refusal("respelling", at.full, errno))?;
     Ok(wrote(
@@ -1258,7 +1278,7 @@ fn rename_shadow(
     folder: BorrowedFd<'_>,
     name: &OsStr,
     full: &Path,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<(), Refusal> {
     faults
         .check(Stage::Swap)
@@ -1304,7 +1324,7 @@ impl MadeFolders {
             match made.make_one(at, name, &relative, disturb) {
                 Ok(folder) => made.chain.push(folder),
                 Err(refusal) => {
-                    made.remove_empty();
+                    made.remove_empty(at.faults);
                     return Err(refusal);
                 }
             }
@@ -1321,6 +1341,10 @@ impl MadeFolders {
         disturb: &mut dyn FnMut(Window),
     ) -> Result<OwnedFd, Refusal> {
         let holder = self.chain.len() - 1;
+        at.faults
+            .at(relative)
+            .check(Stage::Mkdir)
+            .map_err(|error| environment_at("making the folder", at.full, name, &error))?;
         match mkdirat(&self.chain[holder], name, Mode::from_raw_mode(0o777)) {
             Ok(()) => self
                 .made
@@ -1351,7 +1375,10 @@ impl MadeFolders {
 
     /// Remove the folders this call made that are still empty, deepest first,
     /// stopping at the first that is not: every folder above holds it.
-    fn remove_empty(&self) {
+    fn remove_empty(&self, faults: Faulted<'_>) {
+        if faults.check(Stage::Cleanup).is_err() {
+            return;
+        }
         for (holder, name, _) in self.made.iter().rev() {
             if unlinkat(&self.chain[*holder], name.as_os_str(), AtFlags::REMOVEDIR).is_err() {
                 break;
@@ -1360,7 +1387,7 @@ impl MadeFolders {
     }
 
     /// Sync the target's folder and each folder holding one this call made.
-    fn sync(&self, faults: Faults) -> Durability {
+    fn sync(&self, faults: Faulted<'_>) -> Durability {
         self.made.iter().rev().fold(
             sync_folder(self.parent(), faults),
             |durability, (holder, ..)| {
@@ -1392,7 +1419,7 @@ fn publish_exclusively(
     folder: BorrowedFd<'_>,
     name: &OsStr,
     full: &Path,
-    faults: Faults,
+    faults: Faulted<'_>,
 ) -> Result<(), Refusal> {
     faults
         .check(Stage::Swap)
@@ -1488,7 +1515,7 @@ fn confirm_shadow(
 /// The identity is compared first because a shadow now outlives its staging
 /// call: a name a sweep emptied is a name something else may hold, and this
 /// removes only what staging made.
-fn remove_shadow(shadows: &ShadowHome, shadow: &StagedShadow, faults: Faults) {
+fn remove_shadow(shadows: &ShadowHome, shadow: &StagedShadow, faults: Faulted<'_>) {
     if faults.check(Stage::Cleanup).is_err() {
         return;
     }
@@ -1513,6 +1540,10 @@ fn confirm_landed_where(
     landed: &Landed,
     faults: Faults,
 ) -> Result<Confirmed, Refusal> {
+    let faults = Faulted {
+        faults,
+        path: &landed.path,
+    };
     let full = anchor.join(&landed.path);
     let target = Target::of(&landed.path, &full)?;
     let root = open_staged_root(anchor, landed.root)?;
@@ -1587,10 +1618,18 @@ fn remove_empty_folders_where(
     // Depth 0 is the root, which is never removed.
     for depth in (1..chain.len()).rev() {
         let name = names[depth - 1];
+        let relative: PathBuf = names[..depth].iter().collect();
+        let faults = Faulted {
+            faults,
+            path: &relative,
+        };
+        faults
+            .check(Stage::Rmdir)
+            .map_err(|error| environment_at("removing the folder", &full, name, &error))?;
         match unlinkat(&chain[depth - 1], name, AtFlags::REMOVEDIR) {
             Ok(()) => {
-                removed.push(names[..depth].iter().collect());
                 durability = durability.and(sync_folder(chain[depth - 1].as_fd(), faults));
+                removed.push(relative);
             }
             // Another writer removed it first.
             Err(Errno::NOENT) => {}
@@ -1821,13 +1860,79 @@ fn open_home(shadows: &ShadowHome) -> Result<OwnedFd, Refusal> {
         .map_err(|errno| errno_refusal("opening", shadows.directory(), errno))
 }
 
+/// Where the foreign stage is armed, act as a foreign writer on the target:
+/// inside a publication, after the root is checked and before anything is read
+/// again, through the target's folder handle.
+///
+/// What each act leads to is ADR 0031's reading of that writer, which the
+/// publication then meets with no help from here: an edit or a removal of a
+/// replace's or a remove's target is drift — except that removing a remove's
+/// target lands it for the remove, which is found landed by another writer — and
+/// an edit or a take at a create's name is a name taken. A removal against a
+/// create finds nothing and the create lands; a take against anything but a
+/// create is recorded and does nothing. Where the target's folder is missing
+/// there is no handle to act through, and the act is recorded and does nothing.
+#[cfg(any(test, feature = "induced-failure"))]
+#[allow(clippy::disallowed_types)] // The seam's own foreign writer, acting through a vault handle.
+fn act_as_foreign_writer(
+    folder: &Folder,
+    target: &Target<'_>,
+    pending: &Pending,
+    faults: Faulted<'_>,
+) {
+    use crate::faults::{FOREIGN_BYTES, ForeignAct};
+    let Some(act) = faults.faults.foreign(faults.path) else {
+        return;
+    };
+    let Folder::Reached(folder) = folder else {
+        return;
+    };
+    let write_at = |flags: OFlags| {
+        let flags = flags | OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        if let Ok(file) = openat(folder, target.name, flags, Mode::from_raw_mode(0o644)) {
+            let _ = std::fs::File::from(file).write_all(FOREIGN_BYTES);
+        }
+    };
+    match act {
+        ForeignAct::Edit => write_at(OFlags::TRUNC),
+        ForeignAct::Remove => {
+            let _ = unlinkat(folder, target.name, AtFlags::empty());
+        }
+        ForeignAct::Take if matches!(pending, Pending::Create { .. }) => write_at(OFlags::EXCL),
+        ForeignAct::Take => {}
+    }
+}
+
+/// The faults a call runs under, and the vault-relative path its stages act
+/// on, which is what a fired arm's record names.
+#[derive(Clone, Copy)]
+struct Faulted<'a> {
+    faults: Faults,
+    path: &'a Path,
+}
+
+impl<'a> Faulted<'a> {
+    /// The error `stage` is armed to meet here, if any.
+    fn check(&self, stage: Stage) -> std::io::Result<()> {
+        self.faults.check(stage, self.path)
+    }
+
+    /// The same faults, acting on `path`.
+    fn at<'b>(&self, path: &'b Path) -> Faulted<'b> {
+        Faulted {
+            faults: self.faults,
+            path,
+        }
+    }
+}
+
 /// Get a folder's own entries onto the disk, and say whether they got there.
 ///
 /// Through a handle the change was made in, so the folder synced is the folder
 /// that changed whatever its name means by now. `sync_all` is `F_FULLFSYNC` on
 /// macOS.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
-fn sync_folder(folder: BorrowedFd<'_>, faults: Faults) -> Durability {
+fn sync_folder(folder: BorrowedFd<'_>, faults: Faulted<'_>) -> Durability {
     if let Err(error) = faults.check(Stage::ParentSync) {
         return Durability::NotSynced(error);
     }
@@ -2029,7 +2134,7 @@ mod tests {
             &scratch,
             "note.md",
             replace_old_with_new(),
-            Faults::at(&[(Stage::Sync, Answer::Fails(std::io::ErrorKind::Other))]),
+            Faults::at(&[(Stage::ShadowSync, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect_err("a shadow that cannot be synced");
 
@@ -2059,7 +2164,7 @@ mod tests {
                 &scratch,
                 relative,
                 transition,
-                Faults::at(&[(Stage::Write, Answer::MeetsAFullDisk)]),
+                Faults::at(&[(Stage::ShadowWrite, Answer::MeetsAFullDisk)]),
             )
             .expect_err("a shadow that cannot be written");
 
@@ -2083,7 +2188,7 @@ mod tests {
             "fresh.md",
             Transition::Create { content: b"fresh" },
             Faults::at(&[(
-                Stage::Create,
+                Stage::ShadowCreate,
                 Answer::Fails(std::io::ErrorKind::PermissionDenied),
             )]),
         )
@@ -2406,7 +2511,7 @@ mod tests {
             "note.md",
             replace_old_with_new(),
             Faults::at(&[
-                (Stage::Write, Answer::Fails(std::io::ErrorKind::Other)),
+                (Stage::ShadowWrite, Answer::Fails(std::io::ErrorKind::Other)),
                 (
                     Stage::Cleanup,
                     Answer::Fails(std::io::ErrorKind::PermissionDenied),
@@ -2443,7 +2548,7 @@ mod tests {
             home.as_fd(),
             scratch.shadows(),
             &mut || names.pop().expect("a name to try"),
-            Faults::NONE,
+            unarmed(),
         )
         .expect("a shadow under a free name");
 
@@ -2477,7 +2582,7 @@ mod tests {
                 tried.push(taken);
                 name.into()
             },
-            Faults::NONE,
+            unarmed(),
         )
         .expect_err("a home in which every name is taken");
 
@@ -2697,6 +2802,14 @@ mod tests {
                 matches!(judge(spelling, found, after), Err(Refusal::Drifted { .. })),
                 "{spelling} was not drift"
             );
+        }
+    }
+
+    /// No fault armed, acting on a path no record names.
+    fn unarmed() -> Faulted<'static> {
+        Faulted {
+            faults: Faults::NONE,
+            path: Path::new("note.md"),
         }
     }
 

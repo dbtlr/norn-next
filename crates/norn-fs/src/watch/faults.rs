@@ -320,7 +320,7 @@ fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
             answer.name()
         );
     }
-    crate::faults::refuse_a_stage_armed_twice(armed, |stage| stage.name(), source);
+    crate::faults::refuse_a_stage_armed_twice(armed, |stage| stage.name().to_string(), source);
 }
 
 /// One fact about a subscription that turns true once and never back, shared
@@ -826,7 +826,7 @@ mod armed {
             ARMED_STAGES,
             Stage::named,
             Answer::named,
-            |stage| stage.name(),
+            |stage| stage.name().to_string(),
         );
         refuse_an_unreadable_arm(&armed, ARMED_STAGES);
         armed
