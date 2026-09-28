@@ -8710,9 +8710,12 @@ mod tests {
         (host, name)
     }
 
-    /// The fixture above with vaults beside the one under test, whose only
-    /// role is to occupy worker slots: a job blocked on one entry is what
-    /// holds another entry's job in the channel long enough for a test to
+    /// The fixture above over the named vaults and the given number of worker
+    /// slots, with the dispatcher standing down the same way.
+    ///
+    /// A vault here is a case's subject, a bystander whose state the case
+    /// asserts, or an occupant of a worker slot: a job blocked on one entry is
+    /// what holds another entry's job in the channel long enough for a test to
     /// drive the window around it.
     fn host_without_ambient_polling(
         ops: Arc<FakeOps>,
@@ -15645,34 +15648,18 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let damaged = VaultName::new("damaged").unwrap();
         let sibling = VaultName::new("sibling").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(
-                damaged.clone(),
-                VaultRoot::new("/tmp/norn-host-damaged-vault").unwrap(),
-            ),
-            RegistryEntry::new(
-                sibling.clone(),
-                VaultRoot::new("/tmp/norn-host-sibling-vault").unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
-            Arc::clone(&ops),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_millis(2),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&damaged, &sibling], 2);
         drop(host.demand(&damaged, AttachMode::Durable).unwrap());
         drop(host.demand(&sibling, AttachMode::Durable).unwrap());
         wait_for_state(&host, &damaged, TrustState::Ready);
         wait_for_state(&host, &sibling, TrustState::Ready);
 
+        // The batch is one rescan whichever entry's poll spends it, so the
+        // poll that carries it is driven at the damaged entry: a batch armed
+        // while an ambient round is between its polls of the two entries is
+        // the sibling's rescan, and the damaged entry reconciles nothing.
         arrange_for(&ops.damaged_reconcile_at, &damaged);
-        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        report_through_a_driven_poll(&ops, &host, &damaged, &ops.off_thread_rescan_poll_batches);
         wait_until(
             "the damaged entry to come back through its rebuild",
             lifecycle_wait_budget(),
