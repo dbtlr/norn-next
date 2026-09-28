@@ -28,7 +28,9 @@
 //! - **A build artifact is never executed where it lies.** [`Sandbox::install_binary`]
 //!   copies it to a private path first. A binary that a concurrent build may
 //!   rewrite is not a stable thing to exec, and the failure is a spurious one
-//!   in whichever suite happens to be running.
+//!   in whichever suite happens to be running. The copy is written by a child
+//!   process, so no fork of the test process can carry a writer to it and
+//!   make its exec fail with `ETXTBSY`.
 //! - **The direct child's peak resident set is measured**, by reaping it through
 //!   `wait4` and reading the kernel's accounting rather than sampling. This
 //!   measurement includes descendants that the child waited on. It does not
@@ -176,6 +178,19 @@ impl Sandbox {
     /// it.** The artifact is a file a concurrent build is entitled to
     /// rewrite, and executing a file while it is being written is a failure
     /// of the harness rather than of the program.
+    ///
+    /// **The copy is written by a `cp` child, and this process never holds a
+    /// writer to it.** The kernel refuses to exec a file that any process
+    /// holds open for writing, and a child forked by any thread of this
+    /// process holds every descriptor this process held at the fork until
+    /// that child execs or exits; close-on-exec does not close the gap,
+    /// because the gap ends at the exec. A test process spawns from many
+    /// threads, through this harness and around it, so a writer held here
+    /// for even the length of the copy can make the copy unexecutable for as
+    /// long as some unrelated child sits between its fork and its exec. The
+    /// `cp` child's writer is its own and is gone when it has been reaped,
+    /// and the child is a [`Run`] of this sandbox, so its wait is bounded
+    /// like every other.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: installing the artifact under test.
     pub fn install_binary(&self, source: &Path) -> io::Result<PathBuf> {
         let name = source.file_name().ok_or_else(|| {
@@ -185,7 +200,23 @@ impl Sandbox {
             )
         })?;
         let installed = self.tree.join("bin").join(name);
-        std::fs::copy(source, &installed)?;
+        // The child starts in the sandbox's work directory, so a relative
+        // source is resolved against this process's directory first.
+        let source = std::path::absolute(source)?;
+        let copied = Run::new(self, "cp")
+            .arg("--")
+            .arg(&source)
+            .arg(&installed)
+            .wait()?;
+        if copied.status != RunStatus::Exited(0) {
+            return Err(io::Error::other(format!(
+                "copying {} to {} ended {:?}: {}",
+                source.display(),
+                installed.display(),
+                copied.status,
+                copied.stderr_text().trim()
+            )));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -441,6 +472,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::wait::{Budget, Observed, wait_until};
 
     fn sandbox(label: &str) -> Sandbox {
         Sandbox::new(&std::env::temp_dir(), label).expect("a sandbox")
@@ -615,6 +647,292 @@ mod tests {
             "the copy listed: {}",
             outcome.stdout_text()
         );
+    }
+
+    /// How long a held child waits for its release before it ends on its own.
+    #[cfg(target_os = "linux")]
+    const HELD_FORK_BOUND: Duration = DEFAULT_WAIT_DEADLINE;
+
+    /// Children forked by one thread of this process and held short of exec
+    /// until the guard drops, or until [`HELD_FORK_BOUND`] passes.
+    ///
+    /// Each child keeps a copy of every descriptor this process held at its
+    /// fork, which is what any spawn in a test process holds between its fork
+    /// and its exec, `O_CLOEXEC` or not: close-on-exec closes a descriptor at
+    /// the exec, and a held child has not reached it. A held child can hold
+    /// something a case beside it waits on, such as the pipe a spawn reads its
+    /// child's exec through, so the bound is what keeps a hold from wedging a
+    /// case rather than slowing it.
+    #[cfg(target_os = "linux")]
+    struct HeldForks {
+        wait_end: libc::c_int,
+        release_end: libc::c_int,
+        pids: Vec<libc::pid_t>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl HeldForks {
+        fn new() -> Self {
+            let mut ends = [0; 2];
+            let piped = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+            assert_eq!(piped, 0, "a release pipe: {}", io::Error::last_os_error());
+            HeldForks {
+                wait_end: ends[0],
+                release_end: ends[1],
+                pids: Vec::new(),
+            }
+        }
+
+        /// Fork one child that closes `closing`, waits for the release, and
+        /// exits without ever calling exec.
+        fn fork_one(&mut self, closing: &[libc::c_int]) {
+            let bound =
+                libc::c_int::try_from(HELD_FORK_BOUND.as_millis()).unwrap_or(libc::c_int::MAX);
+            match unsafe { libc::fork() } {
+                0 => unsafe {
+                    // Only async-signal-safe calls between here and `_exit`: the
+                    // child of a multithreaded process may take no lock.
+                    libc::close(self.release_end);
+                    for descriptor in closing {
+                        libc::close(*descriptor);
+                    }
+                    let mut release = libc::pollfd {
+                        fd: self.wait_end,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    libc::poll(&mut release, 1, bound);
+                    libc::_exit(0);
+                },
+                -1 => panic!("fork: {}", io::Error::last_os_error()),
+                pid => self.pids.push(pid),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for HeldForks {
+        /// Closing the last release end is the release: every held child's
+        /// wait then sees end of file.
+        fn drop(&mut self) {
+            unsafe { libc::close(self.release_end) };
+            for pid in &self.pids {
+                let mut status = 0;
+                unsafe { libc::waitpid(*pid, &mut status, 0) };
+            }
+            unsafe { libc::close(self.wait_end) };
+        }
+    }
+
+    fn budget() -> Budget {
+        Budget::new(Duration::from_secs(30), Duration::from_millis(500))
+    }
+
+    /// More than a pipe holds: a write this long into a pipe returns only once
+    /// its reader has taken part of it.
+    const PAST_A_PIPES_CAPACITY: usize = 1 << 20;
+
+    /// Install the file at `source` as `name` through a named pipe, and call
+    /// `mid_copy` at a moment the copy is in progress.
+    ///
+    /// The pipe hands the copier the source's bytes only as this function
+    /// writes them, so the copy cannot end before the pipe is closed. The first
+    /// write is longer than a pipe holds, so when it returns the copier has
+    /// read part of the source and waits on the rest: whatever a copy opens
+    /// before it reads is open at that moment, whether this process makes the
+    /// copy or a child of it does, and under whatever name it is written. A
+    /// copy that refuses a pipe for its source, as `std::fs::copy` does, fails
+    /// here: a copy that cannot be held in progress cannot be read in the
+    /// middle of it.
+    ///
+    /// `mid_copy` is handed the pipe's write end. It must not close it, and a
+    /// child it forks must, or the copy never reads to its end.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the pipe the copy reads from.
+    fn install_through_a_pipe<T>(
+        sandbox: &Sandbox,
+        source: &Path,
+        name: &str,
+        mid_copy: impl FnOnce(libc::c_int) -> T,
+    ) -> (PathBuf, T) {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut bytes = std::fs::File::open(source).expect("opening the source");
+        let mut first = vec![0; PAST_A_PIPES_CAPACITY];
+        bytes
+            .read_exact(&mut first)
+            .expect("a source longer than a pipe holds");
+
+        let piped = sandbox.root().join("piped");
+        std::fs::create_dir(&piped).expect("the pipe's directory");
+        let pipe = piped.join(name);
+        let named =
+            std::ffi::CString::new(pipe.as_os_str().as_bytes()).expect("a path with no NUL");
+        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
+        assert_eq!(
+            made,
+            0,
+            "making {}: {}",
+            pipe.display(),
+            io::Error::last_os_error()
+        );
+
+        std::thread::scope(|scope| {
+            let installing = scope.spawn(|| sandbox.install_binary(&pipe));
+
+            // A write end opened without blocking is refused until something
+            // holds the pipe to read.
+            let opened = wait_until("the copier to open the pipe", budget(), || {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&pipe)
+                {
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENXIO)
+                            && !installing.is_finished() =>
+                    {
+                        Observed::pending("nothing holds the pipe to read")
+                    }
+                    opened => Observed::Met(opened),
+                }
+            });
+            let mut feed = match opened {
+                Ok(Ok(feed)) => feed,
+                Ok(Err(error)) => ended_early(installing, format!("opening the pipe: {error}")),
+                Err(failure) => ended_early(installing, failure),
+            };
+            let feed_end = feed.as_raw_fd();
+            let flags = unsafe { libc::fcntl(feed_end, libc::F_GETFL) };
+            let blocking =
+                unsafe { libc::fcntl(feed_end, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+            assert!(
+                flags >= 0 && blocking == 0,
+                "making the pipe's writes block: {}",
+                io::Error::last_os_error()
+            );
+
+            if let Err(error) = feed.write_all(&first) {
+                drop(feed);
+                ended_early(installing, format!("feeding the pipe: {error}"));
+            }
+            let during = mid_copy(feed_end);
+            if let Err(error) = io::copy(&mut bytes, &mut feed) {
+                drop(feed);
+                ended_early(installing, format!("feeding the pipe: {error}"));
+            }
+            drop(feed);
+            let installed = installing
+                .join()
+                .expect("the installing thread")
+                .expect("installing through a pipe");
+            (installed, during)
+        })
+    }
+
+    /// Fail a feed the install stopped reading, naming how the install ended.
+    fn ended_early(
+        installing: std::thread::ScopedJoinHandle<'_, io::Result<PathBuf>>,
+        why: impl std::fmt::Display,
+    ) -> ! {
+        let install = installing.join().expect("the installing thread");
+        panic!("{why}, and the install ended {install:?}")
+    }
+
+    /// The file `descriptor` names, as `(device, inode)`, or `None` for a
+    /// number that names nothing open.
+    #[allow(clippy::unnecessary_cast)] // `st_dev` is `u64` on Linux and `i32` on macOS.
+    fn file_of(descriptor: libc::c_int) -> Option<(u64, u64)> {
+        let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(descriptor, status.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let status = unsafe { status.assume_init() };
+        Some((status.st_dev as u64, status.st_ino as u64))
+    }
+
+    /// The files this process holds a writable descriptor to, as `(device,
+    /// inode)`.
+    ///
+    /// The numbers are the kernel's own listing under `/dev/fd`, and each is
+    /// asked about directly. A number another thread closes or reuses in
+    /// between reads as whatever it names then, which moves the answer only
+    /// for a descriptor that thread owns.
+    #[allow(clippy::disallowed_methods)] // Reads this process's own descriptor listing.
+    fn writable_files_held() -> BTreeSet<(u64, u64)> {
+        let listing = std::fs::read_dir("/dev/fd").expect("this process's descriptor listing");
+        listing
+            .flatten()
+            .filter_map(|entry| {
+                let descriptor: libc::c_int = entry.file_name().to_str()?.parse().ok()?;
+                let access = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+                if access < 0 || access & libc::O_ACCMODE == libc::O_RDONLY {
+                    return None;
+                }
+                file_of(descriptor)
+            })
+            .collect()
+    }
+
+    /// **What makes an installed copy exec-safe.** The kernel may refuse to
+    /// exec a file that any process holds open for writing, and a child forked
+    /// by any thread of the installing process holds, until its own exec,
+    /// every descriptor that process held at the fork. So no descriptor of the
+    /// installing process writes the copy while it is made. The copy here is
+    /// held in progress, this process's writable descriptors are read there,
+    /// and none of them is the installed file: compared by inode, which a copy
+    /// written under another name and renamed into place keeps.
+    ///
+    /// What this reads is the copy. A writer opened after the copy has ended
+    /// is outside the moment it looks at.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Reads the installed file's inode.
+    fn the_installing_process_holds_no_writer_to_a_binary_in_the_middle_of_its_copy() {
+        use std::os::unix::fs::MetadataExt;
+
+        let sandbox = sandbox("installed-through-a-pipe");
+        let source = std::env::current_exe().expect("this suite's own executable");
+        let (installed, (feed, writable)) =
+            install_through_a_pipe(&sandbox, &source, "piped", |feed| {
+                (file_of(feed), writable_files_held())
+            });
+        let feed = feed.expect("the pipe's write end");
+        assert!(
+            writable.contains(&feed),
+            "the listing missed the pipe's write end this process holds, so it cannot be trusted to see a writer to the copy"
+        );
+        let copy = std::fs::metadata(&installed).expect("the installed copy");
+        assert!(
+            !writable.contains(&(copy.dev(), copy.ino())),
+            "this process held a writer to {} in the middle of its copy",
+            installed.display()
+        );
+    }
+
+    /// The consequence the case above guards against, on the kernel that
+    /// refuses the exec: Linux fails it with `ETXTBSY`. A child is forked in
+    /// the middle of the copy and held short of exec, holding everything this
+    /// process held at the fork, and the installed copy must still run while
+    /// that child is held.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_installed_binary_runs_while_a_child_forked_in_the_middle_of_its_copy_is_held_short_of_exec()
+     {
+        let sandbox = sandbox("installed-beside-a-fork");
+        let source = std::env::current_exe().expect("this suite's own executable");
+        let (installed, held) = install_through_a_pipe(&sandbox, &source, "forked", |feed| {
+            let mut held = HeldForks::new();
+            held.fork_one(&[feed]);
+            held
+        });
+
+        let outcome = Run::new(&sandbox, &installed).arg("--list").wait().expect(
+            "running the installed copy while a child forked in the middle of its copy is held",
+        );
+        drop(held);
+        outcome.assert_success();
     }
 
     #[test]

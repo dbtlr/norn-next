@@ -140,12 +140,13 @@
       "name": "harness-processes-are-bounded-and-exec-safe",
       "kind": "defect-class",
       "venue": 0,
-      "property": "A spawned child is bounded and its outcome is legible: output is captured up to a declared limit, an exit code and a terminating signal are reported apart, and a binary written and then executed runs from a path whose writer is closed, so an exec never races ETXTBSY.",
+      "property": "A spawned child is bounded and its outcome is legible: output is captured up to a declared limit, an exit code and a terminating signal are reported apart, and the process that installs a binary to execute holds no writer to it while it is copied, so no child forked during the copy carries a writer into an exec that races ETXTBSY.",
       "sources": ["NRN-401", "NRN-490", "NRN-471"],
       "binding": {
         "status": "bound",
         "tests": [
           "crates/norn-testkit/src/process.rs::an_installed_binary_runs_from_the_sandbox_rather_than_its_source",
+          "crates/norn-testkit/src/process.rs::the_installing_process_holds_no_writer_to_a_binary_in_the_middle_of_its_copy",
           "crates/norn-testkit/src/process.rs::a_runs_output_is_captured_up_to_a_limit",
           "crates/norn-testkit/src/process.rs::a_runs_exit_code_comes_back",
           "crates/norn-testkit/src/process.rs::a_signalled_run_is_reported_as_signalled"
