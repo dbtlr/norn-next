@@ -1852,8 +1852,8 @@ handle that replaced the read's reads another store, and refuses the read as
 reader-unavailable. Where a claim holds the entry — a leg running, a watcher poll, a job
 scheduled against it — that claim publishes over the entry when it ends, so the verdict is not
 written beneath it: the entry carries the damage to the claim's end, and the end of the job leg
-or poll that leaves the entry free publishes it and schedules the rebuild, with no further
-read. The read is refused meanwhile as reader-unavailable where the entry still serves
+or poll that leaves the entry free, or that would hand the claim to a queued apply, publishes
+it and schedules the rebuild, with no further read. The read is refused meanwhile as reader-unavailable where the entry still serves
 `Ready`, and with what the entry publishes otherwise. The carried verdict clears with the
 store it names: a rebuild or a release drops it.
 
@@ -2306,8 +2306,10 @@ sequenceDiagram
   participant D as SQLite (via norn-store)
   C->>S: HTTP (bearer; protocol shape)
   S->>H: verb params (wire)
-  H->>H: resolve operations → one transition per file (before-state, after-state), conditions read
-  H->>W: resolved plan (a preview answers here and writes nothing)
+  Note over H: a preview resolves operations on one snapshot, answers, and writes nothing
+  H->>W: apply: operations or a resolved plan, queued on the entry's claim (admission returns PendingApply)
+  W->>D: intake: derive the facts delivered by then; one snapshot inside the claim
+  W->>W: resolve operations → one transition per file (before-state, after-state), conditions read
   W->>F: check and stage every target: states, conditions, schema, shadow (protocol owned by norn-fs)
   Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh resolved plan and forecast)
   W->>F: publish creates, then replacements, then removals, each verified again
@@ -2336,10 +2338,85 @@ and checked as the vault would stand with every target of the plan at its after-
 after taking in the facts the watcher has delivered, so a plan's own progress never
 changes one.
 Applies run as a job holding the entry's claim, one at a time per registration; the request
-waits for the outcome, and a caller that stops waiting does not abort the apply. Mutation
+waits for the outcome through `PendingApply::wait`, after admission, and a caller that stops
+waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
 the snapshot a planner read through
 ([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
+
+**The apply seam: how an apply is admitted, ordered and answered.** An apply is a
+request-driven job whose outcome returns to its caller the way an explicit reload's does: the
+reply rides in the job. The seam holds these invariants; which gate hold carries each is
+bound by the applier's lifecycle tests.
+
+- **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
+  raises, under ADR 0030's chain, and refuses at once with the code a read would carry where
+  the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
+  unknown vault, or a registration change holding the entry. Everywhere else it queues the
+  apply at once and returns a `PendingApply`, with no settle wait: over an entry taking in a
+  change, the apply's own intake derives those facts; over an entry that is unattached,
+  attaching from unattached, or releasing for idleness, the apply waits behind the attach its
+  demand owes, so a write never refuses because its vault went idle. Over a free claim the
+  apply takes it at admission. The host call blocks no longer than admission.
+- **Applies queue on the entry, ahead of routine derivation only.** Each entry keeps a
+  first-in, first-out queue of admitted applies beside its claim. A reload refuses while the
+  claim is held, but a reconcile turn holds it through much of any edit stream, so refusing
+  would hand every writer a retry. The queue's head takes the claim before the next reconcile
+  turn or maintenance scan would begin, and never ahead of an attach, a recovery, a rebuild,
+  a detach, or a schema reload before it publishes `Ready`, because each of those owes work
+  an apply's intake does not do. Applies run in the order they were admitted, so operations
+  planned inside the registration's serialization plan against a determined predecessor. The
+  queue is the producer the claim's slot carrier (`crates/norn-host/src/lifecycle/claim.rs`)
+  was kept for. Queued applies are demand, so no idle detach begins over their entry; an
+  explicit reload refuses while any are queued, as it does while the claim is held; and
+  `vault unregister` and `vault set` refuse as held while an apply is queued or running.
+- **An apply runs only over a store fit to plan against.** It takes the claim only where a
+  reader stands, no damage is known — damage a read carried to the claim is published, with
+  the rebuild it owes, before any apply takes it — and the entry is attached and trusted. Its
+  first step drains the watcher once, then derives, as its own commit and publishing as a
+  reconcile turn does, exactly the facts delivered by then, and it takes in none after that
+  until its changeset commits. It then takes the request's one snapshot and plans its operations,
+  or checks its resolved plan's states and conditions, against it and the files. No commit
+  lands in the registration's store between that snapshot and the apply's changeset, so the
+  changeset builds on exactly the state the apply read. From planning to its changeset the
+  entry stays `Ready`, since it has derived every fact it has taken in and an in-flight write
+  must not serialize the read surface: a read meanwhile answers the state before the apply.
+  A change made meanwhile is not yet seen, as under a maintenance scan, and an apply that
+  ends with facts waiting hands on to the reconcile they owe unless the next apply takes the
+  claim. A preview takes its one snapshot the ordinary way and takes no claim. An intake that
+  finds the store damaged answers the apply not applied, with the cause, and leaves the
+  rebuild to run.
+- **Every queued apply is answered once.** Every publication of a cause admission refuses
+  for — lost trust, damage, an attach that failed, a park — and every release that re-arms
+  nothing, a leg's unwind cleanup and the host's destruction among them, answers every queued
+  apply not applied, with the cause it publishes. An idle release that finishes with applies
+  queued re-arms the attach their demand owes and keeps the queue. So no apply pre-empts an
+  owed recovery or rebuild, none runs over a store known to be damaged, and none waits on an
+  entry nothing will serve.
+- **The outcome.** `PendingApply::wait` blocks until the outcome, with no host-level bound:
+  applied, which names whether its changeset committed or the entry is healing from what the
+  paths hold; interrupted, naming the targets that landed; refused by a check, with a fresh
+  resolved plan, or with none where the vault's root identity does not match; not applied,
+  with a lifecycle cause or the I/O failure that stopped it before any target landed; or
+  unknown. Every outcome given after planning carries the resolved plan, so a caller that
+  sent operations can finish an interrupted apply by re-sending it. Client-facing timeouts
+  are the serving layer's. Dropping `PendingApply` is how a caller stops waiting: the job
+  ignores the failed send and finishes.
+- **An unanswered apply is answered from its progress.** A worker unwind or a supersession
+  can drop the reply without an answer, so each apply keeps a progress record its waiter reads
+  when that happens: the job sets the resolved plan in it once planning finishes, and marks it
+  publishing before its first publication. Dropped before publication, the apply is not
+  applied and no document is written; the answer carries the cause an unanswered reload's
+  would, and shadows it staged are left to the shadow home's sweep. Dropped after publication
+  began, the outcome is unknown: it carries the resolved plan and says some targets may have
+  landed, and re-sending that plan finishes them. It carries no landed list, because an
+  unwind between a rename and the record's update would make one wrong.
+- **Teardown answers what has not published and lets publication finish.** A park and the
+  host's destruction answer every queued apply not applied at once, with their own cause, and
+  never wait for one, as no teardown waits for a read. A running apply that has not begun
+  publishing stops at its next epoch check, removes its shadows and answers the same. One that
+  has begun publishing finishes its publication and its changeset before its leg ends: publication is a rename per staged target, and finishing it leaves an applied plan
+  where stopping would hand a routine park's caller an interrupted one to re-send.
 
 Four contracts inside that flow carry weight:
 
