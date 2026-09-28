@@ -7,17 +7,19 @@
 //! reachable by writing files into a temporary directory.
 //!
 //! So each stage of the protocol asks [`Faults`] whether it is the stage that
-//! fails. [`Faults::entry`] is what the public entry points pass; the in-crate
-//! suite passes a stage and an [`Answer`] and reads what the protocol did with
-//! it.
+//! fails. [`Faults::entry`] is what the public entry points outside a
+//! publication pass, and [`Faults::publication`] what each publication passes;
+//! the in-crate suite passes a stage and an [`Answer`] and reads what the
+//! protocol did with it.
 //!
 //! The same shape carries the other half of what a test cannot arrange: a
 //! foreign writer landing inside a window one call wide. [`Window`] names those
 //! windows, and a disturbance is handed the window it is standing in.
 //!
 //! **The seam is deliberately small.** It names *where* a write can be made to
-//! fail, and *how* — an error, a full disk, or the end of the process — and
-//! never what the protocol does next, which is the code under test.
+//! fail, in *which* publication, and *how* — an error, a full disk, the end of
+//! the process, or a foreign writer's act on the target — and never what the
+//! protocol does next, which is the code under test.
 //!
 //! # Reaching it from outside
 //!

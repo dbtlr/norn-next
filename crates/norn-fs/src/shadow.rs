@@ -43,9 +43,8 @@
 //! A shadow's name carries **this process's identifier and a counter that only
 //! ever increases within it**, and it is never derived from the destination's
 //! own name. No write ever picks a name a previous write in the same process
-//! was handed, and the shadow is opened with `create_new`, so a name that is
-//! somehow already taken refuses the write rather than truncating whatever is
-//! there.
+//! was handed, and the shadow is opened exclusively, so a name that is somehow
+//! already taken is skipped for the next one rather than truncated.
 //!
 //! That clause is what makes a leaked shadow inert, and it is why cleanup is
 //! allowed to fail quietly. A deterministic, stem-derived name is the forbidden
