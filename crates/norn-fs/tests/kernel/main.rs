@@ -22,6 +22,8 @@
 mod common;
 
 mod anchoring;
+mod folders;
 mod preconditions;
 mod publication;
+mod respell;
 mod shadows;

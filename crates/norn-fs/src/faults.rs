@@ -355,6 +355,8 @@ pub(crate) enum Window {
     Verifying,
     /// Every check has passed and the publication act is next.
     Publishing,
+    /// A create has made one of its missing folders and has not opened it.
+    FolderMade,
 }
 
 /// Which stages of a write fail, and how.

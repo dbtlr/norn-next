@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use norn_fs::{
-    ContentHash, Durability, MaintainershipKey, Placement, Published, Refusal, ShadowHome, Staging,
-    Transition,
+    ContentHash, Durability, MaintainershipKey, Placement, Publication, Published, Refusal,
+    ShadowHome, Staging, Transition,
 };
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::process::{Run, RunStatus, Sandbox};
@@ -159,7 +159,12 @@ fn publish(root: &Path) {
         &shadows,
     )
     .and_then(|staging| match staging {
-        Staging::Staged(staged) => norn_fs::publish(&vault, staged, &shadows).map(Some),
+        Staging::Staged(staged) => {
+            norn_fs::publish(&vault, staged, &shadows).map(|publication| match publication {
+                Publication::Wrote(published) => Some(published),
+                Publication::Found(_) => None,
+            })
+        }
         Staging::Landed(_) => Ok(None),
     });
     record(root, &child_record(&outcome));

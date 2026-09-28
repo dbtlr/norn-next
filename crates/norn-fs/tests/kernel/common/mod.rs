@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use norn_fs::{
-    ContentHash, MaintainershipKey, Placement, Published, Refusal, ShadowHome, Staged, Staging,
-    Transition,
+    Confirmed, ContentHash, MaintainershipKey, Placement, Publication, Published, Refusal,
+    ShadowHome, Staged, Staging, Transition,
 };
 use norn_testkit::scratch;
 
@@ -63,7 +63,7 @@ impl Scratch {
     }
 
     /// Publish what [`Scratch::stage`] staged.
-    pub fn publish(&self, staged: Staged) -> Result<Published, Refusal> {
+    pub fn publish(&self, staged: Staged) -> Result<Publication, Refusal> {
         norn_fs::publish(&self.vault(), staged, &self.shadows)
     }
 
@@ -76,7 +76,7 @@ impl Scratch {
         transition: Transition<'_>,
     ) -> Result<Published, Refusal> {
         let staged = staged(self.stage(relative, transition)?);
-        self.publish(staged)
+        self.publish(staged).map(wrote)
     }
 
     /// The path of the one shadow the home holds.
@@ -144,6 +144,25 @@ pub fn staged(staging: Staging) -> Staged {
     match staging {
         Staging::Staged(staged) => staged,
         Staging::Landed(landed) => panic!("{} staged as already landed", landed.path().display()),
+    }
+}
+
+/// The publication a call made, where it made one rather than finding the
+/// target already landed.
+#[track_caller]
+pub fn wrote(publication: Publication) -> Published {
+    match publication {
+        Publication::Wrote(published) => published,
+        Publication::Found(found) => panic!("the target was found landed: {found:?}"),
+    }
+}
+
+/// The landing a publication found another writer had already made.
+#[track_caller]
+pub fn found(publication: Publication) -> Confirmed {
+    match publication {
+        Publication::Found(found) => found,
+        Publication::Wrote(published) => panic!("the publication wrote: {published:?}"),
     }
 }
 

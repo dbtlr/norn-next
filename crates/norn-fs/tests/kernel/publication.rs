@@ -10,8 +10,8 @@ use std::time::Duration;
 use norn_fs::{AfterState, Durability, Refusal, Staging, Transition, confirm_landed};
 
 use crate::common::{
-    Scratch, bytes_at, demand_unwritable, exists, hash, identity_at, mode_at, mtime_at, names_in,
-    set_mode, staged,
+    Scratch, bytes_at, demand_unwritable, exists, found, hash, identity_at, mode_at, mtime_at,
+    names_in, set_mode, staged,
 };
 
 /// A create publishes its content at a name that had nothing at it, reports
@@ -372,32 +372,6 @@ fn a_publication_into_an_unwritable_folder_is_an_environmental_refusal() {
     );
 }
 
-/// A create whose folder is not there stages — the target is absent — and
-/// refuses at publication as a missing path, making no folder.
-///
-/// Stated for this stage of the protocol: publication does not make folders
-/// yet, and inventing one here would be this crate deciding what a vault's
-/// shape should be.
-#[test]
-fn a_create_whose_folder_is_missing_refuses_at_publication_as_a_missing_path() {
-    let scratch = Scratch::new("missing-parent");
-    let refusal = scratch
-        .stage_and_publish("absent/fresh.md", Transition::Create { content: b"fresh" })
-        .expect_err("a create under a folder that is not there");
-    assert!(
-        matches!(
-            &refusal,
-            Refusal::Environment {
-                kind: std::io::ErrorKind::NotFound,
-                ..
-            }
-        ),
-        "{refusal}"
-    );
-    assert!(!exists(&scratch.at("absent")));
-    assert!(scratch.shadow_names().is_empty());
-}
-
 /// **The bar on re-verification.** A foreign edit that lands between staging
 /// and publication refuses at publication, for every kind that read the
 /// target, and the foreign bytes are what remain.
@@ -477,6 +451,145 @@ fn a_document_removed_after_staging_is_not_resurrected() {
         "{refusal}"
     );
     assert!(!exists(&path), "publication resurrected a removed document");
+    assert!(scratch.shadow_names().is_empty());
+}
+
+/// **The bar on a landing another writer made.** A target that reaches its
+/// after-state between staging and publication is found landed, for every
+/// kind: not refused, and not written again.
+///
+/// A resolved plan's after-state is what it promised, whoever put it there
+/// (ADR 0031). The forbidden shapes are a refusal — a re-sent plan would never
+/// finish over a target somebody else finished for it — and a report that this
+/// call wrote it, which would prime the own-write ledger for an event this call
+/// did not cause. The shadow a found create or replace staged is discarded.
+#[test]
+fn a_target_another_writer_landed_after_staging_is_found() {
+    let scratch = Scratch::new("found-landed");
+    scratch.place("note.md", b"old");
+    scratch.place("gone.md", b"going");
+    let staged = [
+        staged(
+            scratch
+                .stage("fresh.md", Transition::Create { content: b"fresh" })
+                .expect("a create stages"),
+        ),
+        staged(
+            scratch
+                .stage(
+                    "note.md",
+                    Transition::Replace {
+                        before: hash(b"old"),
+                        content: b"new",
+                    },
+                )
+                .expect("a replacement stages"),
+        ),
+        staged(
+            scratch
+                .stage(
+                    "gone.md",
+                    Transition::Remove {
+                        before: hash(b"going"),
+                    },
+                )
+                .expect("a removal stages"),
+        ),
+    ];
+    // Another writer lands every one of them first.
+    scratch.place("fresh.md", b"fresh");
+    scratch.place("note.md", b"new");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    std::fs::remove_file(scratch.at("gone.md")).expect("a foreign removal");
+    let theirs = [
+        identity_at(&scratch.at("fresh.md")),
+        identity_at(&scratch.at("note.md")),
+    ];
+
+    let [create, replace, remove] = staged.map(|staged| {
+        found(
+            scratch
+                .publish(staged)
+                .expect("a landing another writer made"),
+        )
+    });
+
+    for (confirmed, path, identity) in [
+        (&create, "fresh.md", theirs[0]),
+        (&replace, "note.md", theirs[1]),
+    ] {
+        let AfterState::Present(state) = confirmed.after else {
+            panic!("{path}: {:?}", confirmed.after);
+        };
+        assert_eq!((state.dev, state.ino), identity, "{path} was written again");
+        assert!(confirmed.durability.is_synced());
+    }
+    assert!(matches!(remove.after, AfterState::Absent), "{remove:?}");
+    assert!(remove.durability.is_synced());
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a found landing kept its shadow: {:?}",
+        scratch.shadow_names()
+    );
+}
+
+/// A removal whose folder is gone by publication has landed: absence is its
+/// after-state, whatever took the folder with it.
+#[test]
+fn a_removal_whose_folder_is_gone_at_publication_is_found() {
+    let scratch = Scratch::new("found-folder-gone");
+    scratch.place("folder/deeper/note.md", b"going");
+    let staged = staged(
+        scratch
+            .stage(
+                "folder/deeper/note.md",
+                Transition::Remove {
+                    before: hash(b"going"),
+                },
+            )
+            .expect("a removal stages"),
+    );
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    std::fs::remove_dir_all(scratch.at("folder")).expect("a foreign removal of the folder");
+
+    let confirmed = found(scratch.publish(staged).expect("a landed removal"));
+
+    assert!(matches!(confirmed.after, AfterState::Absent));
+    assert!(confirmed.durability.is_synced());
+}
+
+/// A replacement whose folder is gone by publication is still drift: its
+/// after-state is content, and nothing is there.
+#[test]
+fn a_replacement_whose_folder_is_gone_at_publication_is_drift() {
+    let scratch = Scratch::new("drift-folder-gone");
+    scratch.place("folder/note.md", b"old");
+    let staged = staged(
+        scratch
+            .stage(
+                "folder/note.md",
+                Transition::Replace {
+                    before: hash(b"old"),
+                    content: b"new",
+                },
+            )
+            .expect("a replacement stages"),
+    );
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    std::fs::remove_dir_all(scratch.at("folder")).expect("a foreign removal of the folder");
+
+    let refusal = scratch
+        .publish(staged)
+        .expect_err("a replacement onto nothing");
+
+    assert!(
+        matches!(&refusal, Refusal::Drifted { observed: None, .. }),
+        "{refusal}"
+    );
+    assert!(
+        !exists(&scratch.at("folder")),
+        "a replacement made the folder again"
+    );
     assert!(scratch.shadow_names().is_empty());
 }
 

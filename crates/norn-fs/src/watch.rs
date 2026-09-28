@@ -4110,6 +4110,7 @@ mod tests {
         Published {
             after,
             durability: crate::write::Durability::Synced,
+            made_folders: Vec::new(),
         }
     }
 

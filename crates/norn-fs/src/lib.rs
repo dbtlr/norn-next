@@ -26,8 +26,10 @@
 //! - [`write`](mod@write) — the staging and publishing kernel. [`stage`] checks a
 //!   target through an anchored descent and stages a write's content in a
 //!   shadow; [`publish`] checks everything again and publishes by an exclusive
-//!   rename, a rename or an unlink; [`confirm_landed`] makes a landing a
-//!   re-send finds durable; [`discard`] abandons a staged target.
+//!   rename, a rename or an unlink, making a create's missing folders and
+//!   renaming a respell; [`confirm_landed`] makes a landing a re-send finds
+//!   durable; [`discard`] abandons a staged target; [`remove_empty_folders`]
+//!   takes the folders a removal emptied.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
 //!   why a leaked one is inert, and the sweeps that bound what they cost: one
 //!   [per home](ShadowHome::sweep), and two over the
@@ -138,6 +140,6 @@ pub use watch::{
     watch_polling,
 };
 pub use write::{
-    AfterState, Confirmed, Durability, Landed, Published, Staged, Staging, Transition,
-    confirm_landed, discard, publish, stage,
+    AfterState, Confirmed, Durability, Landed, Publication, Published, RemovedFolders, Staged,
+    Staging, Transition, confirm_landed, discard, publish, remove_empty_folders, stage,
 };
