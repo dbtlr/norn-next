@@ -20,7 +20,7 @@ fn staging_a_create_under_missing_folders_makes_none() {
 
     assert!(!exists(&scratch.at("a")), "staging made a folder");
     assert_eq!(scratch.shadow_names().len(), 1);
-    norn_fs::discard(staged, scratch.shadows());
+    scratch.discard(staged);
 }
 
 /// **The bar on made folders.** Publishing a create makes every missing folder
@@ -72,15 +72,12 @@ fn a_create_whose_missing_folder_became_a_file_refuses_and_leaves_nothing() {
         .publish(staged)
         .expect_err("a folder that is a file");
 
-    assert!(
-        matches!(
-            &refusal,
-            Refusal::Environment {
-                kind: std::io::ErrorKind::NotADirectory,
-                ..
-            }
-        ),
-        "{refusal}"
+    assert_eq!(
+        refusal,
+        Refusal::FolderIsFile {
+            path: scratch.at("a/b/fresh.md"),
+            folder: scratch.at("a/b"),
+        }
     );
     assert_eq!(names_in(&scratch.at("a")), vec!["b".to_string()]);
     assert!(scratch.shadow_names().is_empty());
@@ -124,8 +121,8 @@ fn empty_folders_are_removed_upward_until_one_is_not_empty() {
     scratch.directory("a/b/c");
     scratch.place("a/keep.md", b"a document keeps its folder");
 
-    let removed =
-        remove_empty_folders(&scratch.vault(), Path::new("a/b/c")).expect("empty folders removed");
+    let removed = remove_empty_folders(&scratch.vault(), scratch.root(), Path::new("a/b/c"))
+        .expect("empty folders removed");
 
     assert_eq!(
         removed.removed,
@@ -145,8 +142,8 @@ fn emptying_upward_never_removes_the_root() {
     let scratch = Scratch::new("folders-root");
     scratch.directory("a/b");
 
-    let removed =
-        remove_empty_folders(&scratch.vault(), Path::new("a/b")).expect("empty folders removed");
+    let removed = remove_empty_folders(&scratch.vault(), scratch.root(), Path::new("a/b"))
+        .expect("empty folders removed");
 
     assert_eq!(
         removed.removed,
@@ -162,8 +159,8 @@ fn emptying_upward_from_a_folder_already_gone_empties_what_is_above() {
     let scratch = Scratch::new("folders-gone");
     scratch.directory("a");
 
-    let removed =
-        remove_empty_folders(&scratch.vault(), Path::new("a/b/c")).expect("empty folders removed");
+    let removed = remove_empty_folders(&scratch.vault(), scratch.root(), Path::new("a/b/c"))
+        .expect("empty folders removed");
 
     assert_eq!(removed.removed, vec![PathBuf::from("a")]);
 }
@@ -178,7 +175,7 @@ fn emptying_upward_through_a_link_refuses() {
     std::fs::create_dir_all(outside.join("empty")).expect("an empty folder outside the vault");
     symlink(&outside, &scratch.at("linked"));
 
-    let refusal = remove_empty_folders(&scratch.vault(), Path::new("linked/empty"))
+    let refusal = remove_empty_folders(&scratch.vault(), scratch.root(), Path::new("linked/empty"))
         .expect_err("a folder reached through a link");
 
     assert!(
@@ -198,16 +195,10 @@ fn emptying_upward_from_a_path_that_leaves_the_root_is_refused() {
     let scratch = Scratch::new("folders-uncontained");
     scratch.directory("a");
     for relative in ["../a", "a/../a", "/a"] {
-        let refusal = remove_empty_folders(&scratch.vault(), Path::new(relative))
+        let refusal = remove_empty_folders(&scratch.vault(), scratch.root(), Path::new(relative))
             .expect_err("a path that leaves the root");
         assert!(
-            matches!(
-                &refusal,
-                Refusal::Environment {
-                    kind: std::io::ErrorKind::InvalidInput,
-                    ..
-                }
-            ),
+            matches!(&refusal, Refusal::InvalidRequest { .. }),
             "{relative}: {refusal}"
         );
     }

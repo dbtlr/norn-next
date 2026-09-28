@@ -549,7 +549,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-write-kernel-death-at-every-checkpoint",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "process death at each named stage of a compare-and-swap publication leaves one \
+        states: "process death at each named stage of a staged replacement leaves one \
                  whole document — the old one or the new one, never a torn one",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
                   process_death_at_every_checkpoint_leaves_one_whole_document",
@@ -563,6 +563,70 @@ pub const REQUIRED_CASES: &[Case] = &[
                  which is what makes the write kernel's absence assertions mean something",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
                   the_child_role_publishes_under_whatever_it_was_armed_at",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-death-at-each-publication-position",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "process death at each publication position of each kind — a create's and a \
+                 replace's swap, a removal's unlink, a create's folder making, and each kind's \
+                 folder sync — leaves the target old-complete with only a shadow staged, or landed \
+                 with nothing staged",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  process_death_at_each_publication_position_leaves_the_documented_state",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-death-at-the-respell",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "process death at a respell's rename leaves the document under its old spelling \
+                 with its bytes, on a root that folds case",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  process_death_at_the_respell_leaves_the_old_spelling",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-respell-interrupted",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a respell whose rename fails after its content landed answers interrupted, naming \
+                 the cause, with the new content under the old spelling, on a root that folds case",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_respell_whose_rename_fails_after_its_content_landed_is_interrupted",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-ordinal-selects-one-publication",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an arm with a publication ordinal fires in that publication only: three staged \
+                 creates armed to end at the second swap leave exactly the first landed",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  an_ordinal_arm_fires_at_the_nth_publication_only",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-foreign-writer-inside-a-publication",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a foreign writer acting inside a publication meets the outcome ADR 0031 names: \
+                 drift for an edit or a removal of a replace's or a remove's target, a taken name \
+                 for a create, and a landing another writer made for a removal of a remove's target",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0031_names",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-typed-failure-at-unlink-mkdir-rmdir",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a failure or a full disk at a removal's unlink, a create's folder making, or a \
+                 folder's removal is a typed refusal carrying the error number, and leaves what it \
+                 was about as it was",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_failure_at_unlink_mkdir_or_rmdir_is_a_typed_refusal",
         feature: None,
     },
     // The contained read path, which every derivation reads a document and

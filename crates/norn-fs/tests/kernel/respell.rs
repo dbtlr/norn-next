@@ -65,13 +65,7 @@ fn a_respell_that_changes_more_than_ascii_case_is_refused() {
             )
             .expect_err("a respell that is not a case-only rename");
         assert!(
-            matches!(
-                &refusal,
-                Refusal::Environment {
-                    kind: std::io::ErrorKind::InvalidInput,
-                    ..
-                }
-            ),
+            matches!(&refusal, Refusal::InvalidRequest { .. }),
             "{from} -> {to}: {refusal}"
         );
     }
@@ -170,7 +164,7 @@ fn a_respell_with_new_content_lands_it_under_the_new_spelling() {
             .expect("staged"),
     );
     assert_eq!(scratch.shadow_names().len(), 1);
-    wrote(scratch.publish(staged).expect("a respell"));
+    let _ = wrote(scratch.publish(staged).expect("a respell"));
 
     assert_eq!(names_in(&scratch.vault()), vec!["Note.md".to_string()]);
     assert_eq!(bytes_at(&scratch.at("Note.md")), b"new");
@@ -196,7 +190,7 @@ fn a_respell_found_halfway_finishes_the_rename() {
         scratch.shadow_names().is_empty(),
         "a halfway respell staged a shadow"
     );
-    wrote(scratch.publish(staged).expect("the rename finishes"));
+    let _ = wrote(scratch.publish(staged).expect("the rename finishes"));
 
     assert_eq!(names_in(&scratch.vault()), vec!["Note.md".to_string()]);
     assert_eq!(bytes_at(&scratch.at("Note.md")), b"new");
@@ -239,7 +233,7 @@ fn a_respell_another_writer_finished_is_found() {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
     std::fs::rename(scratch.at("note.md"), scratch.at("Note.md")).expect("a foreign respell");
 
-    found(
+    let _ = found(
         scratch
             .publish(staged)
             .expect("a landing another writer made"),
@@ -266,5 +260,70 @@ fn a_respell_at_neither_state_is_drift() {
         #[allow(clippy::disallowed_methods)] // Harness scaffolding: clearing the case's file.
         std::fs::remove_file(path).expect("clearing");
     }
+    assert!(scratch.shadow_names().is_empty());
+}
+
+/// **A landed respell is the new spelling.** A respell another writer moved
+/// back to its old spelling after staging found it landed is not confirmed.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+fn a_respell_reverted_to_its_old_spelling_is_not_confirmed() {
+    let scratch = Scratch::new("respell-reverted");
+    if !folds(
+        &scratch,
+        "a_respell_reverted_to_its_old_spelling_is_not_confirmed",
+    ) {
+        return;
+    }
+    scratch.place("Note.md", b"old");
+    let Staging::Landed(landed) = scratch
+        .stage("note.md", respell(b"old", None))
+        .expect("a landed respell")
+    else {
+        panic!("a landed respell staged");
+    };
+    std::fs::rename(scratch.at("Note.md"), scratch.at("note.md")).expect("a foreign respell back");
+
+    let refusal = confirm_landed(&scratch.vault(), &landed).expect_err("a reverted respell");
+    assert!(matches!(refusal, Refusal::Drifted { .. }), "{refusal}");
+}
+
+/// **On a root that folds, a name is the spelling its folder lists.** A
+/// create whose content stands under another spelling is not landed — the
+/// name is taken, and not by this create — and a replace or a remove of a
+/// spelling the folder no longer lists is drift.
+#[test]
+fn a_target_under_another_spelling_is_not_this_target() {
+    let scratch = Scratch::new("respell-other-spelling");
+    if !folds(
+        &scratch,
+        "a_target_under_another_spelling_is_not_this_target",
+    ) {
+        return;
+    }
+    scratch.place("Note.md", b"old");
+
+    let create = scratch
+        .stage("note.md", Transition::Create { content: b"old" })
+        .expect_err("a create whose content stands under another spelling");
+    assert!(
+        matches!(create, Refusal::DestinationExists { .. }),
+        "{create}"
+    );
+    for transition in [
+        Transition::Replace {
+            before: hash(b"old"),
+            content: b"new",
+        },
+        Transition::Remove {
+            before: hash(b"old"),
+        },
+    ] {
+        let refusal = scratch
+            .stage("note.md", transition)
+            .expect_err("a target the folder lists under another spelling");
+        assert!(matches!(refusal, Refusal::Drifted { .. }), "{refusal}");
+    }
+    assert_eq!(names_in(&scratch.vault()), vec!["Note.md".to_string()]);
     assert!(scratch.shadow_names().is_empty());
 }

@@ -24,9 +24,10 @@
 //! # Reaching it from outside
 //!
 //! One stage of the widening is taken and no more: under the `induced-failure`
-//! feature, the write protocol's public entry points — [`stage`](crate::stage),
-//! [`publish`](crate::publish), [`confirm_landed`](crate::confirm_landed) and
-//! [`discard`](crate::discard) — arm themselves from this process's environment
+//! feature, the write protocol's five public entry points —
+//! [`stage`](crate::stage), [`publish`](crate::publish),
+//! [`confirm_landed`](crate::confirm_landed), [`discard`](crate::discard) and
+//! [`remove_empty_folders`](crate::remove_empty_folders) — arm themselves from this process's environment
 //! rather than passing [`Faults::NONE`]. That is what a lockdown suite's
 //! process-death bars need and what nothing else can give them — a stage whose
 //! required outcome is "this process does not survive here" cannot be reached
@@ -41,19 +42,22 @@
 //!
 //!   ```text
 //!   arm      = pair { "," pair }
-//!   pair     = stage [ "@" N ] "=" ( "fails" | "full-disk" | "ends" ) | "foreign@" N "=" ( "edit" | "remove" | "take" )
-//!   stage    = "stage-create" | "stage-write" | "stage-sync" | "swap" | "unlink" | "respell" | "mkdir" | "rmdir" | "parent-sync" | "cleanup"
+//!   pair     = ( counted [ "@" N ] | uncounted ) "=" ( "fails" | "full-disk" | "ends" ) | "foreign@" N "=" ( "edit" | "remove" | "take" )
+//!   counted  = "swap" | "unlink" | "respell" | "mkdir" | "parent-sync" | "cleanup"
+//!   uncounted = "stage-create" | "stage-write" | "stage-sync" | "rmdir"
 //!   ```
 //!
-//!   Staging's three stages take no ordinal, because they come before any
-//!   publication. `N` counts from 1, one per call of
+//!   Staging's three stages and `rmdir` take no ordinal, because no counted
+//!   call reaches them: staging comes before any publication, and a folder is
+//!   removed only while emptying folders. `N` counts from 1, one per call of
 //!   [`publish`](crate::publish) across every kind in this process;
 //!   [`confirm_landed`](crate::confirm_landed),
 //!   [`remove_empty_folders`](crate::remove_empty_folders) and
 //!   [`discard`](crate::discard) do not count, so an arm with an ordinal never
-//!   fires in them. A stage with no ordinal fires wherever it is reached. One
-//!   stage may be armed at several ordinals; the same selector twice is a
-//!   mistake. The `foreign` stage is a foreign writer acting on the target
+//!   fires in them. A stage with no ordinal fires wherever it is reached, every
+//!   time. One stage may be armed at several ordinals; the same selector twice
+//!   is a mistake, and so is one stage armed both bare and by ordinal, since
+//!   the bare arm would answer first everywhere. The `foreign` stage is a foreign writer acting on the target
 //!   inside the `N`th publication, after the root is checked and before the
 //!   target is read again: `edit` writes fixed foreign bytes at the target's
 //!   name, `remove` removes the target, and `take` claims a create's name —
@@ -62,7 +66,8 @@
 //!   is armed at, so it panics.
 //! - `NORN_FS_ARM_HITS` — a file each fired arm appends one record to before it
 //!   answers — `seam=norn-fs/write stage=<stage> ordinal=<N or -> path=<the
-//!   vault-relative path the stage acts on> answer=<answer>` — so a parent
+//!   vault-relative path the stage acts on, percent-encoded> answer=<answer>`
+//!   — so a parent
 //!   reads *which* checkpoint the protocol reached rather
 //!   than inferring it from what the child left behind. Neutering a stage's
 //!   `check` call takes its record away, which is what makes a bypassed hook
@@ -326,13 +331,15 @@ impl Stage {
 
     /// Whether an arm may select this stage by publication ordinal.
     ///
-    /// Staging comes before any publication, so an ordinal says nothing about
-    /// it; every other position is reached inside one.
+    /// Only a stage some publication reaches can be counted to. Staging comes
+    /// before any publication, and a folder's removal is reached only while
+    /// emptying folders, which no count covers; an ordinal on either would
+    /// name a firing that can never come.
     #[cfg(any(test, feature = "induced-failure"))]
     const fn takes_an_ordinal(self) -> bool {
         !matches!(
             self,
-            Stage::ShadowCreate | Stage::ShadowWrite | Stage::ShadowSync
+            Stage::ShadowCreate | Stage::ShadowWrite | Stage::ShadowSync | Stage::Rmdir
         )
     }
 }
@@ -489,6 +496,9 @@ pub(crate) enum Window {
     Publishing,
     /// A create has made one of its missing folders and has not opened it.
     FolderMade,
+    /// A respell's first step is done and its rename has not read the target
+    /// again.
+    Respelling,
 }
 
 /// Which stages of a write fail, and how, and which publication this is.
@@ -697,11 +707,33 @@ mod armed {
                 "seam={} stage={} ordinal={ordinal} path={} answer={}",
                 super::SEAM,
                 stage.name(),
-                path.display(),
+                super::encoded(path),
                 answer.name()
             ),
         );
     }
+}
+
+/// A path as a record field spells it: every byte outside `A–Z a–z 0–9 - . _ ~
+/// /` as `%` and two upper-case hex digits.
+///
+/// A record is space-separated `key=value` fields, one per line, so a path
+/// holding a space, an `=` or a newline would otherwise forge a field or a
+/// record. The escape is percent-encoding's, `%` itself included, so a reader
+/// can take the value back byte for byte.
+#[cfg(any(test, feature = "induced-failure"))]
+pub(crate) fn encoded(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str()
+        .as_bytes()
+        .iter()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                char::from(*byte).to_string()
+            }
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// Read the write seam's `selector=answer` pairs through the grammar all three
@@ -717,6 +749,18 @@ fn parse(spelling: &str) -> Vec<(Selector, Answer)> {
         Answer::named,
         Selector::spelled,
     );
+    for (index, (selector, _)) in armed.iter().enumerate() {
+        // A stage armed bare fires in every publication, so an ordinal arm of
+        // the same stage beside it would never be the one that answers.
+        assert!(
+            !armed[..index]
+                .iter()
+                .any(|(earlier, _)| earlier.stage == selector.stage
+                    && earlier.ordinal.is_none() != selector.ordinal.is_none()),
+            "the {} stage is armed both bare and by ordinal in {ARMED_STAGES}",
+            selector.stage.name()
+        );
+    }
     for (selector, answer) in &armed {
         assert_eq!(
             selector.stage == Stage::Foreign,
@@ -881,6 +925,9 @@ mod tests {
             .into_iter()
             .filter(|stage| *stage != Stage::Foreign)
         {
+            if stage.takes_an_ordinal() {
+                assert_eq!(parse(&format!("{}@3=ends", stage.name())).len(), 1);
+            }
             assert_eq!(parse(&format!("{}=ends", stage.name())).len(), 1);
         }
     }
@@ -908,12 +955,29 @@ mod tests {
             "foreign@1=ends",
             "swap@1=edit",
             "unlink=take",
+            "swap=ends,swap@2=fails",
+            "swap@2=fails,swap=ends",
+            "rmdir@1=fails",
         ] {
             assert!(
                 std::panic::catch_unwind(|| parse(spelling)).is_err(),
                 "`{spelling}` was read as an arm"
             );
         }
+    }
+
+    /// **A record's path cannot forge a field or a record.** Every byte a
+    /// record's grammar gives meaning to is escaped, and the escape itself.
+    #[test]
+    fn a_record_path_is_percent_encoded() {
+        assert_eq!(
+            encoded(std::path::Path::new("a b/c=d\n%e.md")),
+            "a%20b/c%3Dd%0A%25e.md"
+        );
+        assert_eq!(
+            encoded(std::path::Path::new("notes/note-1_x.md")),
+            "notes/note-1_x.md"
+        );
     }
 
     /// Every stage and every answer a harness arms round-trips through the name

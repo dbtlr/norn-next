@@ -119,7 +119,7 @@ fn a_replacement_publishes_a_new_file_rather_than_editing_the_old_one() {
     let path = scratch.place("note.md", b"old");
     let before = identity_at(&path);
 
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -183,7 +183,7 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
     };
 
     for round in 0..ROUNDS {
-        scratch
+        let _ = scratch
             .stage_and_publish(
                 "note.md",
                 Transition::Replace {
@@ -209,7 +209,7 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
     let path = scratch.place("note.md", b"old");
     set_mode(&path, 0o640);
 
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -225,7 +225,7 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
     );
 
     set_mode(&path, 0o600);
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -238,7 +238,7 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
 
     // A create takes what an ordinary create takes: the control is a plain
     // write in the same directory under the same umask.
-    scratch
+    let _ = scratch
         .stage_and_publish("fresh.md", Transition::Create { content: b"fresh" })
         .expect("a create onto nothing");
     let control = scratch.place("control.md", b"control");
@@ -264,7 +264,7 @@ fn a_replacement_carries_permission_bits_without_the_setuid_bits() {
         "the filesystem did not keep the bits this case is about"
     );
 
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -286,7 +286,7 @@ fn a_read_only_target_is_still_replaced_with_its_mode_carried() {
     let path = scratch.place("note.md", b"old");
     set_mode(&path, 0o444);
 
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -804,4 +804,172 @@ fn a_landed_target_is_confirmed_and_its_folder_synced() {
     scratch.place("folder/note.md", b"theirs");
     let refusal = confirm_landed(&scratch.vault(), &landed).expect_err("a landing that moved");
     assert!(matches!(refusal, Refusal::Drifted { .. }), "{refusal}");
+}
+
+/// **The bar on the shadow's identity.** A shadow replaced between the phases
+/// by another file holding the same bytes refuses as an I/O failure, and the
+/// other file is neither published nor removed.
+///
+/// The hash alone agrees, so only the identity says the file is not the one
+/// staging made. The forbidden shape is a confirmation by content: it
+/// publishes whatever a sweep or a sync client left at the shadow's name.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: a foreign writer in the home.
+fn a_shadow_replaced_by_a_copy_of_its_bytes_refuses() {
+    let scratch = Scratch::new("shadow-copied");
+    let path = scratch.place("note.md", b"old");
+    let staged = staged(
+        scratch
+            .stage(
+                "note.md",
+                Transition::Replace {
+                    before: hash(b"old"),
+                    content: b"new",
+                },
+            )
+            .expect("staged"),
+    );
+    let shadow = scratch.only_shadow();
+    let copy = shadow.with_file_name("a-copy");
+    std::fs::write(&copy, b"new").expect("a copy of the shadow's bytes");
+    std::fs::rename(&copy, &shadow).expect("the copy in the shadow's place");
+    let foreign = identity_at(&shadow);
+
+    let refusal = scratch
+        .publish(staged)
+        .expect_err("a shadow that is another file");
+
+    assert!(
+        matches!(
+            &refusal,
+            Refusal::Environment {
+                kind: std::io::ErrorKind::InvalidData,
+                ..
+            }
+        ),
+        "{refusal}"
+    );
+    assert_eq!(bytes_at(&path), b"old");
+    assert_eq!(
+        identity_at(&shadow),
+        foreign,
+        "the cleanup removed a file it did not stage"
+    );
+}
+
+/// **The shadow is confirmed last.** A landing another writer made is found
+/// whatever became of the shadow, and a create refused at its shadow after
+/// making folders takes them back.
+///
+/// The forbidden shape is confirming the shadow first: a re-send over a target
+/// somebody else finished would refuse for a shadow it does not need, and the
+/// window between the confirmation and the rename would span the whole
+/// verification and the folders.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: a sweep taking the shadow.
+fn the_shadow_is_confirmed_after_the_target_and_the_folders() {
+    let scratch = Scratch::new("shadow-last");
+    scratch.place("note.md", b"old");
+    let replace = staged(
+        scratch
+            .stage(
+                "note.md",
+                Transition::Replace {
+                    before: hash(b"old"),
+                    content: b"new",
+                },
+            )
+            .expect("staged"),
+    );
+    std::fs::remove_file(scratch.only_shadow()).expect("a sweep taking the shadow");
+    scratch.place("note.md", b"new");
+    let _ = found(
+        scratch
+            .publish(replace)
+            .expect("a landing another writer made"),
+    );
+
+    let create = staged(
+        scratch
+            .stage("a/b/fresh.md", Transition::Create { content: b"fresh" })
+            .expect("staged"),
+    );
+    std::fs::remove_file(scratch.only_shadow()).expect("a sweep taking the shadow");
+    let refusal = scratch
+        .publish(create)
+        .expect_err("a create with no shadow");
+    assert!(
+        matches!(
+            &refusal,
+            Refusal::Environment {
+                kind: std::io::ErrorKind::NotFound,
+                ..
+            }
+        ),
+        "{refusal}"
+    );
+    assert!(
+        !exists(&scratch.at("a")),
+        "the folders made before the shadow refused were left"
+    );
+}
+
+/// **Every call is held to the plan's root.** Staging and emptying folders
+/// under a root identity the vault root is not refuse as a replaced root, and
+/// read nothing.
+#[test]
+fn a_root_the_plan_was_not_made_against_refuses_staging_and_emptying() {
+    let scratch = Scratch::new("root-expected");
+    scratch.place("note.md", b"old");
+    scratch.directory("empty");
+    let elsewhere = norn_fs::path_identity(scratch.vault().parent().expect("a tree"))
+        .expect("the tree")
+        .expect("a tree");
+
+    let staging = norn_fs::stage(
+        &scratch.vault(),
+        elsewhere,
+        std::path::Path::new("note.md"),
+        Transition::Remove {
+            before: hash(b"old"),
+        },
+        scratch.shadows(),
+    );
+    assert!(
+        matches!(staging, Err(Refusal::RootReplaced { .. })),
+        "{staging:?}"
+    );
+    let emptying =
+        norn_fs::remove_empty_folders(&scratch.vault(), elsewhere, std::path::Path::new("empty"));
+    assert!(
+        matches!(emptying, Err(Refusal::RootReplaced { .. })),
+        "{emptying:?}"
+    );
+    assert!(exists(&scratch.at("empty")));
+}
+
+/// **A removal's landing is absence.** Confirming a removal staging found
+/// landed refuses where a file has since come to its name, rather than
+/// reporting it absent.
+#[test]
+fn confirming_a_removal_that_finds_a_file_refuses() {
+    let scratch = Scratch::new("confirm-remove-file");
+    let Staging::Landed(landed) = scratch
+        .stage(
+            "note.md",
+            Transition::Remove {
+                before: hash(b"old"),
+            },
+        )
+        .expect("a landed removal")
+    else {
+        panic!("a removal of nothing staged");
+    };
+    scratch.place("note.md", b"somebody's new document");
+
+    let refusal = confirm_landed(&scratch.vault(), &landed).expect_err("a name taken again");
+    assert!(
+        matches!(refusal, Refusal::DestinationExists { .. }),
+        "{refusal}"
+    );
 }

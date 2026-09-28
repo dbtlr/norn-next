@@ -15,7 +15,19 @@
 //! **A target at its after-state has landed, whichever writer put it there.**
 //! Staging reports it as [`Staging::Landed`]; publication reports it as
 //! [`Publication::Found`], discards the shadow and syncs the folder. Only
-//! [`Publication::Wrote`] says this call changed the vault.
+//! [`Publication::Wrote`], and the step [`Publication::Interrupted`] names,
+//! say this call changed the vault.
+//!
+//! **Every call is held to the plan's vault root.** Staging and emptying
+//! folders take the root's `(device, inode)` the plan was made against, and
+//! publication and confirming a landing take it from what staging recorded; a
+//! root whose spelling now names another directory refuses as
+//! [`Refusal::RootReplaced`].
+//!
+//! **On a root that folds case, a name is the spelling its folder lists.** A
+//! target the volume resolves under another spelling is not this target: a
+//! create refuses it as a taken name, a replace or a remove as drift, and it is
+//! never found landed.
 //!
 //! # Staging
 //!
@@ -35,8 +47,9 @@
 //!    after-state stages as landed, with no shadow; a target at neither state
 //!    refuses.
 //! 4. **A write's content goes into a fresh shadow**, opened exclusively in the
-//!    shadow home, given a replaced file's permission bits before a byte of
-//!    content goes in, and fsynced. [`Staged`] records the shadow's name and
+//!    shadow home — reached, where the home is the fallback under the vault
+//!    root, by the same no-follow descent from that root — given a replaced
+//!    file's permission bits before a byte of content goes in, and fsynced. [`Staged`] records the shadow's name and
 //!    `(device, inode)` and nothing that holds it open.
 //!
 //! A staging refusal leaves no shadow behind.
@@ -49,19 +62,19 @@
 //! 1. **The root is reopened** and refuses as [`Refusal::RootReplaced`] when
 //!    its `(device, inode)` is not the one staging recorded.
 //! 2. **The descent is made again** to the target's folder, through no link.
-//! 3. **The shadow is confirmed**: opened through the shadow home's
-//!    directory without following a link, compared by identity with what
-//!    staging made, and hashed again. A shadow that is gone or changed is an
-//!    environmental refusal for this target — an I/O failure, never drift —
-//!    because a staged shadow outlives its staging call and a sweep or a sync
-//!    client can reach it.
-//! 4. **The target is verified again** exactly as staging read it: at its
+//! 3. **The target is verified again** exactly as staging read it: at its
 //!    after-state it is found landed, and otherwise a create must still be
 //!    absent, and a replace or a remove still at its before-state.
-//! 5. **A create makes its missing folders**, one level at a time with
-//!    `mkdirat` and each opened again through no link, just before its
-//!    rename. A create refused after that removes the folders it made that
-//!    are still empty.
+//! 4. **A create makes its missing folders**, one level at a time with
+//!    `mkdirat` and each opened again through no link. A create refused after
+//!    that removes the folders it made that are still empty, and names any it
+//!    had to leave.
+//! 5. **The shadow is confirmed, last, just before the act**: opened through
+//!    the shadow home's directory without following a link, compared by
+//!    identity with what staging made, and hashed again. A shadow that is gone
+//!    or changed is an environmental refusal for this target — an I/O failure,
+//!    never drift — because a staged shadow outlives its staging call and a
+//!    sweep or a sync client can reach it.
 //! 6. **The publication act runs through the folder's handle.** A create is a
 //!    rename that never replaces a name (`renameat2` with `RENAME_NOREPLACE`
 //!    on Linux, `renameatx_np` with `RENAME_EXCL` on macOS); a replace is a
@@ -70,9 +83,11 @@
 //!    filesystem that cannot rename exclusively refuses it as
 //!    [`Refusal::ExclusiveCreateUnsupported`] — there is no fallback, because
 //!    every fallback is a check followed by a rename.
-//! 7. **The folder is synced through the same handle**, and so is each folder
-//!    that holds one the create made. The result is reported as
-//!    [`Durability`] rather than dropped.
+//! 7. **The folder is synced through the same handle.** A create — published,
+//!    or found landed — syncs every folder from the root down to its own, so a
+//!    folder a crashed attempt made and never synced is made durable by the
+//!    re-send that finds it. The result is reported as [`Durability`] rather
+//!    than dropped.
 //!
 //! A refusal before the publication act removes the target's shadow, where the
 //! shadow is still the file staging made.
@@ -91,7 +106,10 @@
 //! ordinary replace under the old spelling; then, with the after-state read
 //! again, a plain rename of the old spelling to the new. Both folder syncs are
 //! in the durability reported. `RENAME_NOREPLACE` cannot serve the second
-//! step, because on a folding root the new spelling *is* the entry.
+//! step, because on a folding root the new spelling *is* the entry. A rename
+//! that fails after the first step landed is [`Publication::Interrupted`]: the
+//! content is published under the old spelling, and a re-send finds the
+//! respell halfway.
 //!
 //! # What durability means here
 //!
@@ -113,8 +131,15 @@
 //! **The window between the last verification and the publication act cannot
 //! be closed.** POSIX offers no compare-and-rename, so a foreign write into the
 //! target in that window is overwritten by a replace or a respell, or taken by
-//! a remove. The window is the width of one call. A create has no such window:
-//! the exclusive rename is its whole question.
+//! a remove. The window is the width of one call. A create has no such window
+//! at its name: the exclusive rename is its whole question.
+//!
+//! **The shadow has the same one-call window**, stated the same way. The
+//! rename moves the shadow by its name, so a foreign replacement of the shadow
+//! between its confirmation and the rename is what gets published. The
+//! confirmation is the last check before the act to keep that window one call
+//! wide, and nothing after the rename checks it again: the home is this crate's
+//! own directory, which nothing but a sweep or a sync client reaches.
 //!
 //! **A folder a foreign writer moves after the descent receives the
 //! publication at its new place.** The handle is the folder, not its name, so
@@ -146,19 +171,21 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, fstat, mkdirat, open, openat, renameat,
-    renameat_with, statat, unlinkat,
+    AtFlags, Dir, Mode, OFlags, RenameFlags, fstat, mkdirat, open, openat, renameat, renameat_with,
+    statat, unlinkat,
 };
 use rustix::io::Errno;
 
 use crate::faults::{Faults, Stage, Window};
 use crate::hash::{ContentHash, hashed_from};
 use crate::identity::{Identity, PostState, identity_of, identity_of_stat, post_state};
-use crate::open::{anchor_flags, directory_flags, regular_flags};
-use crate::path::{CaseSensitivity, Lookup, fold_together, probe_case_behavior_by};
+use crate::open::{Step, Stopped, anchor_flags, contained_names, regular_flags, step_into};
+use crate::path::{
+    CaseSensitivity, Lookup, alternate_ascii_case, fold_together, probe_case_behavior_by,
+};
 use crate::refusal::{Refusal, environment, environment_at};
 use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 
@@ -184,6 +211,12 @@ use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transition<'a> {
     /// Nothing may be at the name, and `content` is what will be.
+    ///
+    /// A create publishes at the mode an ordinary create takes under the
+    /// process's umask, because there is no file to carry a mode from — and a
+    /// move's destination, which a plan resolves into a create, is no
+    /// exception: the moved document lands at the default mode, as the
+    /// one-shot move did before the split.
     Create { content: &'a [u8] },
     /// The file must hash to `before`, and `content` is what will be there.
     Replace {
@@ -206,6 +239,7 @@ pub enum Transition<'a> {
 }
 
 /// What staging found a target needs.
+#[must_use]
 #[derive(Debug, Eq, PartialEq)]
 pub enum Staging {
     /// The target is at its before-state and is ready to publish.
@@ -295,9 +329,24 @@ pub struct Landed {
     path: PathBuf,
     /// The after-state: the content hash, or `None` for absence.
     after: Option<ContentHash>,
-    /// Whether the spelling is part of the after-state: a respell has landed
-    /// only where the folder's listing spells the name exactly as `path` does.
-    spelled: bool,
+    /// Which transition landed, which decides what confirming it syncs and
+    /// whether the spelling is part of the after-state.
+    landing: Landing,
+}
+
+/// Which kind of transition a landing is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Landing {
+    /// A create: every folder from the root down to its own is synced, since a
+    /// crashed attempt may have made them.
+    Created,
+    /// A replace: its folder is synced.
+    Replaced,
+    /// A remove: the deepest folder still there is synced.
+    Removed,
+    /// A respell: landed only where the folder's listing spells the name as
+    /// the path does, and synced like a create.
+    Respelled,
 }
 
 impl Landed {
@@ -324,10 +373,12 @@ pub enum AfterState {
 
 /// Whether a landed change is on the disk, and the error that says why not.
 ///
-/// It covers every sync the call made — the target's folder, and any folder a
-/// create made or a respell renamed in twice. A change the filesystem has not
-/// confirmed durable is still a change every reader sees, so this is never a
-/// refusal; whether it stops what comes next is the caller's to decide.
+/// It covers every sync the call made — the target's folder, every folder a
+/// create's path runs through, and a respell's two steps. A change the
+/// filesystem has not confirmed durable is still a change every reader sees,
+/// so this is never a refusal; whether it stops what comes next is the
+/// caller's to decide.
+#[must_use]
 #[derive(Debug)]
 pub enum Durability {
     /// Every folder the change touched was synced.
@@ -353,6 +404,7 @@ impl Durability {
 }
 
 /// What a publication did.
+#[must_use]
 #[derive(Debug)]
 pub enum Publication {
     /// This call changed the vault. The own-write ledger records this, because
@@ -360,11 +412,15 @@ pub enum Publication {
     Wrote(Published),
     /// The target was already at its after-state — another writer put it
     /// there — so this call wrote nothing, discarded its shadow and synced the
-    /// folder. No event of this call's is coming, and nothing is recorded.
+    /// folders. No event of this call's is coming, and nothing is recorded.
     Found(Confirmed),
+    /// A respell whose first step landed and whose rename did not: ADR 0031's
+    /// interrupted, for this one target.
+    Interrupted(Interrupted),
 }
 
 /// A target this call published.
+#[must_use]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Published {
@@ -377,17 +433,36 @@ pub struct Published {
     pub made_folders: Vec<PathBuf>,
 }
 
-/// A target found at its after-state, verified and its folder synced.
+/// A respell that published its content under the old spelling and did not
+/// rename it.
+///
+/// `published` is the first step, and it is what the own-write ledger records:
+/// an event is coming for the old spelling, which on a folding root is the one
+/// key both spellings share. A re-send stages the respell halfway and finishes
+/// the rename.
+#[must_use]
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Interrupted {
+    /// The first step, landed under the old spelling.
+    pub published: Published,
+    /// Why the rename did not happen.
+    pub cause: Refusal,
+}
+
+/// A target found at its after-state, verified and its folders synced.
+#[must_use]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Confirmed {
     /// What the target holds.
     pub after: AfterState,
-    /// Whether the target's folder is on the disk.
+    /// Whether the folders holding the target are on the disk.
     pub durability: Durability,
 }
 
 /// What emptying folders upward removed.
+#[must_use]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RemovedFolders {
@@ -400,9 +475,10 @@ pub struct RemovedFolders {
 /// Check `path` below `anchor` for `transition`, and stage a write's content.
 ///
 /// See the [module documentation](self) for what staging asks and what it
-/// leaves behind. `anchor` is the vault root, resolved as it is spelled;
-/// `path` is relative to it and names a file below it, never a parent, a
-/// root or a prefix.
+/// leaves behind. `anchor` is the vault root, resolved as it is spelled, and
+/// `root` is the `(device, inode)` the plan was made against: an anchor that
+/// names another directory refuses. `path` is relative to it and names a file
+/// below it, never a parent, a root or a prefix.
 ///
 /// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
 /// plan-apply), which stages every target of a plan before it publishes any.
@@ -410,6 +486,7 @@ pub struct RemovedFolders {
 /// contract is held by this crate's suites alone.
 pub fn stage(
     anchor: &Path,
+    root: Identity,
     path: &Path,
     transition: Transition<'_>,
     shadows: &ShadowHome,
@@ -417,15 +494,15 @@ pub fn stage(
     // The public entry points are where the fault seam is reachable from
     // outside this crate, and only under the `induced-failure` feature: the
     // process-death bars are stated about a process that does not return.
-    stage_where(anchor, path, transition, shadows, Faults::entry())
+    stage_where(anchor, root, path, transition, shadows, Faults::entry())
 }
 
 /// Publish what [`stage`] staged.
 ///
 /// See the [module documentation](self) for what publication asks again, the
 /// residual race and the crash windows. `anchor` and `shadows` are the ones
-/// the target was staged under; a different root refuses, and a different home
-/// holds no such shadow.
+/// the target was staged under; the root is held to the one staging recorded,
+/// and a different home holds no such shadow.
 ///
 /// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
 /// plan-apply), which publishes creates, then replaces, then removes, once
@@ -438,14 +515,16 @@ pub fn publish(
     publish_disturbed(anchor, staged, shadows, Faults::publication(), &mut |_| {})
 }
 
-/// Verify a target staging found already landed, and sync its folder again.
+/// Verify a target staging found already landed, and sync its folders again.
 ///
 /// A re-send of a plan that a crash interrupted finds its landed targets here,
 /// and the sync is why it is more than a look: the crash may have come
-/// between the publication act and the folder sync, and the directory entry is
-/// not durable until one runs. A target that no longer holds the after-state
-/// refuses — drift where a content hash was expected, a taken name where
-/// absence was.
+/// between the publication act and the folder syncs, and a directory entry is
+/// not durable until one runs. A create's and a respell's landing syncs every
+/// folder from the root down to its own, since the crashed attempt may have
+/// made them. The root is held to the one staging recorded. A target that no
+/// longer holds the after-state refuses — drift where a content hash was
+/// expected, a taken name where absence was.
 ///
 /// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
 /// plan-apply), on a re-sent resolved plan. Nothing outside `norn-fs` calls it
@@ -460,21 +539,22 @@ pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refus
 /// target, or a lifecycle end. The shadow is removed only while its name still
 /// means the file staging made, and a removal that fails is left to the shadow
 /// home's sweep, for the reason a publication's own cleanup is (see
-/// [`crate::shadow`]).
+/// [`crate::shadow`]). A fallback home under a vault root that no longer is
+/// the staged one is not reached, and its shadow is left to that sweep too.
 ///
 /// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
 /// plan-apply). Nothing outside `norn-fs` calls it until then.
-pub fn discard(staged: Staged, shadows: &ShadowHome) {
-    if let Some(shadow) = staged.pending.shadow() {
-        remove_shadow(
-            shadows,
-            shadow,
-            Faulted {
-                faults: Faults::entry(),
-                path: &staged.path,
-            },
-        );
-    }
+pub fn discard(anchor: &Path, staged: Staged, shadows: &ShadowHome) {
+    let Some(shadow) = staged.pending.shadow() else {
+        return;
+    };
+    let faults = Faulted {
+        faults: Faults::entry(),
+        path: &staged.path,
+    };
+    let root = open_staged_root(anchor, staged.root).ok();
+    let reach = root.as_ref().map(|root| (root.as_fd(), anchor));
+    remove_shadow(shadows, reach, shadow, faults);
 }
 
 /// Remove `folder` below `anchor` where it is empty, and each folder above it
@@ -483,10 +563,11 @@ pub fn discard(staged: Staged, shadows: &ShadowHome) {
 ///
 /// The applier calls this after a plan's removals, and for the folders a
 /// refused create left: a document is removed, and a folder that held only it
-/// goes with it. The descent is anchored and follows no link, as every change
-/// here is; a folder already gone is where the emptying starts from, and the
-/// folders above it are emptied as if it had been removed here. Each removal's
-/// holder is synced, and the durability of all of them is reported.
+/// goes with it. `root` is the plan's vault root, as [`stage`] takes it. The
+/// descent is anchored and follows no link, as every change here is; a folder
+/// already gone, or one that is now a file, is where the emptying starts from,
+/// and the folders above it are emptied as if it had been removed here. Each
+/// removal's holder is synced, and the durability of all of them is reported.
 ///
 /// A removal the filesystem refuses for a reason other than a folder that is
 /// not empty ends the call as that refusal; the folders removed before it are
@@ -494,8 +575,12 @@ pub fn discard(staged: Staged, shadows: &ShadowHome) {
 ///
 /// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
 /// plan-apply). Nothing outside `norn-fs` calls it until then.
-pub fn remove_empty_folders(anchor: &Path, folder: &Path) -> Result<RemovedFolders, Refusal> {
-    remove_empty_folders_where(anchor, folder, Faults::entry())
+pub fn remove_empty_folders(
+    anchor: &Path,
+    root: Identity,
+    folder: &Path,
+) -> Result<RemovedFolders, Refusal> {
+    remove_empty_folders_where(anchor, root, folder, Faults::entry())
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +591,7 @@ pub fn remove_empty_folders(anchor: &Path, folder: &Path) -> Result<RemovedFolde
 /// fails there.
 fn stage_where(
     anchor: &Path,
+    root: Identity,
     path: &Path,
     transition: Transition<'_>,
     shadows: &ShadowHome,
@@ -518,9 +604,18 @@ fn stage_where(
         Transition::Respell { to, .. } => Some(respelled_name(&target, to, &full)?),
         _ => None,
     };
-    let (root, root_identity) = open_root(anchor)?;
-    let folder = descend(root, &target, anchor, &full)?;
+    let root_fd = open_staged_root(anchor, root)?;
+    let folder = descend(root_fd.as_fd(), &target, anchor, &full)?;
     let after = after_of(&transition);
+    let at = StageAt {
+        anchor,
+        root,
+        root_fd: root_fd.as_fd(),
+        path,
+        full: &full,
+        shadows,
+        faults,
+    };
     if let (
         Some(to),
         Transition::Respell {
@@ -528,31 +623,24 @@ fn stage_where(
         },
     ) = (respelled, transition)
     {
-        return stage_respell(
-            folder,
-            &target,
-            to,
-            before,
-            content,
-            (root_identity, path.to_path_buf()),
-            &full,
-            shadows,
-            faults,
-        );
+        return stage_respell(&at, &folder, &target, to, before, content);
     }
-    let found = match folder {
-        Folder::Reached(folder) => observe(folder.as_fd(), target.name, &full, &mut |_| {})?,
-        Folder::Missing { .. } => Found::Absent,
-    };
-    // Every descriptor the look opened is closed by here: what staging hands
-    // back holds none.
+    let found = observe_target(&folder, &target, &full, &mut |_| {})?;
+    drop(folder);
+    // Every descriptor the look opened is closed by here, the root's aside:
+    // what staging hands back holds none.
     let mode = match judge_staging(&transition, after, found, &full)? {
         Judged::Landed => {
             return Ok(Staging::Landed(Landed {
-                root: root_identity,
+                root,
                 path: path.to_path_buf(),
                 after,
-                spelled: false,
+                landing: match transition {
+                    Transition::Create { .. } => Landing::Created,
+                    Transition::Replace { .. } => Landing::Replaced,
+                    Transition::Remove { .. } => Landing::Removed,
+                    Transition::Respell { .. } => Landing::Respelled,
+                },
             }));
         }
         Judged::Proceed { mode } => mode,
@@ -560,12 +648,12 @@ fn stage_where(
     let pending = match (transition, after) {
         (Transition::Create { content }, Some(after)) => Pending::Create {
             after,
-            shadow: stage_shadow(shadows, content, None, faults)?,
+            shadow: stage_shadow(&at, content, None)?,
         },
         (Transition::Replace { before, content }, Some(after)) => Pending::Replace {
             before,
             after,
-            shadow: stage_shadow(shadows, content, mode, faults)?,
+            shadow: stage_shadow(&at, content, mode)?,
         },
         (Transition::Remove { before }, _) => Pending::Remove { before },
         (
@@ -576,10 +664,21 @@ fn stage_where(
         }
     };
     Ok(Staging::Staged(Staged {
-        root: root_identity,
+        root,
         path: path.to_path_buf(),
         pending,
     }))
+}
+
+/// Where a staging acts: the root, the target, the home and the faults.
+struct StageAt<'a> {
+    anchor: &'a Path,
+    root: Identity,
+    root_fd: BorrowedFd<'a>,
+    path: &'a Path,
+    full: &'a Path,
+    shadows: &'a ShadowHome,
+    faults: Faulted<'a>,
 }
 
 /// The after-state a transition names: its content's hash, a respell's own
@@ -611,10 +710,14 @@ enum Judged {
 /// it read is landed rather than staged, and a target a re-send finds landed
 /// is recognized whatever its before-state was.
 ///
-/// A refusal speaks in the terms of what the transition expected: where it
-/// expected absence and found a name taken, [`Refusal::DestinationExists`];
-/// where it expected a hash and found other bytes or nothing,
-/// [`Refusal::Drifted`].
+/// A refusal speaks in the terms of what the transition expected. Where it
+/// expected absence and found a name taken — by a file, a folder, or the same
+/// document under another listed spelling — [`Refusal::DestinationExists`];
+/// where a folder on the path is a file, [`Refusal::FolderIsFile`]. Where it
+/// expected a hash and found other bytes, another spelling or nothing,
+/// [`Refusal::Drifted`]; where it found no regular file,
+/// [`Refusal::NotRegularFile`]. A remove whose target is gone — or whose path
+/// runs through a file, so that nothing can be there — has landed.
 fn judge_staging(
     transition: &Transition<'_>,
     after: Option<ContentHash>,
@@ -622,19 +725,17 @@ fn judge_staging(
     full: &Path,
 ) -> Result<Judged, Refusal> {
     match (transition, found) {
-        (_, Found::Link) => Err(Refusal::SymlinkDestination {
-            path: full.to_path_buf(),
-        }),
+        (_, Found::Link) => Err(symlink_destination(full)),
         (_, Found::Regular { state, .. }) if Some(state.content_hash) == after => {
             Ok(Judged::Landed)
         }
-        (Transition::Remove { .. }, Found::Absent) => Ok(Judged::Landed),
+        (Transition::Remove { .. }, Found::Absent | Found::Blocked { .. }) => Ok(Judged::Landed),
         (Transition::Create { .. }, Found::Absent) => Ok(Judged::Proceed { mode: None }),
-        (Transition::Create { .. }, Found::Regular { .. } | Found::Other) => {
-            Err(Refusal::DestinationExists {
-                path: full.to_path_buf(),
-            })
-        }
+        (Transition::Create { .. }, Found::Blocked { folder }) => Err(folder_is_file(full, folder)),
+        (
+            Transition::Create { .. },
+            Found::Regular { .. } | Found::OtherSpelling { .. } | Found::Other,
+        ) => Err(destination_exists(full)),
         (
             Transition::Replace { before, .. }
             | Transition::Remove { before }
@@ -648,8 +749,14 @@ fn judge_staging(
             }
         }
         (
+            Transition::Replace { before, .. }
+            | Transition::Remove { before }
+            | Transition::Respell { before, .. },
+            Found::OtherSpelling { state },
+        ) => Err(drifted(full, *before, Some(state))),
+        (
             Transition::Replace { before, .. } | Transition::Respell { before, .. },
-            Found::Absent,
+            Found::Absent | Found::Blocked { .. },
         ) => Err(drifted(full, *before, None)),
         (
             Transition::Replace { .. } | Transition::Remove { .. } | Transition::Respell { .. },
@@ -663,16 +770,12 @@ fn judge_staging(
 ///
 /// Anything more — another folder, another name, a folder's own case, a case
 /// change outside ASCII, or no change at all — is not a respell, and is
-/// refused before anything is read.
+/// refused as an invalid request before anything is read.
 fn respelled_name(target: &Target<'_>, to: &Path, full: &Path) -> Result<OsString, Refusal> {
     let not_a_respell = || {
-        environment(
-            "respelling",
+        invalid_request(
             full,
-            &std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "a respell changes only the ASCII case of the final name",
-            ),
+            "a respell changes only the ASCII case of the final name",
         )
     };
     let respelled = Target::of(to, full).map_err(|_| not_a_respell())?;
@@ -686,47 +789,41 @@ fn respelled_name(target: &Target<'_>, to: &Path, full: &Path) -> Result<OsStrin
 
 /// Stage a respell: judge the three states through the listed spelling, and
 /// stage a shadow only where the content still has to change.
-#[allow(clippy::too_many_arguments)] // One target's whole staging, spelled out rather than bundled.
 fn stage_respell(
-    folder: Folder,
+    at: &StageAt<'_>,
+    folder: &Folder<'_>,
     target: &Target<'_>,
     to: OsString,
     before: ContentHash,
     content: Option<&[u8]>,
-    (root, path): (Identity, PathBuf),
-    full: &Path,
-    shadows: &ShadowHome,
-    faults: Faulted<'_>,
 ) -> Result<Staging, Refusal> {
     let after = content.map_or(before, ContentHash::of);
-    let Folder::Reached(folder) = folder else {
-        return Err(drifted(full, before, None));
+    let Folder::Reached(chain) = folder else {
+        return Err(drifted(at.full, before, None));
     };
-    let Some((spelling, found)) = observe_spelling(folder.as_fd(), target.name, full, &mut |_| {})?
+    let Some((spelling, found)) =
+        observe_spelling(chain.last(), target.name, at.full, &mut |_| {})?
     else {
-        return Err(drifted(full, before, None));
+        return Err(drifted(at.full, before, None));
     };
-    drop(folder);
-    let shadow = match judge_respell(&spelling, found, target.name, &to, before, after, full)? {
+    let shadow = match judge_respell(&spelling, found, target.name, &to, before, after, at.full)? {
         Respelled::Landed { .. } => {
             return Ok(Staging::Landed(Landed {
-                root,
-                path: path.with_file_name(&to),
+                root: at.root,
+                path: at.path.with_file_name(&to),
                 after: Some(after),
-                spelled: true,
+                landing: Landing::Respelled,
             }));
         }
         Respelled::Halfway { .. } => None,
         Respelled::Before { mode, .. } => match content {
-            Some(content) if after != before => {
-                Some(stage_shadow(shadows, content, Some(mode), faults)?)
-            }
+            Some(content) if after != before => Some(stage_shadow(at, content, Some(mode))?),
             _ => None,
         },
     };
     Ok(Staging::Staged(Staged {
-        root,
-        path,
+        root: at.root,
+        path: at.path.to_path_buf(),
         pending: Pending::Respell {
             to,
             before,
@@ -766,12 +863,9 @@ fn judge_respell(
 ) -> Result<Respelled, Refusal> {
     let (state, mode) = match found {
         Found::Regular { state, mode } => (state, mode),
-        Found::Link => {
-            return Err(Refusal::SymlinkDestination {
-                path: full.to_path_buf(),
-            });
-        }
-        Found::Absent => return Err(drifted(full, before, None)),
+        Found::OtherSpelling { state } => return Err(drifted(full, before, Some(state))),
+        Found::Link => return Err(symlink_destination(full)),
+        Found::Absent | Found::Blocked { .. } => return Err(drifted(full, before, None)),
         Found::Other => return Err(not_regular(full)),
     };
     let hash = state.content_hash;
@@ -792,17 +886,17 @@ fn judge_respell(
 /// nothing in the home.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn stage_shadow(
-    shadows: &ShadowHome,
+    at: &StageAt<'_>,
     content: &[u8],
     mode: Option<u32>,
-    faults: Faulted<'_>,
 ) -> Result<StagedShadow, Refusal> {
-    let home = open_home(shadows)?;
+    let shadows = at.shadows;
+    let home = open_home(shadows, Some((at.root_fd, at.anchor)))?;
     let (name, file) = create_shadow(
         home.as_fd(),
         shadows,
         &mut || shadows.next_shadow_name(),
-        faults,
+        at.faults,
     )?;
     let mut file = std::fs::File::from(file);
     let shadow_path = shadows.directory().join(&name);
@@ -810,7 +904,7 @@ fn stage_shadow(
         if let Some(mode) = mode {
             carry_mode_forward(&file, mode);
         }
-        fill(&mut file, content, &shadow_path, faults)?;
+        fill(&mut file, content, &shadow_path, at.faults)?;
         let metadata = file
             .metadata()
             .map_err(|error| environment("reading the identity of", &shadow_path, &error))?;
@@ -821,7 +915,7 @@ fn stage_shadow(
         Err(refusal) => {
             // A shadow this call created and could not finish is its own by
             // construction: the exclusive open made it a moment ago.
-            if faults.check(Stage::Cleanup).is_ok() {
+            if at.faults.check(Stage::Cleanup).is_ok() {
                 let _ = unlinkat(home.as_fd(), name.as_os_str(), AtFlags::empty());
             }
             Err(refusal)
@@ -944,19 +1038,22 @@ fn publish_disturbed(
         faults,
         path: &staged.path,
     };
-    let publication = publish_checked(anchor, &staged, shadows, faults, disturb);
-    // A publication that wrote consumed its shadow, except a respell's that
-    // was found halfway and had nothing left to write.
+    let root = open_staged_root(anchor, staged.root);
+    let publication = match &root {
+        Ok(root) => publish_checked(anchor, root.as_fd(), &staged, shadows, faults, disturb),
+        Err(refusal) => Err(refusal.clone()),
+    };
+    // A create or a replace that wrote consumed its shadow. Everything else —
+    // a refusal, a found landing, and a respell whichever way it went — may
+    // have left one, and removing it only while the name still means the file
+    // staging made is right for all of them: a shadow a refusal was about may
+    // be gone or somebody else's, and a respell's first step may have renamed
+    // it away already. One cleanup, so an auditor finds one place it happens.
     let consumed = matches!(publication, Ok(Publication::Wrote(_)))
         && !matches!(staged.pending, Pending::Respell { .. });
     if !consumed && let Some(shadow) = staged.pending.shadow() {
-        // One cleanup for every refusal and every found landing, so an auditor
-        // finds one place it happens. It removes the shadow only while the name
-        // still means the file staging made, which also makes it right for a
-        // shadow the refusal was about — a missing one is not there, and one
-        // replaced by a foreign file is somebody else's — and for a respell's
-        // shadow its first step already renamed away.
-        remove_shadow(shadows, shadow, faults);
+        let reach = root.as_ref().ok().map(|root| (root.as_fd(), anchor));
+        remove_shadow(shadows, reach, shadow, faults);
     }
     publication
 }
@@ -964,6 +1061,7 @@ fn publish_disturbed(
 /// Ask every question again, and publish.
 fn publish_checked(
     anchor: &Path,
+    root: BorrowedFd<'_>,
     staged: &Staged,
     shadows: &ShadowHome,
     faults: Faulted<'_>,
@@ -971,76 +1069,58 @@ fn publish_checked(
 ) -> Result<Publication, Refusal> {
     let full = anchor.join(&staged.path);
     let target = Target::of(&staged.path, &full)?;
-    let root = open_staged_root(anchor, staged.root)?;
     let folder = descend(root, &target, anchor, &full)?;
     #[cfg(any(test, feature = "induced-failure"))]
     act_as_foreign_writer(&folder, &target, &staged.pending, faults);
     let at = Place {
         anchor,
+        root,
         target: &target,
         full: &full,
+        shadows,
         faults,
     };
     match &staged.pending {
-        Pending::Create { after, shadow } => {
-            let (home, state) = confirm_shadow(shadows, shadow, *after)?;
-            publish_create(&at, folder, *after, (home.as_fd(), shadow, state), disturb)
-        }
+        Pending::Create { after, shadow } => publish_create(&at, folder, *after, shadow, disturb),
         Pending::Replace {
             before,
             after,
             shadow,
-        } => {
-            let Folder::Reached(folder) = folder else {
-                return Err(drifted(&full, *before, None));
-            };
-            let (home, state) = confirm_shadow(shadows, shadow, *after)?;
-            publish_replace(
-                &at,
-                folder.as_fd(),
-                *before,
-                *after,
-                (home.as_fd(), shadow, state),
-                disturb,
-            )
-        }
+        } => publish_replace(&at, folder, *before, *after, shadow, disturb),
         Pending::Remove { before } => publish_remove(&at, folder, *before, disturb),
         Pending::Respell {
             to,
             before,
             after,
             shadow,
-        } => {
-            let Folder::Reached(folder) = folder else {
-                return Err(drifted(&full, *before, None));
-            };
-            let shadow = match shadow {
-                Some(shadow) => Some((shadow, confirm_shadow(shadows, shadow, *after)?.0)),
-                None => None,
-            };
-            publish_respell(&at, folder.as_fd(), to, *before, *after, shadow, disturb)
-        }
+        } => publish_respell(&at, folder, to, *before, *after, shadow.as_ref(), disturb),
     }
 }
 
 /// Where a publication acts, and under which faults.
 struct Place<'a> {
     anchor: &'a Path,
+    root: BorrowedFd<'a>,
     target: &'a Target<'a>,
     full: &'a Path,
+    shadows: &'a ShadowHome,
     faults: Faulted<'a>,
 }
 
-/// A confirmed shadow: the home's handle, the shadow, and the identity it will
-/// publish.
-type ConfirmedShadow<'a> = (BorrowedFd<'a>, &'a StagedShadow, PostState);
+impl Place<'_> {
+    /// Confirm `shadow`, the last step before the act that moves it.
+    fn confirm(
+        &self,
+        shadow: &StagedShadow,
+        after: ContentHash,
+    ) -> Result<(OwnedFd, PostState), Refusal> {
+        confirm_shadow(self.shadows, (self.root, self.anchor), shadow, after)
+    }
+}
 
-/// A landing another writer made: report it, syncing the folder that holds it.
-fn found_landed(after: AfterState, folder: BorrowedFd<'_>, faults: Faulted<'_>) -> Publication {
-    Publication::Found(Confirmed {
-        after,
-        durability: sync_folder(folder, faults),
-    })
+/// A landing another writer made, with the durability of the syncs it made.
+fn found(after: AfterState, durability: Durability) -> Publication {
+    Publication::Found(Confirmed { after, durability })
 }
 
 /// A publication this call made, with no folder made on the way.
@@ -1054,60 +1134,61 @@ fn wrote(after: AfterState, durability: Durability) -> Publication {
 
 /// Publish a create: found where the name already holds its content, and
 /// otherwise the exclusive rename, after making any folder that is missing.
+///
+/// Published or found, a create syncs every folder from the root down to its
+/// own: a first attempt that crashed may have made some of them and synced
+/// none, and the re-send that finds them is the one chance to make them
+/// durable before the applier removes a move's source.
 fn publish_create(
     at: &Place<'_>,
-    folder: Folder,
+    folder: Folder<'_>,
     after: ContentHash,
-    (home, shadow, state): ConfirmedShadow<'_>,
+    shadow: &StagedShadow,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
     let name = at.target.name;
-    let (parent, made) = match folder {
-        Folder::Reached(parent) => {
-            let found = observe(parent.as_fd(), name, at.full, disturb)?;
-            if let Some(landed) = at_after(&found, after) {
-                return Ok(found_landed(landed, parent.as_fd(), at.faults));
+    let made = match folder {
+        Folder::Reached(chain) => {
+            let observed = observe(chain.last(), name, at.full, disturb)?;
+            if let Some(landed) = at_after(&observed, after) {
+                return Ok(found(landed, chain.sync_all(at.faults)));
             }
-            judge_absent(found, at.full)?;
-            (Some(parent), None)
+            judge_absent(observed, at.full)?;
+            MadeFolders::none(chain)
         }
         // Nothing can be at a name whose folder is missing, so the folders are
         // made and the exclusive rename is the create's whole question.
-        Folder::Missing { deepest, reached } => (
-            None,
-            Some(MadeFolders::make(at, deepest, reached, disturb)?),
-        ),
+        Folder::Missing(chain) => MadeFolders::make(at, chain, disturb)?,
+        Folder::Blocked { folder, .. } => return Err(folder_is_file(at.full, folder)),
     };
-    let folder = match (&parent, &made) {
-        (Some(parent), _) => parent.as_fd(),
-        (None, Some(made)) => made.parent(),
-        (None, None) => unreachable!("a create reaches its folder or makes it"),
+    let (home, state) = match at.confirm(shadow, after) {
+        Ok(confirmed) => confirmed,
+        Err(refusal) => return Err(made.abandon(refusal, at.faults)),
     };
     disturb(Window::Publishing);
-    if let Err(refusal) = publish_exclusively(home, shadow, folder, name, at.full, at.faults) {
-        if let Some(made) = &made {
-            made.remove_empty(at.faults);
-        }
+    if let Err(refusal) = publish_exclusively(
+        home.as_fd(),
+        shadow,
+        made.parent(),
+        name,
+        at.full,
+        at.faults,
+    ) {
         // The name was taken at the last moment. Where what took it is this
         // create's own after-state, the create has landed.
         if matches!(refusal, Refusal::DestinationExists { .. })
-            && let Some(landed) = at_after(&observe(folder, name, at.full, &mut |_| {})?, after)
+            && let Some(landed) =
+                at_after(&observe(made.parent(), name, at.full, &mut |_| {})?, after)
         {
-            return Ok(found_landed(landed, folder, at.faults));
+            return Ok(found(landed, made.sync_all(at.faults)));
         }
-        return Err(refusal);
+        return Err(made.abandon(refusal, at.faults));
     }
-    Ok(Publication::Wrote(match made {
-        Some(made) => Published {
-            after: AfterState::Present(state),
-            durability: made.sync(at.faults),
-            made_folders: made.into_paths(),
-        },
-        None => Published {
-            after: AfterState::Present(state),
-            durability: sync_folder(folder, at.faults),
-            made_folders: Vec::new(),
-        },
+    let durability = made.sync_all(at.faults);
+    Ok(Publication::Wrote(Published {
+        after: AfterState::Present(state),
+        durability,
+        made_folders: made.into_paths(),
     }))
 }
 
@@ -1115,127 +1196,163 @@ fn publish_create(
 /// target still at its before-state.
 fn publish_replace(
     at: &Place<'_>,
-    folder: BorrowedFd<'_>,
+    folder: Folder<'_>,
     before: ContentHash,
     after: ContentHash,
-    (home, shadow, state): ConfirmedShadow<'_>,
+    shadow: &StagedShadow,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
-    let found = observe(folder, at.target.name, at.full, disturb)?;
-    if let Some(landed) = at_after(&found, after) {
-        return Ok(found_landed(landed, folder, at.faults));
+    let Folder::Reached(chain) = folder else {
+        return Err(drifted(at.full, before, None));
+    };
+    let folder = chain.last();
+    let observed = observe(folder, at.target.name, at.full, disturb)?;
+    if let Some(landed) = at_after(&observed, after) {
+        return Ok(found(landed, sync_folder(folder, at.faults)));
     }
-    judge_before(found, before, at.full)?;
+    judge_before(observed, before, at.full)?;
+    let (home, state) = at.confirm(shadow, after)?;
     disturb(Window::Publishing);
-    rename_shadow(home, shadow, folder, at.target.name, at.full, at.faults)?;
+    rename_shadow(
+        home.as_fd(),
+        shadow,
+        folder,
+        at.target.name,
+        at.full,
+        at.faults,
+    )?;
     Ok(wrote(
         AfterState::Present(state),
         sync_folder(folder, at.faults),
     ))
 }
 
-/// Publish a remove: found where the target, or its folder, is already gone,
-/// and otherwise an unlink of a target still at its before-state.
+/// Publish a remove: found where the target is already gone — its folder with
+/// it, or a file standing where a folder on its path was — and otherwise an
+/// unlink of a target still at its before-state.
 fn publish_remove(
     at: &Place<'_>,
-    folder: Folder,
+    folder: Folder<'_>,
     before: ContentHash,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
-    let folder = match folder {
-        Folder::Reached(folder) => folder,
-        // The folder is gone, and the target with it: the deepest folder still
-        // there is the one that records the absence.
-        Folder::Missing { deepest, .. } => {
-            return Ok(found_landed(AfterState::Absent, deepest.as_fd(), at.faults));
+    let chain = match folder {
+        Folder::Reached(chain) => chain,
+        // The deepest folder still there is the one that records the absence.
+        Folder::Missing(chain) | Folder::Blocked { chain, .. } => {
+            return Ok(found(
+                AfterState::Absent,
+                sync_folder(chain.last(), at.faults),
+            ));
         }
     };
-    let found = observe(folder.as_fd(), at.target.name, at.full, disturb)?;
-    if matches!(found, Found::Absent) {
-        return Ok(found_landed(AfterState::Absent, folder.as_fd(), at.faults));
+    let folder = chain.last();
+    let observed = observe(folder, at.target.name, at.full, disturb)?;
+    if matches!(observed, Found::Absent) {
+        return Ok(found(AfterState::Absent, sync_folder(folder, at.faults)));
     }
-    judge_before(found, before, at.full)?;
+    judge_before(observed, before, at.full)?;
     disturb(Window::Publishing);
     at.faults
         .check(Stage::Unlink)
         .map_err(|error| environment("removing", at.full, &error))?;
-    match unlinkat(folder.as_fd(), at.target.name, AtFlags::empty()) {
-        Ok(()) => Ok(wrote(
-            AfterState::Absent,
-            sync_folder(folder.as_fd(), at.faults),
-        )),
+    match unlinkat(folder, at.target.name, AtFlags::empty()) {
+        Ok(()) => Ok(wrote(AfterState::Absent, sync_folder(folder, at.faults))),
         // Gone between the verification and the unlink: another writer landed
         // it.
-        Err(Errno::NOENT) => Ok(found_landed(AfterState::Absent, folder.as_fd(), at.faults)),
+        Err(Errno::NOENT) => Ok(found(AfterState::Absent, sync_folder(folder, at.faults))),
         Err(errno) => Err(errno_refusal("removing", at.full, errno)),
     }
 }
 
 /// Publish a respell in its two steps: where the content still has to change,
 /// an ordinary replace under the old spelling; then the rename to the new.
+///
+/// A second step that fails after the first published is not a refusal: the
+/// content landed, and the answer says so, as [`Publication::Interrupted`].
 fn publish_respell(
     at: &Place<'_>,
-    folder: BorrowedFd<'_>,
+    folder: Folder<'_>,
     to: &OsStr,
     before: ContentHash,
     after: ContentHash,
-    shadow: Option<(&StagedShadow, OwnedFd)>,
+    shadow: Option<&StagedShadow>,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Publication, Refusal> {
+    let Folder::Reached(chain) = folder else {
+        return Err(drifted(at.full, before, None));
+    };
+    let folder = chain.last();
     let from = at.target.name;
     let respelled = |disturb: &mut dyn FnMut(Window)| {
-        let Some((spelling, found)) = observe_spelling(folder, from, at.full, disturb)? else {
+        let Some((spelling, observed)) = observe_spelling(folder, from, at.full, disturb)? else {
             return Err(drifted(at.full, before, None));
         };
-        judge_respell(&spelling, found, from, to, before, after, at.full)
+        judge_respell(&spelling, observed, from, to, before, after, at.full)
     };
-    let mut durability = Durability::Synced;
-    let wrote_content = match respelled(disturb)? {
+    let first = match respelled(disturb)? {
         Respelled::Landed { state } => {
-            return Ok(found_landed(AfterState::Present(state), folder, at.faults));
+            return Ok(found(AfterState::Present(state), chain.sync_all(at.faults)));
         }
         Respelled::Before { state, .. } if after != before => {
             // Step 1. The content is at its before-state and has to change; a
             // respell staged halfway has no shadow for that, so the content
             // moved back under it and that is drift.
-            let Some((shadow, home)) = shadow else {
+            let Some(shadow) = shadow else {
                 return Err(drifted(at.full, after, Some(state)));
             };
+            let (home, published) = at.confirm(shadow, after)?;
             disturb(Window::Publishing);
             rename_shadow(home.as_fd(), shadow, folder, from, at.full, at.faults)?;
-            durability = sync_folder(folder, at.faults);
-            true
+            Some(Published {
+                after: AfterState::Present(published),
+                durability: sync_folder(folder, at.faults),
+                made_folders: Vec::new(),
+            })
         }
-        Respelled::Before { .. } | Respelled::Halfway { .. } => false,
+        Respelled::Before { .. } | Respelled::Halfway { .. } => None,
     };
+    disturb(Window::Respelling);
     // Step 2, with the after-state read again under the old spelling.
-    let state = match respelled(disturb)? {
-        Respelled::Landed { state } if !wrote_content => {
-            return Ok(found_landed(AfterState::Present(state), folder, at.faults));
+    let second = (|| {
+        let state = match respelled(disturb)? {
+            Respelled::Landed { state } => return Ok(Err(state)),
+            Respelled::Halfway { state } => state,
+            Respelled::Before { state, .. } if after == before => state,
+            Respelled::Before { state, .. } => return Err(drifted(at.full, after, Some(state))),
+        };
+        at.faults
+            .check(Stage::Respell)
+            .map_err(|error| environment("respelling", at.full, &error))?;
+        renameat(folder, from, folder, to)
+            .map_err(|errno| errno_refusal("respelling", at.full, errno))?;
+        Ok(Ok(state))
+    })();
+    match (second, first) {
+        (Ok(Ok(state)), first) => {
+            let durability = sync_folder(folder, at.faults);
+            let durability = match first {
+                Some(first) => first.durability.and(durability),
+                None => durability,
+            };
+            Ok(wrote(AfterState::Present(state), durability))
         }
-        Respelled::Landed { state } => {
-            // Another writer renamed this call's content into place.
-            return Ok(wrote(
-                AfterState::Present(state),
-                durability.and(sync_folder(folder, at.faults)),
-            ));
+        // Another writer finished the rename. Where this call wrote the content,
+        // that content is what landed.
+        (Ok(Err(state)), Some(first)) => Ok(wrote(
+            AfterState::Present(state),
+            first.durability.and(chain.sync_all(at.faults)),
+        )),
+        (Ok(Err(state)), None) => Ok(found(AfterState::Present(state), chain.sync_all(at.faults))),
+        (Err(cause), Some(published)) => {
+            Ok(Publication::Interrupted(Interrupted { published, cause }))
         }
-        Respelled::Halfway { state } => state,
-        Respelled::Before { state, .. } if after == before => state,
-        Respelled::Before { state, .. } => return Err(drifted(at.full, after, Some(state))),
-    };
-    at.faults
-        .check(Stage::Respell)
-        .map_err(|error| environment("respelling", at.full, &error))?;
-    renameat(folder, from, folder, to)
-        .map_err(|errno| errno_refusal("respelling", at.full, errno))?;
-    Ok(wrote(
-        AfterState::Present(state),
-        durability.and(sync_folder(folder, at.faults)),
-    ))
+        (Err(cause), None) => Err(cause),
+    }
 }
 
-/// The after-state `found` is, where it is this transition's after-state.
+/// The after-state `found` is, where it is this transition's after-state under
+/// the spelling asked for.
 fn at_after(found: &Found, after: ContentHash) -> Option<AfterState> {
     match found {
         Found::Regular { state, .. } if state.content_hash == after => {
@@ -1249,12 +1366,11 @@ fn at_after(found: &Found, after: ContentHash) -> Option<AfterState> {
 fn judge_absent(found: Found, full: &Path) -> Result<(), Refusal> {
     match found {
         Found::Absent => Ok(()),
-        Found::Link => Err(Refusal::SymlinkDestination {
-            path: full.to_path_buf(),
-        }),
-        Found::Regular { .. } | Found::Other => Err(Refusal::DestinationExists {
-            path: full.to_path_buf(),
-        }),
+        Found::Blocked { folder } => Err(folder_is_file(full, folder)),
+        Found::Link => Err(symlink_destination(full)),
+        Found::Regular { .. } | Found::OtherSpelling { .. } | Found::Other => {
+            Err(destination_exists(full))
+        }
     }
 }
 
@@ -1262,11 +1378,11 @@ fn judge_absent(found: Found, full: &Path) -> Result<(), Refusal> {
 fn judge_before(found: Found, before: ContentHash, full: &Path) -> Result<(), Refusal> {
     match found {
         Found::Regular { state, .. } if state.content_hash == before => Ok(()),
-        Found::Regular { state, .. } => Err(drifted(full, before, Some(state))),
-        Found::Absent => Err(drifted(full, before, None)),
-        Found::Link => Err(Refusal::SymlinkDestination {
-            path: full.to_path_buf(),
-        }),
+        Found::Regular { state, .. } | Found::OtherSpelling { state } => {
+            Err(drifted(full, before, Some(state)))
+        }
+        Found::Absent | Found::Blocked { .. } => Err(drifted(full, before, None)),
+        Found::Link => Err(symlink_destination(full)),
         Found::Other => Err(not_regular(full)),
     }
 }
@@ -1287,46 +1403,46 @@ fn rename_shadow(
         .map_err(|errno| errno_refusal("renaming onto", full, errno))
 }
 
-/// The folders a create made on the way to its name, and the handles that
-/// reach them.
-struct MadeFolders {
-    /// Every folder from the deepest one that was there down to the target's
-    /// own, each opened through no link.
-    chain: Vec<OwnedFd>,
-    /// Each folder made: the index in `chain` of the folder holding it, its
+/// The folders from the root down to a create's own — the ones the descent
+/// found and the ones the create made — and which of them this call made.
+struct MadeFolders<'a> {
+    chain: Chain<'a>,
+    /// Each folder made: the index in the chain of the folder holding it, its
     /// name, and its path relative to the vault root.
     made: Vec<(usize, OsString, PathBuf)>,
 }
 
-impl MadeFolders {
-    /// Make every folder of `at`'s target past the first `reached`, one level
-    /// at a time from `deepest`, the last folder that was there.
+impl<'a> MadeFolders<'a> {
+    /// A create whose folder was there: nothing made.
+    fn none(chain: Chain<'a>) -> MadeFolders<'a> {
+        MadeFolders {
+            chain,
+            made: Vec::new(),
+        }
+    }
+
+    /// Make every folder of `at`'s target past the ones `chain` reached, one
+    /// level at a time.
     ///
     /// Each is made with `mkdirat` in the folder above it and then opened like
     /// any folder of a descent — `O_NOFOLLOW` and `O_DIRECTORY` — so a folder
     /// another writer made first is used rather than refused, and a name that
-    /// became a link or a file refuses. A refusal removes the folders this
-    /// call made that are still empty before it is returned.
+    /// became a link or a file refuses. A refusal abandons the folders this
+    /// call made before it is returned.
     fn make(
         at: &Place<'_>,
-        deepest: OwnedFd,
-        reached: usize,
+        chain: Chain<'a>,
         disturb: &mut dyn FnMut(Window),
-    ) -> Result<MadeFolders, Refusal> {
+    ) -> Result<MadeFolders<'a>, Refusal> {
         let folders = &at.target.folders;
-        let mut made = MadeFolders {
-            chain: vec![deepest],
-            made: Vec::new(),
-        };
+        let reached = chain.folders.len();
+        let mut made = MadeFolders::none(chain);
         let mut relative: PathBuf = folders[..reached].iter().collect();
         for name in &folders[reached..] {
             relative.push(name);
             match made.make_one(at, name, &relative, disturb) {
-                Ok(folder) => made.chain.push(folder),
-                Err(refusal) => {
-                    made.remove_empty(at.faults);
-                    return Err(refusal);
-                }
+                Ok(folder) => made.chain.folders.push(folder),
+                Err(refusal) => return Err(made.abandon(refusal, at.faults)),
             }
         }
         Ok(made)
@@ -1345,7 +1461,7 @@ impl MadeFolders {
             .at(relative)
             .check(Stage::Mkdir)
             .map_err(|error| environment_at("making the folder", at.full, name, &error))?;
-        match mkdirat(&self.chain[holder], name, Mode::from_raw_mode(0o777)) {
+        match mkdirat(self.chain.at(holder), name, Mode::from_raw_mode(0o777)) {
             Ok(()) => self
                 .made
                 .push((holder, name.to_owned(), relative.to_path_buf())),
@@ -1354,46 +1470,58 @@ impl MadeFolders {
             Err(errno) => return Err(errno_refusal_at("making the folder", at.full, name, errno)),
         }
         disturb(Window::FolderMade);
-        match open_folder(
-            self.chain[holder].as_fd(),
-            name,
-            at.full,
-            &at.anchor.join(relative),
-        )? {
-            Some(folder) => Ok(folder),
-            None => Err(errno_refusal_at("opening", at.full, name, Errno::NOENT)),
+        let walked = at.anchor.join(relative);
+        match step_into(self.chain.at(holder), name)
+            .map_err(|errno| errno_refusal_at("opening", at.full, name, errno))?
+        {
+            Step::Into(folder) => Ok(folder),
+            Step::Linked => Err(linked_ancestor(at.full, walked)),
+            Step::NotAFolder => Err(folder_is_file(at.full, walked)),
+            Step::Missing(errno) => Err(errno_refusal_at("opening", at.full, name, errno)),
         }
     }
 
     /// The target's own folder.
     fn parent(&self) -> BorrowedFd<'_> {
-        self.chain
-            .last()
-            .expect("the chain starts at a folder")
-            .as_fd()
+        self.chain.last()
     }
 
     /// Remove the folders this call made that are still empty, deepest first,
-    /// stopping at the first that is not: every folder above holds it.
-    fn remove_empty(&self, faults: Faulted<'_>) {
-        if faults.check(Stage::Cleanup).is_err() {
-            return;
-        }
-        for (holder, name, _) in self.made.iter().rev() {
-            if unlinkat(&self.chain[*holder], name.as_os_str(), AtFlags::REMOVEDIR).is_err() {
-                break;
+    /// and answer with `refusal` — naming, where any is left standing, every
+    /// folder this call made that it could not take back.
+    ///
+    /// The removal stops at the first folder it cannot remove, because every
+    /// folder above holds that one. A name that no longer holds a folder at all
+    /// — a link or a file another writer put in its place — is not one this
+    /// call made any more, and is neither removed nor named.
+    fn abandon(&self, refusal: Refusal, faults: Faulted<'_>) -> Refusal {
+        let mut left = self.made.len();
+        if faults.check(Stage::Cleanup).is_ok() {
+            for (holder, name, _) in self.made.iter().rev() {
+                let holder = self.chain.at(*holder);
+                if unlinkat(holder, name.as_os_str(), AtFlags::REMOVEDIR).is_err()
+                    && is_folder(holder, name)
+                {
+                    break;
+                }
+                left -= 1;
             }
+        }
+        if left == 0 {
+            return refusal;
+        }
+        Refusal::FoldersLeft {
+            refusal: Box::new(refusal),
+            folders: self.made[..left]
+                .iter()
+                .map(|(_, _, path)| path.clone())
+                .collect(),
         }
     }
 
-    /// Sync the target's folder and each folder holding one this call made.
-    fn sync(&self, faults: Faulted<'_>) -> Durability {
-        self.made.iter().rev().fold(
-            sync_folder(self.parent(), faults),
-            |durability, (holder, ..)| {
-                durability.and(sync_folder(self.chain[*holder].as_fd(), faults))
-            },
-        )
+    /// Sync every folder on the chain, deepest first.
+    fn sync_all(&self, faults: Faulted<'_>) -> Durability {
+        self.chain.sync_all(faults)
     }
 
     /// The paths of the folders made, shallowest first.
@@ -1404,15 +1532,6 @@ impl MadeFolders {
 
 /// Rename the shadow to the target's name, refusing rather than replacing
 /// anything there.
-///
-/// A name taken between the verification and this call refuses as
-/// [`Refusal::DestinationExists`] with the racer's file untouched. A
-/// filesystem that cannot rename exclusively refuses as
-/// [`Refusal::ExclusiveCreateUnsupported`]: `EINVAL` and `ENOTSUP` are how
-/// Linux and macOS say so, and `ENOSYS` is a kernel that predates the call.
-/// There is no fallback — a hard link and an unlink, or a look and a rename,
-/// are each a check followed by an act, which is the race this call exists
-/// to close.
 fn publish_exclusively(
     home: BorrowedFd<'_>,
     shadow: &StagedShadow,
@@ -1424,34 +1543,38 @@ fn publish_exclusively(
     faults
         .check(Stage::Swap)
         .map_err(|error| environment("renaming onto", full, &error))?;
-    match renameat_with(
+    renameat_with(
         home,
         shadow.name.as_os_str(),
         folder,
         name,
         RenameFlags::NOREPLACE,
-    ) {
-        Ok(()) => Ok(()),
-        Err(Errno::EXIST) => Err(Refusal::DestinationExists {
-            path: full.to_path_buf(),
-        }),
-        Err(errno) if cannot_rename_exclusively(errno) => {
-            Err(Refusal::ExclusiveCreateUnsupported {
-                path: full.to_path_buf(),
-                raw_os_error: errno.raw_os_error(),
-            })
-        }
-        Err(errno) => Err(errno_refusal("renaming onto", full, errno)),
-    }
+    )
+    .map_err(|errno| exclusive_rename_refusal(errno, full))
 }
 
-/// Whether `errno` is a filesystem saying it has no exclusive rename.
+/// What an exclusive rename's failure means.
 ///
-/// Compared one by one because `ENOTSUP` and `EOPNOTSUPP` are one number on
-/// Linux and two on macOS, and a pattern naming both is unreachable on one of
-/// them.
-fn cannot_rename_exclusively(errno: Errno) -> bool {
-    [Errno::INVAL, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::NOSYS].contains(&errno)
+/// A name taken between the verification and the rename is
+/// [`Refusal::DestinationExists`], with the racer's file untouched. A
+/// filesystem that cannot rename exclusively is
+/// [`Refusal::ExclusiveCreateUnsupported`]: `EINVAL` and `ENOTSUP` are how
+/// Linux and macOS say so, and `ENOSYS` is a kernel that predates the call —
+/// compared one by one because `ENOTSUP` and `EOPNOTSUPP` are one number on
+/// Linux and two on macOS. There is no fallback: a hard link and an unlink, or
+/// a look and a rename, are each a check followed by an act, which is the race
+/// the call exists to close. Anything else is the machine's refusal.
+fn exclusive_rename_refusal(errno: Errno, full: &Path) -> Refusal {
+    if errno == Errno::EXIST {
+        destination_exists(full)
+    } else if [Errno::INVAL, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::NOSYS].contains(&errno) {
+        Refusal::ExclusiveCreateUnsupported {
+            path: full.to_path_buf(),
+            raw_os_error: errno.raw_os_error(),
+        }
+    } else {
+        errno_refusal("renaming onto", full, errno)
+    }
 }
 
 /// Confirm a staged shadow is the file staging made and still holds `after`,
@@ -1459,17 +1582,18 @@ fn cannot_rename_exclusively(errno: Errno) -> bool {
 ///
 /// Opened through the home's own directory without following a link, so a
 /// link planted at a shadow's name is refused rather than published. A shadow
-/// that is gone, is another file, or holds other bytes is an environmental
-/// refusal for this target: an I/O failure a re-send stages again, never drift
-/// the caller would re-plan.
+/// that is gone, is another file — the same bytes in another file included —
+/// or holds other bytes is an environmental refusal for this target: an I/O
+/// failure a re-send stages again, never drift the caller would re-plan.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn confirm_shadow(
     shadows: &ShadowHome,
+    reach: (BorrowedFd<'_>, &Path),
     shadow: &StagedShadow,
     after: ContentHash,
 ) -> Result<(OwnedFd, PostState), Refusal> {
     const OPERATION: &str = "confirming the shadow";
-    let home = open_home(shadows)?;
+    let home = open_home(shadows, Some(reach))?;
     let path = shadows.directory().join(&shadow.name);
     let opened = openat(
         home.as_fd(),
@@ -1512,14 +1636,20 @@ fn confirm_shadow(
 /// instead would turn a clean refusal into two problems, and tell the caller
 /// something other than why its write did not happen.
 ///
-/// The identity is compared first because a shadow now outlives its staging
-/// call: a name a sweep emptied is a name something else may hold, and this
-/// removes only what staging made.
-fn remove_shadow(shadows: &ShadowHome, shadow: &StagedShadow, faults: Faulted<'_>) {
+/// The identity is compared first because a shadow outlives its staging call:
+/// a name a sweep emptied is a name something else may hold, and this removes
+/// only what staging made. `reach` is the vault root a fallback home is reached
+/// from; without one, a fallback home is not reached at all.
+fn remove_shadow(
+    shadows: &ShadowHome,
+    reach: Option<(BorrowedFd<'_>, &Path)>,
+    shadow: &StagedShadow,
+    faults: Faulted<'_>,
+) {
     if faults.check(Stage::Cleanup).is_err() {
         return;
     }
-    let Ok(home) = open_home(shadows) else {
+    let Ok(home) = open_home(shadows, reach) else {
         return;
     };
     match statat(&home, shadow.name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
@@ -1547,40 +1677,38 @@ fn confirm_landed_where(
     let full = anchor.join(&landed.path);
     let target = Target::of(&landed.path, &full)?;
     let root = open_staged_root(anchor, landed.root)?;
-    // A removal whose folder is gone too has landed, and the folder that
-    // records its absence is the deepest one still there.
-    let (folder, found) = match descend(root, &target, anchor, &full)? {
-        Folder::Reached(folder) => {
-            let found = if landed.spelled {
-                spelled_exactly(folder.as_fd(), target.name, &full)?
-            } else {
-                observe(folder.as_fd(), target.name, &full, &mut |_| {})?
-            };
-            (folder, found)
+    let folder = descend(root.as_fd(), &target, anchor, &full)?;
+    let found = match (&folder, landed.landing) {
+        (Folder::Reached(chain), Landing::Respelled) => {
+            spelled_exactly(chain.last(), target.name, &full)?
         }
-        Folder::Missing { deepest, .. } => (deepest, Found::Absent),
+        _ => observe_target(&folder, &target, &full, &mut |_| {})?,
     };
     let after = match (landed.after, found) {
-        (_, Found::Link) => {
-            return Err(Refusal::SymlinkDestination { path: full });
-        }
-        (None, Found::Absent) => AfterState::Absent,
-        (None, Found::Regular { .. } | Found::Other) => {
-            return Err(Refusal::DestinationExists { path: full });
+        (_, Found::Link) => return Err(symlink_destination(&full)),
+        (None, Found::Absent | Found::Blocked { .. }) => AfterState::Absent,
+        (None, Found::Regular { .. } | Found::OtherSpelling { .. } | Found::Other) => {
+            return Err(destination_exists(&full));
         }
         (Some(after), Found::Regular { state, .. }) if state.content_hash == after => {
             AfterState::Present(state)
         }
-        (Some(after), Found::Regular { state, .. }) => {
+        (Some(after), Found::Regular { state, .. } | Found::OtherSpelling { state }) => {
             return Err(drifted(&full, after, Some(state)));
         }
-        (Some(after), Found::Absent) => return Err(drifted(&full, after, None)),
+        (Some(after), Found::Absent | Found::Blocked { .. }) => {
+            return Err(drifted(&full, after, None));
+        }
         (Some(_), Found::Other) => return Err(not_regular(&full)),
     };
-    Ok(Confirmed {
-        after,
-        durability: sync_folder(folder.as_fd(), faults),
-    })
+    let chain = match &folder {
+        Folder::Reached(chain) | Folder::Missing(chain) | Folder::Blocked { chain, .. } => chain,
+    };
+    let durability = match landed.landing {
+        Landing::Created | Landing::Respelled => chain.sync_all(faults),
+        Landing::Replaced | Landing::Removed => sync_folder(chain.last(), faults),
+    };
+    Ok(Confirmed { after, durability })
 }
 
 /// What is at `name` in `folder` where the folder's listing spells it exactly
@@ -1596,26 +1724,27 @@ fn spelled_exactly(folder: BorrowedFd<'_>, name: &OsStr, full: &Path) -> Result<
 /// [`remove_empty_folders`], with a stage made to fail.
 fn remove_empty_folders_where(
     anchor: &Path,
+    root: Identity,
     folder: &Path,
     faults: Faults,
 ) -> Result<RemovedFolders, Refusal> {
     let full = anchor.join(folder);
-    let names = contained_names(folder, &full)?;
-    let (root, _) = open_root(anchor)?;
-    let mut chain = vec![root];
-    let mut walked = anchor.to_path_buf();
-    for name in &names {
-        walked.push(name);
-        let holder = chain.last().expect("the chain starts at the root").as_fd();
-        match open_folder(holder, name, &full, &walked)? {
-            Some(next) => chain.push(next),
-            // Already gone: the emptying starts from the deepest folder there.
-            None => break,
-        }
+    let names = contained_names(folder).map_err(|_| uncontained(&full))?;
+    let root = open_staged_root(anchor, root)?;
+    // A folder already gone, or a file where one was, is where the emptying
+    // starts from: the folders above it are all the descent opened.
+    let (opened, stopped) = crate::open::descend(root.as_fd(), &names)
+        .map_err(|(at, errno)| errno_refusal_at("opening", &full, names[at], errno))?;
+    if let Some(Stopped::Linked(at)) = stopped {
+        return Err(linked_ancestor(&full, ancestry(anchor, &names[..=at])));
     }
+    let chain = Chain {
+        root: root.as_fd(),
+        folders: opened,
+    };
     let mut removed = Vec::new();
     let mut durability = Durability::Synced;
-    // Depth 0 is the root, which is never removed.
+    // Index 0 is the root, which is never removed.
     for depth in (1..chain.len()).rev() {
         let name = names[depth - 1];
         let relative: PathBuf = names[..depth].iter().collect();
@@ -1626,9 +1755,10 @@ fn remove_empty_folders_where(
         faults
             .check(Stage::Rmdir)
             .map_err(|error| environment_at("removing the folder", &full, name, &error))?;
-        match unlinkat(&chain[depth - 1], name, AtFlags::REMOVEDIR) {
+        let holder = chain.at(depth - 1);
+        match unlinkat(holder, name, AtFlags::REMOVEDIR) {
             Ok(()) => {
-                durability = durability.and(sync_folder(chain[depth - 1].as_fd(), faults));
+                durability = durability.and(sync_folder(holder, faults));
                 removed.push(relative);
             }
             // Another writer removed it first.
@@ -1656,32 +1786,16 @@ struct Target<'p> {
 }
 
 impl<'p> Target<'p> {
-    /// The target `path` names, where it is a name below the root.
+    /// The target `path` names, where it is a name below the root, by the rule
+    /// [`contained_names`] states for every contained path this crate reaches.
+    /// Anything else is an invalid request, refused before anything is opened.
     fn of(path: &'p Path, full: &Path) -> Result<Target<'p>, Refusal> {
-        let mut folders = contained_names(path, full)?;
+        let mut folders = contained_names(path).map_err(|_| uncontained(full))?;
         let Some(name) = folders.pop() else {
             return Err(uncontained(full));
         };
         Ok(Target { folders, name })
     }
-}
-
-/// The names `path` is made of, where each is an ordinary name below the root.
-///
-/// A parent component walks out of the root, an absolute path makes `openat`
-/// ignore the handle it was given, and a current-directory component names no
-/// file — each is refused before anything is opened, so containment is a
-/// property of this kernel rather than of whoever calls it.
-fn contained_names<'p>(path: &'p Path, full: &Path) -> Result<Vec<&'p OsStr>, Refusal> {
-    path.components()
-        .map(|component| match component {
-            Component::Normal(name) => Ok(name),
-            Component::RootDir
-            | Component::Prefix(_)
-            | Component::ParentDir
-            | Component::CurDir => Err(uncontained(full)),
-        })
-        .collect()
 }
 
 /// Open the root as it is spelled, and read which directory that is.
@@ -1693,98 +1807,161 @@ fn open_root(anchor: &Path) -> Result<(OwnedFd, Identity), Refusal> {
     Ok((root, identity_of_stat(&stat)))
 }
 
-/// Open the root, refusing unless it is the directory `staged` identifies.
-fn open_staged_root(anchor: &Path, staged: Identity) -> Result<OwnedFd, Refusal> {
+/// Open the root, refusing unless it is the directory `expected` identifies.
+fn open_staged_root(anchor: &Path, expected: Identity) -> Result<OwnedFd, Refusal> {
     let (root, current) = open_root(anchor)?;
-    if current != staged {
+    if current != expected {
         return Err(Refusal::RootReplaced {
             path: anchor.to_path_buf(),
-            staged,
+            staged: expected,
             current,
         });
     }
     Ok(root)
 }
 
-/// Where a descent to a target's folder ended.
-enum Folder {
-    /// The target's own folder.
-    Reached(OwnedFd),
-    /// A folder on the way is not there, so neither is the target. `deepest`
-    /// is the last folder that is, and `reached` how many of the target's
-    /// folders the descent opened.
-    Missing { deepest: OwnedFd, reached: usize },
+/// Every folder from the root down to where a descent stopped: the root, then
+/// each folder opened below it, in order.
+struct Chain<'a> {
+    root: BorrowedFd<'a>,
+    folders: Vec<OwnedFd>,
 }
 
-/// Descend from `root` to the folder `target` sits in, one folder at a time
-/// and through no link.
-///
-/// A single multi-component open would resolve the intermediate names in the
-/// kernel, where `O_NOFOLLOW` binds only the last of them.
-fn descend(
-    root: OwnedFd,
+impl Chain<'_> {
+    /// How many folders the chain holds, the root included.
+    fn len(&self) -> usize {
+        self.folders.len() + 1
+    }
+
+    /// The folder at `index`, the root being 0.
+    fn at(&self, index: usize) -> BorrowedFd<'_> {
+        match index {
+            0 => self.root,
+            index => self.folders[index - 1].as_fd(),
+        }
+    }
+
+    /// The deepest folder: the target's own, where the descent reached it.
+    fn last(&self) -> BorrowedFd<'_> {
+        self.at(self.len() - 1)
+    }
+
+    /// Sync every folder on the chain, deepest first: each holds the name of
+    /// the one below it, and the deepest holds the target's.
+    fn sync_all(&self, faults: Faulted<'_>) -> Durability {
+        (0..self.len())
+            .rev()
+            .fold(Durability::Synced, |durability, index| {
+                durability.and(sync_folder(self.at(index), faults))
+            })
+    }
+}
+
+/// Where a descent to a target's folder ended.
+enum Folder<'a> {
+    /// The target's own folder is the chain's last.
+    Reached(Chain<'a>),
+    /// A folder on the way is not there, so neither is the target. The chain
+    /// ends at the last folder that is.
+    Missing(Chain<'a>),
+    /// A name on the way is a file rather than a folder, so nothing can be at
+    /// the target. The chain ends at the folder holding it, and `folder` is
+    /// its path.
+    Blocked { chain: Chain<'a>, folder: PathBuf },
+}
+
+/// Descend from `root` to the folder `target` sits in, through
+/// [`crate::open::descend`] — the one anchored descent every read and every
+/// change goes through.
+fn descend<'a>(
+    root: BorrowedFd<'a>,
     target: &Target<'_>,
     anchor: &Path,
     full: &Path,
-) -> Result<Folder, Refusal> {
-    let mut folder = root;
-    let mut walked = anchor.to_path_buf();
-    for (reached, name) in target.folders.iter().enumerate() {
-        walked.push(name);
-        match open_folder(folder.as_fd(), name, full, &walked)? {
-            Some(next) => folder = next,
-            None => {
-                return Ok(Folder::Missing {
-                    deepest: folder,
-                    reached,
-                });
-            }
+) -> Result<Folder<'a>, Refusal> {
+    let (opened, stopped) = crate::open::descend(root, &target.folders)
+        .map_err(|(at, errno)| errno_refusal_at("opening", full, target.folders[at], errno))?;
+    let chain = Chain {
+        root,
+        folders: opened,
+    };
+    Ok(match stopped {
+        None => Folder::Reached(chain),
+        Some(Stopped::Missing(..)) => Folder::Missing(chain),
+        Some(Stopped::NotAFolder(at)) => Folder::Blocked {
+            chain,
+            folder: ancestry(anchor, &target.folders[..=at]),
+        },
+        Some(Stopped::Linked(at)) => {
+            return Err(linked_ancestor(
+                full,
+                ancestry(anchor, &target.folders[..=at]),
+            ));
         }
-    }
-    Ok(Folder::Reached(folder))
+    })
 }
 
-/// Open the folder `name` in `holder` with `O_NOFOLLOW` and `O_DIRECTORY`, or
-/// answer that nothing is there. `walked` is the folder's own path, which a
-/// linked folder's refusal names.
-fn open_folder(
-    holder: BorrowedFd<'_>,
-    name: &OsStr,
-    full: &Path,
-    walked: &Path,
-) -> Result<Option<OwnedFd>, Refusal> {
-    match openat(holder, name, directory_flags(), Mode::empty()) {
-        Ok(folder) => Ok(Some(folder)),
-        Err(Errno::NOENT) => Ok(None),
-        Err(Errno::LOOP) => Err(linked_ancestor(full, walked.to_path_buf())),
-        // One supported platform says a link opened `O_NOFOLLOW` is not a
-        // directory, so the name is asked what it is before that is believed.
-        Err(Errno::NOTDIR) => Err(match kind_at(holder, name) {
-            Some(FileType::Symlink) => linked_ancestor(full, walked.to_path_buf()),
-            _ => errno_refusal_at("opening", full, name, Errno::NOTDIR),
-        }),
-        Err(errno) => Err(errno_refusal_at("opening", full, name, errno)),
-    }
+/// Whether `name` in `holder` is a folder, asked without following a link.
+fn is_folder(holder: BorrowedFd<'_>, name: &OsStr) -> bool {
+    matches!(
+        statat(holder, name, AtFlags::SYMLINK_NOFOLLOW),
+        Ok(stat) if rustix::fs::FileType::from_raw_mode(stat.st_mode as _) == rustix::fs::FileType::Directory
+    )
+}
+
+/// The path of the folder `names` spell below `anchor`.
+fn ancestry(anchor: &Path, names: &[&OsStr]) -> PathBuf {
+    names
+        .iter()
+        .fold(anchor.to_path_buf(), |path, name| path.join(name))
 }
 
 /// What is at a target's name, as far as a transition cares.
 enum Found {
     Absent,
+    /// A folder on the path is a file, at `folder`: nothing can be at the
+    /// target.
+    Blocked {
+        folder: PathBuf,
+    },
     /// A symbolic link, which this crate never writes through.
     Link,
     /// Something that is not a regular file: a directory, a pipe, a device or
     /// a socket.
     Other,
     /// A regular file, hashed through its own handle, whose name still meant
-    /// that file once the hash was taken.
+    /// that file once the hash was taken, and which its folder lists under
+    /// the spelling asked for.
     Regular {
         state: PostState,
         mode: u32,
     },
+    /// A regular file the root resolves at the name asked for, which its
+    /// folder lists under another spelling: on a root that folds, not this
+    /// target.
+    OtherSpelling {
+        state: PostState,
+    },
 }
 
-/// Read the target `name` in `folder`, and confirm the name still means the
-/// file that was read.
+/// What is at `target`, from where the descent to it ended.
+fn observe_target(
+    folder: &Folder<'_>,
+    target: &Target<'_>,
+    full: &Path,
+    disturb: &mut dyn FnMut(Window),
+) -> Result<Found, Refusal> {
+    Ok(match folder {
+        Folder::Reached(chain) => observe(chain.last(), target.name, full, disturb)?,
+        Folder::Missing(_) => Found::Absent,
+        Folder::Blocked { folder, .. } => Found::Blocked {
+            folder: folder.clone(),
+        },
+    })
+}
+
+/// Read the target `name` in `folder`, confirm the name still means the file
+/// that was read, and confirm the folder lists it under that spelling.
 ///
 /// Three flags carry the reader's discipline: `O_NOFOLLOW`, so a link is
 /// reported rather than read through; `O_NONBLOCK`, so a FIFO at a document's
@@ -1796,6 +1973,12 @@ enum Found {
 /// hashes leaves the handle on an orphaned inode whose bytes still hash to the
 /// before-state; publishing on that answer would replace or remove a document
 /// nobody read. The comparison refuses as [`Refusal::Republished`].
+///
+/// **The spelling is asked only where the root could have answered for
+/// another one**: an alternate ASCII spelling of the name that resolves to the
+/// same file is what a folding folder does, and only then is the folder listed
+/// to see which spelling is the entry. A folder that tells spellings apart pays
+/// one lookup.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn observe(
     folder: BorrowedFd<'_>,
@@ -1812,9 +1995,10 @@ fn observe(
         // platform; either way no regular file is there.
         Err(Errno::NXIO | Errno::OPNOTSUPP) => return Ok(Found::Other),
         Err(errno) => {
-            return match kind_at(folder, name) {
-                Some(FileType::Symlink) => Ok(Found::Link),
-                _ => Err(errno_refusal("opening", full, errno)),
+            return if crate::open::is_link(folder, name) {
+                Ok(Found::Link)
+            } else {
+                Err(errno_refusal("opening", full, errno))
             };
         }
     };
@@ -1830,34 +2014,105 @@ fn observe(
     disturb(Window::Verifying);
     let read = identity_of(&metadata);
     match statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) if identity_of_stat(&stat) == read => Ok(Found::Regular {
-            state: post_state(hash, len, &metadata),
-            mode: metadata.permissions().mode(),
-        }),
-        Ok(stat) => Err(Refusal::Republished {
-            path: full.to_path_buf(),
-            read,
-            current: identity_of_stat(&stat),
-        }),
+        Ok(stat) if identity_of_stat(&stat) == read => {}
+        Ok(stat) => {
+            return Err(Refusal::Republished {
+                path: full.to_path_buf(),
+                read,
+                current: identity_of_stat(&stat),
+            });
+        }
         // Removed while it was read: the same event as finding nothing there.
-        Err(Errno::NOENT) => Ok(Found::Absent),
-        Err(errno) => Err(errno_refusal("reading the identity of", full, errno)),
+        Err(Errno::NOENT) => return Ok(Found::Absent),
+        Err(errno) => return Err(errno_refusal("reading the identity of", full, errno)),
     }
+    let state = post_state(hash, len, &metadata);
+    if !listed_as_asked(folder, name, read, full)? {
+        return Ok(Found::OtherSpelling { state });
+    }
+    Ok(Found::Regular {
+        state,
+        mode: metadata.permissions().mode(),
+    })
 }
 
-/// What kind of file `name` in `folder` is, without following it, where that
-/// can be read.
-fn kind_at(folder: BorrowedFd<'_>, name: &OsStr) -> Option<FileType> {
-    statat(folder, name, AtFlags::SYMLINK_NOFOLLOW)
-        .ok()
-        .map(|stat| FileType::from_raw_mode(stat.st_mode as _))
+/// Whether `folder` lists the file `identity` under `name` itself.
+///
+/// Only a folder that resolved an alternate ASCII spelling of `name` to the
+/// same file could be answering for a spelling it does not list, so only there
+/// is the listing read.
+fn listed_as_asked(
+    folder: BorrowedFd<'_>,
+    name: &OsStr,
+    identity: Identity,
+    full: &Path,
+) -> Result<bool, Refusal> {
+    let Some(alternate) = alternate_ascii_case(name) else {
+        return Ok(true);
+    };
+    match statat(folder, &alternate, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if identity_of_stat(&stat) == identity => {}
+        _ => return Ok(true),
+    }
+    Ok(folded_entries(folder, name, full)?
+        .iter()
+        .any(|listed| listed == name))
 }
 
-/// The shadow home's directory, opened as it is spelled: the home is this
-/// crate's own boundary, not a name inside the vault.
-fn open_home(shadows: &ShadowHome) -> Result<OwnedFd, Refusal> {
-    open(shadows.directory(), anchor_flags(), Mode::empty())
-        .map_err(|errno| errno_refusal("opening", shadows.directory(), errno))
+/// Every entry of `folder` whose name folds together with `name`, as listed.
+fn folded_entries(
+    folder: BorrowedFd<'_>,
+    name: &OsStr,
+    full: &Path,
+) -> Result<Vec<OsString>, Refusal> {
+    let mut listed = Vec::new();
+    let entries = Dir::read_from(folder)
+        .map_err(|errno| errno_refusal("reading the folder of", full, errno))?;
+    for entry in entries {
+        let entry = entry.map_err(|errno| errno_refusal("reading the folder of", full, errno))?;
+        let spelled = entry.file_name().to_bytes();
+        if spelled != b"." && spelled != b".." && fold_together(spelled, name.as_bytes()) {
+            listed.push(OsStr::from_bytes(spelled).to_owned());
+        }
+    }
+    Ok(listed)
+}
+
+/// The shadow home's directory.
+///
+/// A home under the data root is this crate's own boundary and is opened as it
+/// is configured. **A fallback home is under the vault root**, where every
+/// name belongs to whoever writes the vault, so it is reached from `reach`'s
+/// root handle by the one anchored descent, through no link — a `.norn` a
+/// foreign writer swapped for a link does not carry a shadow out of the vault.
+/// Without a root to reach it from, a fallback home is not opened.
+fn open_home(
+    shadows: &ShadowHome,
+    reach: Option<(BorrowedFd<'_>, &Path)>,
+) -> Result<OwnedFd, Refusal> {
+    let directory = shadows.directory();
+    let Some(within) = shadows.within_vault() else {
+        return open(directory, anchor_flags(), Mode::empty())
+            .map_err(|errno| errno_refusal("opening", directory, errno));
+    };
+    let Some((root, anchor)) = reach else {
+        return Err(errno_refusal("opening", directory, Errno::NOENT));
+    };
+    let names = contained_names(within).map_err(|_| uncontained(directory))?;
+    let (mut opened, stopped) = crate::open::descend(root, &names)
+        .map_err(|(at, errno)| errno_refusal_at("opening", directory, names[at], errno))?;
+    match stopped {
+        None => opened.pop().ok_or_else(|| uncontained(directory)),
+        Some(Stopped::Linked(at)) => {
+            Err(linked_ancestor(directory, ancestry(anchor, &names[..=at])))
+        }
+        Some(Stopped::NotAFolder(at)) => {
+            Err(folder_is_file(directory, ancestry(anchor, &names[..=at])))
+        }
+        Some(Stopped::Missing(at, errno)) => {
+            Err(errno_refusal_at("opening", directory, names[at], errno))
+        }
+    }
 }
 
 /// Where the foreign stage is armed, act as a foreign writer on the target:
@@ -1875,7 +2130,7 @@ fn open_home(shadows: &ShadowHome) -> Result<OwnedFd, Refusal> {
 #[cfg(any(test, feature = "induced-failure"))]
 #[allow(clippy::disallowed_types)] // The seam's own foreign writer, acting through a vault handle.
 fn act_as_foreign_writer(
-    folder: &Folder,
+    folder: &Folder<'_>,
     target: &Target<'_>,
     pending: &Pending,
     faults: Faulted<'_>,
@@ -1884,11 +2139,18 @@ fn act_as_foreign_writer(
     let Some(act) = faults.faults.foreign(faults.path) else {
         return;
     };
-    let Folder::Reached(folder) = folder else {
+    let Folder::Reached(chain) = folder else {
         return;
     };
+    let folder = chain.last();
     let write_at = |flags: OFlags| {
-        let flags = flags | OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        // Non-blocking, so a pipe at the target does not hold the writer.
+        let flags = flags
+            | OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::CLOEXEC;
         if let Ok(file) = openat(folder, target.name, flags, Mode::from_raw_mode(0o644)) {
             let _ = std::fs::File::from(file).write_all(FOREIGN_BYTES);
         }
@@ -1930,15 +2192,22 @@ impl<'a> Faulted<'a> {
 ///
 /// Through a handle the change was made in, so the folder synced is the folder
 /// that changed whatever its name means by now. `sync_all` is `F_FULLFSYNC` on
-/// macOS.
+/// macOS. The armed answer and the filesystem's own reach the caller through
+/// one mapping, [`durability_of`], so what is asserted of one is true of the
+/// other.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn sync_folder(folder: BorrowedFd<'_>, faults: Faulted<'_>) -> Durability {
-    if let Err(error) = faults.check(Stage::ParentSync) {
-        return Durability::NotSynced(error);
-    }
-    let synced = folder
-        .try_clone_to_owned()
-        .and_then(|folder| std::fs::File::from(folder).sync_all());
+    durability_of(faults.check(Stage::ParentSync).and_then(|()| {
+        #[cfg(test)]
+        tests::count_sync(folder);
+        folder
+            .try_clone_to_owned()
+            .and_then(|folder| std::fs::File::from(folder).sync_all())
+    }))
+}
+
+/// What a sync's outcome says about durability.
+fn durability_of(synced: std::io::Result<()>) -> Durability {
     match synced {
         Ok(()) => Durability::Synced,
         Err(error) => Durability::NotSynced(error),
@@ -1964,16 +2233,7 @@ fn observe_spelling(
     full: &Path,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Option<(OsString, Found)>, Refusal> {
-    let mut listed = Vec::new();
-    let entries = Dir::read_from(folder)
-        .map_err(|errno| errno_refusal("reading the folder of", full, errno))?;
-    for entry in entries {
-        let entry = entry.map_err(|errno| errno_refusal("reading the folder of", full, errno))?;
-        let spelled = entry.file_name().to_bytes();
-        if spelled != b"." && spelled != b".." && fold_together(spelled, name.as_bytes()) {
-            listed.push(OsStr::from_bytes(spelled).to_owned());
-        }
-    }
+    let mut listed = folded_entries(folder, name, full)?;
     let spelling = match listed.len() {
         0 => return Ok(None),
         1 => listed.remove(0),
@@ -2004,22 +2264,39 @@ fn drifted(path: &Path, expected: ContentHash, observed: Option<PostState>) -> R
 }
 
 fn not_regular(path: &Path) -> Refusal {
-    environment(
-        "reading",
-        path,
-        &invalid_data("the name does not identify a regular file"),
-    )
+    Refusal::NotRegularFile {
+        path: path.to_path_buf(),
+    }
+}
+
+fn destination_exists(path: &Path) -> Refusal {
+    Refusal::DestinationExists {
+        path: path.to_path_buf(),
+    }
+}
+
+fn symlink_destination(path: &Path) -> Refusal {
+    Refusal::SymlinkDestination {
+        path: path.to_path_buf(),
+    }
+}
+
+fn folder_is_file(path: &Path, folder: PathBuf) -> Refusal {
+    Refusal::FolderIsFile {
+        path: path.to_path_buf(),
+        folder,
+    }
+}
+
+fn invalid_request(path: &Path, reason: &'static str) -> Refusal {
+    Refusal::InvalidRequest {
+        path: path.to_path_buf(),
+        reason,
+    }
 }
 
 fn uncontained(path: &Path) -> Refusal {
-    environment(
-        "resolving",
-        path,
-        &std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "the path is not a name below the vault root",
-        ),
-    )
+    invalid_request(path, "the path is not a name below the vault root")
 }
 
 fn linked_ancestor(full: &Path, ancestor: PathBuf) -> Refusal {
@@ -2076,11 +2353,44 @@ mod tests {
     ) -> Result<Staging, Refusal> {
         stage_where(
             &scratch.at(""),
+            root_of(scratch),
             Path::new(relative),
             transition,
             scratch.shadows(),
             faults,
         )
+    }
+
+    /// The identity of `scratch`'s vault root, which a plan is made against.
+    fn root_of(scratch: &Scratch) -> Identity {
+        crate::path_identity(&scratch.at(""))
+            .expect("the vault root")
+            .expect("a vault root")
+    }
+
+    thread_local! {
+        /// The folders this thread synced, while a case counts them.
+        static SYNCED: std::cell::RefCell<Option<Vec<Identity>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Record that `folder` is being synced, where the running case counts.
+    pub(super) fn count_sync(folder: BorrowedFd<'_>) {
+        SYNCED.with(|synced| {
+            if let Some(synced) = synced.borrow_mut().as_mut()
+                && let Ok(stat) = fstat(folder)
+            {
+                synced.push(identity_of_stat(&stat));
+            }
+        });
+    }
+
+    /// Run `work`, and answer with what it returned and the folders it synced.
+    fn syncs_of<T>(work: impl FnOnce() -> T) -> (T, Vec<Identity>) {
+        SYNCED.with(|synced| *synced.borrow_mut() = Some(Vec::new()));
+        let answer = work();
+        let synced = SYNCED.with(|synced| synced.borrow_mut().take().unwrap_or_default());
+        (answer, synced)
     }
 
     /// Stage `transition`, which must stage rather than land.
@@ -2108,7 +2418,7 @@ mod tests {
     fn written(publication: Publication) -> Published {
         match publication {
             Publication::Wrote(published) => published,
-            Publication::Found(found) => panic!("found landed: {found:?}"),
+            other => panic!("did not write: {other:?}"),
         }
     }
 
@@ -2449,7 +2759,7 @@ mod tests {
         // And the leak is inert: the next publication neither trips over it
         // nor touches it.
         let staged = staged_in(&scratch, "note.md", replace_old_with_new());
-        publish_in(&scratch, staged, Faults::NONE, &mut |_| {}).expect("a replacement");
+        let _ = publish_in(&scratch, staged, Faults::NONE, &mut |_| {}).expect("a replacement");
         assert_eq!(scratch.read(&path), b"new");
         assert_eq!(scratch.shadow_names(), leaked);
     }
@@ -2472,7 +2782,7 @@ mod tests {
         let shadow = scratch.shadows().directory().join(&names[0]);
         republish(&scratch, &shadow, b"somebody else's file");
 
-        discard(staged, scratch.shadows());
+        discard(&scratch.at(""), staged, scratch.shadows());
 
         assert_eq!(scratch.read(&shadow), b"somebody else's file");
     }
@@ -2542,7 +2852,7 @@ mod tests {
         std::fs::write(&taken, b"a dead writer's bytes").expect("residue");
         let residue = identity_at(&taken);
 
-        let home = open_home(scratch.shadows()).expect("the home");
+        let home = open_home(scratch.shadows(), None).expect("the home");
         let mut names: Vec<OsString> = vec!["norn-shadow-1-1".into(), "norn-shadow-1-0".into()];
         let (opened, _) = create_shadow(
             home.as_fd(),
@@ -2567,7 +2877,7 @@ mod tests {
     #[test]
     fn a_shadow_home_whose_every_name_is_taken_refuses_at_the_bound() {
         let scratch = Scratch::new("write-shadow-exhausted");
-        let home = open_home(scratch.shadows()).expect("the home");
+        let home = open_home(scratch.shadows(), None).expect("the home");
         let mut tried: Vec<PathBuf> = Vec::new();
 
         let refusal = create_shadow(
@@ -2811,6 +3121,381 @@ mod tests {
             faults: Faults::NONE,
             path: Path::new("note.md"),
         }
+    }
+
+    /// The identities of the folders `relatives` name in `scratch`'s vault,
+    /// the root spelled as `""`.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging which folders were synced.
+    fn folders_of(scratch: &Scratch, relatives: &[&str]) -> std::collections::BTreeSet<Identity> {
+        relatives
+            .iter()
+            .map(|relative| identity_at(&scratch.at(relative)))
+            .collect()
+    }
+
+    /// **The bar on a re-send over folders a crash made.** A create's landing,
+    /// confirmed by a re-send, syncs every folder from the root down to its
+    /// own — not only the one that holds it.
+    ///
+    /// The forbidden shape is syncing the target's folder alone: a first
+    /// attempt that made `a/` and `a/b/` and died before syncing them leaves
+    /// entries a power cut can lose, the re-send reports the landing synced,
+    /// and the applier removes a move's source on the strength of it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: folders a crashed attempt made.
+    fn a_resent_create_confirmed_landed_syncs_every_folder_down_to_it() {
+        let scratch = Scratch::new("write-sync-confirm");
+        std::fs::create_dir_all(scratch.at("a/b")).expect("folders a crash made");
+        scratch.place("a/b/fresh.md", b"ours");
+        let Staging::Landed(landed) = stage_in(
+            &scratch,
+            "a/b/fresh.md",
+            Transition::Create { content: b"ours" },
+            Faults::NONE,
+        )
+        .expect("a landed create") else {
+            panic!("a landed create staged");
+        };
+
+        let (confirmed, synced) =
+            syncs_of(|| confirm_landed_where(&scratch.at(""), &landed, Faults::NONE));
+
+        assert!(confirmed.expect("confirmed").durability.is_synced());
+        assert_eq!(
+            synced
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            folders_of(&scratch, &["", "a", "a/b"])
+        );
+    }
+
+    /// The same bar on a publication: a create into folders that were already
+    /// there — made by a crashed attempt, or by anybody — syncs each of them,
+    /// and one found landed at the last check does too.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: folders a crashed attempt made.
+    fn a_create_published_or_found_syncs_every_folder_down_to_it() {
+        let scratch = Scratch::new("write-sync-publish");
+        std::fs::create_dir_all(scratch.at("a/b")).expect("folders a crash made");
+        let chain = folders_of(&scratch, &["", "a", "a/b"]);
+
+        let staged = staged_in(
+            &scratch,
+            "a/b/one.md",
+            Transition::Create { content: b"ours" },
+        );
+        let (published, synced) =
+            syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
+        assert!(
+            matches!(published, Ok(Publication::Wrote(_))),
+            "{published:?}"
+        );
+        assert_eq!(
+            synced
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            chain
+        );
+
+        let staged = staged_in(
+            &scratch,
+            "a/b/two.md",
+            Transition::Create { content: b"ours" },
+        );
+        scratch.place("a/b/two.md", b"ours");
+        let (found, synced) = syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
+        assert!(matches!(found, Ok(Publication::Found(_))), "{found:?}");
+        assert_eq!(
+            synced
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            chain
+        );
+    }
+
+    /// A create that makes its folders syncs each folder holding one it made,
+    /// and the root holding the first.
+    #[test]
+    fn a_create_that_makes_folders_syncs_each_one_and_its_holder() {
+        let scratch = Scratch::new("write-sync-made");
+        let staged = staged_in(
+            &scratch,
+            "a/b/fresh.md",
+            Transition::Create { content: b"ours" },
+        );
+        let (published, synced) =
+            syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
+        assert!(
+            matches!(published, Ok(Publication::Wrote(_))),
+            "{published:?}"
+        );
+        assert_eq!(
+            synced
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            folders_of(&scratch, &["", "a", "a/b"])
+        );
+    }
+
+    /// **A found landing syncs, and says what the sync said.** A replace and a
+    /// remove another writer finished are each reported with their folder's
+    /// sync, not with a synced durability no sync stands behind.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    fn a_found_replace_or_remove_syncs_its_folder() {
+        let scratch = Scratch::new("write-sync-found");
+        std::fs::create_dir_all(scratch.at("a")).expect("a folder");
+        scratch.place("a/note.md", b"old");
+        scratch.place("a/gone.md", b"going");
+        let replace = staged_in(&scratch, "a/note.md", replace_old_with_new());
+        let remove = staged_in(
+            &scratch,
+            "a/gone.md",
+            Transition::Remove {
+                before: ContentHash::of(b"going"),
+            },
+        );
+        scratch.place("a/note.md", b"new");
+        std::fs::remove_file(scratch.at("a/gone.md")).expect("a foreign removal");
+
+        for staged in [replace, remove] {
+            let (found, synced) =
+                syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
+            assert!(matches!(found, Ok(Publication::Found(_))), "{found:?}");
+            assert_eq!(
+                synced
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                folders_of(&scratch, &["a"])
+            );
+        }
+    }
+
+    /// **A removal that finds its target gone at the unlink has been landed by
+    /// another writer**, and says so rather than claiming the removal.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    fn a_target_removed_just_before_the_unlink_is_found() {
+        let scratch = Scratch::new("write-unlink-gone");
+        let path = scratch.place("note.md", b"old");
+        let staged = staged_in(
+            &scratch,
+            "note.md",
+            Transition::Remove {
+                before: ContentHash::of(b"old"),
+            },
+        );
+        let publication = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+            if window == Window::Publishing {
+                std::fs::remove_file(&path).expect("a foreign removal");
+            }
+        })
+        .expect("a landing another writer made");
+        let Publication::Found(found) = publication else {
+            panic!("a removal another writer made was reported written: {publication:?}");
+        };
+        assert!(matches!(found.after, AfterState::Absent));
+    }
+
+    /// **One mapping from a sync's outcome to durability**, for the armed
+    /// answer and the filesystem's own error alike: what a case asserts of an
+    /// armed failure is what a real one is told.
+    #[test]
+    fn a_sync_outcome_maps_to_durability_one_way() {
+        assert!(durability_of(Ok(())).is_synced());
+        let Durability::NotSynced(error) =
+            durability_of(Err(std::io::Error::from_raw_os_error(libc::EIO)))
+        else {
+            panic!("a failed sync was reported synced");
+        };
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+    }
+
+    /// **The exclusive rename's failures are classified by what they mean**:
+    /// a taken name, a filesystem with no exclusive rename, and the machine.
+    #[test]
+    fn exclusive_rename_failures_are_classified() {
+        let path = Path::new("/vault/note.md");
+        assert_eq!(
+            exclusive_rename_refusal(Errno::EXIST, path),
+            Refusal::DestinationExists {
+                path: path.to_path_buf()
+            }
+        );
+        for errno in [Errno::INVAL, Errno::NOTSUP, Errno::OPNOTSUPP, Errno::NOSYS] {
+            assert_eq!(
+                exclusive_rename_refusal(errno, path),
+                Refusal::ExclusiveCreateUnsupported {
+                    path: path.to_path_buf(),
+                    raw_os_error: errno.raw_os_error(),
+                },
+                "{errno:?}"
+            );
+        }
+        for errno in [Errno::ACCESS, Errno::XDEV, Errno::NOSPC] {
+            assert!(
+                exclusive_rename_refusal(errno, path).is_os_error(errno.raw_os_error()),
+                "{errno:?}"
+            );
+        }
+    }
+
+    /// **The bar on a refused create's folders.** Where a create refused after
+    /// making folders cannot take them back, the refusal names them, so the
+    /// report can.
+    #[test]
+    fn a_refused_create_that_cannot_take_back_its_folders_names_them() {
+        let scratch = Scratch::new("write-folders-left");
+        let staged = staged_in(
+            &scratch,
+            "a/b/fresh.md",
+            Transition::Create { content: b"ours" },
+        );
+        let refusal = publish_in(
+            &scratch,
+            staged,
+            Faults::at(&[
+                (Stage::Swap, Answer::Fails(std::io::ErrorKind::Other)),
+                (
+                    Stage::Cleanup,
+                    Answer::Fails(std::io::ErrorKind::PermissionDenied),
+                ),
+            ]),
+            &mut |_| {},
+        )
+        .expect_err("a refused create");
+
+        let Refusal::FoldersLeft { refusal, folders } = &refusal else {
+            panic!("the folders left were not named: {refusal}");
+        };
+        assert!(
+            matches!(
+                **refusal,
+                Refusal::Environment {
+                    operation: "renaming onto",
+                    ..
+                }
+            ),
+            "{refusal}"
+        );
+        assert_eq!(folders, &[PathBuf::from("a"), PathBuf::from("a/b")]);
+        assert!(scratch.exists(&scratch.at("a/b")));
+    }
+
+    /// **The bar on a fallback home reached through a link.** Where the shadow
+    /// home sits under the vault root, a `.norn` a foreign writer swapped for a
+    /// link refuses staging and publication, and nothing lands outside the
+    /// vault.
+    ///
+    /// The forbidden shape is opening the home by its path: every name under
+    /// the vault root is one a foreign writer can replace, and a home reached
+    /// through one would stage a document's bytes wherever it points.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a foreign writer swapping `.norn`.
+    fn a_fallback_home_reached_through_a_link_refuses_at_stage_and_publish() {
+        let scratch = Scratch::new("write-home-link");
+        let vault = scratch.at("");
+        let home = ShadowHome::resolve_where(
+            &vault,
+            &scratch.directory("data/vaults/notes/tmp"),
+            &crate::scratch::key(),
+            false,
+        )
+        .expect("a fallback home");
+        let path = scratch.place("note.md", b"old");
+        let root = root_of(&scratch);
+        let outside = scratch.directory("outside");
+        let stage = |home: &ShadowHome| {
+            stage_where(
+                &vault,
+                root,
+                Path::new("note.md"),
+                replace_old_with_new(),
+                home,
+                Faults::NONE,
+            )
+        };
+
+        // A link in place of `.norn` before staging.
+        let moved = outside.join(".norn");
+        std::fs::rename(vault.join(".norn"), &moved).expect("moving `.norn` out");
+        std::os::unix::fs::symlink(&moved, vault.join(".norn")).expect("a link in its place");
+        let refusal = stage(&home).expect_err("a home reached through a link");
+        assert!(
+            matches!(refusal, Refusal::LinkedAncestor { .. }),
+            "{refusal}"
+        );
+        assert!(
+            std::fs::read_dir(moved.join("tmp").join(crate::scratch::key().as_path()))
+                .expect("the moved home")
+                .next()
+                .is_none(),
+            "staging wrote a shadow outside the vault"
+        );
+
+        // And after staging, before publication.
+        std::fs::remove_file(vault.join(".norn")).expect("the link");
+        std::fs::rename(&moved, vault.join(".norn")).expect("`.norn` back");
+        let Staging::Staged(staged) = stage(&home).expect("staged") else {
+            panic!("staged as landed");
+        };
+        std::fs::rename(vault.join(".norn"), &moved).expect("moving `.norn` out");
+        std::os::unix::fs::symlink(&moved, vault.join(".norn")).expect("a link in its place");
+        let refusal = publish_disturbed(&vault, staged, &home, Faults::NONE, &mut |_| {})
+            .expect_err("a home reached through a link");
+        assert!(
+            matches!(refusal, Refusal::LinkedAncestor { .. }),
+            "{refusal}"
+        );
+        assert_eq!(
+            scratch.read(&path),
+            b"old",
+            "a shadow outside the vault was published"
+        );
+    }
+
+    /// **The bar on a respell's second step after its first landed.** Content
+    /// published under the old spelling and then moved back to its
+    /// before-state by another writer is drift at the rename — and since the
+    /// first step landed, the answer is interrupted, carrying that drift.
+    ///
+    /// Runs where the scratch root folds case; elsewhere a respell refuses
+    /// before either step.
+    #[test]
+    fn a_respell_whose_content_reverts_between_its_steps_is_interrupted_by_drift() {
+        let scratch = Scratch::new("write-respell-revert");
+        if crate::PathNormalizer::detect(&scratch.at(""))
+            .expect("the scratch root's case behavior")
+            .case_sensitivity()
+            != crate::CaseSensitivity::Insensitive
+        {
+            eprintln!("skipped: the scratch root does not fold case");
+            return;
+        }
+        let path = scratch.place("note.md", b"old");
+        let staged = staged_in(
+            &scratch,
+            "note.md",
+            Transition::Respell {
+                to: Path::new("Note.md"),
+                before: ContentHash::of(b"old"),
+                content: Some(b"new"),
+            },
+        );
+        let publication = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+            if window == Window::Respelling {
+                republish(&scratch, &path, b"old");
+            }
+        })
+        .expect("an interrupted respell");
+        let Publication::Interrupted(interrupted) = publication else {
+            panic!("a respell drifted between its steps was not interrupted: {publication:?}");
+        };
+        assert!(
+            matches!(interrupted.cause, Refusal::Drifted { .. }),
+            "{:?}",
+            interrupted.cause
+        );
     }
 
     /// A foreign writer with its own atomic-replace protocol: `content` at

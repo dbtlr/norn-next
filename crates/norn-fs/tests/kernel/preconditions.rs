@@ -308,8 +308,7 @@ fn a_pipe_at_a_target_refuses_without_waiting() {
         .recv_timeout(std::time::Duration::from_secs(20))
         .expect("staging never returned: a pipe at the target held it inside open");
     assert!(
-        matches!(&refusal, Refusal::Environment { kind, .. }
-            if *kind == std::io::ErrorKind::InvalidData),
+        matches!(&refusal, Refusal::NotRegularFile { .. }),
         "{refusal}"
     );
 }

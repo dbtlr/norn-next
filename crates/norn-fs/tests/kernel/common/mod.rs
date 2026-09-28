@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use norn_fs::{
-    Confirmed, ContentHash, MaintainershipKey, Placement, Publication, Published, Refusal,
-    ShadowHome, Staged, Staging, Transition,
+    Confirmed, ContentHash, Identity, MaintainershipKey, Placement, Publication, Published,
+    Refusal, ShadowHome, Staged, Staging, Transition,
 };
 use norn_testkit::scratch;
 
@@ -56,10 +56,23 @@ impl Scratch {
     pub fn stage(&self, relative: &str, transition: Transition<'_>) -> Result<Staging, Refusal> {
         norn_fs::stage(
             &self.vault(),
+            self.root(),
             Path::new(relative),
             transition,
             &self.shadows,
         )
+    }
+
+    /// The identity of the vault root, which a plan is made against.
+    pub fn root(&self) -> Identity {
+        norn_fs::path_identity(&self.vault())
+            .expect("the vault root")
+            .expect("a vault root")
+    }
+
+    /// Discard what [`Scratch::stage`] staged.
+    pub fn discard(&self, staged: Staged) {
+        norn_fs::discard(&self.vault(), staged, &self.shadows);
     }
 
     /// Publish what [`Scratch::stage`] staged.
@@ -153,7 +166,7 @@ pub fn staged(staging: Staging) -> Staged {
 pub fn wrote(publication: Publication) -> Published {
     match publication {
         Publication::Wrote(published) => published,
-        Publication::Found(found) => panic!("the target was found landed: {found:?}"),
+        other => panic!("the publication did not write: {other:?}"),
     }
 }
 
@@ -162,7 +175,7 @@ pub fn wrote(publication: Publication) -> Published {
 pub fn found(publication: Publication) -> Confirmed {
     match publication {
         Publication::Found(found) => found,
-        Publication::Wrote(published) => panic!("the publication wrote: {published:?}"),
+        other => panic!("the target was not found landed: {other:?}"),
     }
 }
 

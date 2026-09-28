@@ -170,6 +170,9 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct ShadowHome {
     directory: PathBuf,
     placement: Placement,
+    /// Where a fallback home sits below the vault root, relative to it; `None`
+    /// for a home under the data root.
+    within_vault: Option<PathBuf>,
 }
 
 /// Which of the two homes a maintainership's shadows landed in.
@@ -298,7 +301,7 @@ impl ShadowHome {
     /// `data_tmp` is expected to exist already — reading its device is what
     /// [`ShadowHome::resolve`] decides `same_device` from, so it has been made by
     /// the time an answer is available.
-    fn resolve_where(
+    pub(crate) fn resolve_where(
         vault_root: &Path,
         data_tmp: &Path,
         key: &MaintainershipKey,
@@ -308,13 +311,16 @@ impl ShadowHome {
             return Ok(ShadowHome {
                 directory: data_tmp.to_path_buf(),
                 placement: Placement::DataRoot,
+                within_vault: None,
             });
         }
-        let fallback = vault_root.join(FALLBACK).join(key.as_path());
+        let within = Path::new(FALLBACK).join(key.as_path());
+        let fallback = vault_root.join(&within);
         make_directory(&fallback)?;
         Ok(ShadowHome {
             directory: fallback,
             placement: Placement::VaultFallback,
+            within_vault: Some(within),
         })
     }
 
@@ -326,6 +332,16 @@ impl ShadowHome {
     /// Which of the two placements this is.
     pub fn placement(&self) -> Placement {
         self.placement
+    }
+
+    /// Where a fallback home sits below the vault root, relative to it, or
+    /// `None` for a home under the data root.
+    ///
+    /// The write kernel reaches a fallback home from the vault root's handle by
+    /// its no-follow descent rather than by this home's path: every name under
+    /// the vault root is one a foreign writer can replace with a link.
+    pub(crate) fn within_vault(&self) -> Option<&Path> {
+        self.within_vault.as_deref()
     }
 
     /// The name of a shadow nothing has taken yet, in this home.
@@ -772,6 +788,7 @@ mod tests {
         let home = ShadowHome {
             directory: PathBuf::from("/data/vaults/notes/tmp"),
             placement: Placement::DataRoot,
+            within_vault: None,
         };
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..1_000 {

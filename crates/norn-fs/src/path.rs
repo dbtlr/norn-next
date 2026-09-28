@@ -747,7 +747,9 @@ fn count(tally: impl FnOnce(&mut DetectionReads)) {
     });
 }
 
-fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
+/// `name` with its first ASCII letter's case changed, or nothing where it has
+/// no ASCII letter: the spelling a probe asks a folder about.
+pub(crate) fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
     let mut bytes = name.as_bytes().to_vec();
     let byte = bytes.iter_mut().find(|byte| byte.is_ascii_alphabetic())?;
     *byte = if byte.is_ascii_lowercase() {

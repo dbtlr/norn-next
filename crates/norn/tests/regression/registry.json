@@ -329,21 +329,18 @@
       "name": "a-mutation-confirms-the-file-it-holds-before-it-publishes",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A mutation evaluates its precondition against bytes the call reads itself, through a handle the call opens and holds — never against a caller-supplied snapshot and never against what an index remembers. At the last point before anything is published, the call resolves the name again and compares what it finds against that handle's device and inode; a replacement, a suppressed no-op, a removal and a move's source read all ask that one question, and both answers that are not the file the call read refuse it — a name republished onto a different file, and a name that resolves to nothing. Re-hashing the bytes through the same handle is the second question, and every arm that publishes or answers at the name it read asks it at the same last point: on a replacement, on a suppressed no-op and on a removal, a foreign write into the file that was read refuses there. A move's source leg publishes elsewhere on the bytes it read once, and its second leg re-reads the source under the removal's own two questions rather than trusting that read, so a foreign write into the source inside the span refuses at the removal and leaves both names holding a document. On a create the exclusive open is itself the publication, so the identity comparison there governs cleanup instead: a create that fails takes back only a name that still resolves to the file it created.",
-      "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15"],
+      "property": "A mutation evaluates its before-state against bytes it reads itself, at staging and again at publication, through a handle it opens for that read — never against a caller-supplied snapshot, never against what an index remembers, and never against what staging saw, since no handle is held between the phases. After hashing, the call resolves the name again and compares it with that handle's device and inode, so a name republished onto another file refuses rather than being replaced or removed, and a name that resolves to nothing reads as the absence it is. A foreign write into the target between staging and publication refuses a replace or a remove as drift. A create publishes by a rename that never replaces a name, so a name taken at the last moment is refused with the racer's file untouched. The staged shadow is confirmed by identity and hash as the last step before the rename, so a shadow replaced by another file, the same bytes included, is refused. Every cleanup removes only a shadow whose name still means the file this call staged.",
+      "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15", "NORN-293"],
       "binding": {
         "status": "bound",
         "tests": [
-          "crates/norn-fs/src/write.rs::a_foreign_write_inside_the_window_is_caught_before_the_swap",
-          "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused",
-          "crates/norn-fs/src/write.rs::an_unchanged_outcome_whose_name_was_republished_is_refused",
-          "crates/norn-fs/src/write.rs::an_unchanged_outcome_over_a_foreign_write_is_refused",
-          "crates/norn-fs/src/write.rs::a_document_removed_inside_the_window_is_not_resurrected",
-          "crates/norn-fs/src/write.rs::a_removal_whose_name_was_republished_is_refused",
-          "crates/norn-fs/src/write.rs::a_removal_over_a_foreign_write_is_refused",
-          "crates/norn-fs/src/write.rs::a_move_whose_source_is_republished_while_it_is_read_is_refused",
-          "crates/norn-fs/src/write.rs::a_move_whose_source_is_rewritten_between_the_legs_keeps_it",
-          "crates/norn-fs/src/write.rs::a_create_that_fails_never_removes_a_foreign_document"
+          "crates/norn-fs/tests/kernel/preconditions.rs::a_before_state_is_checked_against_the_bytes_that_are_there_now",
+          "crates/norn-fs/src/write.rs::a_foreign_replacement_while_publication_reads_is_refused",
+          "crates/norn-fs/tests/kernel/publication.rs::a_foreign_edit_after_staging_refuses_at_publication",
+          "crates/norn-fs/tests/kernel/publication.rs::a_document_removed_after_staging_is_not_resurrected",
+          "crates/norn-fs/src/write.rs::a_name_taken_just_before_the_rename_refuses_the_create",
+          "crates/norn-fs/tests/kernel/publication.rs::a_shadow_replaced_by_a_copy_of_its_bytes_refuses",
+          "crates/norn-fs/src/write.rs::a_discard_never_removes_a_file_it_did_not_stage"
         ]
       }
     },
@@ -1090,16 +1087,18 @@
       "name": "per-file-atomicity-and-durability",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Every file written goes through temp, rename, fsync of the file and fsync of the parent, and every document-mutating path — a write, a vacate and a move — routes through that one primitive. An interrupted run leaves each document fully old or fully new with no orphaned temp, and a placement that would cross a filesystem boundary stages inside the vault instead of falling back to copy-then-unlink.",
-      "sources": ["NRN-139", "NRN-146", "NRN-159", "NRN-162", "NRN-217", "NRN-442", "norn-legacy engineering learnings"],
+      "property": "Every document-mutating path — a create, a replace, a remove and a respell — goes through one staged protocol: a write's content goes into a shadow fsynced before any name points at it, publication is a rename or an unlink through the target's folder handle, and the folders the change touched are synced after it, their durability reported rather than dropped. An interrupted run leaves each document fully old or fully new with at most an inert shadow and no orphaned temp at the document's name, and a placement that would cross a filesystem boundary stages inside the vault instead of falling back to copy-then-unlink.",
+      "sources": ["NRN-139", "NRN-146", "NRN-159", "NRN-162", "NRN-217", "NRN-442", "norn-legacy engineering learnings", "NORN-293"],
       "binding": {
         "status": "bound",
         "tests": [
           "crates/norn-fs/tests/kernel/publication.rs::a_replacement_publishes_a_new_file_rather_than_editing_the_old_one",
-          "crates/norn-fs/tests/kernel/adjacent.rs::a_removal_under_its_precondition_reports_what_it_took",
-          "crates/norn-fs/tests/kernel/adjacent.rs::a_move_lands_the_destination_and_takes_the_source",
+          "crates/norn-fs/tests/kernel/publication.rs::a_create_lands_and_reports_its_identity",
+          "crates/norn-fs/tests/kernel/publication.rs::a_removal_takes_the_document_and_reports_absence",
           "crates/norn-fs/tests/lockdown.rs::process_death_at_every_checkpoint_leaves_one_whole_document",
-          "crates/norn-fs/tests/kernel/shadows.rs::a_landed_write_leaves_no_shadow",
+          "crates/norn-fs/tests/lockdown.rs::process_death_at_each_publication_position_leaves_the_documented_state",
+          "crates/norn-fs/tests/kernel/shadows.rs::a_landed_publication_leaves_no_shadow",
+          "crates/norn-fs/src/write.rs::a_folder_sync_that_fails_is_reported_with_the_target_landed",
           "crates/norn-fs/src/shadow.rs::two_filesystems_fall_back_inside_the_vault"
         ]
       }
@@ -1192,14 +1191,16 @@
       "name": "vault-root-containment",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Containment is per component: the descent to a target opens each ancestor without following a link, so a symlinked directory inside the vault is refused at the component that is the link — a required read refuses and an optional one answers nothing rather than reading through it. A name that leaves the anchor, a parent traversal or an absolute path, refuses before anything is opened. A lexical check ahead of the descent is not what refuses. A publication verifies its destination through the handle it holds rather than through a second open by name, so a foreign republication that keeps the bytes is refused instead of overwritten. The rename after that verification is not exclusive, and nothing here claims it is.",
-      "sources": ["NRN-145", "NRN-160"],
+      "property": "Containment is per component: the descent to a target opens each ancestor without following a link, so a symlinked directory inside the vault is refused at the component that is the link — a required read refuses and an optional one answers nothing rather than reading through it. A name that leaves the anchor, a parent traversal or an absolute path, refuses before anything is opened. A lexical check ahead of the descent is not what refuses. Every mutation descends the same way from the vault root, at staging and again at publication, and a shadow home that falls back under the vault root is reached through that descent too. A publication verifies its target at the last point before its act and compares the name's identity with the handle it hashed through, so a foreign republication that keeps the bytes is refused instead of overwritten. A replace's rename after that verification is not exclusive, and nothing here claims it is.",
+      "sources": ["NRN-145", "NRN-160", "NORN-293"],
       "binding": {
         "status": "bound",
         "tests": [
           "crates/norn-fs/tests/observations.rs::no_component_below_the_anchor_is_followed_through_a_link",
           "crates/norn-fs/tests/observations.rs::a_name_that_leaves_the_anchor_is_refused_rather_than_resolved",
-          "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused"
+          "crates/norn-fs/src/write.rs::a_foreign_replacement_while_publication_reads_is_refused",
+          "crates/norn-fs/tests/kernel/anchoring.rs::a_folder_swapped_for_a_link_refuses_publication_for_every_kind",
+          "crates/norn-fs/src/write.rs::a_fallback_home_reached_through_a_link_refuses_at_stage_and_publish"
         ]
       }
     },

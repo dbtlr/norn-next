@@ -421,9 +421,9 @@ what is left on disk cannot tell a hook that fired from a hook that was deleted,
 heal with no tear point in it converges and satisfies every outcome the row states by not
 having failed. The same discipline carries the effect surfaces `norn-fs` owns, where **three
 sibling fault seams are each widened once, at their own boundary** — the write protocol's at
-its four public entry points (stage, publish, confirm a landing, discard), the watcher's at
-watch establishment, the walk's at a walk's construction — under one feature, read from the
-environment a process is started with. The write seam names every position apart: staging's
+its five public entry points (stage, publish, confirm a landing, discard, empty folders), the
+watcher's at watch establishment, the walk's at a walk's construction — under one feature,
+read from the environment a process is started with. The write seam names every position apart: staging's
 shadow create, write and sync, and publication's swap, unlink, respell, folder make, folder
 removal, folder sync and cleanup. An arm selects a publication by ordinal — one count per
 publish call in the process, across kinds, which confirming a landing, emptying folders and
@@ -1597,7 +1597,12 @@ against it:
   and a create's `mkdirat` all act through the folder handle the descent reached. What
   that cannot close is stated rather than claimed away: a folder another writer moves
   after the descent receives the publication at its new place, inside the vault and
-  through no link, and the watcher reports where the document landed. What an operator sees: a vault whose `.norn` or
+  through no link, and the watcher reports where the document landed. The one descent is
+  shared: the read seam's open and every mutation reach names through the same
+  per-component walk, and a `.` component is skipped as naming the folder the walk stands
+  in. A shadow home that falls back under the vault root is reached the same way, from the
+  root's handle, so a `.norn` swapped for a link does not carry a shadow out of the vault.
+  What an operator sees: a vault whose `.norn` or
   `.norn/schema.yaml` is a symlink does not attach, a configured `schema_source` that
   names a symlink does not either, and the refusal names the component that stopped the
   read. One schema shared across vaults is spelled as a `schema_source` naming the file
@@ -1614,8 +1619,12 @@ against it:
   onto the destination, fsync the parent directory. The rename is the atom every reader
   is protected by, and the parent's fsync is what makes it survive a power cut. `norn-fs`
   splits the order at the rename: everything before it is staging, done for every target
-  of a plan before any publishes, and publication checks the root, the shadow and the
-  target again before its rename. A create is not shorter — its content is staged like a
+  of a plan before any publishes, and publication checks the root and the target again,
+  makes a create's missing folders, and confirms the shadow — by identity and hash — as
+  the last step before its rename. The shadow then carries the same one-call residual the
+  target does: a foreign replacement of the shadow between its confirmation and the rename
+  is what gets published, and nothing re-checks it after, since only a sweep or a sync
+  client reaches the home. A create is not shorter — its content is staged like a
   replacement's and published by a rename that never replaces a name (`renameat2`
   `RENAME_NOREPLACE` on Linux, `renameatx_np` `RENAME_EXCL` on macOS; a filesystem without
   one refuses the create, with no fallback), after any missing folder is made; a removal
@@ -1628,9 +1637,11 @@ reader sees the change, and this is never reported as a write that did not happe
 they surface it differently. `norn-config` names it as its own outcome, because a
 machine-local file has one writer and a caller that reads it back. `norn-fs` reports it on
 the success side: a publication carries a typed durability — synced, or not synced with the
-error — covering every folder sync it made, a create's made folders and a respell's two
-steps included, and confirming a landing a re-send finds syncs its folder again and reports
-the same way. The kernel holds no policy over it; the applier does, because a plan whose
+error — covering every folder sync it made, a respell's two steps included. A create,
+published or found landed, syncs every folder from the vault root down to its own, and so
+does confirming a create's or a respell's landing on a re-send: a crashed first attempt can
+leave folders it made unsynced, and the re-send is what makes them durable. A respell whose
+rename fails after its content landed answers interrupted rather than refused. The kernel holds no policy over it; the applier does, because a plan whose
 later target draws on an earlier one's content must not replace or remove the source until
 the earlier target has durably landed, so an unsynced landing stops its publication.
 

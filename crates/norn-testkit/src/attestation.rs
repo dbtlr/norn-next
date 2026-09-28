@@ -161,6 +161,17 @@ fn parse(line: &str) -> Option<ArmHit> {
 mod tests {
     use super::*;
 
+    /// A write-seam record's path is percent-encoded where it writes it, so a
+    /// path holding a space or an `=` stays one field.
+    #[test]
+    fn a_write_record_with_an_encoded_path_is_one_field_each() {
+        let hit = parse("seam=norn-fs/write stage=swap ordinal=2 path=a%20b/c%3Dd.md answer=ends")
+            .expect("a record");
+        assert_eq!(hit.get("path"), Some("a%20b/c%3Dd.md"));
+        assert_eq!(hit.get("ordinal"), Some("2"));
+        assert_eq!(hit.get("answer"), Some("ends"));
+    }
+
     #[test]
     fn a_record_is_read_field_by_field() {
         let hit = parse("seam=norn-fs/write stage=swap answer=ends").expect("a record");

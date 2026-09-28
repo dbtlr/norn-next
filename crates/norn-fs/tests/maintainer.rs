@@ -356,13 +356,16 @@ fn a_contended_vault_is_fully_workable() {
         "the lock is not held, so nothing here is contended"
     );
 
+    let root = norn_fs::path_identity(&vault)
+        .expect("the vault root")
+        .expect("a vault root");
     let apply = |path: &str, transition: Transition<'_>| {
-        let Staging::Staged(staged) =
-            stage(&vault, Path::new(path), transition, &shadows).expect("staged under a held lock")
+        let Staging::Staged(staged) = stage(&vault, root, Path::new(path), transition, &shadows)
+            .expect("staged under a held lock")
         else {
             panic!("{path} staged as already landed");
         };
-        publish(&vault, staged, &shadows).expect("published under a held lock");
+        let _ = publish(&vault, staged, &shadows).expect("published under a held lock");
     };
     apply("fresh.md", Transition::Create { content: b"one" });
     apply(

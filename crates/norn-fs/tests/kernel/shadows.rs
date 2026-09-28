@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 
-use norn_fs::{Refusal, Transition, discard, is_shadow_name};
+use norn_fs::{Refusal, Transition, is_shadow_name};
 
 use crate::common::{Scratch, bytes_at, exists, hard_link, hash, identity_at, staged};
 
@@ -16,7 +16,7 @@ fn a_landed_publication_leaves_no_shadow() {
     for round in 0..5 {
         let previous = format!("{round}");
         let next = format!("{}", round + 1);
-        scratch
+        let _ = scratch
             .stage_and_publish(
                 "note.md",
                 Transition::Replace {
@@ -53,7 +53,7 @@ fn a_leaked_aliased_shadow_is_never_reopened() {
     hard_link(&path, &stem_derived);
     hard_link(&path, &shadow_shaped);
 
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -89,7 +89,7 @@ fn residue_in_the_shadow_home_neither_blocks_nor_is_taken() {
     std::fs::write(&residue, b"a dead writer's bytes").expect("residue");
 
     let path = scratch.place("note.md", b"old");
-    scratch
+    let _ = scratch
         .stage_and_publish(
             "note.md",
             Transition::Replace {
@@ -179,7 +179,7 @@ fn a_discarded_target_leaves_no_shadow_and_publishes_nothing() {
     );
     assert_eq!(scratch.shadow_names().len(), 1);
 
-    discard(staged, scratch.shadows());
+    scratch.discard(staged);
 
     assert!(
         scratch.shadow_names().is_empty(),
@@ -254,7 +254,7 @@ fn no_descriptor_survives_staging() {
         "staging left descriptors open under the tree: {held:?}"
     );
     for staged in staged {
-        discard(staged, scratch.shadows());
+        scratch.discard(staged);
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use norn_fs::{Refusal, Transition};
+use norn_fs::{Refusal, Staging, Transition};
 
 use crate::common::{Scratch, bytes_at, exists, hash, staged, swap_folder_for_link, symlink};
 
@@ -108,33 +108,37 @@ fn a_folder_swapped_for_a_link_refuses_publication_for_every_kind() {
     );
 }
 
-/// A folder in the path that is a file refuses staging as the environment
-/// naming a name that is not a folder, rather than reading as absence.
+/// **A folder on the path that is a file is judged by what each kind
+/// expected.** A create has nowhere to go and refuses naming the file; a
+/// replace finds the document it composed against gone, which is drift; a
+/// remove finds its after-state, since nothing can be at the path, and has
+/// landed.
 ///
-/// The forbidden shape is absence: a create would stage a document that can
-/// never be published, and a removal would report landed over a tree it never
-/// looked into.
+/// The forbidden shapes are a machine error for any of them — a caller would
+/// treat a fact about the vault as a fault of the host — and, for a create,
+/// absence: it would stage a document that can never be published.
 #[test]
-fn a_folder_that_is_a_file_refuses_staging() {
+fn a_folder_that_is_a_file_is_judged_by_each_kind() {
     let scratch = Scratch::new("anchor-file-parent");
     scratch.place("folder", b"a file where a folder would be");
 
-    for transition in every_kind() {
-        let relative = format!("folder/{}", name_for(&transition));
-        let refusal = scratch
-            .stage(&relative, transition)
-            .expect_err("a target below a file");
-        assert!(
-            matches!(
-                &refusal,
-                Refusal::Environment {
-                    kind: std::io::ErrorKind::NotADirectory,
-                    ..
-                }
-            ),
-            "{relative}: {refusal}"
-        );
-    }
+    let [create, replace, remove] = every_kind()
+        .map(|transition| scratch.stage(&format!("folder/{}", name_for(&transition)), transition));
+    assert_eq!(
+        create.expect_err("a create below a file"),
+        Refusal::FolderIsFile {
+            path: scratch.at("folder/fresh.md"),
+            folder: scratch.at("folder"),
+        }
+    );
+    assert!(matches!(
+        replace.expect_err("a replace below a file"),
+        Refusal::Drifted { observed: None, .. }
+    ));
+    assert!(matches!(
+        remove.expect("a remove below a file"),
+        Staging::Landed(_)
+    ));
     assert!(scratch.shadow_names().is_empty());
 }
 
@@ -158,19 +162,14 @@ fn a_path_that_leaves_the_root_is_refused() {
         for transition in every_kind() {
             let refusal = norn_fs::stage(
                 &scratch.vault(),
+                scratch.root(),
                 Path::new(relative),
                 transition,
                 scratch.shadows(),
             )
             .expect_err("a path that leaves the root");
             assert!(
-                matches!(
-                    &refusal,
-                    Refusal::Environment {
-                        kind: std::io::ErrorKind::InvalidInput,
-                        ..
-                    }
-                ),
+                matches!(&refusal, Refusal::InvalidRequest { .. }),
                 "{relative:?}: {refusal}"
             );
         }
@@ -194,6 +193,7 @@ fn a_root_spelled_through_a_link_is_the_boundary() {
     let staged = staged(
         norn_fs::stage(
             &spelled,
+            scratch.root(),
             Path::new("note.md"),
             Transition::Replace {
                 before: hash(b"old"),
@@ -203,6 +203,6 @@ fn a_root_spelled_through_a_link_is_the_boundary() {
         )
         .expect("a root reached through a link"),
     );
-    norn_fs::publish(&spelled, staged, scratch.shadows()).expect("published");
+    let _ = norn_fs::publish(&spelled, staged, scratch.shadows()).expect("published");
     assert_eq!(bytes_at(&scratch.at("note.md")), b"new");
 }

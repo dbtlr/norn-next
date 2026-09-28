@@ -25,8 +25,8 @@ publish.workspace = true
 # `notify` is the platform watcher backend. Its event vocabulary never crosses
 # this crate boundary; callers receive only typed dirty sets and rescan scopes.
 # `induced-failure` makes this crate's fault seams reachable from outside it:
-# the write protocol's entry points (`stage`, `publish`, `confirm_landed`,
-# `discard`) and the public watch entry points arm themselves from the environment
+# the write protocol's five entry points (`stage`, `publish`, `confirm_landed`,
+# `discard`, `remove_empty_folders`) and the public watch entry points arm themselves from the environment
 # instead of passing no faults at all. It exists because the process-death bars
 # over the publication protocol cannot be stated by a caller that returns — a
 # child dies inside staging or publication and its parent reads what was left

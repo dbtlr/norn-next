@@ -150,6 +150,9 @@ fn the_child_role_publishes_under_whatever_it_was_armed_at() {
 fn run_scenario(root: &Path) {
     let vault = root.join("vault");
     let shadows = shadow_home(root);
+    let vault_root = norn_fs::path_identity(&vault)
+        .expect("the vault root")
+        .expect("a vault root");
     let scenario = std::env::var(SCENARIO).unwrap_or_else(|_| "replace".to_string());
     let before = match std::env::var(PRECONDITION).as_deref() {
         Ok("stale") => ContentHash::of(STALE),
@@ -175,12 +178,21 @@ fn run_scenario(root: &Path) {
                 content: None,
             },
         )],
+        "respell-content" => vec![(
+            DOCUMENT,
+            Transition::Respell {
+                to: respelled,
+                before,
+                content: Some(NEW),
+            },
+        )],
         "three" => ["one.md", "two.md", "three.md"]
             .into_iter()
             .map(|name| (name, Transition::Create { content: NEW }))
             .collect(),
         "rmdir" => {
-            let removed = norn_fs::remove_empty_folders(&vault, Path::new("empty/deeper"));
+            let removed =
+                norn_fs::remove_empty_folders(&vault, vault_root, Path::new("empty/deeper"));
             let line = match removed {
                 Ok(removed) => format!("outcome=removed count={}", removed.removed.len()),
                 Err(refusal) => refused(&refusal),
@@ -200,7 +212,7 @@ fn run_scenario(root: &Path) {
         .map(|(path, transition)| {
             (
                 path,
-                norn_fs::stage(&vault, Path::new(path), transition, &shadows),
+                norn_fs::stage(&vault, vault_root, Path::new(path), transition, &shadows),
             )
         })
         .collect();
@@ -217,6 +229,10 @@ fn run_scenario(root: &Path) {
                     ),
                 },
                 Ok(Publication::Found(_)) => "outcome=found".to_string(),
+                Ok(Publication::Interrupted(interrupted)) => format!(
+                    "outcome=interrupted {}",
+                    refused(&interrupted.cause).replacen("outcome=", "cause=", 1)
+                ),
                 Err(refusal) => refused(&refusal),
             },
         };
@@ -490,6 +506,53 @@ fn process_death_at_the_respell_leaves_the_old_spelling() {
             ("stage", "respell"),
             ("ordinal", "1"),
             ("answer", "ends"),
+        ],
+    );
+}
+
+/// **A respell whose rename fails after its content landed is interrupted,
+/// not refused.** The new content stands under the old spelling, the answer
+/// says the first step landed and why the rename did not, and a re-send finds
+/// the respell halfway. Runs only where the tree's root folds case.
+#[test]
+fn a_respell_whose_rename_fails_after_its_content_landed_is_interrupted() {
+    let tree = Tree::new("respell-interrupted");
+    if PathNormalizer::detect(&tree.vault())
+        .expect("the tree's case behavior")
+        .case_sensitivity()
+        != CaseSensitivity::Insensitive
+    {
+        eprintln!(
+            "a_respell_whose_rename_fails_after_its_content_landed_is_interrupted: skipped, \
+             the root does not fold"
+        );
+        return;
+    }
+    let outcome = tree.spawn(&[(SCENARIO, "respell-content"), (ARMED, "respell=fails")]);
+
+    assert_eq!(
+        outcome.status,
+        RunStatus::Exited(0),
+        "{}",
+        outcome.stderr_text()
+    );
+    assert_eq!(tree.vault_names(), vec![DOCUMENT.to_string()]);
+    assert_eq!(tree.bytes_at(DOCUMENT), Some(NEW.to_vec()));
+    let attested = tree.attestation();
+    attested.assert_reached(
+        "an interrupted respell",
+        &[
+            (SEAM, WRITE_SEAM),
+            ("stage", "respell"),
+            ("answer", "fails"),
+        ],
+    );
+    attested.assert_reached(
+        "an interrupted respell",
+        &[
+            (SEAM, CHILD_SEAM),
+            ("outcome", "interrupted"),
+            ("cause", "environment"),
         ],
     );
 }

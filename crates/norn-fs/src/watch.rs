@@ -832,7 +832,10 @@ impl OwnWrites {
     /// primed for one would absorb the next foreign change to that path — so
     /// there is no method that takes one. A move is two publications, a create
     /// at the destination and a removal at the source, and is recorded as the
-    /// two.
+    /// two. A respell is recorded at its new spelling, and an interrupted one
+    /// records its first step at the old: on a root that folds the two
+    /// spellings are one ledger key, so an event reported under either is
+    /// matched, and on one that does not a respell is never published.
     ///
     /// `path` may be vault-relative or absolute beneath the watched vault root.
     /// An absolute path outside that root is refused as [`PathError::Absolute`].
@@ -5413,6 +5416,25 @@ mod tests {
         assert!(ledger.lock().unwrap().entries.is_empty());
         let batch = suppress(&recorder.root, &ledger, dirty(&recorder, &["0.md"]));
         assert_eq!(batch.vault_roots().len(), 1);
+    }
+
+    /// **A respell's two spellings are one ledger entry on a folding root.**
+    /// What is recorded at the new spelling is found under the old one, so the
+    /// event the rename reports under either is the recorded one.
+    #[test]
+    fn a_respell_recorded_at_one_spelling_is_found_at_the_other_on_a_folding_root() {
+        let (scratch, ledger, mut recorder) = own_write_harness("watch-respelled");
+        recorder.normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = scratch.place("Note.md", b"respelled");
+        recorder
+            .published(&path, &published(AfterState::Present(observed(&path))))
+            .unwrap();
+
+        let old = recorder.normalize(Path::new("note.md")).unwrap();
+        assert!(
+            ledger.lock().unwrap().entries.contains_key(&old),
+            "the old spelling's event would not find the entry the respell recorded"
+        );
     }
 
     /// A move is recorded as its two publications: the destination present
