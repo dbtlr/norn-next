@@ -9449,16 +9449,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         let entry = host.shared.entries.get(&name).unwrap();
-        // The attach leg that published Ready ends after publishing, so the
-        // case waits for its registration to clear before standing its own.
-        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
-            if entry.gate.lock().unwrap().claim.leg().is_none() {
-                Observed::Met(())
-            } else {
-                Observed::pending("the attach leg is still registered")
-            }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_attach_leg_to_end(&entry);
 
         let (reply, answer) = mpsc::sync_channel(1);
         let epoch = {
@@ -14415,16 +14406,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
-        // The attach leg that published Ready ends after publishing, so the
-        // case waits for its registration to clear before standing its own.
-        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
-            if entry.gate.lock().unwrap().claim.leg().is_none() {
-                Observed::Met(())
-            } else {
-                Observed::pending("the attach leg is still registered")
-            }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_attach_leg_to_end(&entry);
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -14478,16 +14460,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
-        // The attach leg that published Ready ends after publishing, so the
-        // case waits for its registration to clear before standing its own.
-        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
-            if entry.gate.lock().unwrap().claim.leg().is_none() {
-                Observed::Met(())
-            } else {
-                Observed::pending("the attach leg is still registered")
-            }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_the_attach_leg_to_end(&entry);
 
         // The poll holding the entry's coverage.
         let (holder, attachment) = {
@@ -19450,34 +19423,45 @@ mod tests {
     /// costs the round it is already paying for and no other. A lease that
     /// gave itself back from its own drop instead would take the gate a
     /// second time for the same refusal.
+    ///
+    /// **The rounds counted are the refused read's alone.** The gate's count
+    /// is the entry's, so the case brackets a stretch in which nothing but
+    /// that read takes the gate: the attach leg that published `Ready` has
+    /// ended, the teardown has run to its end, and the first read's snapshot
+    /// ends by hand, which hands the connection on and takes no gate. The
+    /// first read's hold drops once the count is read, so its rounds fall
+    /// outside the bracket: the hold's drop takes the gate to unpin, and its
+    /// lease then goes back from a drop of its own, which takes the gate
+    /// again only where it finds the gate free, so the first read costs one
+    /// round or two.
     #[test]
     fn a_refusal_under_the_gate_gives_its_lease_back_in_the_same_hold() {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
-        let (entry, first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
-        let before = entry.gate.times_taken();
-
-        // The teardown while the second read waits, and the first read giving
-        // its connection back, are what the wake and the retake below answer:
+        let (entry, mut first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
+        wait_for_the_attach_leg_to_end(&entry);
+        // The teardown while the second read waits is what its retake answers:
         // the entry the retake finds is one that has stopped serving.
         refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
-        drop(std::mem::ManuallyDrop::into_inner(first));
+        let before = entry.gate.times_taken();
 
+        drop(first.snapshot.take());
         let refusal = joined_within_the_budget("the read waiting behind the first", waiting)
             .expect("the waiting read's own thread unwound instead of answering");
+        let rounds = entry.gate.times_taken() - before;
+        drop(std::mem::ManuallyDrop::into_inner(first));
+
         assert!(
             matches!(refusal, Err(ReadRefusal::NotServing(_))),
             "the read that waited was refused as something other than the entry it found: \
              {refusal:?}"
         );
         assert_eq!(
-            entry.gate.times_taken() - before,
-            5,
-            "the teardown, the first read's give-back and the second read's retake together took \
-             other than five rounds of the gate — a refusal that gives its lease back outside the \
-             hold it found the entry under costs one round more"
+            rounds, 1,
+            "the refused read took other than the one round of its retake — a refusal that gives \
+             its lease back outside the hold it found the entry under costs one round more"
         );
         assert_eq!(
             demand_leases(&entry),
@@ -19549,6 +19533,22 @@ mod tests {
             poisoned.is_err(),
             "the thread asked to poison the gate returned"
         );
+    }
+
+    /// Wait for the leg registered against `entry` to end.
+    ///
+    /// The attach leg that published `Ready` ends after publishing, and its
+    /// end takes the gate again, so a case that stands a leg of its own or
+    /// counts the gate's rounds waits for that registration to clear.
+    fn wait_for_the_attach_leg_to_end<A: SnapshotSource>(entry: &Entry<A>) {
+        wait_until("the attach leg to end", lifecycle_wait_budget(), || {
+            if entry.gate.lock().unwrap().claim.leg().is_none() {
+                Observed::Met(())
+            } else {
+                Observed::pending("the attach leg is still registered")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// The demand leases `entry` counts, read under one hold of its gate that
