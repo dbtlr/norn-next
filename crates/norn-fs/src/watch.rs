@@ -2446,6 +2446,7 @@ mod tests {
             .try_recv()
             .unwrap()
             .expect("the batch placed before the window");
+        assert_eq!(subscription.try_recv(), Ok(None));
         let healed = subscription.finish_heal().unwrap();
 
         assert!(names(&placed, "placed.md"), "{placed:?}");
@@ -2706,6 +2707,102 @@ mod tests {
 
         assert!(matches!(healed, Err(WatchError::Backend(_))), "{healed:?}");
         dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal already waiting out a suppression returns when the coalescer
+    /// dies inside it**, and reports the watcher stopped. The batch under
+    /// suppression is never handed over, so the only thing that ends the wait
+    /// is the coalescer saying it left.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_waiting_heal_returns_when_the_coalescer_dies_suppressing_its_batch() {
+        let scratch = Scratch::new("heal-window-coalescer-dies-while-waited-on");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let (held, holding) = mpsc::channel();
+        let (panic_now, told) = mpsc::channel::<()>();
+        let writer = thread::spawn(move || {
+            let _held = ledger.lock().unwrap();
+            let _ = held.send(());
+            let _ = told.recv();
+            panic!("a writer panics while holding the own-write ledger");
+        });
+        holding.recv().expect("the writer to hold the ledger");
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until(
+            "the coalescer to take the batch up",
+            watch_budget(),
+            || {
+                if subscription.state.lock().unwrap().closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is not suppressing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let healed = subscription.finish_heal();
+            let _ = done.send((subscription, healed));
+        });
+        let early = finished.recv_timeout(watch_budget().probe());
+        assert!(
+            early.is_err(),
+            "the heal closed while a batch was being suppressed"
+        );
+        drop(panic_now);
+        let _ = writer.join();
+        let (subscription, healed) = finished
+            .recv_timeout(watch_budget().work())
+            .expect("the heal to return once the coalescer died");
+
+        assert!(matches!(healed, Err(WatchError::Backend(_))), "{healed:?}");
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal closed after the coalescer delivered its terminal error
+    /// reports no second failure.** That error is the subscription's last
+    /// fact, and a coalescer that returned after delivering it left no batch
+    /// behind for the heal to wait on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_closed_after_a_delivered_terminal_error_reports_no_second_failure() {
+        let scratch = Scratch::new("heal-window-after-terminal");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.state.lock().unwrap().terminal = Some(WatchError::CoverageLost(vault.clone()));
+        let _ = subscription.wake.as_ref().unwrap().try_send(());
+        norn_testkit::wait::wait_until(
+            "the coalescer to deliver and return",
+            watch_budget(),
+            || {
+                if subscription.worker.as_ref().unwrap().is_finished() {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is running")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+
+        assert_eq!(
+            subscription.try_recv(),
+            Err(WatchError::CoverageLost(vault.clone()))
+        );
+        let healed = subscription.finish_heal();
+        assert!(healed.is_ok(), "{healed:?}");
     }
 
     #[test]
