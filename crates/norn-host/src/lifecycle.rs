@@ -9402,17 +9402,20 @@ mod tests {
     /// A reload-shaped leg whose claim is taken away by `park` while it runs,
     /// on a host of its own, in the mode `dry_run` names: what its asker is
     /// told, beside the detail the park's own refusal carries.
+    ///
+    /// The host runs no ambient poll. A watcher poll holds the entry's claim
+    /// and coverage while it runs, and a reload asked inside that span is
+    /// refused at admission, so the leg this case takes the claim from would
+    /// never start.
     #[cfg(unix)]
     fn a_leg_superseded_by(park: Park, dry_run: bool) -> (ReloadRefusal, ErrorDetail) {
         let scratch = temp_base("reload-claim-superseded");
-        let root = scratch.root().join("root");
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
-        let host = Arc::new(host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1));
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
+        let root = scratch.root().join(name.as_str());
+        let host = one_worker_host_over(&ops, scratch.root(), &[&name]);
 
         let asking = Arc::clone(&host);
         let asked = name.clone();
@@ -9564,6 +9567,14 @@ mod tests {
         assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
+    /// A reload turn whose drain stays saturated hands its claim on, and the
+    /// sibling attach queued behind it runs before the turn it handed on to.
+    ///
+    /// The host runs no ambient poll: a watcher poll holds the entry's claim
+    /// and coverage while it runs, and a reload asked inside that span is
+    /// refused at admission. The one worker's channel is full with the
+    /// sibling's attach when the turn hands on, so the handed-on turn waits on
+    /// its marker, and the case drives the dispatch retry that sends it.
     #[test]
     fn saturated_reload_hands_the_claim_on_before_it_continues() {
         let ops = Arc::new(FakeOps::default());
@@ -9576,13 +9587,14 @@ mod tests {
         let base = scratch.root();
         let reloaded_root = base.join("reloaded");
         let sibling_root = base.join("sibling");
-        let host = Arc::new(host_over_roots(
+        let host = Arc::new(rooted_host(
             Arc::clone(&ops),
             &[
                 (&reloaded, reloaded_root.as_path()),
                 (&sibling, sibling_root.as_path()),
             ],
             1,
+            Duration::from_secs(60),
         ));
         let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
         wait_for_state(&host, &reloaded, TrustState::Ready);
@@ -9608,6 +9620,7 @@ mod tests {
             Ok(TrustState::Warming { .. })
         ));
         *ops.continuous_handoff_poll_for.lock().unwrap() = None;
+        retry_pending_dispatches(&host.shared);
         // The turn that finishes answers what the first turn judged.
         assert_eq!(
             reload.join().unwrap(),
@@ -10663,9 +10676,10 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
     }
 
-    /// Two vaults over roots of their own, both `Ready`, on a host with one
-    /// worker and no dispatcher tick of its own, so a job blocked on one entry
-    /// holds every other entry's job behind it for as long as a case drives.
+    /// Vaults over roots of their own, each `Ready`, on a host with one worker
+    /// and no dispatcher tick of its own, so a job blocked on one entry holds
+    /// every other entry's job behind it for as long as a case drives, and no
+    /// ambient poll holds an entry a case asks a reload of.
     #[cfg(unix)]
     fn one_worker_host_over(
         ops: &Arc<FakeOps>,
