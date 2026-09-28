@@ -276,17 +276,28 @@ impl ConfigDirs {
         self.vaults_dir().join(name.as_str())
     }
 
-    /// The three names one derived store is keyed by, taken from this value.
+    /// The three names one derived store is keyed by, taken from this value,
+    /// with the data directory digested at the spelling `resolve` gives it.
     ///
-    /// A pure function of the same [`ConfigDirs`] [`ConfigDirs::derived_dir`]
-    /// is built from, so a mechanism kept somewhere other than that directory
+    /// A function of the same [`ConfigDirs`] [`ConfigDirs::derived_dir`] is
+    /// built from, so a mechanism kept somewhere other than that directory
     /// carries the directory's own identity rather than a second spelling of
-    /// it.
-    pub fn derived_key(&self, name: &VaultName) -> DerivedKey {
+    /// it. **Resolving the spelling is the caller's.** Two spellings of one
+    /// data directory — a symbolic link, a `..`, a doubled separator — reach
+    /// one derived directory and so one lock inside it, and only a resolution
+    /// against the filesystem makes them one key; this crate reaches no
+    /// filesystem, so `resolve` is where that resolution comes in. The host
+    /// passes the canonical spelling. A data directory `resolve` hands back
+    /// unchanged is digested exactly as it is held.
+    pub fn derived_key(
+        &self,
+        name: &VaultName,
+        resolve: impl FnOnce(&Path) -> PathBuf,
+    ) -> DerivedKey {
         DerivedKey {
             channel: Channel::COMPILED.app_directory(),
             vault: name.as_str().to_owned(),
-            data_base: digest_component(self.data.as_os_str().as_encoded_bytes()),
+            data_base: digest_component(resolve(&self.data).as_os_str().as_encoded_bytes()),
         }
     }
 }
@@ -307,7 +318,9 @@ impl ConfigDirs {
 /// The two spellable coordinates are carried as themselves. The data base is a
 /// whole absolute path and cannot be one component, so it is carried as a
 /// digest (`digest_component`) of it — the one part a reader cannot spell back,
-/// which is why the other two are not folded in with it.
+/// which is why the other two are not folded in with it. The path digested is
+/// the one [`ConfigDirs::derived_key`]'s caller resolves the data directory
+/// to, so every spelling that reaches one lock can be made to reach one key.
 ///
 /// Each part is one path component, which is what makes the key spellable as a
 /// directory anywhere: [`Channel::app_directory`] is a fixed name,
@@ -332,7 +345,8 @@ impl DerivedKey {
     }
 
     /// The data-base component: which machine-local data directory this store
-    /// lives under, as a digest of that directory's path.
+    /// lives under, as a digest of that directory's path at the spelling the
+    /// key's caller resolved it to.
     pub fn data_base(&self) -> &str {
         self.data_base.as_str()
     }
@@ -354,10 +368,10 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// `bytes` as one filesystem-safe path component: sixteen lowercase hex digits.
 ///
-/// **The bytes are digested as they are held, never canonicalized.** Two
-/// spellings of one directory therefore digest to two components and key two
-/// homes. That is the safe direction: an extra home costs a directory nobody
-/// looks in, where a shared home costs the separation the key exists to buy.
+/// **The bytes are digested as they are held, never canonicalized here.** Two
+/// spellings of one directory digest to two components, so a caller that
+/// means one directory to be one component resolves the spelling first, as
+/// [`ConfigDirs::derived_key`]'s caller does.
 fn digest_component(bytes: &[u8]) -> String {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in bytes {
@@ -485,7 +499,7 @@ mod tests {
     fn the_derived_key_names_the_derived_directory_at_its_own_positions() {
         let dirs = ConfigDirs::new("/config", "/data").expect("two bases");
         let name = VaultName::new("notes").expect("a name");
-        let key = dirs.derived_key(&name);
+        let key = dirs.derived_key(&name, Path::to_path_buf);
         let derived = dirs.derived_dir(&name);
 
         let components: Vec<_> = derived
@@ -515,6 +529,12 @@ mod tests {
             digest_component(dirs.data_dir().as_os_str().as_encoded_bytes()),
             "the data-base part is not the digest of the data directory"
         );
+        assert_eq!(
+            dirs.derived_key(&name, |_| PathBuf::from("/resolved/norn-dev"))
+                .data_base(),
+            digest_component(b"/resolved/norn-dev"),
+            "the data-base part is not the digest of the spelling the caller resolved"
+        );
     }
 
     /// **The bar the third coordinate buys.** Two data bases are two derived
@@ -533,27 +553,28 @@ mod tests {
 
         assert_ne!(mine.derived_dir(&name), theirs.derived_dir(&name));
         assert_ne!(
-            mine.derived_key(&name),
-            theirs.derived_key(&name),
+            mine.derived_key(&name, Path::to_path_buf),
+            theirs.derived_key(&name, Path::to_path_buf),
             "two data bases spell one key"
         );
         assert_ne!(
-            mine.derived_key(&name).data_base(),
-            theirs.derived_key(&name).data_base(),
+            mine.derived_key(&name, Path::to_path_buf).data_base(),
+            theirs.derived_key(&name, Path::to_path_buf).data_base(),
             "two data bases spell one data-base part"
         );
         assert_eq!(
-            mine.derived_key(&name),
+            mine.derived_key(&name, Path::to_path_buf),
             ConfigDirs::new("/config", "/home/mine/.local/share")
                 .expect("two bases")
-                .derived_key(&name),
+                .derived_key(&name, Path::to_path_buf),
             "one data base spelled two keys across two constructions"
         );
     }
 
     /// The digest is one filesystem-safe component, and it is the digest of the
-    /// path as held: two spellings of one directory yield two components, which
-    /// errs toward two homes rather than one shared one.
+    /// path as held: two spellings of one directory yield two components, so
+    /// making them one is the resolution [`ConfigDirs::derived_key`]'s caller
+    /// supplies.
     #[test]
     fn the_data_base_digest_is_one_hex_component_of_the_path_as_held() {
         let digest = digest_component(b"/home/person/.local/share/norn-dev");
