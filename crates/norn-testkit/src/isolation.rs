@@ -156,8 +156,8 @@ pub const QUEUED_HOLDERS: u32 = 160 * 4;
 /// record string unchanged**: it runs between two reads that both saw that
 /// string, never through the time a look spent descheduled around its own read,
 /// so a waiter starved on a busy runner cannot stretch a moving queue past it.
-/// A string that recurs across hand-overs joins those standings; [`Unmoved`]
-/// says which strings do and what that costs.
+/// A string that recurs across hand-overs joins those standings; the
+/// module's look tracker says which strings do and what that costs.
 ///
 /// It is sized for the longest window a case honestly holds the lease: a whole
 /// case rather than a single wait, since a case attaches a vault, runs a
