@@ -1482,9 +1482,11 @@ struct State {
     /// on the consumer.
     closing: bool,
     /// The batch the coalescer closed and has not placed in the delivery slot:
-    /// waiting for room behind a full slot, or held for the heal window open
-    /// when it was handed over, which takes it. The coalescer closes no other
-    /// batch while this one waits.
+    /// waiting for room behind a full slot, or held for an open heal window.
+    /// Any window open while it waits takes it as the window closes, whether
+    /// the window was open when the batch was handed over or opened later.
+    /// With no window open, a receive that finds the slot empty takes it. The
+    /// coalescer closes no other batch while this one waits.
     unplaced: Option<Batch>,
     /// How many batches the delivery slot holds. Both ends of the slot move it
     /// under this lock, so it is exact whenever the lock is held.
@@ -1935,10 +1937,12 @@ impl Drop for CoalescerExit<'_> {
 /// Reports whether the consumer is still there: a dropped subscription ends the
 /// wait even with a heal window open.
 ///
-/// The slot is only ever filled under the state lock and only while no heal
-/// window is open, which is what lets a window treat the slot as closed for its
-/// whole length: [`Subscription::begin_heal`] takes the same lock, and a batch
-/// that meets an open window is held for it. The batch is out of the
+/// A batch only ever enters the slot under the state lock and only while no
+/// heal window is open, which is what lets a window treat the slot as closed to
+/// batches for its whole length: [`Subscription::begin_heal`] takes the same
+/// lock, and a batch that meets an open window is held for it. The terminal
+/// error is the one exception: the coalescer sends it outside the lock, and it
+/// can enter the slot while a window is open. The batch is out of the
 /// coalescer's hands the moment this takes the lock, so a closing window never
 /// waits on a consumer to make room. The coalescer then waits, releasing the
 /// lock, until a receive makes room or takes the batch, or the closing window
