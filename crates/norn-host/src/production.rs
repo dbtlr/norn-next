@@ -2006,7 +2006,16 @@ fn scoped_increment(
         // or when the next whole-vault heal walks it. That is the from-zero
         // reading: a derivation over this tree holds one row for one entry, at
         // the name the directory lists.
-        let kind = match vault.reach(path).map_err(effect)? {
+        //
+        // **What this leg converges is stated at the spelling the tree lists.**
+        // A report can name an entry through a spelling the fold equates with
+        // the one its directories render — written before a case-only rename
+        // of the entry or of a directory above it, and applied after a leg that
+        // already landed the rendered one. The reach answers at the listed
+        // spelling, and every read and every row below is taken there, so the
+        // order the reports are applied in does not decide the spelling a row
+        // lands at.
+        let (kind, rendered) = match vault.reach(path).map_err(effect)? {
             norn_fs::Reach::Refused(skip) => {
                 pending.flush()?;
                 prune_refused_root(
@@ -2023,8 +2032,9 @@ fn scoped_increment(
                 refused.push(skip);
                 continue;
             }
-            norn_fs::Reach::Stands(kind) => kind,
+            norn_fs::Reach::Stands { kind, at } => (kind, at),
         };
+        let path = rendered.as_path();
         // Both the identity and the range it addresses are read before anything
         // that would use them, because what a spelling names and what it holds
         // are different questions: `..md` names no document and is still where
@@ -13270,25 +13280,118 @@ mod tests {
         }
     }
 
-    /// **A batch whose only spelling of a directory is the one that died
-    /// carries the reported descendant to the name the tree renders.**
+    /// **A case-renamed directory and a save under it converge at the spelling
+    /// the directory renders whichever increment applies its report first.**
+    ///
+    /// The save's report names the document through the directory's pre-rename
+    /// spelling and the rename's reports name the directory alone, at both its
+    /// spellings, and they can settle into separate batches. Applied save-first,
+    /// the directory's heal re-spells the row. Applied directory-first, the leg
+    /// after it reads a spelling the fold equates with the rendered one — the
+    /// save's, or the retired half of the rename's — and the row it derives is
+    /// the one a build from zero holds: at the name the directory lists, not at
+    /// the name the report was spelled in.
+    #[test]
+    fn a_case_renamed_directory_and_a_save_under_it_converge_in_either_increment_order() {
+        for order in [
+            ["folder/note.md", "FOLDER"],
+            ["FOLDER", "folder/note.md"],
+            ["FOLDER", "folder"],
+        ] {
+            let f = Fixture::new("case-only-directory-rename-across-increments");
+            if norn_fs::PathNormalizer::detect(&f.vault())
+                .unwrap()
+                .case_sensitivity()
+                != norn_fs::CaseSensitivity::Insensitive
+            {
+                return;
+            }
+            fs::create_dir(f.vault().join("folder")).unwrap();
+            fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+            let (ops, name) = f.ops(2);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            fs::write(f.vault().join("folder/note.md"), "revised body").unwrap();
+            fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
+
+            for report in order {
+                scoped_increment(
+                    &mut attachment.store,
+                    f.vault().as_path(),
+                    &dirty_path(f.vault().as_path(), report),
+                    ProductionPolicy::new(2, 2).unwrap(),
+                    &progress.healing(),
+                    &exclusions(&attachment.registration, &attachment.shadows),
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                ["FOLDER/note.md"],
+                "increments applied as {order:?}"
+            );
+            ops.detach(&name, attachment);
+        }
+    }
+
+    /// **A case-renamed document converges at the spelling the directory lists
+    /// whichever increment applies a report of it last.**
+    ///
+    /// A report spelled at the name the rename retired names the same document
+    /// as the one spelled at the name it made, so a leg reading the retired
+    /// spelling after the rendered one has already landed derives the row the
+    /// rendered spelling holds rather than moving it back.
+    #[test]
+    fn a_case_renamed_document_converges_in_either_increment_order() {
+        for order in [["note.md", "NOTE.md"], ["NOTE.md", "note.md"]] {
+            let f = Fixture::new("case-only-file-rename-across-increments");
+            if norn_fs::PathNormalizer::detect(&f.vault())
+                .unwrap()
+                .case_sensitivity()
+                != norn_fs::CaseSensitivity::Insensitive
+            {
+                return;
+            }
+            fs::write(f.vault().join("note.md"), "body").unwrap();
+            let (ops, name) = f.ops(2);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            fs::rename(f.vault().join("note.md"), f.vault().join("NOTE.md")).unwrap();
+
+            for report in order {
+                scoped_increment(
+                    &mut attachment.store,
+                    f.vault().as_path(),
+                    &dirty_path(f.vault().as_path(), report),
+                    ProductionPolicy::new(2, 2).unwrap(),
+                    &progress.healing(),
+                    &exclusions(&attachment.registration, &attachment.shadows),
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                ["NOTE.md"],
+                "increments applied as {order:?}"
+            );
+            ops.detach(&name, attachment);
+        }
+    }
+
+    /// **A batch whose only spelling of a directory is the one that died lands
+    /// every row under it at the name the tree renders.**
     ///
     /// A backend can report a directory's old name gone without reporting the
     /// new one, and a change under the directory then arrives spelled through
-    /// the name it now renders. A heal rooted at the dead spelling walks at that
-    /// spelling, so the descendant's own root is what reaches a name a
-    /// directory entry holds — and the batch seam keeps that pair standing
-    /// through the fold a delivery crosses so this leg can read it.
-    ///
-    /// **The bound this states is per reported root.** A heal rooted at a dead
-    /// spelling stores every row under it that way, and only the roots the
-    /// batch names are re-spelled after it: the sibling below is a document no
-    /// report named, and it is left at the dead spelling until a walk rooted
-    /// somewhere the tree renders reaches it. That is the reading of a dead
-    /// root, not of subsumption — the same rows land for the same reason when
-    /// no root covers another.
+    /// the name it now renders. The batch seam keeps that pair standing through
+    /// the fold a delivery crosses, and the dead spelling reaches the directory
+    /// the tree lists under the name it renders — so the heal rooted there walks
+    /// at the rendered name, and the sibling no report named lands beside the
+    /// reported descendant rather than at the spelling the rename retired.
     #[test]
-    fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_descendants_own() {
+    fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_rendered_one() {
         let f = Fixture::new("dead-directory-spelling-with-descendant");
         if norn_fs::PathNormalizer::detect(&f.vault())
             .unwrap()
@@ -13332,15 +13435,8 @@ mod tests {
 
         assert_eq!(
             stored_paths(&mut attachment.store),
-            ["FOLDER/note.md", "folder/other.md"],
-            "the reported descendant did not reach the name the tree renders"
-        );
-
-        // And a walk rooted where the tree renders takes the sibling with it.
-        heal_the_vault(&ops, &name, &mut attachment, &progress);
-        assert_eq!(
-            stored_paths(&mut attachment.store),
-            ["FOLDER/note.md", "FOLDER/other.md"]
+            ["FOLDER/note.md", "FOLDER/other.md"],
+            "a row under the dead spelling did not reach the name the tree renders"
         );
         ops.detach(&name, attachment);
     }
