@@ -343,9 +343,12 @@ impl<T: Stanced> EntryGate<T> {
     }
 
     /// Take the gate from a drop, waiting for it, and count the take. Every
-    /// drop-side take of an entry gate comes through here: a read's hold
-    /// giving its pin back, and the host's destruction tearing each entry
-    /// down.
+    /// drop-side take that waits for an entry gate comes through here: a
+    /// read's hold giving its pin back, a withdrawal that did not commit
+    /// putting the entry back in service, and the host's destruction tearing
+    /// each entry down. A demand lease giving itself back does not wait, and
+    /// defers through [`EntryGate::run_under_the_next_hold`] instead, which
+    /// reads through poison the same way.
     ///
     /// **It reads through a poisoned gate on every thread**, unwinding or not.
     /// On an unwinding thread a panic here is a second panic and aborts the

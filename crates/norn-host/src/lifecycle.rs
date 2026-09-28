@@ -2670,13 +2670,8 @@ impl<A: SnapshotSource> Drop for Withdrawal<'_, A> {
             return;
         }
         // One flag is written, whole, so a gate a panic poisoned elsewhere
-        // holds nothing this write could read half-done; recovering it keeps
-        // an unwind through here from becoming an abort.
-        self.entry
-            .gate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .service = Service::Served;
+        // holds nothing this write could read half-done.
+        self.entry.gate.lock_in_a_drop().service = Service::Served;
     }
 }
 
