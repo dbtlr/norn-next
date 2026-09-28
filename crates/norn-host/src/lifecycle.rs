@@ -8656,6 +8656,16 @@ mod tests {
             .count()
     }
 
+    /// One vault, `notes`, over a root the filesystem answers for with
+    /// nothing, on a host with one worker whose dispatcher ticks every 2ms.
+    ///
+    /// Every tick polls the attached entry, and the poll holds the entry's
+    /// claim and takes its coverage out for as long as it runs. A case here
+    /// that reads the claim, the queue slot or the coverage at one instant
+    /// races that poll, and so does a case that expects a reload admitted: a
+    /// reload is refused at admission while the claim is held or the coverage
+    /// is out. Such a case waits for the value it needs, or runs on
+    /// `host_without_ambient_polling` and drives the poll itself.
     fn fixture(ops: Arc<FakeOps>, idle_after: Duration) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
         let entry = RegistryEntry::new(
@@ -8759,8 +8769,17 @@ mod tests {
         )
     }
 
-    /// A host over roots the filesystem answers for, with the dispatcher
-    /// ticking.
+    /// A host over roots the filesystem answers for, whose dispatcher ticks
+    /// every 2ms.
+    ///
+    /// Every tick polls each attached entry, and the poll holds the entry's
+    /// claim and takes its coverage out for as long as it runs. A case here
+    /// that reads an entry's claim, queue slot or coverage at one instant races
+    /// that poll, and so does a case that expects a reload admitted: a reload
+    /// is refused at admission while the claim is held or the coverage is out.
+    /// Such a case waits for the value it needs, or runs on
+    /// `host_without_ambient_polling` over `Roots::Created` and drives the
+    /// poll itself.
     fn host_over_roots(
         ops: Arc<FakeOps>,
         roots: &[(&VaultName, &std::path::Path)],
