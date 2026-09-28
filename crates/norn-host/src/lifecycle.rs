@@ -24464,14 +24464,15 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"));
         }
 
-        /// Wait for the job `name`'s entry sent into the channel to take its
-        /// queue slot, and answer the epoch the job carries.
+        /// Wait for `name`'s entry to take the queue slot for the job it owes,
+        /// and answer the epoch the job carries.
         ///
-        /// The job an entry owes a standing lease is sent by the demand that
-        /// finds the entry free, or by the end of the watcher poll holding the
-        /// entry when that demand arrived. The case keeps a lease standing
-        /// until this returns, so either sender finds the lease the job is
-        /// owed to.
+        /// The owed job is scheduled by whichever of the demand and the end
+        /// of a watcher poll first finds the entry free while a lease stands.
+        /// Its dispatch takes the slot under the entry's lock and then sends
+        /// the job into the channel, either at once or at a later dispatcher
+        /// tick. The case keeps a lease standing until this returns, so the
+        /// job is scheduled whichever of them finds the entry free first.
         fn wait_for_queued_job(host: &Host<Arc<FakeOps>>, name: &VaultName) -> u64 {
             let entry = host.shared.entries.get(name).expect("the vault is served");
             wait_until(
