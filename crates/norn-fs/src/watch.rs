@@ -609,11 +609,15 @@ impl Subscription {
     /// Called with no window open, it takes the accumulation and nothing the
     /// slot is owed: a batch waiting for room in the slot stays there.
     ///
-    /// A terminal error closes the window too, and is returned in place of the
-    /// batch: the held batch and the accumulation are discarded with it, and
-    /// the error calls for a rescan of the vault. A coalescer that died is
-    /// reported as a stopped watcher, so a heal never waits on a batch no
-    /// coalescer is left to hand over.
+    /// A terminal error found under the state lock closes the window too, and
+    /// is returned in place of the batch: the held batch and the accumulation
+    /// are discarded with it, and the error calls for a rescan of the vault. A
+    /// coalescer that died is reported as a stopped watcher, so a heal never
+    /// waits on a batch no coalescer is left to hand over.
+    ///
+    /// A vault root that moved is refused before the state lock is taken. That
+    /// refusal leaves the window open, with any batch held for it still held;
+    /// dropping the subscription releases the coalescer holding that batch.
     pub fn finish_heal(&self) -> Result<Batch, WatchError> {
         self.check_root_anchor()?;
         let (closed_before, work) = {
@@ -1916,8 +1920,8 @@ fn run_coalescer(
 ///
 /// A return never leaves the mark set, but an unwind out of suppression does,
 /// and a closing heal waits on that mark. Clearing it here is what lets that
-/// heal return. The state lock is taken even when poisoned, because an unwind
-/// out of the handover can be what poisoned it.
+/// heal return. The state lock is taken even when poisoned, because a poisoned
+/// state lock is one way the coalescer unwinds.
 struct CoalescerExit<'a> {
     state: &'a Mutex<State>,
     handoff: &'a Condvar,

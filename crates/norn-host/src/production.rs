@@ -1718,7 +1718,7 @@ fn poll_subscription(
 /// Every batch already settled at the subscription, taken without waiting.
 ///
 /// Called with a heal window open, when no batch enters the delivery slot:
-/// the drain takes the batches the slot held as the window opened and ends at
+/// the drain takes the batch the slot held as the window opened and ends at
 /// the first receive that finds it empty. A terminal error can still enter the
 /// slot during the window, and the drain returns it as the failure.
 ///
