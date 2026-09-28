@@ -20423,15 +20423,28 @@ mod tests {
                     false => Observed::pending("the read is still waiting"),
                 },
             );
-            let turns = ops.reconciles.load(Ordering::SeqCst);
+            // The first turn hands on and lets the gate go before the second
+            // is sent, and the second is counted only once a worker takes it,
+            // so the read can answer ahead of that count. The count is waited
+            // for rather than sampled; it stays exact because the second turn
+            // is held until its release below.
+            let turns = wait_until(
+                "the second reconcile turn to begin",
+                lifecycle_wait_budget(),
+                || match ops.reconciles.load(Ordering::SeqCst) {
+                    turns if turns >= 2 => Observed::Met(turns),
+                    turns => Observed::pending(format!("{turns} turns have begun")),
+                },
+            );
             *ops.continuous_fact_handoff_for
                 .lock()
                 .expect("continuous handoff poll poisoned") = None;
             ops.later_reconcile_release.store(true, Ordering::SeqCst);
             answered.unwrap_or_else(|failure| panic!("{failure}"));
+            let turns = turns.unwrap_or_else(|failure| panic!("{failure}"));
             assert_eq!(
                 turns, 2,
-                "the read answered with the second turn not yet begun"
+                "the read answered with a turn past the second already begun"
             );
             reading.join().expect("the read finished")
         })
