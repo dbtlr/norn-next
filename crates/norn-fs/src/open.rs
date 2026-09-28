@@ -145,74 +145,161 @@ impl Unreached {
     }
 }
 
+/// The ordinary names `path` is made of, where it is a path below an anchor.
+///
+/// **One rule for every contained path this crate reaches, read or write.** A
+/// component naming a filesystem root, a platform prefix or a parent directory
+/// is refused and handed back, because none of the three is a name below the
+/// anchor: `openat` resolves an absolute name from the filesystem root and
+/// ignores the descriptor it was handed, and `..` walks out of the anchor with
+/// `O_NOFOLLOW` set and no error to report. A `.` component is skipped: it names
+/// the folder the descent already stands in, so it adds no name and opens
+/// nothing — and the standard library's own component reading already drops
+/// every `.` but a leading one.
+pub(crate) fn contained_names(path: &Path) -> Result<Vec<&OsStr>, &OsStr> {
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                return Err(component.as_os_str());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// What one step of a descent found at a name.
+pub(crate) enum Step {
+    /// A folder, opened with `O_NOFOLLOW` and `O_DIRECTORY`.
+    Into(OwnedFd),
+    /// Nothing is at the name, and the error number that said so.
+    Missing(Errno),
+    /// The name is a symbolic link.
+    Linked,
+    /// The name is something that is not a folder.
+    NotAFolder,
+}
+
+/// Open the folder `name` in `holder` without following a link at it, or say
+/// what stands there instead.
+///
+/// A refused name is asked what it is by name, because which error
+/// `O_NOFOLLOW` reports for a link differs between the supported platforms: one
+/// says the name is a link and the other says it is not a directory. The stat
+/// happens only where an open already failed, and it is what lets a refusal
+/// name the condition an operator has to fix. What the machine refuses — a
+/// denied folder, a full descriptor table — is the error half.
+pub(crate) fn step_into(holder: BorrowedFd<'_>, name: &OsStr) -> Result<Step, Errno> {
+    match openat(holder, name, directory_flags(), Mode::empty()) {
+        Ok(folder) => Ok(Step::Into(folder)),
+        Err(errno @ (Errno::NOENT | Errno::NAMETOOLONG)) => Ok(Step::Missing(errno)),
+        Err(Errno::LOOP) => Ok(Step::Linked),
+        Err(Errno::NXIO | Errno::OPNOTSUPP) => Ok(Step::NotAFolder),
+        Err(Errno::NOTDIR) => Ok(if is_link(holder, name) {
+            Step::Linked
+        } else {
+            Step::NotAFolder
+        }),
+        Err(errno) => Err(errno),
+    }
+}
+
+/// Where a descent through folders stopped short, and at which of them.
+pub(crate) enum Stopped {
+    /// The folder at this index is not there.
+    Missing(usize, Errno),
+    /// The name at this index is a symbolic link.
+    Linked(usize),
+    /// The name at this index is not a folder.
+    NotAFolder(usize),
+}
+
+/// **The one anchored descent.** Open `folders` one at a time below `anchor`,
+/// each with `O_NOFOLLOW` and `O_DIRECTORY` relative to the one above it, and
+/// hand back every folder opened, in order, with where the descent stopped
+/// short where it did.
+///
+/// A single multi-component open would resolve the intermediate names in the
+/// kernel, where `O_NOFOLLOW` binds only the last of them, and a name below the
+/// anchor could then be reached through a link that leaves it. Every read of a
+/// file's content and every change the write kernel makes descends through
+/// here. The error half is the machine's refusal, at the index it met it.
+pub(crate) fn descend(
+    anchor: BorrowedFd<'_>,
+    folders: &[&OsStr],
+) -> Result<(Vec<OwnedFd>, Option<Stopped>), (usize, Errno)> {
+    let mut opened: Vec<OwnedFd> = Vec::with_capacity(folders.len());
+    for (at, name) in folders.iter().enumerate() {
+        let holder = opened.last().map_or(anchor, AsFd::as_fd);
+        let stopped = match step_into(holder, name).map_err(|errno| (at, errno))? {
+            Step::Into(folder) => {
+                opened.push(folder);
+                continue;
+            }
+            Step::Missing(errno) => Stopped::Missing(at, errno),
+            Step::Linked => Stopped::Linked(at),
+            Step::NotAFolder => Stopped::NotAFolder(at),
+        };
+        return Ok((opened, Some(stopped)));
+    }
+    Ok((opened, None))
+}
+
 /// Opens the regular file `relative` names below the already-open `anchor`.
 ///
-/// `relative` is resolved component by component from `anchor`, and nothing
-/// above `anchor` is consulted: the descent can only reach names the anchor
-/// directory contains, transitively, through real directories.
-///
-/// Only ordinary names descend. A component that names a filesystem root, a
-/// platform prefix or a parent directory is refused before any of it is opened,
-/// because none of the three is a name below the anchor: `openat` resolves an
-/// absolute name from the filesystem root and ignores the descriptor it was
-/// handed, and `..` walks out of the anchor with `O_NOFOLLOW` set and no error
-/// to report. Refusing them is what makes the containment above a property of
-/// this function rather than of whoever calls it.
+/// `relative` is resolved component by component from `anchor` through
+/// [`descend`], and nothing above `anchor` is consulted: the descent can only
+/// reach names the anchor directory contains, transitively, through real
+/// directories. [`contained_names`] is the rule for which components are names
+/// at all.
 pub(crate) fn open_regular_at(
     anchor: BorrowedFd<'_>,
     relative: &Path,
 ) -> Result<Reached, OpenError> {
-    let mut components = relative.components().peekable();
-    let mut descended: Option<OwnedFd> = None;
-    while let Some(component) = components.next() {
-        let name = component.as_os_str();
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
-                return Err(OpenError::Uncontained {
-                    component: name.to_owned(),
-                });
-            }
-        }
-        let last = components.peek().is_none();
-        let opened = {
-            let parent = descended.as_ref().map_or(anchor, AsFd::as_fd);
-            let flags = if last {
-                regular_flags()
-            } else {
-                directory_flags()
-            };
-            openat(parent, name, flags, Mode::empty())
-        };
-        let fd = match opened {
-            Ok(fd) => fd,
-            Err(errno) => {
-                let parent = descended.as_ref().map_or(anchor, AsFd::as_fd);
-                return classify(parent, name, errno);
-            }
-        };
-        if !last {
-            descended = Some(fd);
-            continue;
-        }
-        crate::reads::count_stat();
-        let stat = fstat(&fd).map_err(|errno| OpenError::Machine {
-            errno,
-            component: name.to_owned(),
-        })?;
-        let kind = FileType::from_raw_mode(stat.st_mode as _);
-        return Ok(match kind {
-            FileType::RegularFile => {
-                crate::reads::count_document_open();
-                Reached::Regular(fd)
-            }
-            _ => Reached::Nothing(Unreached::not_regular(name)),
-        });
-    }
+    let names = contained_names(relative).map_err(|component| OpenError::Uncontained {
+        component: component.to_owned(),
+    })?;
     // An empty relative path names the anchor directory itself, which is not a
     // regular file and is not opened again to say so. The name it stopped at is
     // the anchor, spelled the way an empty path spells it.
-    Ok(Reached::Nothing(Unreached::not_regular(OsStr::new("."))))
+    let Some((last, folders)) = names.split_last() else {
+        return Ok(Reached::Nothing(Unreached::not_regular(OsStr::new("."))));
+    };
+    let (opened, stopped) = descend(anchor, folders).map_err(|(at, errno)| OpenError::Machine {
+        errno,
+        component: folders[at].to_owned(),
+    })?;
+    match stopped {
+        Some(Stopped::Missing(at, errno)) => {
+            return Ok(Reached::Nothing(Unreached::missing(folders[at], errno)));
+        }
+        Some(Stopped::Linked(at)) => {
+            return Ok(Reached::Nothing(Unreached::symbolic_link(folders[at])));
+        }
+        Some(Stopped::NotAFolder(at)) => {
+            return Ok(Reached::Nothing(Unreached::not_a_directory(folders[at])));
+        }
+        None => {}
+    }
+    let parent = opened.last().map_or(anchor, AsFd::as_fd);
+    let fd = match openat(parent, *last, regular_flags(), Mode::empty()) {
+        Ok(fd) => fd,
+        Err(errno) => return classify(parent, last, errno),
+    };
+    crate::reads::count_stat();
+    let stat = fstat(&fd).map_err(|errno| OpenError::Machine {
+        errno,
+        component: last.to_os_string(),
+    })?;
+    Ok(match FileType::from_raw_mode(stat.st_mode as _) {
+        FileType::RegularFile => {
+            crate::reads::count_document_open();
+            Reached::Regular(fd)
+        }
+        _ => Reached::Nothing(Unreached::not_regular(last)),
+    })
 }
 
 /// What stops an open that is not a fact about a name on the filesystem.
@@ -254,13 +341,7 @@ impl OpenError {
     }
 }
 
-/// Separates the facts about names from the machine's own failures.
-///
-/// A refused component is asked about by name, because which error `O_NOFOLLOW`
-/// reports for a link differs between the supported platforms: one says the
-/// name is a link and the other says it is not a directory. The stat costs
-/// nothing in the common case — it happens only where an open already failed —
-/// and it is what lets the refusal name the condition an operator has to fix.
+/// Separates the facts about the last name from the machine's own failures.
 ///
 /// The kinds an open declines to give a descriptor for are facts too. A socket
 /// cannot be opened at all — `ENXIO` on one platform, `EOPNOTSUPP` on the other
@@ -270,24 +351,29 @@ impl OpenError {
 /// would make an optional read refuse where its own contract promises an
 /// answer, and the racing case is ordinary — a document replaced by a socket
 /// between a stat and this open.
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
 fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reached, OpenError> {
     match errno {
         Errno::NOENT | Errno::NAMETOOLONG => Ok(Reached::Nothing(Unreached::missing(name, errno))),
         Errno::LOOP => Ok(Reached::Nothing(Unreached::symbolic_link(name))),
         Errno::NXIO | Errno::OPNOTSUPP => Ok(Reached::Nothing(Unreached::not_regular(name))),
-        Errno::NOTDIR => Ok(Reached::Nothing({
-            crate::reads::count_stat();
-            match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink => {
-                    Unreached::symbolic_link(name)
-                }
-                _ => Unreached::not_a_directory(name),
-            }
+        Errno::NOTDIR => Ok(Reached::Nothing(if is_link(parent, name) {
+            Unreached::symbolic_link(name)
+        } else {
+            Unreached::not_a_directory(name)
         })),
         errno => Err(OpenError::Machine {
             errno,
             component: name.to_owned(),
         }),
     }
+}
+
+/// Whether `name` in `holder` is a symbolic link, asked without following it.
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
+pub(crate) fn is_link(holder: BorrowedFd<'_>, name: &OsStr) -> bool {
+    crate::reads::count_stat();
+    matches!(
+        statat(holder, name, AtFlags::SYMLINK_NOFOLLOW),
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink
+    )
 }
