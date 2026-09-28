@@ -2468,6 +2468,41 @@ mod tests {
         assert_eq!(subscription.try_recv(), Ok(None));
     }
 
+    /// **On a folding vault a heal keeps the window's spelling over that of
+    /// the batch held for it.** The held batch closed before the window
+    /// opened, so where the two name one identity at two spellings, the
+    /// window's is the later report and the one the tree renders.
+    ///
+    /// The subscription folds at the case behavior its state carries, so the
+    /// case states a folding vault on a volume of either kind.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_keeps_the_windows_spelling_over_the_batch_held_for_it() {
+        let scratch = Scratch::new("heal-window-spelling");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.state.lock().unwrap().normalizer =
+            PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        closed_by_the_coalescer(&subscription, "placed.md");
+        closed_by_the_coalescer(&subscription, "flip.md");
+        assert!(subscription.holds_a_settled_batch());
+
+        subscription.begin_heal();
+        reported(&subscription, "FLIP.md");
+        let healed = subscription.finish_heal().unwrap();
+
+        let flipped: Vec<_> = healed
+            .vault_roots()
+            .iter()
+            .map(|root| root.as_path())
+            .filter(|path| path.to_string_lossy().eq_ignore_ascii_case("flip.md"))
+            .collect();
+        assert_eq!(flipped, [Path::new("FLIP.md")], "{healed:?}");
+    }
+
     /// **Receiving until no batch is reported takes every settled batch**,
     /// the one waiting behind the slot included, with no wait for the coalescer
     /// to move it in.
