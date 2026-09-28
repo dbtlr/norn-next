@@ -209,17 +209,16 @@ impl Batch {
     /// tells that apart from the same rename the other way round: both are two
     /// roots disagreeing about a shared ancestor's spelling, with no report
     /// saying which name a directory entry holds. What resolves it is a reading
-    /// of the tree, and this is a reading of reports. That is the contract, and
-    /// its bound is stated rather than closed. Neither backend this crate ships
+    /// of the tree, and this is a reading of reports: [`crate::Vault::reach`] is
+    /// that reading, and it answers a root at the spelling each directory
+    /// lists, so a consumer deriving through it lands the rendered spelling
+    /// whichever one the root carries. Neither backend this crate ships
     /// produces the shape: a native stream reports the halves in the order they
     /// happened, so the name the tree renders lands last, and the poll backend
     /// reports the old spelling as a death, which never displaces a live name.
     /// Reaching it takes a backend that reports the dead half last as a path
     /// that stands, or a consumer folding [`Batch::vault_change`] at the dead
-    /// spelling after the live one. Rows derived under such a root stand at
-    /// the dead spelling until the consumer's next whole-vault heal reads the
-    /// tree. Which occasions run one is the consumer's contract; none runs
-    /// because time passed, so nothing sooner converges it.
+    /// spelling after the live one.
     ///
     /// **A root nothing has spelled live covers only what also died.** Every
     /// covering root answers for its whole range — one reading enumerates the
