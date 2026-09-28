@@ -34,6 +34,15 @@
 //! So the condition is written exactly — the precise set of paths, the exact
 //! row — and both bounds are written loose.
 //!
+//! A single probe-bound breach in CI is read as the runner before it is read
+//! as the probe. A probe takes a reading and returns, so an evaluation that
+//! passed its bound once says the runner did not schedule the process for that
+//! long: ruled 2026-09-21, the run is a non-qualifying evidence source on its
+//! own timing, and the flake ledger's `class-a-probe-bound` entry records each
+//! rerun of it. A run that also breached a work bound is not cleared that way,
+//! because the work-bound breach is its own reading. A structurally expensive
+//! probe breaches its bound run after run, and those records are what show it.
+//!
 //! # The work bound is not the probe bound
 //!
 //! [`Budget`] carries two bounds over two different things. The **work
@@ -332,9 +341,11 @@ pub enum FailureKind {
     /// One evaluation is the whole sample: a single slow one ends the wait,
     /// whatever the ones around it cost and whatever work bound is left. That
     /// is why the probe bound is sized for the slowest plausible evaluation
-    /// rather than the typical one — this failure reads as "the probe is
-    /// structurally too expensive", and a bound tight enough to be tripped by
-    /// one unlucky evaluation makes it say that about a probe that is fine.
+    /// rather than the typical one — across runs this failure reads as "the
+    /// probe is structurally too expensive", and a bound tight enough to be
+    /// tripped by one unlucky evaluation makes it say that about a probe that
+    /// is fine. One occurrence in CI reads as a runner that starved the probe,
+    /// as the module documentation sets out.
     ProbeOverran {
         /// How long that evaluation took.
         took: Duration,
@@ -362,6 +373,12 @@ pub struct WaitFailure {
     pub last_state: String,
 }
 
+/// The diagnostic, which says which bound was passed in words CI reads.
+///
+/// `.github/scripts/flake-tripwire.sh` tells a probe-bound breach from a
+/// work-bound one by these renderings (`stopped at probe` and
+/// `work bound after`), and the flake ledger's class-a-probe-bound entry
+/// matches the first; `norn --test certification` holds both to this text.
 impl fmt::Display for WaitFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let WaitFailure {
@@ -600,25 +617,96 @@ mod tests {
         Budget::new(WORK, PROBE)
     }
 
+    /// The phrases `.github/scripts/flake-tripwire.sh` reads a breached bound
+    /// by: the probe bound's, then the work bound's.
+    const BOUND_PHRASES: [&str; 2] = ["stopped at probe", "work bound after"];
+
+    /// `rendered` as a case here echoes it into its own failure message: each
+    /// bound's phrase is spelled with a `·` after its first character, so the
+    /// tripwire reads no breached bound in it.
+    fn unread(rendered: &str) -> String {
+        BOUND_PHRASES
+            .iter()
+            .fold(rendered.to_owned(), |text, phrase| {
+                let (first, rest) = phrase.split_at(1);
+                text.replace(phrase, &format!("{first}·{rest}"))
+            })
+    }
+
+    /// The value of a wait a case expects to succeed, or a panic naming
+    /// `expected` and the failure's rendering, [`unread`].
+    fn met<T>(outcome: Result<T, WaitFailure>, expected: &str) -> T {
+        outcome.unwrap_or_else(|failure| panic!("{expected}: {}", unread(&failure.to_string())))
+    }
+
+    /// **A case here that fails echoes neither bound's phrase.**
+    ///
+    /// CI runs this module through `.github/scripts/flake-tripwire.sh`, which
+    /// reads a line carrying a bound's phrase as a wait that breached that
+    /// bound: a probe-bound breach as a runner that starved a probe, whose
+    /// disposition is a deliberate rerun. Every failure a case here renders is
+    /// one it made on purpose, so a case that echoed that rendering into its
+    /// own failure message would have a deterministic regression in this module
+    /// filed as a starved runner.
+    #[test]
+    fn a_rendered_failure_echoed_by_a_case_here_carries_neither_bound_phrase() {
+        for (kind, phrase) in [
+            (FailureKind::Elapsed, 1),
+            (
+                FailureKind::ProbeOverran {
+                    took: Duration::from_millis(318),
+                },
+                0,
+            ),
+        ] {
+            let rendered = WaitFailure {
+                what: "a state echoed by a failing case".to_owned(),
+                kind,
+                budget: budget(),
+                elapsed: WORK,
+                probes: 3,
+                last_state: "nothing yet".to_owned(),
+            }
+            .to_string();
+            let echoed = unread(&rendered);
+            assert!(
+                rendered.contains(BOUND_PHRASES[phrase]),
+                "the rendering no longer carries bound phrase {phrase} the tripwire reads: \
+                 {echoed}"
+            );
+            // Named by index: the text itself is what cannot be echoed here.
+            for (index, bound) in BOUND_PHRASES.iter().enumerate() {
+                assert!(
+                    !echoed.contains(bound),
+                    "a failing case here would echo bound phrase {index}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_condition_that_already_holds_is_observed_at_once() {
-        let value = wait_until("a settled state", budget(), || Observed::Met("ready"))
-            .expect("a condition that holds on the first look");
+        let value = met(
+            wait_until("a settled state", budget(), || Observed::Met("ready")),
+            "a condition that holds on the first look",
+        );
         assert_eq!(value, "ready");
     }
 
     #[test]
     fn a_condition_that_becomes_true_inside_the_bound_is_observed() {
         let mut looks = 0;
-        let value = wait_until("a converging state", budget(), || {
-            looks += 1;
-            if looks < 3 {
-                Observed::pending(format!("{looks} of 3 looks"))
-            } else {
-                Observed::Met(looks)
-            }
-        })
-        .expect("a condition that holds on the third look");
+        let value = met(
+            wait_until("a converging state", budget(), || {
+                looks += 1;
+                if looks < 3 {
+                    Observed::pending(format!("{looks} of 3 looks"))
+                } else {
+                    Observed::Met(looks)
+                }
+            }),
+            "a condition that holds on the third look",
+        );
         assert_eq!(value, 3);
     }
 
@@ -672,7 +760,8 @@ mod tests {
         ] {
             assert!(
                 rendered.contains(expected),
-                "the failure does not name {expected:?}: {rendered}"
+                "the failure does not name {expected:?}: {}",
+                unread(&rendered)
             );
         }
     }
@@ -748,7 +837,10 @@ mod tests {
         .expect_err("a probe that passes its own bound");
 
         let FailureKind::ProbeOverran { took } = failure.kind else {
-            panic!("a slow probe was reported as {}", failure);
+            panic!(
+                "a slow probe was reported as {}",
+                unread(&failure.to_string())
+            );
         };
         assert!(
             took >= slow,
@@ -760,7 +852,8 @@ mod tests {
         let rendered = failure.to_string();
         assert!(
             rendered.contains(&format!("{probe_bound:?}")) && rendered.contains("probe bound"),
-            "the failure does not name the probe bound it passed: {rendered}"
+            "the failure does not name the probe bound it passed: {}",
+            unread(&rendered)
         );
     }
 
@@ -773,15 +866,17 @@ mod tests {
     /// amount of budget can settle.
     #[test]
     fn a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored() {
-        let value = wait_until(
-            "a state seen by a probe that outlives the work bound",
-            Budget::new(Duration::from_millis(1), Duration::from_secs(30)),
-            || {
-                std::thread::sleep(Duration::from_millis(40));
-                Observed::Met("settled")
-            },
-        )
-        .expect("a condition observed by a probe that started inside the bound");
+        let value = met(
+            wait_until(
+                "a state seen by a probe that outlives the work bound",
+                Budget::new(Duration::from_millis(1), Duration::from_secs(30)),
+                || {
+                    std::thread::sleep(Duration::from_millis(40));
+                    Observed::Met("settled")
+                },
+            ),
+            "a condition observed by a probe that started inside the bound",
+        );
         assert_eq!(value, "settled");
     }
 
@@ -801,17 +896,19 @@ mod tests {
     fn a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored() {
         let probe_bound = Duration::from_millis(5);
         let slow = Duration::from_millis(60);
-        let value = wait_until(
-            "a state read through a probe slower than its own bound",
-            // Work enough that only the probe bound is passed, so a failure
-            // here could only be the probe bound discarding the answer.
-            Budget::new(Duration::from_secs(30), probe_bound),
-            || {
-                std::thread::sleep(slow);
-                Observed::Met("settled")
-            },
-        )
-        .expect("a condition observed by an evaluation that passed the probe bound");
+        let value = met(
+            wait_until(
+                "a state read through a probe slower than its own bound",
+                // Work enough that only the probe bound is passed, so a failure
+                // here could only be the probe bound discarding the answer.
+                Budget::new(Duration::from_secs(30), probe_bound),
+                || {
+                    std::thread::sleep(slow);
+                    Observed::Met("settled")
+                },
+            ),
+            "a condition observed by an evaluation that passed the probe bound",
+        );
         assert_eq!(value, "settled");
     }
 
@@ -829,19 +926,21 @@ mod tests {
         // ahead of the wait's own bound: the look that sees it is the one
         // taken after the last gap, which is clamped to the bound itself.
         let started = Instant::now();
-        let value = wait_until(
-            "a state that settles as its bound expires",
-            Budget::new(work, PROBE),
-            || {
-                let waited = started.elapsed();
-                if waited >= work {
-                    Observed::Met("settled")
-                } else {
-                    Observed::pending(format!("{waited:?} into a {work:?} bound"))
-                }
-            },
-        )
-        .expect("a condition true at the work bound is seen by the look taken there");
+        let value = met(
+            wait_until(
+                "a state that settles as its bound expires",
+                Budget::new(work, PROBE),
+                || {
+                    let waited = started.elapsed();
+                    if waited >= work {
+                        Observed::Met("settled")
+                    } else {
+                        Observed::pending(format!("{waited:?} into a {work:?} bound"))
+                    }
+                },
+            ),
+            "a condition true at the work bound is seen by the look taken there",
+        );
         assert_eq!(value, "settled");
     }
 
@@ -862,7 +961,8 @@ mod tests {
         let rendered = failure.to_string();
         assert!(
             rendered.ends_with(UNREPORTED_STATE),
-            "the failure trails off after its colon: {rendered:?}"
+            "the failure trails off after its colon: {:?}",
+            unread(&rendered)
         );
     }
 
@@ -1177,6 +1277,12 @@ mod tests {
             || Observed::<()>::pending("nothing yet"),
         )
         .expect_err("a condition that is never true");
-        assert_eq!(format!("{failure:?}"), failure.to_string());
+        let (debugged, rendered) = (format!("{failure:?}"), failure.to_string());
+        assert!(
+            debugged == rendered,
+            "the failure debugs as {:?} rather than its diagnostic {:?}",
+            unread(&debugged),
+            unread(&rendered)
+        );
     }
 }

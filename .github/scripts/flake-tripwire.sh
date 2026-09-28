@@ -17,6 +17,17 @@
 # A failure that matches nothing is recorded too, as the new failure it is.
 # Silence would otherwise read the same as a run nobody scanned.
 #
+# **Which bound a failed wait breached is named apart**, whether or not a
+# ledger entry matched, because the two are different claims with different
+# dispositions. A probe-bound breach is one evaluation that took longer than
+# its bound: a reading of the runner, which was not scheduled for that long. A
+# work-bound breach is a condition that never held, with no probe-bound breach
+# rendered behind it: that wait carries no evidence of a starved probe, so under
+# a class-A entry it reopens that ruling. A run that breached both is not
+# cleared by its starved probe: the work-bound breach is its own reading, so
+# every surface of that run, each class-A recurrence's annotation included,
+# says the run is not a non-qualifying evidence source.
+#
 # usage: flake-tripwire.sh <command> [argument...]
 
 set -uo pipefail
@@ -95,6 +106,80 @@ matches=$(awk -v output="$log" '
   END { flush() }
 ' "$ledger")
 
+# The phrases `norn-testkit`'s wait module renders for each bound, and for no
+# other: a probe-bound breach says `waiting for <what> stopped at probe <n>,
+# which took <d> and passed its <d> probe bound <d> into a <d> work bound`, and
+# a work-bound breach says `waiting for <what> passed its <d> work bound after
+# <d> and <n> probes`. A bare `probe bound` is not the phrase, because the wait
+# module's own assertions say it about waits that breached nothing. The probe
+# phrase is also the signature of the ledger's class-a-probe-bound entry.
+probe_bound_phrase="stopped at probe"
+work_bound_phrase="work bound after"
+
+# The distinct lines of the run that carry `phrase`, read the way a signature
+# is: a line reporting a test that passed or was skipped is not scanned.
+lines_carrying() {
+  awk -v phrase="$1" '
+    /^[ \t]*test .+ [.][.][.] (ok|ignored)/ { next }
+    index($0, phrase) > 0 && !seen[$0]++ { print }
+  ' "$log"
+}
+
+starved=$(lines_carrying "$probe_bound_phrase")
+elapsed=$(lines_carrying "$work_bound_phrase")
+
+# **A run that breached a work bound is not cleared by a starved probe.** The
+# work-bound breach is its own reading, and under a class-A entry it reopens
+# that ruling, so the class-A dispositions' reading of a starved probe as a
+# non-qualifying run does not hold for this one. Every surface that would
+# otherwise say so says this instead: the annotation and the summary block of
+# each wall-clock-starvation recurrence, and the probe-bound block.
+starvation_class="wall-clock starvation"
+not_cleared="This run breached a work bound. That breach is its own reading and reopens the class-A ruling, so this run is not a non-qualifying evidence source, and a rerun does not clear it."
+
+# One job-summary block per bound a failed wait breached, naming what that
+# breach is a reading of and the lines that say so.
+name_the_breached_bounds() {
+  local line
+  if [ -n "$starved" ]; then
+    {
+      echo
+      echo "### Flake tripwire: a probe bound was breached"
+      echo
+      echo "One evaluation of a wait's condition took longer than its probe bound. A probe"
+      echo "takes a reading and returns, so this is a reading of the runner rather than the"
+      echo "product: the process was not scheduled for that long. A probe that breaches its"
+      echo "bound run after run is the structural cost the bound exists to catch, and these"
+      echo "records are what show it."
+      echo
+      if [ -z "$elapsed" ]; then
+        echo "This run is a non-qualifying evidence source on its own timing, and a rerun of"
+        echo "it is deliberate and recorded."
+      else
+        echo "$not_cleared"
+      fi
+      echo
+      while IFS= read -r line; do
+        echo "- **line**: \`${line}\`"
+      done <<< "$starved"
+    } >> "$summary"
+  fi
+  if [ -n "$elapsed" ]; then
+    {
+      echo
+      echo "### Flake tripwire: a work bound was breached"
+      echo
+      echo "A wait's condition never held inside its work bound, and that wait rendered no"
+      echo "probe-bound breach. Under a class-A ledger entry a recurrence like this"
+      echo "reopens that ruling."
+      echo
+      while IFS= read -r line; do
+        echo "- **line**: \`${line}\`"
+      done <<< "$elapsed"
+    } >> "$summary"
+  fi
+}
+
 if [ -z "$matches" ]; then
   {
     echo
@@ -106,16 +191,24 @@ if [ -z "$matches" ]; then
     echo "- run: ${run}"
   } >> "$summary"
   echo "::notice title=Flake tripwire::this failure matched no ledgered signature, so it is a new one."
+  name_the_breached_bounds
   exit "$status"
 fi
 
 while IFS=$'\t' read -r id signature class seen disposition matched; do
   [ -n "$id" ] || continue
-  echo "::error title=Ledgered flake recurred: ${id}::${disposition}"
+  reading=$disposition
+  if [ "$class" = "$starvation_class" ] && [ -n "$elapsed" ]; then
+    reading=$not_cleared
+  fi
+  echo "::error title=Ledgered flake recurred: ${id}::${reading}"
   {
     echo
     echo "### Flake tripwire: \`${id}\` recurred"
     echo
+    if [ "$reading" != "$disposition" ]; then
+      echo "- **this run**: ${reading}"
+    fi
     echo "- **class**: ${class}"
     echo "- **first seen**: ${seen}"
     echo "- **signature**: \`${signature}\`"
@@ -127,5 +220,7 @@ while IFS=$'\t' read -r id signature class seen disposition matched; do
     echo "before rerunning: the ledger entry says what a recurrence means."
   } >> "$summary"
 done <<< "$matches"
+
+name_the_breached_bounds
 
 exit "$status"
