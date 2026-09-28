@@ -1347,14 +1347,16 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
     );
     assert!(
         summary.contains("no ledgered signature matched"),
-        "a failure of no ledgered class was recorded as a recurrence: {summary}"
+        "a failure of no ledgered class was recorded as a recurrence: {}",
+        unread(&summary)
     );
     for fields in &entries {
         let id = ledger_field(fields, "id");
         assert!(
             !annotations.contains(id),
             "`{id}` was reported as recurring by a run in which its own test passed, so the \
-             entry cannot tell a recurrence from any other red run: {annotations}"
+             entry cannot tell a recurrence from any other red run: {}",
+            unread(&annotations)
         );
     }
 
@@ -1377,11 +1379,13 @@ fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
         );
         assert!(
             annotations.contains(&format!("Ledgered flake recurred: {id}")),
-            "`{id}` recurred and the run carries no annotation naming it: {annotations}"
+            "`{id}` recurred and the run carries no annotation naming it: {}",
+            unread(&annotations)
         );
         assert!(
             summary.contains(ledger_field(fields, "disposition")),
-            "`{id}` recurred and the job summary carries no disposition to read: {summary}"
+            "`{id}` recurred and the job summary carries no disposition to read: {}",
+            unread(&summary)
         );
     }
 }
@@ -1419,7 +1423,8 @@ fn a_starved_probe_is_named_as_a_probe_bound_breach_and_meets_its_class_a_entry(
             "stopped at probe 78, which took 255.4ms and passed its 250ms probe bound 3.88s into \
              a 900s work bound"
         ),
-        "the wait module no longer renders a probe-bound breach the way CI recorded it: {starved}"
+        "the wait module no longer renders a probe-bound breach the way CI recorded it: {}",
+        unread(&starved)
     );
 
     let (status, summary, annotations) = tripwire_over(
@@ -1439,16 +1444,24 @@ fn a_starved_probe_is_named_as_a_probe_bound_breach_and_meets_its_class_a_entry(
     assert!(
         annotations.contains(&format!("Ledgered flake recurred: {PROBE_BOUND_ENTRY}")),
         "a starved probe recurred and the run carries no annotation naming \
-         `{PROBE_BOUND_ENTRY}`: {annotations}"
+         `{PROBE_BOUND_ENTRY}`: {}",
+        unread(&annotations)
     );
     assert!(
         summary.contains("a probe bound was breached"),
         "a starved probe recurred and the job summary does not name the bound it breached: \
-         {summary}"
+         {}",
+        unread(&summary)
     );
     assert!(
         !summary.contains("a work bound was breached"),
-        "a probe-bound breach was named as a work-bound one: {summary}"
+        "a probe-bound breach was named as a work-bound one: {}",
+        unread(&summary)
+    );
+    assert!(
+        summary.contains("This run is a non-qualifying evidence source on its own timing"),
+        "a run that starved a probe and breached nothing else is not named non-qualifying: {}",
+        unread(&summary)
     );
 }
 
@@ -1493,30 +1506,186 @@ fn a_work_bound_breach_is_named_as_one_and_never_read_as_a_starved_probe() {
     );
     assert!(
         !annotations.contains(PROBE_BOUND_ENTRY),
-        "a work-bound breach was reported as a starved probe: {annotations}"
+        "a work-bound breach was reported as a starved probe: {}",
+        unread(&annotations)
     );
     assert!(
         summary.contains("a work bound was breached"),
         "a work-bound breach recurred and the job summary does not name the bound it breached: \
-         {summary}"
+         {}",
+        unread(&summary)
     );
     assert!(
         !summary.contains("a probe bound was breached"),
-        "a work-bound breach was named as a probe-bound one: {summary}"
+        "a work-bound breach was named as a probe-bound one: {}",
+        unread(&summary)
     );
     assert!(
         summary.contains("reopens that ruling"),
         "a work-bound breach recurred and the job summary does not state that under a class-A \
-         entry it reopens the ruling: {summary}"
+         entry it reopens the ruling: {}",
+        unread(&summary)
     );
     for unrendered in ["inside its probe bound", "starved runner"] {
         assert!(
             !summary.contains(unrendered),
             "the job summary claims `{unrendered}` of a work-bound breach, which its rendering \
-             does not show: {summary}"
+             does not show: {}",
+            unread(&summary)
         );
     }
 }
+
+/// **A run that breached both bounds is recorded under both, and takes neither
+/// reading of the run.**
+///
+/// The ruling reads a run that starved a probe as a non-qualifying evidence
+/// source, and a work-bound breach with no probe-bound breach behind it as
+/// reopening a class-A ruling. It does not say whether a probe that starved in
+/// one wait stands behind a work bound that passed in another, so a summary
+/// that called the run non-qualifying in one block and qualifying in the next
+/// would be deciding that question twice, both ways.
+#[test]
+#[cfg(unix)]
+fn a_run_that_breached_both_bounds_is_recorded_under_both_and_takes_neither_reading() {
+    let root = workspace_root();
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "flake-tripwire-both",
+    )
+    .expect("a sandbox for the tripwire");
+    let starved = wait_failure(
+        norn_testkit::wait::FailureKind::ProbeOverran {
+            took: std::time::Duration::from_micros(255_400),
+        },
+        std::time::Duration::from_millis(3_880),
+        78,
+    );
+    let elapsed = wait_failure(
+        norn_testkit::wait::FailureKind::Elapsed,
+        std::time::Duration::from_secs(900),
+        3_600,
+    );
+    let output = format!(
+        "{}{}",
+        failed_run("a_case_whose_probe_starved", &starved),
+        failed_run("a_case_whose_condition_never_held", &elapsed)
+    );
+
+    let (status, summary, _) = tripwire_over(&sandbox, &root, "both", &output);
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    for bound in ["a probe bound was breached", "a work bound was breached"] {
+        assert!(
+            summary.contains(bound),
+            "a run that breached both bounds has no summary block saying `{bound}`: {}",
+            unread(&summary)
+        );
+    }
+    assert!(
+        summary.contains("both breached") && summary.contains("not ruled"),
+        "a run that breached both bounds does not say the ruling leaves its reading open: {}",
+        unread(&summary)
+    );
+    for decided in ["This run is a non-qualifying", "is not a non-qualifying"] {
+        assert!(
+            !summary.contains(decided),
+            "a run that breached both bounds was read one way (`{decided}`) by a summary that \
+             records it under both: {}",
+            unread(&summary)
+        );
+    }
+}
+
+/// **A tripwire case that fails is read by the tripwire as a failure of no
+/// ledgered class and no breached bound.**
+///
+/// CI runs this file through the tripwire it tests. A case here that echoed a
+/// signature or a bound's phrase into its own failure message would have a
+/// regression in the tripwire filed as the very recurrence the tripwire failed
+/// to read — a probe-bound breach, whose disposition is a deliberate rerun, for
+/// a defect no rerun fixes. So every summary, annotation and rendering these
+/// cases echo passes through [`unread`] first.
+#[test]
+#[cfg(unix)]
+fn a_failing_tripwire_case_is_read_as_no_ledgered_class_and_no_breached_bound() {
+    let root = workspace_root();
+    let ledger =
+        std::fs::read_to_string(root.join(".github/flake-ledger")).expect("reading the ledger");
+    let sandbox = Sandbox::new(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "flake-tripwire-unread",
+    )
+    .expect("a sandbox for the tripwire");
+    let starved = wait_failure(
+        norn_testkit::wait::FailureKind::ProbeOverran {
+            took: std::time::Duration::from_micros(255_400),
+        },
+        std::time::Duration::from_millis(3_880),
+        78,
+    );
+    let elapsed = wait_failure(
+        norn_testkit::wait::FailureKind::Elapsed,
+        std::time::Duration::from_secs(900),
+        3_600,
+    );
+    let echoed = format!("the tripwire read this wrong: {ledger}\n{starved}\n{elapsed}");
+
+    let (status, summary, annotations) = tripwire_over(
+        &sandbox,
+        &root,
+        "unread",
+        &failed_run("a_tripwire_case", &unread(&echoed)),
+    );
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    assert!(
+        summary.contains("no ledgered signature matched")
+            && !annotations.contains("Ledgered flake recurred"),
+        "a tripwire case's own failure message was read as a ledgered recurrence: {}",
+        unread(&annotations)
+    );
+    assert!(
+        !summary.contains("bound was breached"),
+        "a tripwire case's own failure message was read as a breached bound: {}",
+        unread(&summary)
+    );
+}
+
+/// `text` as a tripwire case echoes it into its own failure message: every
+/// phrase the tripwire reads — each ledger signature and each bound's phrase —
+/// is spelled with a `·` after its first character, so the tripwire running
+/// over this file in CI reads none of them.
+#[cfg(unix)]
+fn unread(text: &str) -> String {
+    let ledger = std::fs::read_to_string(workspace_root().join(".github/flake-ledger"))
+        .expect("reading the ledger");
+    let signatures = ledger_entries(&ledger)
+        .into_iter()
+        .map(|fields| ledger_field(&fields, "signature").to_owned());
+    let phrases = BOUND_PHRASES.iter().map(|phrase| (*phrase).to_owned());
+    signatures
+        .chain(phrases)
+        .fold(text.to_owned(), |text, phrase| {
+            let mut chars = phrase.chars();
+            let spelled = match chars.next() {
+                Some(first) => format!("{first}·{}", chars.as_str()),
+                None => return text,
+            };
+            text.replace(&phrase, &spelled)
+        })
+}
+
+/// The phrases `.github/scripts/flake-tripwire.sh` reads a breached bound by:
+/// the probe bound's, then the work bound's.
+#[cfg(unix)]
+const BOUND_PHRASES: [&str; 2] = ["stopped at probe", "work bound after"];
 
 /// The ledger entry a probe-bound breach is matched to.
 #[cfg(unix)]

@@ -31,6 +31,14 @@
 //! — a scan where a lookup was meant — and that reads as overrun at any
 //! generous bound.
 //!
+//! One breach in CI is read the other way first. A probe takes a reading and
+//! returns, so an evaluation that passed its bound once says the runner did not
+//! schedule the process for that long: ruled 2026-09-21, the run is a
+//! non-qualifying evidence source on its own timing, and the flake ledger's
+//! `class-a-probe-bound` entry records each rerun of it. A structurally
+//! expensive probe breaches its bound run after run, and those records are what
+//! show it.
+//!
 //! So the condition is written exactly — the precise set of paths, the exact
 //! row — and both bounds are written loose.
 //!
@@ -332,9 +340,11 @@ pub enum FailureKind {
     /// One evaluation is the whole sample: a single slow one ends the wait,
     /// whatever the ones around it cost and whatever work bound is left. That
     /// is why the probe bound is sized for the slowest plausible evaluation
-    /// rather than the typical one — this failure reads as "the probe is
-    /// structurally too expensive", and a bound tight enough to be tripped by
-    /// one unlucky evaluation makes it say that about a probe that is fine.
+    /// rather than the typical one — across runs this failure reads as "the
+    /// probe is structurally too expensive", and a bound tight enough to be
+    /// tripped by one unlucky evaluation makes it say that about a probe that
+    /// is fine. One occurrence in CI reads as a runner that starved the probe,
+    /// as the module documentation sets out.
     ProbeOverran {
         /// How long that evaluation took.
         took: Duration,

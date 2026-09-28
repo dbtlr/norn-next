@@ -22,8 +22,9 @@
 # dispositions. A probe-bound breach is one evaluation that took longer than
 # its bound: a reading of the runner, which was not scheduled for that long. A
 # work-bound breach is a condition that never held, with no probe-bound breach
-# rendered behind it: the run carries no evidence of a starved probe, so under
-# a class-A entry it reopens that ruling.
+# rendered behind it: that wait carries no evidence of a starved probe, so under
+# a class-A entry it reopens that ruling. A run that breached both is recorded
+# under both and takes neither reading of the run.
 #
 # usage: flake-tripwire.sh <command> [argument...]
 
@@ -123,7 +124,12 @@ lines_carrying() {
 }
 
 # One job-summary block per bound a failed wait breached, naming what that
-# breach is a reading of and the lines that say so.
+# breach is a reading of and the lines that say so. A run that breached both
+# gets a third block and no verdict on the run from either of the first two:
+# the ruling reads a run that starved a probe as non-qualifying and a work-bound
+# breach with no probe-bound breach behind it as reopening a class-A ruling, and
+# does not say whether a probe starved in one wait stands behind a work bound
+# passed in another.
 name_the_breached_bounds() {
   local starved elapsed line
   starved=$(lines_carrying "$probe_bound_phrase")
@@ -135,8 +141,14 @@ name_the_breached_bounds() {
       echo
       echo "One evaluation of a wait's condition took longer than its probe bound. A probe"
       echo "takes a reading and returns, so this is a reading of the runner rather than the"
-      echo "product: the process was not scheduled for that long. The run is a non-qualifying"
-      echo "evidence source on its own timing, and a rerun of it is deliberate and recorded."
+      echo "product: the process was not scheduled for that long. A probe that breaches its"
+      echo "bound run after run is the structural cost the bound exists to catch, and these"
+      echo "records are what show it."
+      if [ -z "$elapsed" ]; then
+        echo
+        echo "This run is a non-qualifying evidence source on its own timing, and a rerun of"
+        echo "it is deliberate and recorded."
+      fi
       echo
       while IFS= read -r line; do
         echo "- **line**: \`${line}\`"
@@ -148,13 +160,25 @@ name_the_breached_bounds() {
       echo
       echo "### Flake tripwire: a work bound was breached"
       echo
-      echo "A wait's condition never held inside its work bound, and the wait rendered no"
-      echo "probe-bound breach, so the run is not a non-qualifying evidence source on its own"
-      echo "timing. Under a class-A ledger entry a recurrence like this reopens that ruling."
+      echo "A wait's condition never held inside its work bound, and that wait rendered no"
+      echo "probe-bound breach. Under a class-A ledger entry a recurrence like this"
+      echo "reopens that ruling."
       echo
       while IFS= read -r line; do
         echo "- **line**: \`${line}\`"
       done <<< "$elapsed"
+    } >> "$summary"
+  fi
+  if [ -n "$starved" ] && [ -n "$elapsed" ]; then
+    {
+      echo
+      echo "### Flake tripwire: a probe bound and a work bound were both breached"
+      echo
+      echo "The ruling reads a run that starved a probe as a non-qualifying evidence source,"
+      echo "and a work-bound breach with no probe-bound breach behind it as reopening a"
+      echo "class-A ruling. Whether a probe that starved in one wait stands behind a work"
+      echo "bound passed in another is not ruled, so this run is recorded under both and"
+      echo "takes neither reading: the ledger rules on it before it is rerun."
     } >> "$summary"
   fi
 }

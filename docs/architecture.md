@@ -2400,7 +2400,10 @@ Four contracts inside that flow carry weight:
   removes is the rerun that leaves a second occurrence unrecorded. It also names which bound a
   failed wait breached, from the wait's own rendering: a probe-bound breach is a reading of
   a runner that starved the probe, a non-qualifying evidence source for that run, and a
-  work-bound breach with no probe-bound breach behind it reopens a class-A ruling.
+  work-bound breach with no probe-bound breach behind it reopens a class-A ruling. A run
+  that breached both is recorded under both and takes neither reading, because the ruling
+  does not say whether a probe starved in one wait stands behind a work bound passed in
+  another.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
   inventory of required cases and the table of trust-transition arms nothing reaches at the
   production path — empty as it stands, and kept as the shape the next one arrives in — the
