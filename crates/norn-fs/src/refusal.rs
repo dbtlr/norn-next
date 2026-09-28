@@ -12,7 +12,9 @@
 //! it: the path a refusal names holds byte for byte what it held when the call
 //! began, and the one thing left behind is at most a shadow, which is inert
 //! (see [`crate::shadow`]). A create is no exception, because it publishes a
-//! staged shadow by an exclusive rename and never claims its name empty.
+//! staged shadow by an exclusive rename and never claims its name empty; the
+//! one thing a refused create can leave in the vault is empty folders it made
+//! and could not take back, and [`Refusal::FoldersLeft`] names them.
 //!
 //! Mapping a refusal onto the wire's structured envelope belongs to whoever
 //! serves it. What is here is the engineering fact: which path, and what about
@@ -120,6 +122,30 @@ pub enum Refusal {
     /// exclusive publication exists to close. `raw_os_error` is what the
     /// filesystem answered.
     ExclusiveCreateUnsupported { path: PathBuf, raw_os_error: i32 },
+    /// The name holds something that is not a regular file — a folder, a pipe,
+    /// a device or a socket — where a replace, a remove or a respell expected
+    /// the document it composed against. A member of the drift family: the
+    /// world is not what the plan was made against.
+    NotRegularFile { path: PathBuf },
+    /// A folder on the path is a file, so a create has nowhere to go.
+    ///
+    /// For a replace or a respell the same fact is drift — the document the
+    /// plan was made against is not there — and for a remove it is the
+    /// after-state, since nothing can be at the path. `folder` is the file's
+    /// own path.
+    FolderIsFile { path: PathBuf, folder: PathBuf },
+    /// The request itself is not one this crate can act on: a path that is not
+    /// a name below the vault root, or a respell whose two names differ in more
+    /// than the ASCII case of the final one. Nothing was read.
+    InvalidRequest { path: PathBuf, reason: &'static str },
+    /// A create refused after it made folders on the way to its name, and
+    /// could not take every one of them back: `refusal` is why it refused, and
+    /// `folders` — relative to the vault root, shallowest first — are the ones
+    /// it made that stand, empty or holding what another writer put there.
+    FoldersLeft {
+        refusal: Box<Refusal>,
+        folders: Vec<PathBuf>,
+    },
     /// A respell was asked of a folder not proven to fold case.
     ///
     /// Where two spellings that differ only in case are two names, renaming
@@ -222,6 +248,27 @@ impl fmt::Display for Refusal {
                 f,
                 "the vault root {} was {staged} when the change was staged and is {current} now",
                 path.display()
+            ),
+            Refusal::NotRegularFile { path } => {
+                write!(f, "{} does not identify a regular file", path.display())
+            }
+            Refusal::FolderIsFile { path, folder } => write!(
+                f,
+                "{} is reached through {}, which is a file",
+                path.display(),
+                folder.display()
+            ),
+            Refusal::InvalidRequest { path, reason } => {
+                write!(f, "{} cannot be changed as asked: {reason}", path.display())
+            }
+            Refusal::FoldersLeft { refusal, folders } => write!(
+                f,
+                "{refusal}; the folders it made that stand are {}",
+                folders
+                    .iter()
+                    .map(|folder| folder.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Refusal::NotCaseFolding { path } => write!(
                 f,

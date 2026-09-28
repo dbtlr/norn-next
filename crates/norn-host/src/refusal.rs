@@ -720,6 +720,16 @@ fn fs_refusal_told_in(place: &str, error: &norn_fs::Refusal) -> String {
         norn_fs::Refusal::RootReplaced { .. } => {
             format!("{place} was replaced under the host")
         }
+        norn_fs::Refusal::NotRegularFile { .. } => {
+            format!("a name in {place} is not a regular file")
+        }
+        norn_fs::Refusal::FolderIsFile { .. } => {
+            format!("a folder in {place} is a file")
+        }
+        norn_fs::Refusal::InvalidRequest { reason, .. } => {
+            format!("a change in {place} was asked wrongly: {reason}")
+        }
+        norn_fs::Refusal::FoldersLeft { refusal, .. } => fs_refusal_told_in(place, refusal),
         norn_fs::Refusal::NotCaseFolding { .. } => {
             format!("a folder in {place} does not fold case")
         }
