@@ -714,6 +714,15 @@ fn fs_refusal_told_in(place: &str, error: &norn_fs::Refusal) -> String {
         norn_fs::Refusal::SymlinkDestination { .. } => {
             format!("a file in {place} is a symbolic link")
         }
+        norn_fs::Refusal::LinkedAncestor { .. } => {
+            format!("a folder in {place} is a symbolic link")
+        }
+        norn_fs::Refusal::RootReplaced { .. } => {
+            format!("{place} was replaced under the host")
+        }
+        norn_fs::Refusal::ExclusiveCreateUnsupported { .. } => {
+            format!("the filesystem holding {place} cannot create a file exclusively")
+        }
     }
 }
 
