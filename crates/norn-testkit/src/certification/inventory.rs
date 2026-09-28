@@ -142,6 +142,18 @@ impl Lane {
             Lane::RealWatcherBackendDecides => "real-watcher/backend-decides",
         }
     }
+
+    /// Whether a case in this lane attaches a production host over the real
+    /// platform watcher, which is what carrying an arm at the production path
+    /// means. A lane that only asks something of the filesystem does not.
+    pub fn needs_real_watcher(&self) -> bool {
+        match self {
+            Lane::Any | Lane::FoldingVolume => false,
+            Lane::RealWatcher
+            | Lane::RealWatcherVolumeFoldingDecides
+            | Lane::RealWatcherBackendDecides => true,
+        }
+    }
 }
 
 /// One required certification case.
@@ -1486,15 +1498,26 @@ mod tests {
     /// and read as "every arm is carried" while nothing had changed. So the two
     /// facts are asserted together: the table is empty only while the
     /// trust-transition suite holds cases in a real-watcher lane.
+    /// A lane that asks only something of the filesystem carries nothing at the
+    /// production path, however it narrows where its case is covered.
+    #[test]
+    fn only_the_real_watcher_lanes_need_a_real_watcher() {
+        assert!(!Lane::Any.needs_real_watcher());
+        assert!(!Lane::FoldingVolume.needs_real_watcher());
+        assert!(Lane::RealWatcher.needs_real_watcher());
+        assert!(Lane::RealWatcherVolumeFoldingDecides.needs_real_watcher());
+        assert!(Lane::RealWatcherBackendDecides.needs_real_watcher());
+    }
+
     #[test]
     fn an_empty_unreached_table_stands_on_production_carriers() {
         if !UNREACHED_ARMS.is_empty() {
             return;
         }
         assert!(
-            REQUIRED_CASES.iter().any(|case| case.suite
-                == Suite::TrustTransition
-                && !matches!(case.lane, Lane::Any)),
+            REQUIRED_CASES
+                .iter()
+                .any(|case| case.suite == Suite::TrustTransition && case.lane.needs_real_watcher()),
             "the unreached table is empty and no trust-transition case runs in a lane that needs \
              a real watcher, so the table reads as `every arm is carried` with nothing carrying \
              one at the production path"
