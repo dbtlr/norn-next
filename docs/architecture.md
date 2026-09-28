@@ -2370,9 +2370,9 @@ bound by the applier's lifecycle tests.
 - **An apply runs only over a store fit to plan against.** It takes the claim only where a
   reader stands, no damage is known — damage a read carried to the claim is published, with
   the rebuild it owes, before any apply takes it — and the entry is attached and trusted. Its
-  first step derives, as its own commit and publishing as a reconcile turn does, exactly the
-  facts the entry had taken in when it took the claim, and it takes in none after that until
-  its changeset commits. It then takes the request's one snapshot and plans its operations,
+  first step drains the watcher once, then derives, as its own commit and publishing as a
+  reconcile turn does, exactly the facts delivered by then, and it takes in none after that
+  until its changeset commits. It then takes the request's one snapshot and plans its operations,
   or checks its resolved plan's states and conditions, against it and the files. No commit
   lands in the registration's store between that snapshot and the apply's changeset, so the
   changeset builds on exactly the state the apply read. From planning to its changeset the
@@ -2412,8 +2412,7 @@ bound by the applier's lifecycle tests.
   host's destruction answer every queued apply not applied at once, with their own cause, and
   never wait for one, as no teardown waits for a read. A running apply that has not begun
   publishing stops at its next epoch check, removes its shadows and answers the same. One that
-  has begun publishing finishes its publication and its changeset before it gives the claim
-  back: publication is a rename per staged target, and finishing it leaves an applied plan
+  has begun publishing finishes its publication and its changeset before its leg ends: publication is a rename per staged target, and finishing it leaves an applied plan
   where stopping would hand a routine park's caller an interrupted one to re-send.
 
 Four contracts inside that flow carry weight:
