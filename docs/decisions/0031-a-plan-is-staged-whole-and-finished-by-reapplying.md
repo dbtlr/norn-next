@@ -74,21 +74,25 @@ one planner and the one applier invariant 4 names.
   publication: each publication verifies its target again.
 - **Publication order and what can still stop it.** Creates publish first, each by an
   exclusive, atomic publication that never replaces a name, with any parent folder it
-  needs made just before it; replacements follow; removals come last, and a folder the
+  needs made just before it is published; replacements follow; removals come last, and a folder the
   plan's removals leave empty is removed after them, on a re-send too. A folder made for a
-  create that then refuses is removed if it is empty. Folders are not transitions, and the
+  create that then refuses is removed if it is empty; one a crash leaves before its create
+  lands stays empty until a re-send publishes into it or removes it. Folders are not transitions, and the
   forecast and the report name them. Four things can stop publication part-way: a crash;
   an I/O failure; a create whose name another writer took after staging; and a foreign
   edit reaching a target after its staging, which that target's verification refuses. A
   foreign write landing between a target's verification and its rename is overwritten:
   this is the per-file protocol's stated residual race, and the watcher converges the
   store on what the path holds. An attempt that stops before any target lands has written
-  nothing: a refusal when a check stopped it, a failure when I/O did. An attempt that stops
+  no document, only possibly an empty folder: a refusal when a check stopped it, a failure
+  when I/O did. An attempt that stops
   after at least one of its targets landed is **interrupted**, and its report names every
   target that landed.
 - **A target at its after-state is landed.** A removal is landed when its path is absent. A
   move is landed when its destination holds its after-state and its source is absent, each
-  leg recognized on its own. A target at its after-state is landed whichever writer put it
+  leg recognized on its own; since a source is removed only after its destination durably
+  landed, a source found absent while its destination is not at its after-state was removed
+  by another writer, which is drift, and the move is unresolved. A target at its after-state is landed whichever writer put it
   there. Re-applying a resolved plan treats a landed target as done, so re-sending a plan
   a crash or an I/O failure interrupted finishes it. A resolved plan whose targets return
   to their before-states applies again.

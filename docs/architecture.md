@@ -2355,7 +2355,9 @@ Four contracts inside that flow carry weight:
   names holding the document.
 - **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
   is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
-  interrupted completes it with no journal and no rollback. An attempt that stops after
+  interrupted completes it with no journal and no rollback. A move's source found absent
+  while its destination is not at its after-state was removed by another writer: that is
+  drift, and the move is unresolved. An attempt that stops after
   one of its targets landed is interrupted, not refused. An
   uninterrupted apply commits one changeset to its registration's store, so a read there
   sees the whole state before or after it. Re-sending operations is a new change.
