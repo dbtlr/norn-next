@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use norn_fs::{
@@ -26,7 +26,7 @@ use norn_fs::{
 };
 use norn_testkit::process::{Outcome, Run, RunStatus, Sandbox};
 use norn_testkit::scratch;
-use norn_testkit::wait::{Budget, Observed, wait_until};
+use norn_testkit::wait::{Budget, Observed, WaitFailure, wait_until};
 
 /// Which part the child plays.
 const ROLE: &str = "NORN_FS_MAINTAINER_ROLE";
@@ -50,9 +50,18 @@ const CHILD_ARGS: [&str; 4] = [
 /// The backstop deadline on a holding child: never reached in a healthy run,
 /// because the child kills itself the moment the parent says it has seen
 /// everything it needs. What this bounds is a wedged run — a child that never
-/// acquires, or a parent observation that never lands — so it matches the
-/// parent's own wait budget rather than racing it.
+/// acquires, or a parent observation that never lands.
+///
+/// It equals the parent's wait budget, and the parent's wait can start before
+/// the child is spawned, so a parent wait on a wedged child can give up while
+/// the child still runs. That is why a failed wait on the holding child waits
+/// [`HOLDER_REPORT_BOUND`] for the run's report and names it: the failure then
+/// carries the child's end and output whichever bound passes first.
 const BACKSTOP: Duration = Duration::from_secs(30);
+
+/// How long the parent waits for the holding child's run to report: past
+/// [`BACKSTOP`] by the time the harness takes to end a run and read its output.
+const HOLDER_REPORT_BOUND: Duration = BACKSTOP.saturating_add(Duration::from_secs(15));
 
 /// How long a child that plays a part and exits may run before it is killed.
 /// Reaching it is a wedged child rather than a slow one.
@@ -547,7 +556,9 @@ fn a_killed_maintainer_releases_its_lock() {
                     Err(error) => Observed::pending(format!("no answer yet: {error}")),
                 }
             })
-            .expect("the child to take a free lock");
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report("the child to take a free lock", &failure, &receiver)
+            });
             let held_by: u32 = said
                 .trim()
                 .rsplit(' ')
@@ -567,7 +578,13 @@ fn a_killed_maintainer_releases_its_lock() {
                     }
                 }
             })
-            .expect("a lock held by another process to be contended");
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report(
+                    "a lock held by another process to be contended",
+                    &failure,
+                    &receiver,
+                )
+            });
             let Incumbent::Named { pid, version, .. } = &incumbent else {
                 panic!("a lock held by another process named no incumbent");
             };
@@ -592,13 +609,19 @@ fn a_killed_maintainer_releases_its_lock() {
                     }
                 },
             )
-            .expect("a dead maintainer's lock to be free");
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report(
+                    "a dead maintainer's lock to be free",
+                    &failure,
+                    &receiver,
+                )
+            });
             held_by
         })
     };
 
     let outcome = receiver
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(HOLDER_REPORT_BOUND)
         .expect("the child's run to report")
         .expect("waiting on the child");
     assert_eq!(
@@ -652,17 +675,47 @@ fn run_child(
 fn assert_the_holder_runs(run: &Receiver<std::io::Result<Outcome>>) {
     match run.try_recv() {
         Err(TryRecvError::Empty) => {}
-        Ok(Ok(outcome)) => panic!(
-            "the holding child ended before it was told to, with {:?}\n\
-             stdout:\n{}\nstderr:\n{}",
+        Ok(report) => panic!(
+            "the holding child's run reported before it was told to end: {}",
+            described(&report)
+        ),
+        Err(TryRecvError::Disconnected) => {
+            panic!("the holding child's run ended without reporting how")
+        }
+    }
+}
+
+/// Fail a wait on the holding child, naming how the child's run ended.
+///
+/// A wait on the child can give up while the child still runs, so this waits
+/// up to [`HOLDER_REPORT_BOUND`] for the run's report: a child still running
+/// at its [`BACKSTOP`] reads as timed out, with what it printed, and is told
+/// apart from one that could not be run or ended on its own.
+fn fail_with_the_holders_report(
+    expected: &str,
+    failure: &WaitFailure,
+    run: &Receiver<std::io::Result<Outcome>>,
+) -> ! {
+    let report = match run.recv_timeout(HOLDER_REPORT_BOUND) {
+        Ok(report) => described(&report),
+        Err(RecvTimeoutError::Timeout) => {
+            format!("did not report within {HOLDER_REPORT_BOUND:?}")
+        }
+        Err(RecvTimeoutError::Disconnected) => "ended without reporting how".to_string(),
+    };
+    panic!("{expected}: {failure}\nthe holding child's run: {report}")
+}
+
+/// How a run ended and what it printed, or why it could not be run.
+fn described(report: &std::io::Result<Outcome>) -> String {
+    match report {
+        Ok(outcome) => format!(
+            "ended with {:?}\nstdout:\n{}\nstderr:\n{}",
             outcome.status,
             outcome.stdout_text(),
             outcome.stderr_text()
         ),
-        Ok(Err(error)) => panic!("the holding child could not be run: {error}"),
-        Err(TryRecvError::Disconnected) => {
-            panic!("the holding child's run ended without reporting how")
-        }
+        Err(error) => format!("could not be run: {error}"),
     }
 }
 
