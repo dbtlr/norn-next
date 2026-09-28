@@ -900,23 +900,26 @@ fn stage_shadow(
     )?;
     let mut file = std::fs::File::from(file);
     let shadow_path = shadows.directory().join(&name);
-    let filled = (|| {
-        if let Some(mode) = mode {
-            carry_mode_forward(&file, mode);
+    // The identity is read before the fill, so a fill that fails still knows
+    // which file is this call's: the name can be taken over while the bytes
+    // are written and synced, and the cleanup removes only what was made here.
+    let identity = match file.metadata() {
+        Ok(metadata) => identity_of(&metadata),
+        Err(error) => {
+            // Nothing identifies the file, so nothing is removed by its name;
+            // the shadow is inert residue the home's sweep bounds.
+            return Err(environment("reading the identity of", &shadow_path, &error));
         }
-        fill(&mut file, content, &shadow_path, at.faults)?;
-        let metadata = file
-            .metadata()
-            .map_err(|error| environment("reading the identity of", &shadow_path, &error))?;
-        Ok(identity_of(&metadata))
-    })();
-    match filled {
-        Ok(identity) => Ok(StagedShadow { name, identity }),
+    };
+    let shadow = StagedShadow { name, identity };
+    if let Some(mode) = mode {
+        carry_mode_forward(&file, mode);
+    }
+    match fill(&mut file, content, &shadow_path, at.faults) {
+        Ok(()) => Ok(shadow),
         Err(refusal) => {
-            // A shadow this call created and could not finish is its own by
-            // construction: the exclusive open made it a moment ago.
             if at.faults.check(Stage::Cleanup).is_ok() {
-                let _ = unlinkat(home.as_fd(), name.as_os_str(), AtFlags::empty());
+                unlink_shadow_if_ours(home.as_fd(), &shadow);
             }
             Err(refusal)
         }
@@ -1176,11 +1179,16 @@ fn publish_create(
     ) {
         // The name was taken at the last moment. Where what took it is this
         // create's own after-state, the create has landed.
-        if matches!(refusal, Refusal::DestinationExists { .. })
-            && let Some(landed) =
-                at_after(&observe(made.parent(), name, at.full, &mut |_| {})?, after)
-        {
-            return Ok(found(landed, made.sync_all(at.faults)));
+        // A failure to look is a refusal like any other here, so the folders
+        // this create made are still taken back or named.
+        if matches!(refusal, Refusal::DestinationExists { .. }) {
+            let observed = match observe(made.parent(), name, at.full, &mut |_| {}) {
+                Ok(observed) => observed,
+                Err(error) => return Err(made.abandon(error, at.faults)),
+            };
+            if let Some(landed) = at_after(&observed, after) {
+                return Ok(found(landed, made.sync_all(at.faults)));
+            }
         }
         return Err(made.abandon(refusal, at.faults));
     }
@@ -1652,9 +1660,15 @@ fn remove_shadow(
     let Ok(home) = open_home(shadows, reach) else {
         return;
     };
-    match statat(&home, shadow.name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+    unlink_shadow_if_ours(home.as_fd(), shadow);
+}
+
+/// Remove `shadow` from the home open at `home` only while its name still
+/// means the file staging made.
+fn unlink_shadow_if_ours(home: BorrowedFd<'_>, shadow: &StagedShadow) {
+    match statat(home, shadow.name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) if identity_of_stat(&stat) == shadow.identity => {
-            let _ = unlinkat(&home, shadow.name.as_os_str(), AtFlags::empty());
+            let _ = unlinkat(home, shadow.name.as_os_str(), AtFlags::empty());
         }
         _ => {}
     }
@@ -3286,6 +3300,44 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             folders_of(&scratch, &["", "a", "a/b"])
         );
+    }
+
+    /// A create whose name was taken at its rename, and whose look at what took
+    /// it fails, still answers for the folders it made: the failure reaches the
+    /// caller through the same abandonment every other refusal takes.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the racer's file and its mode.
+    fn a_create_that_cannot_read_what_took_its_name_names_the_folders_it_left() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("write-raced-unreadable");
+        let path = scratch.at("a/b/fresh.md");
+        let staged = staged_in(
+            &scratch,
+            "a/b/fresh.md",
+            Transition::Create { content: b"ours" },
+        );
+
+        let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
+            if window == Window::Publishing {
+                republish(&scratch, &path, b"theirs");
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+                    .expect("the racer's file made unreadable");
+            }
+        })
+        .expect_err("a create whose name was taken");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("the racer's file made readable again");
+
+        let Refusal::FoldersLeft { refusal, folders } = &refusal else {
+            panic!("the folders left were not named: {refusal}");
+        };
+        assert!(
+            matches!(**refusal, Refusal::Environment { .. }),
+            "{refusal}"
+        );
+        assert_eq!(folders, &[PathBuf::from("a"), PathBuf::from("a/b")]);
+        assert_eq!(std::fs::read(&path).expect("the racer's file"), b"theirs");
     }
 
     /// A create that makes its folders syncs each folder holding one it made,
