@@ -15631,34 +15631,18 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let damaged = VaultName::new("damaged").unwrap();
         let sibling = VaultName::new("sibling").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(
-                damaged.clone(),
-                VaultRoot::new("/tmp/norn-host-damaged-vault").unwrap(),
-            ),
-            RegistryEntry::new(
-                sibling.clone(),
-                VaultRoot::new("/tmp/norn-host-sibling-vault").unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
-            Arc::clone(&ops),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_millis(2),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&damaged, &sibling], 2);
         drop(host.demand(&damaged, AttachMode::Durable).unwrap());
         drop(host.demand(&sibling, AttachMode::Durable).unwrap());
         wait_for_state(&host, &damaged, TrustState::Ready);
         wait_for_state(&host, &sibling, TrustState::Ready);
 
+        // The batch is one rescan whichever entry's poll spends it, so the
+        // poll that carries it is driven at the damaged entry: an ambient
+        // round armed between its polls of the two entries hands the rescan
+        // to the sibling, and the damaged entry reconciles nothing.
         arrange_for(&ops.damaged_reconcile_at, &damaged);
-        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        report_through_a_driven_poll(&ops, &host, &damaged, &ops.off_thread_rescan_poll_batches);
         wait_until(
             "the damaged entry to come back through its rebuild",
             lifecycle_wait_budget(),
