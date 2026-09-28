@@ -24464,6 +24464,28 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"));
         }
 
+        /// Wait for `name`'s entry to take the queue slot for the job it owes,
+        /// and answer the epoch the job carries.
+        ///
+        /// The owed job is scheduled by whichever of the demand and the end
+        /// of a watcher poll first finds the entry free while a lease stands.
+        /// Its dispatch takes the slot under the entry's lock and then sends
+        /// the job into the channel, either at once or at a later dispatcher
+        /// tick. The case keeps a lease standing until this returns, so the
+        /// job is scheduled whichever of them finds the entry free first.
+        fn wait_for_queued_job(host: &Host<Arc<FakeOps>>, name: &VaultName) -> u64 {
+            let entry = host.shared.entries.get(name).expect("the vault is served");
+            wait_until(
+                "a job to wait in the channel",
+                lifecycle_wait_budget(),
+                || match entry.gate.lock().unwrap().claim.slot() {
+                    Some(epoch) => Observed::Met(epoch),
+                    None => Observed::pending("the queue slot is free".to_string()),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        }
+
         /// Attach `name`, then let it idle out, so it has been served and
         /// holds nothing.
         fn attach_and_idle(host: &Host<Arc<FakeOps>>, name: &VaultName) {
@@ -25467,25 +25489,15 @@ mod tests {
                     .withdraw_trust_for_damage("the index disagrees with the documents");
             }
             drop(host.demand(&name, AttachMode::Durable).unwrap());
+            let stale = wait_for_queued_job(&host, &name);
             drop(lease);
-            let stale = host
-                .shared
-                .entries
-                .get(&name)
-                .unwrap()
-                .gate
-                .lock()
-                .unwrap()
-                .claim
-                .slot();
-            assert!(stale.is_some(), "the rebuild did not wait in the channel");
             refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
             unregister(&host, UnregisterParams::new(name.clone()).keeping_state())
                 .expect("the entry holding nothing is unregistered");
 
             register(&host, &name, &root).expect("the name is registered again");
             let reborn = host.shared.entries.get(&name).unwrap();
-            while reborn.gate.lock().unwrap().claim.epoch() + 1 < stale.unwrap() {
+            while reborn.gate.lock().unwrap().claim.epoch() + 1 < stale {
                 refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
             }
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -25494,7 +25506,7 @@ mod tests {
             ops.attach_release.store(true, Ordering::SeqCst);
 
             assert!(
-                scheduled >= stale.unwrap(),
+                scheduled >= stale,
                 "the new entry scheduled its attach below the queued job's epoch"
             );
             wait_for_state(&host, &name, TrustState::Ready);
@@ -26392,18 +26404,8 @@ mod tests {
                     .withdraw_trust_for_damage("the index disagrees with the documents");
             }
             drop(host.demand(&name, AttachMode::Durable).unwrap());
+            let stale = wait_for_queued_job(&host, &name);
             drop(lease);
-            let stale = host
-                .shared
-                .entries
-                .get(&name)
-                .unwrap()
-                .gate
-                .lock()
-                .unwrap()
-                .claim
-                .slot()
-                .expect("the rebuild did not wait in the channel");
             refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
             {
                 let entry = host.shared.entries.get(&name).unwrap();
