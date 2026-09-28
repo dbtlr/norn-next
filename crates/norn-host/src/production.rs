@@ -14260,9 +14260,14 @@ mod tests {
     /// one. The heal therefore empties the slot into its own batch.
     ///
     /// The forbidden shape is the second assertion reporting facts. Coverage is
-    /// installed by the attach, the write settles into the slot well inside the
-    /// second this case waits, and a heal that took only its own window would
-    /// hand that batch back after the window's.
+    /// installed by the attach, the case waits until the write's batch is
+    /// settled in the slot before the window opens, and a heal that took only
+    /// its own window would hand that batch back after the window's.
+    ///
+    /// Behind `induced-failure`, because the look at the slot that leaves its
+    /// batch in place is: a receive would take the batch the heal is supposed
+    /// to take.
+    #[cfg(feature = "induced-failure")]
     #[test]
     fn a_heal_takes_the_batch_that_settled_before_its_window() {
         let f = Fixture::new("heal-window-residue");
@@ -14270,21 +14275,45 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         attachment.heal_observed = norn_fs::Batch::default();
+        // A backend delivers in order, so receiving a change made after the
+        // attach puts every establishment delivery behind this case: the next
+        // batch the slot holds is the write's. A directory, because creating
+        // one is one report on every backend.
+        fs::create_dir(f.vault().join("arrived")).unwrap();
+        wait_until(
+            "a batch naming `arrived`",
+            lifecycle_budget(),
+            || match poll_subscription(&mut attachment) {
+                Ok(Some(batch))
+                    if batch
+                        .vault_roots()
+                        .iter()
+                        .any(|root| root.as_path() == Path::new("arrived")) =>
+                {
+                    Observed::Met(())
+                }
+                other => Observed::pending(format!("{other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
 
         fs::write(f.vault().join("settled-before.md"), "body").unwrap();
-        // **The one wait here that a condition cannot replace.** What this case
-        // needs is the batch sitting in the delivery slot *before* the window
-        // opens, and the slot has no look that leaves what it holds behind:
-        // `try_recv` takes the batch, which is the residue the heal below is
-        // supposed to take. So the margin is spent as time rather than observed,
-        // sized two orders of magnitude above the quiet window the coalescer
-        // settles on.
-        //
-        // A margin this size is spent by every run and the failure it can still
-        // meet is stated: a host loaded enough to leave the write undelivered
-        // for a second fails the first assertion below, which prints the batch
-        // the heal did take.
-        std::thread::sleep(Duration::from_secs(1));
+        wait_until(
+            "a settled batch in the delivery slot",
+            lifecycle_budget(),
+            || {
+                let subscription = attachment
+                    .subscription
+                    .as_ref()
+                    .expect("the attach installed coverage");
+                if subscription.holds_a_settled_batch() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the delivery slot is empty")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
 
         ops.heal_under_coverage(&mut attachment, &progress).unwrap();
 
