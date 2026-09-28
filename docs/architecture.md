@@ -2306,8 +2306,10 @@ sequenceDiagram
   participant D as SQLite (via norn-store)
   C->>S: HTTP (bearer; protocol shape)
   S->>H: verb params (wire)
-  H->>H: resolve operations → one transition per file (before-state, after-state), conditions read
-  H->>W: resolved plan (a preview answers here and writes nothing)
+  Note over H: a preview resolves operations on one snapshot, answers, and writes nothing
+  H->>W: apply: operations or a resolved plan, queued on the entry's claim (admission returns PendingApply)
+  W->>D: intake: derive the facts delivered by then; one snapshot inside the claim
+  W->>W: resolve operations → one transition per file (before-state, after-state), conditions read
   W->>F: check and stage every target: states, conditions, schema, shadow (protocol owned by norn-fs)
   Note over W,F: any refusal → nothing published; refuse-and-refresh (fresh resolved plan and forecast)
   W->>F: publish creates, then replacements, then removals, each verified again
@@ -2336,7 +2338,8 @@ and checked as the vault would stand with every target of the plan at its after-
 after taking in the facts the watcher has delivered, so a plan's own progress never
 changes one.
 Applies run as a job holding the entry's claim, one at a time per registration; the request
-waits for the outcome, and a caller that stops waiting does not abort the apply. Mutation
+waits for the outcome through `PendingApply::wait`, after admission, and a caller that stops
+waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
 the snapshot a planner read through
 ([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
