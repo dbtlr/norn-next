@@ -1999,13 +1999,15 @@ fn scoped_increment(
         // it, so a spelling only the volume resolves reads here as the nothing a
         // walk of this vault finds there.
         //
-        // **A batch whose only spelling of a document is one the tree does not
-        // list derives nothing at all.** Nothing is read at that spelling and
-        // the rows it addresses die; the document's own row stands where the
-        // tree renders it, and it is derived when a report names that spelling
-        // or when the next whole-vault heal walks it. That is the from-zero
-        // reading: a derivation over this tree holds one row for one entry, at
-        // the name the directory lists.
+        // **A batch whose only spelling of a document is one no listing holds
+        // under the vault's ASCII fold derives nothing at all.** Only the
+        // volume's wider fold resolves such a spelling, so nothing is read at
+        // it and the rows it addresses die; the document's own row stands
+        // where the tree renders it, and it is derived when a report names that
+        // spelling or when the next whole-vault heal walks it. That is the
+        // from-zero reading: a derivation over this tree holds one row for one
+        // entry, at the name the directory lists. A spelling the ASCII fold
+        // does equate with a listed name is the next paragraph's case.
         //
         // **What this leg converges is stated at the spelling the tree lists.**
         // A report can name an entry through a spelling the fold equates with
