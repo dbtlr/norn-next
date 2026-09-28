@@ -12,7 +12,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -506,8 +506,8 @@ pub struct Subscription {
     state: Arc<Mutex<State>>,
     /// Signalled under the state lock whenever a closed batch can move: the
     /// coalescer hands one over, a receive makes room in the delivery slot, a
-    /// closing heal window takes the batch waiting unplaced, or the slot's
-    /// receiver is dropped.
+    /// closing heal window takes the batch waiting unplaced, or the
+    /// subscription is dropped.
     handoff: Arc<Condvar>,
     wake: Option<mpsc::SyncSender<()>>,
     faults: WatchFaults,
@@ -761,13 +761,15 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         self.watcher.take();
         // Disconnect the delivery slot before joining the worker. A terminal
-        // send blocked on the full slot fails, and a coalescer waiting for room
-        // in it is woken, under the state lock, to find the slot gone. Backend
+        // send blocked on the full slot fails, and a coalescer holding a batch,
+        // whether for room in the slot or for a heal window still open, is
+        // woken under the state lock to find the subscription gone. Backend
         // callbacks write only shared pending state, so delivery backpressure
         // never blocks event intake.
         self.batches.take();
         {
-            let _state = self.state.lock();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.unsubscribed = true;
             self.handoff.notify_all();
         }
         self.wake.take();
@@ -1458,6 +1460,9 @@ struct State {
     /// How many batches the delivery slot holds. Both ends of the slot move it
     /// under this lock, so it is exact whenever the lock is held.
     settled_in_slot: usize,
+    /// The subscription is being dropped: no receive or heal window will take
+    /// a batch again, including one held for a window left open.
+    unsubscribed: bool,
 }
 
 impl State {
@@ -1487,6 +1492,7 @@ impl State {
             closing: false,
             unplaced: None,
             settled_in_slot: 0,
+            unsubscribed: false,
         }
     }
     fn batch(&mut self) -> &mut Batch {
@@ -1866,7 +1872,8 @@ fn run_coalescer(
 
 /// Hand one closed batch over: into the delivery slot, or, while a heal window
 /// is open or the slot is full, into [`State::unplaced`] until it can move.
-/// Reports whether the consumer is still there.
+/// Reports whether the consumer is still there: a dropped subscription ends the
+/// wait even with a heal window open.
 ///
 /// The slot is only ever filled under the state lock and only while no heal
 /// window is open, which is what lets a window treat the slot as closed for its
@@ -1887,6 +1894,9 @@ fn hand_over(
     locked.unplaced = Some(batch);
     handoff.notify_all();
     loop {
+        if locked.unsubscribed {
+            return false;
+        }
         if !locked.healing
             && let Some(batch) = locked.unplaced.take()
         {
@@ -2496,6 +2506,47 @@ mod tests {
     fn dropping_a_subscription_releases_a_coalescer_waiting_behind_the_slot() {
         let (_scratch, subscription) = a_batch_waiting_behind_the_slot("slot-drop");
 
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **Dropping a subscription with a heal window open releases a coalescer
+    /// holding a batch for that window**, so the drop's join returns. No
+    /// window outlives its subscription.
+    #[test]
+    fn dropping_a_subscription_with_a_heal_window_open_releases_the_coalescer_holding_its_batch() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-drop");
+
+        subscription.begin_heal();
+
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal refused because the vault root moved leaves a subscription
+    /// that still drops**, releasing a coalescer holding a batch for the
+    /// window the refusal left open.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_refused_by_a_moved_root_leaves_a_subscription_that_drops() {
+        let (scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-root-moved");
+        subscription.begin_heal();
+        let placed = subscription.try_recv().unwrap().expect("the placed batch");
+        let vault = scratch.path("vault");
+        std::fs::rename(&vault, scratch.path("moved-vault")).unwrap();
+        std::fs::create_dir(&vault).unwrap();
+
+        let refused = subscription.finish_heal();
+
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        assert!(
+            matches!(refused, Err(WatchError::CoverageLost(_))),
+            "{refused:?}"
+        );
+        dropped_within_the_budget(subscription);
+    }
+
+    /// Drop the subscription on a thread of its own, failing the case if the
+    /// drop's join has not returned within the watch budget.
+    fn dropped_within_the_budget(subscription: Subscription) {
         let (done, dropped) = mpsc::channel();
         thread::spawn(move || {
             drop(subscription);
