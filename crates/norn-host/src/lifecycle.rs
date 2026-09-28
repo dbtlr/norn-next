@@ -8656,6 +8656,16 @@ mod tests {
             .count()
     }
 
+    /// One vault, `notes`, over a root the filesystem answers for with
+    /// nothing, on a host with one worker whose dispatcher ticks every 2ms.
+    ///
+    /// Every tick polls the attached entry, and the poll holds the entry's
+    /// claim and takes its coverage out for as long as it runs. A case here
+    /// that reads the claim, the queue slot or the coverage at one instant
+    /// races that poll, and so does a case that expects a reload admitted: a
+    /// reload is refused at admission while the claim is held or the coverage
+    /// is out. Such a case waits for the value it needs, or runs on
+    /// `host_without_ambient_polling` and drives the poll itself.
     fn fixture(ops: Arc<FakeOps>, idle_after: Duration) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
         let entry = RegistryEntry::new(
@@ -8677,41 +8687,67 @@ mod tests {
         (host, name)
     }
 
-    /// A fixture whose dispatcher never ticks inside a test's own run: no
-    /// ambient watcher poll, no idle reap, and no retry of a dispatch a full
-    /// queue refused.
+    /// Where the roots a test host registers stand on the filesystem.
+    enum Roots<'a> {
+        /// One root per named vault that the filesystem answers for with
+        /// nothing, which the registry reads as registrable and not yet
+        /// present.
+        Absent(&'a [&'a VaultName]),
+        /// The root given for each named vault, created before the host reads
+        /// the registry.
+        Created(&'a [(&'a VaultName, &'a std::path::Path)]),
+        /// Registrations a case built itself, read as they stand: a root the
+        /// case left missing, aliased or shared stays that way.
+        Registered(&'a [RegistryEntry]),
+    }
+
+    impl Roots<'_> {
+        /// The registry a host over these roots starts from.
+        fn registry(self) -> RegistryRead {
+            match self {
+                Roots::Absent(names) => RegistryRead::from_entries(names.iter().map(|name| {
+                    RegistryEntry::new(
+                        (*name).clone(),
+                        VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
+                    )
+                })),
+                Roots::Created(roots) => registry_over_created_roots(roots),
+                Roots::Registered(registrations) => {
+                    RegistryRead::from_entries(registrations.iter().cloned())
+                }
+            }
+        }
+    }
+
+    /// The policy of a host whose dispatcher never ticks inside a test's own
+    /// run, with `worker_slots` workers: its tick, and with it every ambient
+    /// watcher poll and idle reap, is a minute away. A case whose subject is
+    /// one other field of the policy names that field over this one.
+    fn no_ambient_poll_policy(worker_slots: usize) -> LifecyclePolicy {
+        LifecyclePolicy {
+            idle_after: Duration::from_secs(60),
+            worker_slots,
+            watch_poll_interval: Duration::from_secs(60),
+            read_settle_bound: crate::READ_SETTLE_BOUND,
+        }
+    }
+
+    /// A host over `roots` with `worker_slots` workers, whose dispatcher never
+    /// ticks inside a test's own run: no ambient watcher poll, no idle reap,
+    /// and no retry of a dispatch a full queue refused.
     ///
     /// A caller here drives those duties itself, which is what makes the
     /// interleaving under test the one the test set up rather than the one a
-    /// tick arrived at first.
+    /// tick arrived at first. A watcher poll holds an entry's claim and its
+    /// coverage for as long as it runs, so a case that expects a reload
+    /// admitted, or reads an entry's claim, queue slot or coverage at one
+    /// instant and expects it settled, runs here and drives any poll it needs
+    /// itself.
     ///
     /// Standing down the dispatcher costs its other duties too, so a test
     /// here also assumes nothing it dispatches is refused for a full queue:
     /// the tick that would retry such a dispatch is a minute away, past any
     /// wait budget in this suite.
-    fn fixture_without_ambient_polling(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
-        let name = VaultName::new("notes").unwrap();
-        let entry = RegistryEntry::new(
-            name.clone(),
-            VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
-        );
-        let registry = RegistryRead::from_entries([entry]);
-        let host = Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
-        (host, name)
-    }
-
-    /// The fixture above over the named vaults and the given number of worker
-    /// slots, with the dispatcher standing down the same way.
     ///
     /// A vault here is a case's subject, a bystander whose state the case
     /// asserts, or an occupant of a worker slot: a job blocked on one entry is
@@ -8719,85 +8755,62 @@ mod tests {
     /// drive the window around it.
     fn host_without_ambient_polling(
         ops: Arc<FakeOps>,
-        names: &[&VaultName],
+        roots: Roots<'_>,
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = RegistryRead::from_entries(names.iter().map(|name| {
-            RegistryEntry::new(
-                (*name).clone(),
-                VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
-            )
-        }));
-        Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap()
+        Host::new(roots.registry(), ops, no_ambient_poll_policy(worker_slots)).unwrap()
     }
 
     /// A directory of one case's own, removed when the handle drops.
     ///
-    /// The roots the fixtures above name resolve to nothing, which the registry
-    /// reads as a root that is registrable and not yet present. A case whose
-    /// subject is what the registry reads off a root needs a root the
-    /// filesystem answers for, and this is where those live.
+    /// An absent root resolves to nothing, which the registry reads as a root
+    /// that is registrable and not yet present. A case whose subject is what
+    /// the registry reads off a root needs a root the filesystem answers for,
+    /// and this is where those live.
     fn temp_base(label: &str) -> Scratch {
         Scratch::new(&format!("norn-host-{label}"))
     }
 
-    /// A host over roots the filesystem answers for. Every root is created
-    /// before the host reads the registry.
-    fn rooted_host(
-        ops: Arc<FakeOps>,
-        roots: &[(&VaultName, &std::path::Path)],
-        worker_slots: usize,
-        watch_poll_interval: Duration,
-    ) -> Host<Arc<FakeOps>> {
+    /// A registry over roots the filesystem answers for. Every root is created
+    /// before the registry is read.
+    fn registry_over_created_roots(roots: &[(&VaultName, &std::path::Path)]) -> RegistryRead {
         for (_, root) in roots {
             std::fs::create_dir_all(root).unwrap();
         }
-        let registry = RegistryRead::from_entries(roots.iter().map(|(name, root)| {
-            RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
-        }));
-        Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots,
-                watch_poll_interval,
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
+        RegistryRead::from_entries(
+            roots.iter().map(|(name, root)| {
+                RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
+            }),
         )
-        .unwrap()
     }
 
-    /// A host over roots the filesystem answers for, with the dispatcher
-    /// ticking.
+    /// A host over roots the filesystem answers for, whose dispatcher ticks
+    /// every 2ms.
+    ///
+    /// Every tick polls each attached entry, and the poll holds the entry's
+    /// claim and takes its coverage out for as long as it runs. A case here
+    /// that reads an entry's claim, queue slot or coverage at one instant races
+    /// that poll, and so does a case that expects a reload admitted: a reload
+    /// is refused at admission while the claim is held or the coverage is out.
+    /// Such a case waits for the value it needs, or runs on
+    /// `host_without_ambient_polling` over `Roots::Created` and drives the
+    /// poll itself.
     fn host_over_roots(
         ops: Arc<FakeOps>,
         roots: &[(&VaultName, &std::path::Path)],
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        rooted_host(ops, roots, worker_slots, Duration::from_millis(2))
-    }
-
-    /// A host over roots the filesystem answers for, without ambient polling.
-    ///
-    /// A case that drives a watcher signal itself needs the dispatcher's own
-    /// tick out of the way: the fake holds one terminal report, and which leg
-    /// consumes it is what such a case pins.
-    fn quiet_host_over_roots(
-        ops: Arc<FakeOps>,
-        roots: &[(&VaultName, &std::path::Path)],
-    ) -> Host<Arc<FakeOps>> {
-        rooted_host(ops, roots, 2, Duration::from_secs(60))
+        Host::new(
+            registry_over_created_roots(roots),
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap()
     }
 
     /// Retarget a vault root to a symlink that resolves to itself. The identity
@@ -9320,7 +9333,8 @@ mod tests {
     #[test]
     fn unsupported_reload_leaves_a_ready_vault_unchanged() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9347,7 +9361,8 @@ mod tests {
     fn a_job_marked_behind_an_ending_leg_is_sent_where_the_leg_ends() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9418,7 +9433,13 @@ mod tests {
         ops.block_reload.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
         let root = scratch.root().join(name.as_str());
-        let host = one_worker_host_over(&ops, scratch.root(), &[&name]);
+        let host = Arc::new(host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            1,
+        ));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
 
         let asking = Arc::clone(&host);
         let asked = name.clone();
@@ -9468,7 +9489,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -9521,7 +9543,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -9552,7 +9575,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciled = ops.reconciles.load(Ordering::SeqCst);
@@ -9590,14 +9614,13 @@ mod tests {
         let base = scratch.root();
         let reloaded_root = base.join("reloaded");
         let sibling_root = base.join("sibling");
-        let host = Arc::new(rooted_host(
+        let host = Arc::new(host_without_ambient_polling(
             Arc::clone(&ops),
-            &[
+            Roots::Created(&[
                 (&reloaded, reloaded_root.as_path()),
                 (&sibling, sibling_root.as_path()),
-            ],
+            ]),
             1,
-            Duration::from_secs(60),
         ));
         let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
         wait_for_state(&host, &reloaded, TrustState::Ready);
@@ -9647,7 +9670,8 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         ops.reload_schema_apply_failure
             .store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _initial_lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9686,7 +9710,8 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         ops.reload_schema_apply_failure
             .store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9795,7 +9820,8 @@ mod tests {
     #[test]
     fn the_status_of_a_ready_entry_reports_ready_and_adds_no_demand() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9824,7 +9850,8 @@ mod tests {
     #[test]
     fn a_status_holds_no_demand_so_an_idle_entry_is_still_reaped() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         let released = Instant::now();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -9845,7 +9872,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.heal_in_attach.store(true, Ordering::SeqCst);
         ops.block_attach.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
 
@@ -9863,7 +9891,8 @@ mod tests {
     fn the_status_of_an_untrusted_entry_reports_its_reason() {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         let untrusted = TrustState::untrusted(UntrustedReason::schema_unreadable(
             "this fake withholds trust",
@@ -9883,7 +9912,8 @@ mod tests {
     fn the_status_of_an_entry_parked_maintainer_contended_reports_the_park() {
         let ops = Arc::new(FakeOps::default());
         ops.contend_attach.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_park(
             &host,
@@ -9911,7 +9941,11 @@ mod tests {
             let root = scratch.root().join("root");
             let ops = Arc::new(FakeOps::default());
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &root)]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, &root)]),
+                2,
+            );
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let parked = park_entry(&host, &name, &root, park);
@@ -9935,7 +9969,8 @@ mod tests {
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
         ops.reload_schema_apply_failure
             .store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
@@ -9963,7 +9998,8 @@ mod tests {
     fn the_status_reports_why_an_entrys_reads_refuse() {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -9979,13 +10015,15 @@ mod tests {
     /// root is refused as the throwaway attach it asks for.
     #[test]
     fn a_status_refuses_an_unknown_name_and_a_root() {
-        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
+        let notes = VaultName::new("notes").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[&notes]), 1);
         let unregistered = VaultName::new("elsewhere").unwrap();
         assert_eq!(
             status_refused(&host, &status_params(&unregistered)),
             ErrorDetail::unknown_vault(unregistered)
         );
-        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap();
+        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-notes").unwrap();
         assert_eq!(
             status_refused(
                 &host,
@@ -9999,7 +10037,8 @@ mod tests {
     /// none wanting attention.
     #[test]
     fn a_host_serving_nothing_rolls_up_to_nothing() {
-        let host = host_without_ambient_polling(Arc::new(FakeOps::default()), &[], 1);
+        let host =
+            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[]), 1);
         let roll_up = rolled_up(&host);
         assert_eq!(roll_up, norn_wire::RollUp::of(&[]));
         assert_eq!(roll_up.vaults(), 0);
@@ -10016,7 +10055,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[&ready, &idle, &parked, &untrusted],
+            Roots::Absent(&[&ready, &idle, &parked, &untrusted]),
             1,
         );
 
@@ -10088,12 +10127,13 @@ mod tests {
         let scratch = temp_base("doctor-sound");
         let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[
+            Roots::Created(&[
                 (&beta, &scratch.root().join("beta")),
                 (&alpha, &scratch.root().join("alpha")),
-            ],
+            ]),
+            2,
         );
         let _lease = host.demand(&alpha, AttachMode::Durable).unwrap();
         wait_for_state(&host, &alpha, TrustState::Ready);
@@ -10149,9 +10189,10 @@ mod tests {
             scratch.root().join("exposed"),
         );
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&ignoring, &ignoring_root), (&exposed, &exposed_root)],
+            Roots::Created(&[(&ignoring, &ignoring_root), (&exposed, &exposed_root)]),
+            2,
         );
         std::fs::write(ignoring_root.join(".gitignore"), "/.norn/\n").unwrap();
         *ops.advisories.lock().unwrap() = vec![falling_back()];
@@ -10217,7 +10258,11 @@ mod tests {
             scratch.root().join("covered"),
         );
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, &registered)]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, &registered)]),
+            2,
+        );
         std::fs::create_dir_all(&covered).unwrap();
         std::fs::write(registered.join(".gitignore"), "notes/\n").unwrap();
         std::fs::write(covered.join(".gitignore"), "/.norn/\n").unwrap();
@@ -10248,25 +10293,18 @@ mod tests {
         std::os::unix::fs::symlink(&shared, &alias).unwrap();
         let [alpha, beta, gone] =
             ["alpha", "beta", "gone"].map(|name| VaultName::new(name).unwrap());
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
-            RegistryEntry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
-            RegistryEntry::new(
-                gone.clone(),
-                VaultRoot::new(scratch.root().join("gone")).unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
+        let host = host_without_ambient_polling(
             Arc::new(FakeOps::default()),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+            Roots::Registered(&[
+                RegistryEntry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
+                RegistryEntry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
+                RegistryEntry::new(
+                    gone.clone(),
+                    VaultRoot::new(scratch.root().join("gone")).unwrap(),
+                ),
+            ]),
+            1,
+        );
 
         for name in [&alpha, &beta] {
             drop(host.demand(name, AttachMode::Durable).unwrap());
@@ -10327,7 +10365,9 @@ mod tests {
     /// name**, whether the request activates or only validates.
     #[test]
     fn vault_reload_refuses_an_unregistered_name_as_unknown() {
-        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
+        let notes = VaultName::new("notes").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[&notes]), 1);
         let unregistered = VaultName::new("elsewhere").unwrap();
         for dry_run in [false, true] {
             assert_eq!(
@@ -10341,8 +10381,10 @@ mod tests {
     /// no control files to re-read.
     #[test]
     fn vault_reload_refuses_a_root_as_an_unsupported_attach() {
-        let (host, _) = fixture_without_ambient_polling(Arc::new(FakeOps::default()));
-        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap();
+        let notes = VaultName::new("notes").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::new(FakeOps::default()), Roots::Absent(&[&notes]), 1);
+        let root = norn_wire::VaultRoot::new("/tmp/norn-host-lifecycle-notes").unwrap();
         for dry_run in [false, true] {
             let params = norn_wire::ReloadParams::new(norn_wire::VaultAddress::root(root.clone()));
             let params = if dry_run { params.dry_run() } else { params };
@@ -10358,7 +10400,8 @@ mod tests {
     fn vault_reload_refuses_an_unattached_entry_as_not_ready() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         for dry_run in [false, true] {
             assert_eq!(
                 reload_refused(&host, &reload_params(&name, dry_run)),
@@ -10397,7 +10440,8 @@ mod tests {
     fn vault_reload_refuses_an_entry_parked_on_a_duplicate_root_with_its_aliases() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let conflict = conflict_over(&name);
@@ -10426,7 +10470,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.contend_attach.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_park(
             &host,
@@ -10475,7 +10520,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.block_reload.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -10500,7 +10546,8 @@ mod tests {
     #[test]
     fn vault_reload_refuses_an_attachment_without_a_reload_as_unsupported() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         for dry_run in [false, true] {
@@ -10520,7 +10567,8 @@ mod tests {
     fn a_reload_that_meets_store_damage_owes_rung_three_in_either_mode() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let detail = "the reloaded database disagrees with its own schema";
@@ -10558,7 +10606,8 @@ mod tests {
     fn a_reload_that_lost_maintainership_releases_the_entry_in_either_mode() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -10598,7 +10647,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         *ops.store_reading_at_attach.lock().unwrap() = Some(fake_reading(3));
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(recorded_store_reading(&host, &name), Some(fake_reading(3)));
@@ -10620,7 +10670,8 @@ mod tests {
     #[test]
     fn only_a_leg_the_entry_stands_at_records_a_store_reading() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -10643,7 +10694,8 @@ mod tests {
     fn a_reload_whose_leg_unwinds_answers_the_reading_the_unwind_published() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -10677,35 +10729,6 @@ mod tests {
             assert_eq!(answered, expected);
         }
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
-    }
-
-    /// Vaults over roots of their own, each `Ready`, on a host with one worker
-    /// and no dispatcher tick of its own, so a job blocked on one entry holds
-    /// every other entry's job behind it for as long as a case drives, and no
-    /// ambient poll holds an entry a case asks a reload of.
-    #[cfg(unix)]
-    fn one_worker_host_over(
-        ops: &Arc<FakeOps>,
-        base: &std::path::Path,
-        names: &[&VaultName],
-    ) -> Arc<Host<Arc<FakeOps>>> {
-        let roots: Vec<_> = names.iter().map(|name| base.join(name.as_str())).collect();
-        let pairs: Vec<_> = names
-            .iter()
-            .copied()
-            .zip(roots.iter().map(std::path::PathBuf::as_path))
-            .collect();
-        let host = Arc::new(rooted_host(
-            Arc::clone(ops),
-            &pairs,
-            1,
-            Duration::from_secs(60),
-        ));
-        for name in names {
-            drop(host.demand(name, AttachMode::Durable).unwrap());
-            wait_for_state(&host, name, TrustState::Ready);
-        }
-        host
     }
 
     /// Ask `vault reload` of `name` on a thread of its own.
@@ -10779,7 +10802,20 @@ mod tests {
             let holding = VaultName::new("holding").unwrap();
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+            let queued_root = scratch.root().join("queued");
+            let holding_root = scratch.root().join("holding");
+            let host = Arc::new(host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[
+                    (&queued, queued_root.as_path()),
+                    (&holding, holding_root.as_path()),
+                ]),
+                1,
+            ));
+            for name in [&queued, &holding] {
+                drop(host.demand(name, AttachMode::Durable).unwrap());
+                wait_for_state(&host, name, TrustState::Ready);
+            }
             ops.block_reload.store(true, Ordering::SeqCst);
             let held = reload_on_a_thread(&host, &holding, dry_run);
             wait_for_flag("reload_started", &ops.reload_started);
@@ -10829,7 +10865,22 @@ mod tests {
             let filling = VaultName::new("filling").unwrap();
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding, &filling]);
+            let queued_root = scratch.root().join("queued");
+            let holding_root = scratch.root().join("holding");
+            let filling_root = scratch.root().join("filling");
+            let host = Arc::new(host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[
+                    (&queued, queued_root.as_path()),
+                    (&holding, holding_root.as_path()),
+                    (&filling, filling_root.as_path()),
+                ]),
+                1,
+            ));
+            for name in [&queued, &holding, &filling] {
+                drop(host.demand(name, AttachMode::Durable).unwrap());
+                wait_for_state(&host, name, TrustState::Ready);
+            }
             ops.block_reload.store(true, Ordering::SeqCst);
             let held = reload_on_a_thread(&host, &holding, dry_run);
             wait_for_flag("reload_started", &ops.reload_started);
@@ -10891,7 +10942,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
@@ -10941,7 +10993,8 @@ mod tests {
         for dry_run in [false, true] {
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let _lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             host.shared.jobs.lock().unwrap().take();
@@ -11095,6 +11148,15 @@ mod tests {
     /// watcher poll, so the dispatcher has to be ticking.
     fn polling_fixture(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
         fixture(ops, Duration::from_secs(60))
+    }
+
+    /// The host a teardown the case provokes itself runs on: no dispatcher
+    /// tick polls the entry, so no stale poll's release reaches the fake ahead
+    /// of the leg under test.
+    fn driven_leg_fixture(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(ops, Roots::Absent(&[&name]), 1);
+        (host, name)
     }
 
     /// How many watcher polls have reached the vault.
@@ -11265,7 +11327,7 @@ mod tests {
     #[test]
     fn a_recover_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.lost_recover.store(true, Ordering::SeqCst),
             by_a_demanded_recovery,
         );
@@ -11274,7 +11336,7 @@ mod tests {
     #[test]
     fn a_recover_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.contend_recover.store(true, Ordering::SeqCst),
             by_a_demanded_recovery,
         );
@@ -11283,7 +11345,7 @@ mod tests {
     #[test]
     fn a_reconcile_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.lost_reconcile.store(true, Ordering::SeqCst),
             by_a_reconciled_batch,
         );
@@ -11292,7 +11354,7 @@ mod tests {
     #[test]
     fn a_reconcile_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.contend_reconcile.store(true, Ordering::SeqCst),
             by_a_reconciled_batch,
         );
@@ -11301,7 +11363,7 @@ mod tests {
     #[test]
     fn a_maintenance_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.lost_maintenance.store(true, Ordering::SeqCst),
             by_due_maintenance,
         );
@@ -11310,7 +11372,7 @@ mod tests {
     #[test]
     fn a_maintenance_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
-            fixture_without_ambient_polling,
+            driven_leg_fixture,
             |ops| ops.contend_maintenance.store(true, Ordering::SeqCst),
             by_due_maintenance,
         );
@@ -11325,27 +11387,7 @@ mod tests {
     fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(
-                a.clone(),
-                VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
-            ),
-            RegistryEntry::new(
-                b.clone(),
-                VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
-            ),
-        ]);
-        let host = Host::new(
-            registry,
-            ops,
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+        let host = host_without_ambient_polling(ops, Roots::Absent(&[&a, &b]), 2);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         drop(host.demand(&b, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
@@ -11436,7 +11478,8 @@ mod tests {
     #[test]
     fn a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11486,7 +11529,8 @@ mod tests {
     #[test]
     fn a_window_opened_over_a_stale_poll_already_detaching_closes_on_nothing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11533,7 +11577,8 @@ mod tests {
     #[test]
     fn a_window_opened_over_a_stale_job_leg_already_detaching_closes_on_nothing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11599,7 +11644,8 @@ mod tests {
     #[test]
     fn a_leg_that_unwinds_leaves_the_entry_untrusted_and_a_demand_attaches_it_again() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11651,7 +11697,8 @@ mod tests {
     #[test]
     fn a_recovery_that_unwinds_leaves_the_entry_owing_no_rung() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11700,7 +11747,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&a, &b]), 1);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
 
@@ -11725,7 +11772,11 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let ops = Arc::new(FakeOps::default());
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&a, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&a, root.as_path())]),
+            2,
+        );
 
         ops.panic_in_attach.store(true, Ordering::SeqCst);
         drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -11824,7 +11875,8 @@ mod tests {
     #[test]
     fn a_leg_that_unwinds_under_an_open_release_window_still_finishes_the_release() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -11880,7 +11932,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("z").unwrap();
         let bystander = VaultName::new("a").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&name, &bystander], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &bystander]), 1);
         let entry = host.shared.entries.get(&name).expect("z is registered");
 
         *ops.panic_in_attach_at.lock().unwrap() = Some(name.clone());
@@ -11951,11 +12004,10 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let ops = Arc::new(FakeOps::default());
-        let host = rooted_host(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, root_a.as_path()), (&b, root_b.as_path())],
+            Roots::Created(&[(&a, root_a.as_path()), (&b, root_b.as_path())]),
             1,
-            Duration::from_secs(60),
         );
         drop(host.demand(&a, AttachMode::Durable).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
@@ -12011,7 +12063,8 @@ mod tests {
     #[test]
     fn a_poisoned_attach_gate_still_answers_through_the_accessor() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
 
         let shared = Arc::clone(&host.shared);
         let poisoned = thread::spawn(move || {
@@ -12050,7 +12103,7 @@ mod tests {
     fn a_detach_panic_under_a_read_completes_the_release_with_the_reads_pin_standing() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -12094,7 +12147,7 @@ mod tests {
     fn an_attach_that_unwinds_gives_back_no_pin_it_never_took() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject]), 1);
         drop(host.demand(&subject, AttachMode::Durable).unwrap());
         wait_for_state(&host, &subject, TrustState::Ready);
         let entry = host.shared.entries.get(&subject).unwrap();
@@ -12147,7 +12200,8 @@ mod tests {
     #[test]
     fn a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).unwrap();
@@ -12185,7 +12239,8 @@ mod tests {
     #[test]
     fn an_unwound_leg_gives_the_ops_their_per_vault_residue_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -12236,7 +12291,8 @@ mod tests {
     #[test]
     fn a_detach_that_panics_gives_the_ops_their_residue_back_through_discard() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -12408,7 +12464,8 @@ mod tests {
     #[test]
     fn an_identity_refusal_over_a_leg_standing_at_parked_coverage_releases_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -12484,7 +12541,8 @@ mod tests {
     #[test]
     fn a_rebuild_requirement_does_not_outlive_the_coverage_a_refusal_gives_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -13069,9 +13127,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         // Only b is attached, so the coverage the poll below reports on is b's.
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13121,9 +13180,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
@@ -13173,9 +13233,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
@@ -13235,9 +13296,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13304,9 +13366,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13366,7 +13429,11 @@ mod tests {
         let previous = scratch.root().join("previous");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -13408,7 +13475,11 @@ mod tests {
         let root = scratch.root().join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -13455,9 +13526,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = quiet_host_over_roots(
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+            Roots::Created(&[(&a, a_root.as_path()), (&b, b_root.as_path())]),
+            2,
         );
 
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
@@ -13670,7 +13742,8 @@ mod tests {
     #[test]
     fn a_job_leg_release_honors_a_demand_with_a_claimed_re_attach() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -13737,8 +13810,11 @@ mod tests {
         let working = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let holding_too = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding, &holding_too], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &holding, &holding_too]),
+            2,
+        );
         let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -13918,7 +13994,8 @@ mod tests {
     #[test]
     fn destruction_releases_before_it_publishes_unattached() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -13945,7 +14022,8 @@ mod tests {
     #[test]
     fn destruction_and_the_leg_it_waits_for_converge_on_one_release() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -14000,7 +14078,8 @@ mod tests {
     #[test]
     fn destruction_leaves_coverage_out_with_a_leg_to_that_leg() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
@@ -14062,7 +14141,8 @@ mod tests {
     #[test]
     fn a_refused_take_leaves_the_record_of_the_leg_holding_the_coverage() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
@@ -14152,7 +14232,8 @@ mod tests {
     #[test]
     fn a_poll_whose_registration_was_taken_over_gives_its_pin_back_when_it_unwinds() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
@@ -14223,7 +14304,8 @@ mod tests {
     #[test]
     fn a_job_that_unwinds_after_a_poll_took_its_registration_over_leaves_the_polls_pin() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
@@ -14298,7 +14380,8 @@ mod tests {
     #[test]
     fn destruction_gives_back_an_attachment_a_finished_job_left_behind() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         {
@@ -14447,7 +14530,8 @@ mod tests {
     #[test]
     fn a_reconcile_records_the_advisories_its_rescan_leaves() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         *ops.advisories.lock().unwrap() = vec![linked("before.md")];
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -14746,7 +14830,8 @@ mod tests {
     #[test]
     fn reconcile_handoff_saturation_requires_an_additional_reconcile_before_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -14766,7 +14851,8 @@ mod tests {
     #[test]
     fn reconcile_handoff_saturation_preserves_observed_rescan_as_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -14976,7 +15062,8 @@ mod tests {
     #[test]
     fn a_read_that_meets_damage_publishes_it_and_schedules_the_rebuild() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
@@ -15022,7 +15109,8 @@ mod tests {
     #[test]
     fn a_read_that_meets_damage_under_a_held_claim_publishes_nothing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -15078,7 +15166,8 @@ mod tests {
     #[test]
     fn damage_a_read_meets_under_a_held_reconcile_reaches_the_rebuild_when_it_ends() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -15130,7 +15219,8 @@ mod tests {
     #[test]
     fn a_read_that_meets_damage_on_a_replaced_handle_publishes_nothing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -15176,7 +15266,8 @@ mod tests {
     #[test]
     fn a_read_that_meets_damage_already_published_answers_it_and_schedules_nothing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
@@ -15328,7 +15419,8 @@ mod tests {
     #[test]
     fn a_rebuild_over_coverage_whose_trust_is_withheld_publishes_the_withheld_reason() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -15482,7 +15574,8 @@ mod tests {
     fn damage_a_reload_reports_refuses_the_caller_and_reaches_rung_three() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -15648,7 +15741,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let damaged = VaultName::new("damaged").unwrap();
         let sibling = VaultName::new("sibling").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&damaged, &sibling], 2);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&damaged, &sibling]), 2);
         drop(host.demand(&damaged, AttachMode::Durable).unwrap());
         drop(host.demand(&sibling, AttachMode::Durable).unwrap());
         wait_for_state(&host, &damaged, TrustState::Ready);
@@ -16012,7 +16106,8 @@ mod tests {
     #[test]
     fn a_release_owing_undemanded_recovery_schedules_no_reattach() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let held = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).unwrap();
@@ -16494,7 +16589,8 @@ mod tests {
     #[test]
     fn shutdown_after_a_dispatch_takes_the_slot_gives_the_slot_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let entry = host.shared.entries.get(&name).unwrap();
         let epoch = {
             let mut state = entry.gate.lock().unwrap();
@@ -16526,7 +16622,8 @@ mod tests {
     #[test]
     fn a_disconnected_dispatch_gives_its_queue_slot_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let entry = host.shared.entries.get(&name).unwrap();
         {
             let mut state = entry.gate.lock().unwrap();
@@ -16555,7 +16652,8 @@ mod tests {
     #[test]
     fn a_dispatch_with_no_sender_gives_its_queue_slot_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let entry = host.shared.entries.get(&name).unwrap();
         {
             let mut state = entry.gate.lock().unwrap();
@@ -16582,7 +16680,8 @@ mod tests {
     #[test]
     fn a_disconnected_follow_up_gives_its_queue_slot_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let entry = host.shared.entries.get(&name).unwrap();
         let job = {
             let mut state = entry.gate.lock().unwrap();
@@ -16817,7 +16916,8 @@ mod tests {
     #[test]
     fn a_superseded_job_leg_gives_the_entry_back_and_schedules_the_lease_on_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -16878,7 +16978,8 @@ mod tests {
     #[test]
     fn a_lease_held_across_a_terminal_attach_does_not_re_acquire_coverage() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         ops.terminal_attach.store(true, Ordering::SeqCst);
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -16919,7 +17020,8 @@ mod tests {
     #[test]
     fn an_identity_refusal_drops_work_scheduled_against_the_poll_it_invalidates() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -17278,7 +17380,11 @@ mod tests {
         let previous = scratch.root().join("previous");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            2,
+        );
 
         ops.block_attach.store(true, Ordering::SeqCst);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -17311,26 +17417,14 @@ mod tests {
         let base = scratch.root();
         let healthy_root = base.join("healthy");
         let refused_root = base.join("refused");
-        std::fs::create_dir_all(&healthy_root).unwrap();
-        std::fs::create_dir_all(&refused_root).unwrap();
         let ops = Arc::new(FakeOps::default());
         let healthy = VaultName::new("healthy").unwrap();
         let refused = VaultName::new("refused").unwrap();
-        let registry = RegistryRead::from_entries([
-            RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
-            RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
-        ]);
-        let host = Host::new(
-            registry,
+        let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 2,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
-            },
-        )
-        .unwrap();
+            Roots::Created(&[(&healthy, &healthy_root), (&refused, &refused_root)]),
+            2,
+        );
         let healthy_lease = host.demand(&healthy, AttachMode::Durable).unwrap();
         let refused_lease = host.demand(&refused, AttachMode::Durable).unwrap();
         wait_for_state(&host, &healthy, TrustState::Ready);
@@ -17458,19 +17552,12 @@ mod tests {
     /// under test is the one the case calls, at the moment it calls it.
     fn fixture_reaped_on_demand(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
-        let entry = RegistryEntry::new(
-            name.clone(),
-            VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
-        );
-        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
-            registry,
+            Roots::Absent(&[&name]).registry(),
             ops,
             LifecyclePolicy {
                 idle_after: Duration::ZERO,
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
-                read_settle_bound: crate::READ_SETTLE_BOUND,
+                ..no_ambient_poll_policy(1)
             },
         )
         .unwrap();
@@ -17485,7 +17572,8 @@ mod tests {
     #[test]
     fn an_attach_publishes_a_reader_beside_the_coverage_it_installs() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -17574,7 +17662,8 @@ mod tests {
     fn an_attach_the_entry_moved_on_from_mints_no_reader() {
         let ops = Arc::new(FakeOps::default());
         ops.readers.mint_statements.store(2, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         ops.block_attach.store(true, Ordering::SeqCst);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_flag("attach_started", &ops.attach_started);
@@ -17641,7 +17730,8 @@ mod tests {
     #[test]
     fn a_refusal_over_a_leg_holding_the_coverage_closes_the_reader_at_the_window() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -17684,7 +17774,8 @@ mod tests {
     #[test]
     fn an_identity_refusal_closes_the_reader_it_gives_the_coverage_back_with() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -17707,7 +17798,8 @@ mod tests {
     #[test]
     fn an_identity_refusal_over_a_leg_holding_the_coverage_closes_the_reader() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -17792,7 +17884,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("working").unwrap();
         let occupied = VaultName::new("occupied").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &occupied]),
+            1,
+        );
         drop(host.demand(&working, AttachMode::Durable).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -17884,7 +17980,8 @@ mod tests {
     #[test]
     fn a_read_over_an_unattached_entry_schedules_the_attach_and_refuses_warming() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
 
         let refusal = host
             .begin_read(&name)
@@ -17919,7 +18016,8 @@ mod tests {
     #[test]
     fn an_entry_only_reads_touch_is_not_reaped_across_the_detach_horizon() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18027,7 +18125,8 @@ mod tests {
     #[test]
     fn an_establishment_that_refuses_reads_as_reader_unavailable() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.establish_fails.store(true, Ordering::SeqCst);
@@ -18061,7 +18160,8 @@ mod tests {
     #[test]
     fn a_read_runs_only_its_establishment_under_the_gate() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18114,7 +18214,8 @@ mod tests {
     #[test]
     fn a_read_that_heals_an_empty_slot_accounts_for_the_mint_it_ran() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -18191,7 +18292,8 @@ mod tests {
     #[test]
     fn a_read_refused_by_its_establishment_accounts_for_what_that_establishment_ran() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -18249,7 +18351,8 @@ mod tests {
     #[test]
     fn a_read_refused_by_its_mint_accounts_for_what_that_mint_ran() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -18310,7 +18413,8 @@ mod tests {
     #[test]
     fn the_establishing_statement_runs_while_the_acquisition_holds_the_entry_gate() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -18357,7 +18461,8 @@ mod tests {
     fn the_read_account_moves_only_where_a_read_is_served() {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18383,7 +18488,8 @@ mod tests {
         // The number is this case's own, so nothing else either account
         // counts produces it.
         ops.readers.mint_statements.store(2, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18409,7 +18515,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.readers.mint_statements.store(2, Ordering::SeqCst);
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18430,7 +18537,8 @@ mod tests {
     fn a_leg_that_parks_coverage_accounts_for_the_mint_it_ran() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
@@ -18477,7 +18585,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
@@ -18508,7 +18617,8 @@ mod tests {
     fn a_rebuild_accounts_its_mint_to_the_job_account() {
         let ops = Arc::new(FakeOps::default());
         ops.readers.mint_statements.store(3, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -18536,7 +18646,8 @@ mod tests {
     #[test]
     fn a_recovery_over_an_empty_slot_accounts_its_mint_to_the_job_account() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
@@ -18632,7 +18743,8 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
             ops.reload_schema_changed.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             ops.readers.mint_statements.store(3, Ordering::SeqCst);
@@ -18683,7 +18795,8 @@ mod tests {
     #[test]
     fn a_read_whose_mint_unwinds_under_the_gate_poisons_it_rather_than_holding_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
@@ -18769,7 +18882,8 @@ mod tests {
     #[test]
     fn an_unwind_in_a_reads_wait_gives_its_lease_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
@@ -18839,7 +18953,8 @@ mod tests {
     #[test]
     fn an_unwind_on_a_gate_poisoned_during_a_reads_wait_gives_its_lease_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let (entry, mut first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
 
@@ -18879,7 +18994,8 @@ mod tests {
     #[test]
     fn an_unwind_on_a_serving_set_poisoned_during_a_reads_wait_gives_its_lease_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let (entry, mut first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
 
@@ -18925,7 +19041,8 @@ mod tests {
     #[test]
     fn a_read_that_unwinds_over_a_poisoned_gate_gives_its_hold_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -18966,7 +19083,8 @@ mod tests {
     #[test]
     fn a_read_whose_establishment_unwinds_after_its_wait_poisons_the_gate_rather_than_holding_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let (entry, mut first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
         ops.readers.establish_panics.store(true, Ordering::SeqCst);
@@ -19004,7 +19122,8 @@ mod tests {
     #[test]
     fn a_refusal_under_the_gate_gives_its_lease_back_in_the_same_hold() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         let (entry, first, waiting) = a_read_waiting_behind_another(&host, &name, &ops);
         let before = entry.gate.times_taken();
@@ -19144,7 +19263,8 @@ mod tests {
     #[test]
     fn a_read_waiting_for_the_entrys_connection_leaves_every_other_surface_answering() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let host = Arc::new(host);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
@@ -19243,7 +19363,8 @@ mod tests {
     #[test]
     fn a_read_waiting_for_the_entrys_connection_is_counted_before_it_is_let_through() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -19310,7 +19431,8 @@ mod tests {
     #[test]
     fn a_read_that_waited_for_the_connection_refuses_where_the_entry_stopped_serving() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -19425,7 +19547,8 @@ mod tests {
     fn a_change_after_a_declaration_no_recovery_could_read_makes_the_next_read_recover() {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(
@@ -19466,7 +19589,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
@@ -19495,7 +19619,8 @@ mod tests {
     fn withheld_and_refused_to_a_read() -> (Arc<FakeOps>, Host<Arc<FakeOps>>, VaultName) {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_withheld_trust(&host, &name);
         assert_eq!(
@@ -19570,7 +19695,8 @@ mod tests {
     fn a_read_over_an_entry_whose_trust_is_withheld_refuses_and_mints_nothing() {
         let ops = Arc::new(FakeOps::default());
         ops.withholds_trust.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_until(
             "the entry to publish the withheld trust its attach carried",
@@ -19654,7 +19780,8 @@ mod tests {
     #[test]
     fn a_read_that_waited_acquires_the_handle_that_replaced_the_one_it_waited_for() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -19735,25 +19862,20 @@ mod tests {
     /// read answering inside a case was woken rather than timed out.
     const LONG_SETTLE: Duration = Duration::from_secs(60);
 
-    /// The fixture without ambient polling, with the read settle bound a case
-    /// names.
+    /// One vault, `notes`, over an absent root, on a host with one worker
+    /// whose dispatcher never ticks inside a case's own run, and whose reads
+    /// settle within the bound a case names.
     fn fixture_settling_within(
         ops: Arc<FakeOps>,
         read_settle_bound: Duration,
     ) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
-        let entry = RegistryEntry::new(
-            name.clone(),
-            VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
-        );
         let host = Host::new(
-            RegistryRead::from_entries([entry]),
+            Roots::Absent(&[&name]).registry(),
             ops,
             LifecyclePolicy {
-                idle_after: Duration::from_secs(60),
-                worker_slots: 1,
-                watch_poll_interval: Duration::from_secs(60),
                 read_settle_bound,
+                ..no_ambient_poll_policy(1)
             },
         )
         .unwrap();
@@ -20238,7 +20360,8 @@ mod tests {
     #[test]
     fn a_lease_dropped_under_a_held_gate_goes_back_with_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -20276,7 +20399,8 @@ mod tests {
     #[test]
     fn a_lease_dropped_under_a_held_gate_restarts_the_idle_interval_from_its_drop() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
@@ -20476,7 +20600,8 @@ mod tests {
     #[test]
     fn a_reconcile_turn_is_handed_the_facts_the_entry_took_in() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_fact_poll_batches);
@@ -20554,11 +20679,26 @@ mod tests {
             .entries
             .get(&subject)
             .expect("the entry is served");
-        let job = {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.detach_due = true;
-            schedule(&mut state, &subject)
-        };
+        // A watcher poll holds the entry's claim and takes its coverage out
+        // while it runs, and a leg scheduled under that poll finds neither.
+        // The leg is scheduled under the lock that finds the claim free and
+        // the coverage in hand, and the claim it schedules keeps any poll off
+        // the entry from then until the leg runs.
+        let mut schedule = Some(schedule);
+        let job = wait_until(
+            "a watcher poll to give the entry's claim and coverage back",
+            lifecycle_wait_budget(),
+            || {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if state.claim.is_held() || !state.coverage.in_hand() {
+                    return Observed::pending("the claim is held or the coverage is out");
+                }
+                state.detach_due = true;
+                let schedule = schedule.take().expect("the leg is scheduled once");
+                Observed::Met(schedule(&mut state, &subject))
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         run_job(&host.shared, job);
         assert!(
             entry
@@ -21539,7 +21679,8 @@ mod tests {
     #[test]
     fn concurrent_reads_share_the_entrys_one_reader() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -21590,7 +21731,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         drop(
@@ -21638,7 +21780,8 @@ mod tests {
     #[test]
     fn a_read_over_a_parked_entry_refuses_with_the_park_and_leaves_it_standing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let entry = host
@@ -21688,7 +21831,8 @@ mod tests {
     fn a_leg_that_parks_coverage_publishes_the_reason_its_mint_refused_with() {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -21733,7 +21877,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.reload_supported.store(true, Ordering::SeqCst);
         ops.reload_schema_changed.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -21798,7 +21943,8 @@ mod tests {
     fn a_read_seam_that_failed_heals_on_the_next_read_after_the_environment_recovers() {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert!(matches!(
@@ -21856,7 +22002,8 @@ mod tests {
     fn a_read_over_a_seam_the_environment_still_refuses_is_refused_with_the_mint_s_own_reason() {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -21891,7 +22038,8 @@ mod tests {
     #[test]
     fn a_reader_a_read_is_running_on_outlives_the_entrys_own() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -21948,7 +22096,8 @@ mod tests {
     #[test]
     fn a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22010,7 +22159,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&a, &b]), 1);
         // One vault attaches at a time: the single queue slot this fixture
         // gives is the one the attaches would otherwise contend for, and a
         // send this fixture refuses waits for a tick a minute away.
@@ -22083,7 +22232,8 @@ mod tests {
     #[test]
     fn a_claim_that_loses_coverage_drops_the_job_that_was_waiting_on_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22140,7 +22290,8 @@ mod tests {
     #[test]
     fn a_claim_that_refuses_environmentally_drops_the_job_that_was_waiting_on_it() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22197,7 +22348,8 @@ mod tests {
     #[test]
     fn a_release_takes_the_marker_of_the_job_that_was_waiting_on_the_claim() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         // No lease stands over the release below, so the release publishes
         // Unattached and schedules nothing: what the entry is left holding is
         // the whole of what this test reads.
@@ -22257,7 +22409,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&subject, &holding]), 1);
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22339,8 +22492,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &holding, &attaching]),
+            2,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22418,8 +22574,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &holding, &attaching]),
+            2,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22486,8 +22645,11 @@ mod tests {
         let subject = VaultName::new("a").unwrap();
         let working = VaultName::new("b").unwrap();
         let waiting = VaultName::new("c").unwrap();
-        let host =
-            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &working, &waiting], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &working, &waiting]),
+            1,
+        );
         let lease = host.demand(&subject, AttachMode::Durable).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
 
@@ -22588,7 +22750,7 @@ mod tests {
         let second_slot = VaultName::new("c").unwrap();
         let host = host_without_ambient_polling(
             Arc::clone(&ops),
-            &[&working, &first_slot, &second_slot],
+            Roots::Absent(&[&working, &first_slot, &second_slot]),
             2,
         );
         let lease = host.demand(&working, AttachMode::Durable).unwrap();
@@ -22648,7 +22810,8 @@ mod tests {
     #[test]
     fn a_poll_end_leaves_the_job_leg_a_release_window_waits_on() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22694,7 +22857,8 @@ mod tests {
     #[test]
     fn a_stale_arrival_gives_its_marker_back_to_the_leg_running_against_the_entry() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22752,7 +22916,8 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding], 1);
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&working, &holding]), 1);
         let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
         let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
@@ -22803,7 +22968,8 @@ mod tests {
     #[test]
     fn a_tick_passes_over_an_entry_a_marker_holds() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22844,7 +23010,8 @@ mod tests {
     #[test]
     fn a_job_that_lost_its_coverage_leaves_a_newer_marker_standing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -22900,7 +23067,11 @@ mod tests {
         let first = VaultName::new("a").unwrap();
         let second = VaultName::new("b").unwrap();
         let working = VaultName::new("c").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&first, &second, &working], 2);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&first, &second, &working]),
+            2,
+        );
         for name in [&first, &second, &working] {
             drop(host.demand(name, AttachMode::Durable).unwrap());
             wait_for_state(&host, name, TrustState::Ready);
@@ -22977,7 +23148,8 @@ mod tests {
     #[test]
     fn a_polled_rescan_publishes_the_overflow_and_schedules_its_reconcile() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -23011,7 +23183,8 @@ mod tests {
     #[test]
     fn a_polled_batch_without_a_rescan_publishes_healing() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -23118,7 +23291,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("working").unwrap();
         let occupied = VaultName::new("occupied").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&working, &occupied]),
+            1,
+        );
         drop(host.demand(&working, AttachMode::Durable).unwrap());
         wait_for_state(&host, &working, TrustState::Ready);
 
@@ -23198,7 +23375,8 @@ mod tests {
         coverage: bool,
         recovery: bool,
     ) -> (Host<Arc<FakeOps>>, VaultName) {
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&name]), 1);
         if coverage {
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
@@ -23335,7 +23513,8 @@ mod tests {
     #[test]
     fn a_poll_carrying_facts_runs_the_maintenance_it_found_due() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciles = ops.reconciles.load(Ordering::SeqCst);
@@ -23362,7 +23541,8 @@ mod tests {
     #[test]
     fn maintenance_that_derived_nothing_publishes_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -23389,7 +23569,8 @@ mod tests {
     #[test]
     fn a_reconcile_that_keeps_finding_facts_yields_to_due_maintenance() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         let reconciles = ops.reconciles.load(Ordering::SeqCst);
@@ -23584,7 +23765,8 @@ mod tests {
         #[test]
         fn an_inserted_vault_attaches_like_a_registered_one() {
             let ops = Arc::new(FakeOps::default());
-            let (host, served) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let served = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&served]), 1);
             let joined = VaultName::new("joined").unwrap();
             assert_eq!(
                 host.demand(&joined, AttachMode::Durable).unwrap().outcome(),
@@ -23672,7 +23854,8 @@ mod tests {
         #[test]
         fn a_name_the_set_serves_is_not_inserted_over() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             assert_eq!(
@@ -23698,7 +23881,8 @@ mod tests {
         #[test]
         fn a_removed_vault_is_unknown_to_the_next_demand() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
 
             host.shared
                 .entries
@@ -23731,7 +23915,8 @@ mod tests {
         #[test]
         fn a_removed_entry_answers_its_holder_as_the_set_does() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             host.shared
@@ -23759,7 +23944,8 @@ mod tests {
         #[test]
         fn a_withdrawn_entry_is_removed_as_it_stands() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -23794,8 +23980,11 @@ mod tests {
             let leaving = VaultName::new("leaving").unwrap();
             let occupied = VaultName::new("occupied").unwrap();
             let after = VaultName::new("after").unwrap();
-            let host =
-                host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &occupied, &after], 1);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Absent(&[&leaving, &occupied, &after]),
+                1,
+            );
 
             // The one worker, held inside an attach: the job the demand below
             // dispatches waits in the channel for the whole of the sequence.
@@ -23870,7 +24059,11 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let leaving = VaultName::new("leaving").unwrap();
             let bystander = VaultName::new("bystander").unwrap();
-            let host = host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &bystander], 1);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Absent(&[&leaving, &bystander]),
+                1,
+            );
             let epoch = host
                 .shared
                 .entries
@@ -23906,7 +24099,8 @@ mod tests {
         #[test]
         fn a_name_the_set_never_served_is_removed_by_answering() {
             let ops = Arc::new(FakeOps::default());
-            let (host, served) = fixture_without_ambient_polling(ops);
+            let served = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(ops, Roots::Absent(&[&served]), 1);
             let absent = VaultName::new("absent").unwrap();
 
             assert_eq!(
@@ -23930,7 +24124,8 @@ mod tests {
         #[test]
         fn an_attached_vault_is_refused_removal_and_goes_on_being_served() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
 
@@ -23951,7 +24146,8 @@ mod tests {
         #[test]
         fn an_attached_vault_is_refused_replacement_and_goes_on_being_served() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -23978,7 +24174,8 @@ mod tests {
         #[test]
         fn a_replaced_entry_answers_held_to_a_caller_still_holding_it() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(ops);
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(ops, Roots::Absent(&[&name]), 1);
             let replaced = host.shared.entries.get(&name).expect("the vault is served");
             let edited = replaced
                 .registration
@@ -24017,7 +24214,8 @@ mod tests {
         #[test]
         fn an_entry_holding_its_gate_stays_in_the_set() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(ops);
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(ops, Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             {
                 let mut state = entry.gate.lock().unwrap();
@@ -24046,7 +24244,8 @@ mod tests {
         #[test]
         fn an_entry_whose_coverage_is_out_with_a_leg_stays_in_the_set() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -24087,7 +24286,8 @@ mod tests {
         #[test]
         fn an_entry_a_registered_leg_stands_against_stays_in_the_set() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(ops);
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(ops, Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let epoch = {
                 let mut state = entry.gate.lock().unwrap();
@@ -24125,7 +24325,8 @@ mod tests {
         #[test]
         fn an_entry_holding_its_queue_slot_stays_in_the_set() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(ops);
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(ops, Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let (leg, job) = {
                 let mut state = entry.gate.lock().unwrap();
@@ -24182,7 +24383,8 @@ mod tests {
         fn a_lease_recorded_against_an_entry_holds_it_in_the_set() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_until(
                 "the contended attach to park the entry",
@@ -24246,17 +24448,11 @@ mod tests {
         }
 
         fn host_serving(registrations: Vec<RegistryEntry>) -> Host<Arc<FakeOps>> {
-            Host::new(
-                RegistryRead::from_entries(registrations),
+            host_without_ambient_polling(
                 Arc::new(FakeOps::default()),
-                LifecyclePolicy {
-                    idle_after: Duration::from_secs(60),
-                    worker_slots: 1,
-                    watch_poll_interval: Duration::from_secs(60),
-                    read_settle_bound: crate::READ_SETTLE_BOUND,
-                },
+                Roots::Registered(&registrations),
+                1,
             )
-            .unwrap()
         }
 
         /// A resolution answers from the set as it stands: a vault that joined
@@ -24511,7 +24707,7 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&vault, &link).unwrap();
             let canonical = VaultRoot::new(std::fs::canonicalize(&vault).unwrap()).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let joined = VaultName::new("joined").unwrap();
 
             let report = register(&host, &joined, &link).expect("the vault is registered");
@@ -24548,7 +24744,8 @@ mod tests {
         #[test]
         fn a_name_already_served_is_refused_and_nothing_is_written() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let scratch = temp_base("register-served-name");
 
@@ -24630,7 +24827,7 @@ mod tests {
             let sealed = scratch.root().join("sealed");
             std::fs::create_dir_all(&sealed).unwrap();
             std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("refused").unwrap();
 
             let answers = [scratch.root().join("missing"), file, sealed.clone()]
@@ -24656,7 +24853,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             ops.registry_unwritable.store(true, Ordering::SeqCst);
             let scratch = temp_base("register-unwritable");
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("joined").unwrap();
 
             let refusal = register(&host, &name, scratch.root())
@@ -24687,7 +24884,7 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let first = VaultName::new("first").unwrap();
             let second = VaultName::new("second").unwrap();
             let start = std::sync::Barrier::new(2);
@@ -24732,7 +24929,8 @@ mod tests {
         #[test]
         fn an_unregistered_vault_leaves_the_set_and_the_file_and_its_state_is_discarded() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             attach_and_idle(&host, &name);
 
@@ -24764,7 +24962,8 @@ mod tests {
         #[test]
         fn an_unregistration_keeping_state_discards_nothing() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
 
             let report = unregister(&host, UnregisterParams::new(name.clone()).keeping_state())
                 .expect("the idle vault is unregistered");
@@ -24779,7 +24978,8 @@ mod tests {
         #[test]
         fn an_unserved_name_is_refused_as_unknown() {
             let ops = Arc::new(FakeOps::default());
-            let (host, served) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let served = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&served]), 1);
             let absent = VaultName::new("absent").unwrap();
 
             let refusal = unregister(&host, UnregisterParams::new(absent.clone()))
@@ -24795,7 +24995,8 @@ mod tests {
         #[test]
         fn a_held_entry_is_refused_and_goes_on_being_served() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
 
@@ -24814,7 +25015,8 @@ mod tests {
         fn a_parked_entry_nothing_holds_is_unregistered() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_park(
                 &host,
@@ -24851,9 +25053,10 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, link.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, link.as_path())]),
+                2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -24884,9 +25087,10 @@ mod tests {
             let root = scratch.root().join("root");
             std::fs::create_dir_all(&root).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, root.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, root.as_path())]),
+                2,
             );
             let conflict = a_conflict([a.clone(), b.clone()]);
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -24917,7 +25121,8 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let incumbent = MaintainerIdentity::named(4242, "0.0.0", 1_700_000_000);
             *ops.maintained_elsewhere.lock().unwrap() = Some(incumbent.clone());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
@@ -24946,7 +25151,8 @@ mod tests {
         #[test]
         fn a_refused_registry_write_leaves_the_entry_that_stood_in_service() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             ops.registry_unwritable.store(true, Ordering::SeqCst);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -24977,7 +25183,8 @@ mod tests {
         fn a_refused_discard_leaves_the_entry_that_stood_and_writes_nothing() {
             let ops = Arc::new(FakeOps::default());
             ops.discard_refused.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
 
             let answer = unregister(&host, UnregisterParams::new(name.clone()))
@@ -24999,7 +25206,8 @@ mod tests {
         #[test]
         fn a_demand_holding_the_entry_across_its_removal_answers_unknown_vault() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             unregister(&host, UnregisterParams::new(name.clone()))
@@ -25034,7 +25242,8 @@ mod tests {
         #[test]
         fn every_door_answers_held_while_an_unregistration_holds_the_lock() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
@@ -25139,7 +25348,8 @@ mod tests {
         fn vault_reload_answers_held_while_an_unregistration_holds_the_lock() {
             let ops = Arc::new(FakeOps::default());
             ops.reload_supported.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
 
@@ -25181,7 +25391,20 @@ mod tests {
                 let holding = VaultName::new("holding").unwrap();
                 let ops = Arc::new(FakeOps::default());
                 ops.reload_supported.store(true, Ordering::SeqCst);
-                let host = one_worker_host_over(&ops, scratch.root(), &[&queued, &holding]);
+                let queued_root = scratch.root().join("queued");
+                let holding_root = scratch.root().join("holding");
+                let host = Arc::new(host_without_ambient_polling(
+                    Arc::clone(&ops),
+                    Roots::Created(&[
+                        (&queued, queued_root.as_path()),
+                        (&holding, holding_root.as_path()),
+                    ]),
+                    1,
+                ));
+                for name in [&queued, &holding] {
+                    drop(host.demand(name, AttachMode::Durable).unwrap());
+                    wait_for_state(&host, name, TrustState::Ready);
+                }
                 ops.block_reload.store(true, Ordering::SeqCst);
                 let held = reload_on_a_thread(&host, &holding, dry_run);
                 wait_for_flag("reload_started", &ops.reload_started);
@@ -25229,7 +25452,8 @@ mod tests {
         #[test]
         fn the_bookkeeping_doors_answer_held_while_an_unregistration_holds_the_lock() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
 
@@ -25259,7 +25483,8 @@ mod tests {
         #[test]
         fn a_refused_unregistration_puts_the_withdrawn_entry_back_in_service() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             ops.registry_unwritable.store(true, Ordering::SeqCst);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
             let pause = RetirePause::new();
@@ -25312,7 +25537,7 @@ mod tests {
         fn a_name_the_registry_file_records_is_refused_and_the_file_keeps_it() {
             let ops = Arc::new(FakeOps::default());
             let scratch = temp_base("register-recorded");
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[]);
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
             let name = VaultName::new("joined").unwrap();
             let theirs = RegistryEntry::new(
                 name.clone(),
@@ -25339,7 +25564,8 @@ mod tests {
         fn a_retry_during_a_refused_unregistration_leaves_the_contention_park() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_park(&host, &name, contended.clone());
@@ -25399,13 +25625,14 @@ mod tests {
                 VaultName::new("b").unwrap(),
                 VaultName::new("leaving").unwrap(),
             );
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[
+                Roots::Created(&[
                     (&a, root.as_path()),
                     (&b, link.as_path()),
                     (&leaving, other.as_path()),
-                ],
+                ]),
+                2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -25434,7 +25661,8 @@ mod tests {
         #[test]
         fn a_retirement_that_unwinds_puts_the_entry_back_in_service() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             ops.panic_in_retire.store(true, Ordering::SeqCst);
 
             let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -25470,11 +25698,10 @@ mod tests {
                 VaultName::new("busy").unwrap(),
                 VaultName::new("notes").unwrap(),
             );
-            let host = rooted_host(
+            let host = host_over_roots(
                 Arc::clone(&ops),
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
-                Duration::from_millis(2),
             );
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
@@ -25528,7 +25755,11 @@ mod tests {
             let root = scratch.root().join("root");
             std::fs::create_dir_all(&root).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, root.as_path())]),
+                2,
+            );
             drop(host.demand(&name, AttachMode::Durable).unwrap());
             wait_for_state(&host, &name, TrustState::Ready);
             refuse_root_identity(&root);
@@ -25666,17 +25897,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(registration.name.clone(), registration.clone());
-            Host::new(
-                RegistryRead::from_entries([registration.clone()]),
+            host_without_ambient_polling(
                 Arc::clone(ops),
-                LifecyclePolicy {
-                    idle_after: Duration::from_secs(60),
-                    worker_slots: 1,
-                    watch_poll_interval: Duration::from_secs(60),
-                    read_settle_bound: crate::READ_SETTLE_BOUND,
-                },
+                Roots::Registered(std::slice::from_ref(registration)),
+                1,
             )
-            .unwrap()
         }
 
         fn schema_source(path: &str) -> SchemaSource {
@@ -25706,7 +25931,8 @@ mod tests {
         #[test]
         fn a_set_schema_source_is_recorded_listed_and_attached_under() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             let source = schema_source("/tmp/norn-host-schemas/notes.yaml");
 
@@ -25754,7 +25980,8 @@ mod tests {
         #[test]
         fn a_set_poll_backend_is_recorded_and_attached_under() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
 
             let report = set(
@@ -25796,7 +26023,8 @@ mod tests {
         #[test]
         fn an_edit_keeping_every_field_answers_the_registration_and_writes_nothing() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             let report =
@@ -25869,7 +26097,11 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&new, &link).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, old.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, old.as_path())]),
+                2,
+            );
             record_startup(&host, &ops, &name);
             let directory = VaultRoot::new(std::fs::canonicalize(&new).unwrap()).unwrap();
 
@@ -25902,7 +26134,11 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let name = VaultName::new("notes").unwrap();
-            let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, link.as_path())]);
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&name, link.as_path())]),
+                2,
+            );
 
             let report = set(
                 &host,
@@ -25979,7 +26215,8 @@ mod tests {
             let sealed = scratch.root().join("sealed");
             std::fs::create_dir_all(&sealed).unwrap();
             std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             let standing = serving(&host, &name);
 
@@ -26005,7 +26242,8 @@ mod tests {
         #[test]
         fn an_edit_of_an_unserved_name_is_refused_as_unknown() {
             let ops = Arc::new(FakeOps::default());
-            let (host, served) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let served = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&served]), 1);
             let absent = VaultName::new("absent").unwrap();
 
             let refusal = set(
@@ -26024,7 +26262,8 @@ mod tests {
         #[test]
         fn an_edit_of_a_held_entry_is_refused_and_it_goes_on_being_served() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
 
@@ -26046,7 +26285,8 @@ mod tests {
         fn an_edit_of_a_parked_entry_is_refused_in_the_parks_code_and_the_park_stands() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             let standing = serving(&host, &name);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
@@ -26074,7 +26314,8 @@ mod tests {
         /// nothing holds, with the registration it serves.
         fn parked_host(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, Registration) {
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, ops, &name);
             let standing = serving(&host, &name);
             let contended = Demand::MaintainerContended(MaintainerIdentity::unknown());
@@ -26133,7 +26374,8 @@ mod tests {
         #[test]
         fn a_same_value_edit_of_a_held_entry_is_refused_as_held() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             assert_eq!(serving(&host, &name).poll_backend, None);
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
@@ -26156,7 +26398,8 @@ mod tests {
         #[test]
         fn a_refused_registry_write_leaves_the_registration_that_stood() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             ops.registry_unwritable.store(true, Ordering::SeqCst);
             let entry = host.shared.entries.get(&name).expect("the vault is served");
@@ -26187,7 +26430,8 @@ mod tests {
         #[test]
         fn every_door_answers_held_while_an_edit_is_under_way() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let standing = serving(&host, &name);
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
@@ -26266,7 +26510,8 @@ mod tests {
         #[test]
         fn a_demand_or_status_holding_the_replaced_entry_is_answered_held() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let replaced = host.shared.entries.get(&name).expect("the vault is served");
 
             let edited = set(
@@ -26311,7 +26556,8 @@ mod tests {
         #[test]
         fn the_entry_serving_an_edit_reports_nothing_until_its_own_attach() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             record_startup(&host, &ops, &name);
             let link = norn_wire::Advisory::symlink_skipped("away.md");
             *ops.advisories.lock().unwrap() = vec![linked("away.md")];
@@ -26350,7 +26596,8 @@ mod tests {
         #[test]
         fn an_amendment_that_unwinds_puts_the_entry_back_in_service() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let name = VaultName::new("notes").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let standing = serving(&host, &name);
             ops.panic_in_amend.store(true, Ordering::SeqCst);
             let edit =
@@ -26385,11 +26632,10 @@ mod tests {
                 VaultName::new("busy").unwrap(),
                 VaultName::new("notes").unwrap(),
             );
-            let host = rooted_host(
+            let host = host_over_roots(
                 Arc::clone(&ops),
                 &[(&busy, busy_root.as_path()), (&name, root.as_path())],
                 1,
-                Duration::from_millis(2),
             );
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
@@ -26496,9 +26742,10 @@ mod tests {
             let link = scratch.root().join("link");
             std::os::unix::fs::symlink(&root, &link).unwrap();
             let (a, b) = (VaultName::new("a").unwrap(), VaultName::new("b").unwrap());
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&a, root.as_path()), (&b, link.as_path())],
+                Roots::Created(&[(&a, root.as_path()), (&b, link.as_path())]),
+                2,
             );
             let conflict = Demand::DuplicateRoot(a_conflict([a.clone(), b.clone()]));
             drop(host.demand(&a, AttachMode::Durable).unwrap());
@@ -26548,9 +26795,10 @@ mod tests {
                 VaultName::new("notes").unwrap(),
                 VaultName::new("other").unwrap(),
             );
-            let host = quiet_host_over_roots(
+            let host = host_without_ambient_polling(
                 Arc::clone(&ops),
-                &[(&name, root.as_path()), (&other, theirs.as_path())],
+                Roots::Created(&[(&name, root.as_path()), (&other, theirs.as_path())]),
+                2,
             );
             let pause = RetirePause::new();
             *ops.retire_pause.lock().unwrap() = Some(Arc::clone(&pause));
