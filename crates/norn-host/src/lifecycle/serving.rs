@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 
 use norn_config::registry::Entry as Registration;
 use norn_fs::Refusal;
@@ -168,20 +168,31 @@ impl<A: SnapshotSource> ServingSet<A> {
     }
 
     /// The entry serving `name`, as [`ServingSet::get`] answers it, for a
-    /// caller inside a drop.
-    ///
-    /// **On an unwinding thread it reads through a poisoned set**, because a
-    /// second panic there aborts the process; on any other thread it panics on
-    /// the poison as [`ServingSet::get`] does. A poisoned set's map is the map
-    /// the unwind that poisoned it left, and a lookup in it reads no more than
-    /// that.
+    /// caller inside a drop, read through a poisoned set as
+    /// [`ServingSet::read_in_a_drop`] reads it.
     pub(crate) fn get_in_a_drop(&self, name: &VaultName) -> Option<Arc<Entry<A>>> {
-        let entries = if std::thread::panicking() {
-            self.entries.read().unwrap_or_else(PoisonError::into_inner)
-        } else {
-            self.entries.read().expect("serving set poisoned")
-        };
-        entries.get(name).cloned()
+        self.read_in_a_drop().get(name).cloned()
+    }
+
+    /// Every entry the set serves, ascending by name, as
+    /// [`ServingSet::snapshot`] answers it, for the host's destruction, read
+    /// through a poisoned set as [`ServingSet::read_in_a_drop`] reads it.
+    pub(crate) fn snapshot_in_a_drop(&self) -> Vec<Arc<Entry<A>>> {
+        self.read_in_a_drop().values().cloned().collect()
+    }
+
+    /// The set's map for a reader inside a drop. Every drop-side read of the
+    /// set comes through here.
+    ///
+    /// **It reads through a poisoned set on every thread**, unwinding or not,
+    /// for the reason every drop-side take of an entry gate does: a panic here
+    /// aborts an unwinding thread, and on any other thread it stops partway a
+    /// drop that gives resources back. Reading through is safe because the
+    /// writers of the set that can panic under its write lock — a removal or a
+    /// replacement meeting a poisoned entry gate — panic before they change
+    /// the map, so a poisoned set's map is whole.
+    fn read_in_a_drop(&self) -> RwLockReadGuard<'_, BTreeMap<VaultName, Arc<Entry<A>>>> {
+        self.entries.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Clear a poisoned set, for a case that poisoned it on purpose.

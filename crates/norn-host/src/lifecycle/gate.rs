@@ -342,20 +342,24 @@ impl<T: Stanced> EntryGate<T> {
         }
     }
 
-    /// Take the gate from a drop, waiting for it, and count the take.
+    /// Take the gate from a drop, waiting for it, and count the take. Every
+    /// drop-side take that waits for an entry gate comes through here: a
+    /// read's hold giving its pin back, a withdrawal that did not commit
+    /// putting the entry back in service, and the host's destruction tearing
+    /// each entry down. A demand lease giving itself back does not wait, and
+    /// defers through [`EntryGate::run_under_the_next_hold`] instead, which
+    /// reads through poison the same way.
     ///
-    /// **On an unwinding thread it reads through a poisoned gate**, because a
-    /// second panic there aborts the process; on any other thread it panics on
-    /// the poison as every other take of the gate does. Nothing recovers a
-    /// poisoned gate, so what a drop writes through the poison is read by no
-    /// later holder: reading through it is what keeps the drop from panicking,
-    /// and nothing more.
+    /// **It reads through a poisoned gate on every thread**, unwinding or not.
+    /// On an unwinding thread a panic here is a second panic and aborts the
+    /// process; on any other thread it would stop a drop that gives resources
+    /// back partway, and destruction would strand the coverage of every entry
+    /// after the poisoned one. Reading through is safe because nothing
+    /// recovers a poisoned gate: what a drop writes through the poison is
+    /// read by no later holder, since every ordinary take still panics on it,
+    /// and that is what keeps the entry unreachable.
     pub(super) fn lock_in_a_drop(&self) -> GateHold<'_, T> {
-        if std::thread::panicking() {
-            self.lock().unwrap_or_else(PoisonError::into_inner)
-        } else {
-            self.lock().expect("entry gate poisoned")
-        }
+        self.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Take the gate where it is free, counting the take the way
