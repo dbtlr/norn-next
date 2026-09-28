@@ -88,10 +88,13 @@ pub fn declared_folding(at: &Path) -> Folding {
 /// **A place is keyed by its identity, not by its spelling.** On a volume that
 /// folds case, `Note.md` and `note.md` are one place, and a census comparing the
 /// two renderings byte for byte would call a document that never moved a place
-/// with no row standing beside a row standing nowhere. Whether two derivations
-/// agree about the *spelling* a document is rendered at is the equivalence
-/// comparator's question, asked of the whole projection rather than of this
-/// coarse signal.
+/// with no row standing beside a row standing nowhere.
+///
+/// **The spelling a place's row is held at is still compared**, against the
+/// one the tree renders there. A case-only rename moves no identity and no
+/// bytes, so a store no report of the rename has reached yet agrees with the
+/// tree on both — and a case reading the rendered spelling after a settle that
+/// ignored it would read the store before the host had caught up.
 ///
 /// **What keying by identity costs is duplicates.** Two derived rows whose
 /// spellings fold together collapse into one entry here, so a store holding
@@ -186,7 +189,12 @@ impl Census {
         for (place, hash) in &self.rows {
             let at = &self.spellings[place];
             match derived.get(place) {
-                Some((_, held)) if held == hash => {}
+                Some((spelling, held)) if held == hash && spelling == at => {}
+                Some((spelling, held)) if held == hash => {
+                    apart.push(format!(
+                        "`{at}` is held at `{spelling}`, a spelling the tree does not render"
+                    ));
+                }
                 Some((_, held)) => {
                     apart.push(format!("`{at}` holds {held} and the tree holds {hash}"));
                 }

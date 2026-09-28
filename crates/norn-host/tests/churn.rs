@@ -297,6 +297,49 @@ fn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero() {
     churned.judge(workload.changing().name(), 0);
 }
 
+/// **A store holding a document at a spelling the tree no longer renders has
+/// not settled.**
+///
+/// A directory's case rename changes no identity and no bytes, so a store the
+/// rename's report has not reached yet agrees with the tree about every place
+/// and every hash. What it disagrees about is the spelling the document is held
+/// at, and the case above reads that spelling the moment the settle ends — so
+/// the settle asks for it too.
+///
+/// The rename lands here with no host running, which is the state a settle
+/// meets while the directory's report is still on its way: the tree renders the
+/// new spelling and the store holds the old one, however long it is watched.
+/// Where the volume tells the two spellings apart the rename moves the document
+/// to a place with no row, and the settle is still not met, for that reason.
+#[test]
+fn a_store_holding_a_retired_spelling_has_not_settled() {
+    let sandbox = sandbox("churn-retired-spelling");
+    let ground = ground(&sandbox.work_dir());
+    let folding = ground.folding;
+    let workload = Family::CaseRenamedParent.workload(&ground);
+    let opened = attach_and_churn(sandbox, workload.opening(), When::Settled);
+    let renaming = Script::new(
+        "a parent directory's case renamed with no host watching",
+        vec![Step::new(
+            "rename the parent directory's case",
+            Act::Rename {
+                from: churn::RENAMED_PARENT_FROM.to_string(),
+                to: churn::RENAMED_PARENT_TO.to_string(),
+            },
+        )],
+    );
+    apply(&renaming, opened.vault.path(), &mut Applied::default());
+
+    let renamed = census(opened.vault.path(), folding);
+    let why = renamed
+        .disagreement(&mut opened.vault.store())
+        .expect("the store holds the document at the spelling the rename retired and has settled");
+    assert!(
+        why.contains(churn::RENAMED_PARENT_DOCUMENT),
+        "the disagreement does not name the spelling the tree renders: {why}"
+    );
+}
+
 /// **Family 3.** A burst against one path and a burst across many.
 ///
 /// The bar is what the store ends up holding rather than how many times it was
@@ -2166,7 +2209,7 @@ fn apply(script: &Script, root: &Path, applied: &mut Applied) {
 }
 
 /// **The settle.** Wait until the derived store agrees with the tree about
-/// which places hold documents and what bytes they hold.
+/// which places hold documents, at which spellings, and what bytes they hold.
 ///
 /// The condition is coarse on purpose: paths and content hashes are the
 /// cheapest signal that says the host caught up. What is judged afterwards is
