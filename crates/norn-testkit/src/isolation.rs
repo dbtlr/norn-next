@@ -152,6 +152,13 @@ pub const QUEUED_HOLDERS: u32 = 160 * 4;
 /// a record that has not moved for this long is a holder that stopped working
 /// rather than one working slowly.
 ///
+/// **The span held against it is a lower bound on how long the waiter saw one
+/// record string unchanged**: it runs between two reads that both saw that
+/// string, never through the time a look spent descheduled around its own read,
+/// so a waiter starved on a busy runner cannot stretch a moving queue past it.
+/// A string that recurs across hand-overs joins those standings; the
+/// module's look tracker says which strings do and what that costs.
+///
 /// It is sized for the longest window a case honestly holds the lease: a whole
 /// case rather than a single wait, since a case attaches a vault, runs a
 /// sequence of waits over it, and detaches. Five minutes is far past any case
@@ -308,10 +315,11 @@ impl Lease {
     /// `budget`'s work bound is the wall on the whole acquisition; a failure
     /// that names it is a queue that kept moving for that long.
     /// [`HOLDER_PATIENCE`] is the per-holder bound, re-armed every time the
-    /// record names different hands than the last look, and a failure that
-    /// names it is one holder that stopped letting go. Both come back as the
-    /// same [`WaitFailure`] shape, carrying the bound that was passed and the
-    /// holder that was there when it went.
+    /// record names different hands than the last look and held against a
+    /// lower bound on how long the waiter saw one record unchanged, and a
+    /// failure that names it is one holder that stopped letting go. Both come
+    /// back as the same [`WaitFailure`] shape, carrying the bound that was
+    /// passed and the holder that was there when it went.
     pub fn try_hold(key: &str, budget: Budget) -> Result<Self, WaitFailure> {
         Self::try_hold_under(key, budget, Patience::Standing)
     }
@@ -343,25 +351,14 @@ impl Lease {
         let what = format!("the {key} lease");
         let started = Instant::now();
         let mut probes = 0usize;
-        // The holder the last look found, and when this wait first saw those
-        // hands. Both move together, and only when the record changes.
-        let mut queued: Option<(String, Instant)> = None;
+        let mut looks = Unmoved::default();
 
         wait_until(&what, budget, || {
             probes += 1;
             match file.try_lock() {
                 Ok(()) => Observed::Met(Ok(())),
                 Err(TryLockError::WouldBlock) => {
-                    let record = holder(&path);
-                    let since = match &queued {
-                        Some((named, since)) if *named == record => *since,
-                        _ => {
-                            let now = Instant::now();
-                            queued = Some((record.clone(), now));
-                            now
-                        }
-                    };
-                    let unmoved = since.elapsed();
+                    let (record, unmoved) = looks.look(|| holder(&path));
                     if unmoved >= patience {
                         Observed::Met(Err(WaitFailure {
                             what: what.clone(),
@@ -408,6 +405,62 @@ impl Drop for Lease {
         // Closing the file would release the lock on its own; unlocking first
         // says so where a reader is looking for the release.
         let _ = self.file.unlock();
+    }
+}
+
+/// How long the holder record one acquisition keeps reading has stood
+/// unchanged, read as a lower bound.
+///
+/// **A look is one read of the record between two clock readings, and the span
+/// is taken between the two that cannot overstate it**: from the reading after
+/// the first look that saw this record to the reading before the look that sees
+/// it now. Both reads saw the record, so it stood at least that long however
+/// long either look was descheduled around its read. The other pair is the one
+/// that overstates — a look that reads the record, is not scheduled, and only
+/// then reads the clock charges the holder for time the waiter spent off the
+/// processor, and a queue changing hands on a starved runner is named as a
+/// holder that stopped. A holder that really stands still is still named at the
+/// patience, at most one look later than the clock alone would name it.
+///
+/// **What it bounds is one record string, not one holder.** A string that
+/// recurs across hand-overs joins those standings into one span: every empty
+/// file reads as the same placeholder, whether a holder let go, died recording
+/// nothing, or failed to write its record, and a process that holds the lease
+/// twice writes the same record both times. So a run of consecutive looks that
+/// each land on such a string, spanning the patience, names a queue that did
+/// move. The placeholder is not made to re-arm all the same, because then a
+/// holder that died recording nothing would never be named at all.
+///
+/// The look reads the clock and the record in one place, [`Unmoved::look`], so
+/// no call site can order them the other way.
+#[derive(Debug, Default)]
+struct Unmoved {
+    // The record the last look read, and the clock reading after the first look
+    // that read it. Both move together, and only when the record changes.
+    standing: Option<(String, Instant)>,
+}
+
+impl Unmoved {
+    /// Take one look through `read`, handing back the record it read and the
+    /// span the waiter has seen that record unchanged for, at least.
+    fn look(&mut self, read: impl FnOnce() -> String) -> (String, Duration) {
+        let before = Instant::now();
+        let record = read();
+        let after = Instant::now();
+        let unmoved = self.charge(&record, before, after);
+        (record, unmoved)
+    }
+
+    /// The arithmetic of one look: `record` was read after `before` and ahead
+    /// of `after`.
+    fn charge(&mut self, record: &str, before: Instant, after: Instant) -> Duration {
+        match &self.standing {
+            Some((named, since)) if named == record => before.saturating_duration_since(*since),
+            _ => {
+                self.standing = Some((record.to_owned(), after));
+                Duration::ZERO
+            }
+        }
     }
 }
 
@@ -687,6 +740,98 @@ mod tests {
         drop(occupier);
     }
 
+    /// **The bar on what a look charges the holder.** The span a record is read
+    /// as unmoved is one both looks saw it stand through, and never the time a
+    /// look spent descheduled around its own read.
+    ///
+    /// The forbidden shape is the span read off the clock after the read — the
+    /// shape class-a-lease-changing-hands recorded. Under it a look that read the
+    /// record and then waited out a scheduling slice charges that slice to the
+    /// holder, and a record that stood for less than the patience is named as a
+    /// holder that stopped. The looks here are driven with the clock readings a
+    /// starved runner produces, so the case is the arithmetic and not the
+    /// scheduler.
+    #[test]
+    fn a_look_that_is_descheduled_around_its_read_charges_the_holder_only_what_both_looks_saw() {
+        let t0 = Instant::now();
+        let at = |millis| t0 + Duration::from_millis(millis);
+        let mut unmoved = Unmoved::default();
+
+        // The first look that sees the record is slow after its read: the
+        // record is only known to have stood from the reading that ends it.
+        assert_eq!(unmoved.charge("pid 1", at(0), at(400)), Duration::ZERO);
+        // A later look is slow after its read too: it is charged up to the
+        // reading that starts it, and the 900ms the clock shows after is not
+        // the record's.
+        assert_eq!(
+            unmoved.charge("pid 1", at(700), at(1_300)),
+            Duration::from_millis(300)
+        );
+        // Different hands re-arm the span, whatever the one before stood for.
+        assert_eq!(
+            unmoved.charge("pid 2", at(1_400), at(1_401)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            unmoved.charge("pid 2", at(1_901), at(1_902)),
+            Duration::from_millis(500)
+        );
+    }
+
+    /// **The bar on where a look reads the clock.** A look run through a read
+    /// that sleeps around the record is charged no more than the span between
+    /// the reads that saw that record, however long the sleeps are.
+    ///
+    /// The forbidden shapes are the orderings that put a sleep inside the span:
+    /// the record read ahead of the clock reading that starts the look, which
+    /// is the ordering class-a-lease-changing-hands recorded, or a span taken
+    /// from the reading that starts the first look or to the one that ends the
+    /// current look. Under any of them a record read twice within microseconds
+    /// is charged a whole sleep, and a queue that keeps changing hands on a
+    /// starved runner is named as a holder that stopped. Each record here is
+    /// read once after a sleep and once ahead of one, so each wrong ordering
+    /// has a sleep to charge.
+    #[test]
+    fn a_look_charges_the_holder_no_more_than_the_reads_that_saw_its_record() {
+        let asleep = Duration::from_millis(150);
+        let looks = [
+            ("pid 1", asleep, Duration::ZERO),
+            ("pid 1", Duration::ZERO, asleep),
+            ("pid 2", asleep, Duration::ZERO),
+            ("pid 2", Duration::ZERO, asleep),
+        ];
+        let mut unmoved = Unmoved::default();
+        let mut first_read: Option<(&str, Instant)> = None;
+
+        for (record, ahead, behind) in looks {
+            let mut read_at = None;
+            let (read, span) = unmoved.look(|| {
+                thread::sleep(ahead);
+                read_at = Some(Instant::now());
+                thread::sleep(behind);
+                record.to_owned()
+            });
+            let read_at = read_at.expect("the look ran its read");
+            let first = match first_read {
+                Some((named, at)) if named == record => at,
+                _ => {
+                    first_read = Some((record, read_at));
+                    read_at
+                }
+            };
+            assert_eq!(
+                read, record,
+                "the look handed back a record it did not read"
+            );
+            assert!(
+                span <= read_at - first,
+                "{record} was charged {span:?}, past the {:?} between the reads that saw it, so a \
+                 look charged the holder for the {asleep:?} it slept around its own read",
+                read_at - first
+            );
+        }
+    }
+
     /// **The bar on the re-arm.** A queue whose record keeps naming different
     /// hands runs on past the patience and ends at the acquisition wall
     /// instead, however many patience windows it outlives.
@@ -707,49 +852,67 @@ mod tests {
         let wall = Budget::new(Duration::from_secs(2), Duration::from_millis(500));
 
         // The queue changing hands, written where a waiter reads it: each pass
-        // leaves a record naming a different holder than the last. The widest
-        // gap between two writes that landed is kept because it, and not the
-        // count, is what the waiter sees: hands starved for longer than the
-        // patience have left the waiter a record that did stop moving, and the
-        // failure that follows would be this thread's rather than the re-arm's.
-        // A gap ends at the next landed write or at the waiter's failure,
-        // whichever comes first, so a stall the stop flag interrupts is still
-        // measured rather than lost with the write it prevented.
+        // leaves a record naming a different holder than the last, written in
+        // place over one handle and at one width, so the file never reads empty
+        // between two hand-overs. A read torn across a digit carry can still
+        // match another hand-over's record; a look that lands on one joins it
+        // to the waiter's neighboring look at most, so the join is bounded by
+        // the waiter's gap between two looks rather than by these windows.
+        //
+        // **What is measured is the widest window a record could have stood**,
+        // and it is an upper bound: from a clock reading before the write that
+        // made the record to one after the next write that landed. A record is
+        // readable from no earlier than the first and gone by the second,
+        // however long this thread was descheduled around either write. The
+        // waiter's unmoved span is a lower bound, taken between two reads that
+        // both saw one record, so it sits inside that record's window. The guard
+        // below holding every window under the patience is therefore what makes
+        // a patience failure the re-arm's and nothing else's — a starved runner
+        // can widen a window, but only past the guard, never past the patience
+        // alone.
+        //
+        // The last window has no next write to close it before the waiter
+        // stops, so it closes at the failure the waiter observed: a stall the
+        // stop flag interrupts is measured rather than lost with the write it
+        // prevented.
         let stop = Arc::new(AtomicBool::new(false));
         let handovers = Arc::new(AtomicUsize::new(0));
-        let widest_gap = Arc::new(AtomicU64::new(0));
+        let widest_window = Arc::new(AtomicU64::new(0));
         let epoch = Instant::now();
-        let last_write = Arc::new(AtomicU64::new(0));
+        // Nanoseconds from `epoch` to the clock reading before the last write
+        // that landed.
+        let last_made = Arc::new(AtomicU64::new(0));
+        let record_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("the scratch lease record the hands write to");
         let hands = {
-            let (path, stop, handovers, widest_gap, last_write) = (
-                path.clone(),
+            let (stop, handovers, widest_window, last_made) = (
                 Arc::clone(&stop),
                 Arc::clone(&handovers),
-                Arc::clone(&widest_gap),
-                Arc::clone(&last_write),
+                Arc::clone(&widest_window),
+                Arc::clone(&last_made),
             );
             thread::spawn(move || {
-                let mut last: Option<Instant> = None;
-                let mut nth = 0usize;
+                let mut made: Option<Instant> = None;
+                let mut nth = 0u64;
                 while !stop.load(Ordering::SeqCst) {
                     nth += 1;
-                    let record = format!("pid {nth} holding a lease since unix 0");
-                    let wrote = std::fs::OpenOptions::new()
-                        .write(true)
-                        .truncate(true)
-                        .open(&path)
-                        .and_then(|mut file| file.write_all(record.as_bytes()))
-                        .is_ok();
-                    if wrote {
-                        let now = Instant::now();
-                        if let Some(previous) = last {
-                            widest_gap.fetch_max(
-                                now.duration_since(previous).as_micros() as u64,
+                    let record = format!("pid {nth:010} holding a lease since unix 0");
+                    let before = Instant::now();
+                    if write_record(&record_file, &record).is_ok() {
+                        let landed = Instant::now();
+                        if let Some(made) = made {
+                            widest_window.fetch_max(
+                                landed.duration_since(made).as_nanos() as u64,
                                 Ordering::SeqCst,
                             );
                         }
-                        last = Some(now);
-                        last_write.store(epoch.elapsed().as_micros() as u64, Ordering::SeqCst);
+                        made = Some(before);
+                        last_made.store(
+                            before.duration_since(epoch).as_nanos() as u64,
+                            Ordering::SeqCst,
+                        );
                         handovers.fetch_add(1, Ordering::SeqCst);
                     }
                     thread::sleep(Duration::from_millis(2));
@@ -757,10 +920,10 @@ mod tests {
             })
         };
 
-        // The waiter starts once the record is these hands' own, so the window
-        // it reads begins at a write and every gap inside it is one the thread
-        // above measured. Started ahead of that, it would be reading the
-        // occupier's line for however long the thread waits to be scheduled.
+        // The waiter starts once the record is these hands' own, so every
+        // record it reads is one whose window the thread above measured.
+        // Started ahead of that, it would be reading the occupier's line for
+        // however long the thread waits to be scheduled.
         let spawned = Instant::now();
         while handovers.load(Ordering::SeqCst) == 0 && spawned.elapsed() < patience {
             thread::sleep(Duration::from_millis(1));
@@ -781,24 +944,25 @@ mod tests {
         hands.join().expect("the hands the record kept changing to");
 
         let changed = handovers.load(Ordering::SeqCst);
-        // The tail is judged from the failure the waiter observed: hands
-        // starved through the patience are still asleep when the flag stops
-        // them, so the stall they caused reaches from their last landed write
-        // to the failure itself and never to a write that follows it.
+        // A write that landed after the failure closed the window it followed,
+        // so that window is already measured and the tail is empty.
         let tail =
-            at_failure.saturating_sub(Duration::from_micros(last_write.load(Ordering::SeqCst)));
-        let widest = Duration::from_micros(widest_gap.load(Ordering::SeqCst)).max(tail);
+            at_failure.saturating_sub(Duration::from_nanos(last_made.load(Ordering::SeqCst)));
+        let widest = Duration::from_nanos(widest_window.load(Ordering::SeqCst)).max(tail);
         assert!(
             widest < patience,
-            "this case's own hands stalled for {widest:?}, past the {patience:?} patience, so the \
-             record they left did stop moving and what follows judges the stall rather than the \
-             re-arm"
+            "a record this case's own hands left could have stood for {widest:?}, past the \
+             {patience:?} patience, so what follows would judge the stall rather than the re-arm"
         );
-        assert!(
-            changed as u32 > wall.work().as_millis() as u32 / patience.as_millis() as u32,
-            "the record changed hands {changed} times, too few to outlive a {patience:?} patience \
-             inside a {:?} wall",
-            wall.work()
+        // The bound the wait ended on is judged before the hand-over count, so
+        // a wait that ended early is named by the bound that ended it. A probe
+        // overrun carries the wall's budget like the wall does, so it is told
+        // apart by its kind, and its rendering is what the flake tripwire reads.
+        assert_eq!(
+            failure.kind,
+            FailureKind::Elapsed,
+            "a queue that changed hands {changed} times ended on a probe rather than a bound: \
+             {failure}"
         );
         assert_eq!(
             failure.budget.work(),
@@ -813,6 +977,12 @@ mod tests {
                 .contains("neither let go nor changed hands"),
             "a queue that changed hands {changed} times is reported as a holder that stopped: \
              {failure}"
+        );
+        assert!(
+            changed as u32 > wall.work().as_millis() as u32 / patience.as_millis() as u32,
+            "the record changed hands {changed} times, too few to outlive a {patience:?} patience \
+             inside a {:?} wall",
+            wall.work()
         );
         drop(occupier);
     }
