@@ -300,6 +300,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "churn-settle-reads-the-rendered-spelling",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcherVolumeFoldingDecides,
+        states: "the settle every churn case ends on is not met while the store holds a document \
+                 at a spelling the tree does not render, so a case reading the rendered spelling \
+                 reads a store the host has caught up with",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_store_holding_a_retired_spelling_has_not_settled",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "churn-burst-and-coalescing",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

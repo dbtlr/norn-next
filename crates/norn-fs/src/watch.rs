@@ -205,21 +205,19 @@ impl Batch {
     /// **That name is as good as the reports behind it.** Where a backend
     /// reports the half a rename moved away from as a path that stands, and
     /// reports it last, the covering root carries a spelling the tree no longer
-    /// renders and everything it speaks for is derived through it. Nothing here
-    /// tells that apart from the same rename the other way round: both are two
-    /// roots disagreeing about a shared ancestor's spelling, with no report
-    /// saying which name a directory entry holds. What resolves it is a reading
-    /// of the tree, and this is a reading of reports. That is the contract, and
-    /// its bound is stated rather than closed. Neither backend this crate ships
-    /// produces the shape: a native stream reports the halves in the order they
-    /// happened, so the name the tree renders lands last, and the poll backend
-    /// reports the old spelling as a death, which never displaces a live name.
-    /// Reaching it takes a backend that reports the dead half last as a path
-    /// that stands, or a consumer folding [`Batch::vault_change`] at the dead
-    /// spelling after the live one. Rows derived under such a root stand at
-    /// the dead spelling until the consumer's next whole-vault heal reads the
-    /// tree. Which occasions run one is the consumer's contract; none runs
-    /// because time passed, so nothing sooner converges it.
+    /// renders. Nothing here tells that apart from the same rename the other
+    /// way round: both are two roots disagreeing about a shared ancestor's
+    /// spelling, with no report saying which name a directory entry holds.
+    /// What resolves it is a reading of the tree, and this is a reading of
+    /// reports: [`crate::Vault::reach`] is that reading, and it answers a root
+    /// at the spelling each directory lists, so a consumer deriving through it
+    /// lands the rendered spelling whichever one the root carries. Neither
+    /// backend this crate ships produces the shape: a native stream reports
+    /// the halves in the order they happened, so the name the tree renders
+    /// lands last, and the poll backend reports the old spelling as a death,
+    /// which never displaces a live name. Reaching it takes a backend that
+    /// reports the dead half last as a path that stands, or a consumer folding
+    /// [`Batch::vault_change`] at the dead spelling after the live one.
     ///
     /// **A root nothing has spelled live covers only what also died.** Every
     /// covering root answers for its whole range — one reading enumerates the
@@ -3973,10 +3971,10 @@ mod tests {
     /// over whichever backend reported it.
     ///
     /// The forbidden shape is a batch naming the pre-rename spelling on a
-    /// folding volume. A consumer derives at the spelling a root carries, and
-    /// the directory renders only the post-rename one, so a batch that hands
-    /// back the dead spelling sends the derivation to a name no directory entry
-    /// holds.
+    /// folding volume. The directory renders only the post-rename spelling, and
+    /// both backends report enough for a batch to carry it, so a batch that
+    /// hands back the dead spelling states a name no directory entry holds and
+    /// leaves the tree reading that corrects it to the consumer.
     ///
     /// The two backends order the reports differently and this case is stated
     /// over both: a native stream reports a rename as the two spellings in the
@@ -4385,17 +4383,17 @@ mod tests {
         }
     }
 
-    /// **A covering root carries the name its last live report spelled, and
-    /// that is the name everything it speaks for is derived through.**
+    /// **A covering root carries the name its last live report spelled.**
     ///
-    /// This is the bound on subsumption, stated over the shape that reaches it.
-    /// A backend which cannot say which half of a rename a path was reports
-    /// both halves as paths that stand, and the set reads them the only way a
-    /// set of reports can be read: a name a report calls live is live, so the
-    /// last of them is the one the root carries. Where that last one is the
-    /// half the rename moved away from, the covering root carries a spelling
-    /// the tree no longer renders, and the descendant it subsumes was the one
-    /// root naming the identity at a spelling the tree does render.
+    /// This is the bound on the spelling subsumption keeps, stated over the
+    /// shape that reaches it. A backend which cannot say which half of a rename
+    /// a path was reports both halves as paths that stand, and the set reads
+    /// them the only way a set of reports can be read: a name a report calls
+    /// live is live, so the last of them is the one the root carries. Where
+    /// that last one is the half the rename moved away from, the covering root
+    /// carries a spelling the tree no longer renders, and the descendant it
+    /// subsumes was the one root naming the identity at a spelling the tree
+    /// does render.
     ///
     /// Nothing in a batch tells that apart from the same rename the other way
     /// round: two roots, one covering the other, disagreeing about how their
@@ -4403,9 +4401,10 @@ mod tests {
     /// a directory entry holds. What resolves it is a reading of the tree, and
     /// a batch is a reading of reports.
     ///
-    /// Neither shipped backend reports the shape, and the consumer's next
-    /// whole-vault heal converges what a batch that carries it derived; the
-    /// `Batch::vault_roots` contract states the bound.
+    /// Neither shipped backend reports the shape, and a consumer that reaches
+    /// the root through `Vault::reach` reads it at the spelling the tree lists,
+    /// whichever one the root carries; the `Batch::vault_roots` contract states
+    /// both.
     #[test]
     fn a_covering_root_carries_the_name_its_last_live_report_spelled() {
         let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
