@@ -8710,9 +8710,12 @@ mod tests {
         (host, name)
     }
 
-    /// The fixture above with vaults beside the one under test, whose only
-    /// role is to occupy worker slots: a job blocked on one entry is what
-    /// holds another entry's job in the channel long enough for a test to
+    /// The fixture above over the named vaults and the given number of worker
+    /// slots, with the dispatcher standing down the same way.
+    ///
+    /// A vault here is a case's subject, a bystander whose state the case
+    /// asserts, or an occupant of a worker slot: a job blocked on one entry is
+    /// what holds another entry's job in the channel long enough for a test to
     /// drive the window around it.
     fn host_without_ambient_polling(
         ops: Arc<FakeOps>,
@@ -15638,9 +15641,9 @@ mod tests {
         wait_for_state(&host, &sibling, TrustState::Ready);
 
         // The batch is one rescan whichever entry's poll spends it, so the
-        // poll that carries it is driven at the damaged entry: an ambient
-        // round armed between its polls of the two entries hands the rescan
-        // to the sibling, and the damaged entry reconciles nothing.
+        // poll that carries it is driven at the damaged entry: a batch armed
+        // while an ambient round is between its polls of the two entries is
+        // the sibling's rescan, and the damaged entry reconciles nothing.
         arrange_for(&ops.damaged_reconcile_at, &damaged);
         report_through_a_driven_poll(&ops, &host, &damaged, &ops.off_thread_rescan_poll_batches);
         wait_until(
