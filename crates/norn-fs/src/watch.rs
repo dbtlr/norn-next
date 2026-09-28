@@ -12,7 +12,7 @@ use std::fmt;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -472,13 +472,20 @@ impl std::error::Error for WatchError {}
 /// quietest.
 ///
 /// A delivered batch is closed, and the delivery slot holds one. A consumer
-/// that polls slowly therefore holds the coalescer at its next send, and
-/// everything arriving meanwhile merges into the batch still pending behind
-/// it — so slow polling widens the batches yet to come rather than dropping
-/// facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens to a
-/// [`RescanScope::Vault`] rescan instead of growing. More than one batch can
-/// be waiting, so a consumer that wants everything settled receives until
+/// that polls slowly therefore holds the coalescer behind the next batch it
+/// closes, and everything arriving meanwhile merges into the batch still
+/// pending behind that one — so slow polling widens the batches yet to come
+/// rather than dropping facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens
+/// to a [`RescanScope::Vault`] rescan instead of growing. More than one batch
+/// can be waiting, so a consumer that wants everything settled receives until
 /// `try_recv` reports no batch.
+///
+/// **No batch enters the delivery slot while a heal window is open.** A batch
+/// the coalescer closed before [`Subscription::begin_heal`] and had not placed
+/// is held for the window instead, and [`Subscription::finish_heal`] returns
+/// it ahead of the window's own accumulation. The batches the slot holds when
+/// a window closes are therefore the ones it held when the window opened, less
+/// what the consumer took, and every batch after them is newer than the heal's.
 ///
 /// A terminal [`WatchError`] is the last fact a subscription carries: it is
 /// delivered once, no batch follows it, and a receive after it reports either
@@ -497,6 +504,11 @@ pub struct Subscription {
     worker: Option<thread::JoinHandle<()>>,
     control: Arc<(Mutex<SubscriptionState>, Condvar)>,
     state: Arc<Mutex<State>>,
+    /// Signalled under the state lock whenever a closed batch can move: the
+    /// coalescer hands one over, a receive makes room in the delivery slot or
+    /// takes the batch waiting unplaced, a closing heal window takes that
+    /// batch, or the subscription is dropped.
+    handoff: Arc<Condvar>,
     wake: Option<mpsc::SyncSender<()>>,
     faults: WatchFaults,
     /// Closed by the first [`Subscription::finish_heal`], and read by the fault
@@ -585,40 +597,79 @@ impl Subscription {
         self.state.lock().expect("watch state poisoned").healing = true;
     }
 
-    /// Close the heal window and take every fact accumulated during it.
+    /// Close the heal window and take every fact accumulated during it, behind
+    /// any batch the coalescer closed before the window opened and did not
+    /// place in the delivery slot.
     ///
     /// Everything the backend reported across the window is handed back here,
     /// so the first delivery this consumer meets as a change of its own is the
     /// next one. That is what the fault seam's stream stage stands in place of,
     /// and closing the first window is what makes its arm eligible.
+    ///
+    /// Called with no window open, it takes the accumulation and nothing the
+    /// slot is owed: a batch waiting for room in the slot stays there.
+    ///
+    /// A terminal error found under the state lock closes the window too, and
+    /// is returned in place of the batch: the held batch and the accumulation
+    /// are discarded with it, and the error calls for a rescan of the vault. A
+    /// coalescer that died is reported as a stopped watcher, so a heal never
+    /// waits on a batch no coalescer is left to hand over.
+    ///
+    /// A vault root that moved is refused before the state lock is taken. That
+    /// refusal leaves the window open, with any batch held for it still held;
+    /// dropping the subscription releases the coalescer holding that batch.
     pub fn finish_heal(&self) -> Result<Batch, WatchError> {
         self.check_root_anchor()?;
-        let work = {
+        let (closed_before, work) = {
             let mut state = self.state.lock().expect("watch state poisoned");
+            // The wait is the coalescer's suppression of a batch it took up
+            // before the window opened. Suppression never waits on the
+            // consumer, and its batch is handed over under this lock: held
+            // unplaced while a window is open, and taken just below. A
+            // coalescer that unwinds clears the mark on its way out.
+            while state.closing {
+                state = self.handoff.wait(state).expect("watch state poisoned");
+            }
             // Closed under the state lock: a delivery cannot pass the arm's
             // gate and land in the batch this call is about to take, so an
             // arm's answer is always a live report, never the heal's own.
             self.first_heal.closed();
-            state.healing = false;
-            if let Some(error) = state.terminal.take() {
+            let window_was_open = std::mem::replace(&mut state.healing, false);
+            let closed_before = if window_was_open {
+                state.unplaced.take()
+            } else {
+                None
+            };
+            // The coalescer waits on a batch held for the window, and goes on
+            // once the window has taken it.
+            self.handoff.notify_all();
+            let terminal = state.terminal.take().or_else(|| {
+                state
+                    .coalescer_died
+                    .then(|| WatchError::Backend("watcher stopped".into()))
+            });
+            if let Some(error) = terminal {
                 state.pending.take();
                 return Err(error);
             }
             let root = state.root.clone();
             let ledger = state.ledger.clone();
-            state
+            let work = state
                 .pending
                 .take()
-                .map(|pending| (root, ledger, pending.into_batch()))
+                .map(|pending| (root, ledger, pending.into_batch()));
+            (closed_before, work)
         };
         let _ = self
             .wake
             .as_ref()
             .expect("subscription wake sender present")
             .try_send(());
-        Ok(work.map_or_else(Batch::default, |(root, ledger, batch)| {
-            suppress(&root, &ledger, batch)
-        }))
+        let mut batch = closed_before.unwrap_or_default();
+        if let Some((root, ledger, accumulated)) = work {
+            batch.merge(suppress(&root, &ledger, accumulated));
+        }
+        Ok(batch)
     }
 
     /// Observe the current control state without consuming it.
@@ -630,14 +681,56 @@ impl Subscription {
             .clone()
     }
 
+    /// Whether a settled batch is waiting in the delivery slot, observed
+    /// without taking it.
+    ///
+    /// Built for this crate's tests and behind `induced-failure`: it is how a
+    /// suite orders a change against the slot a heal window drains, where a
+    /// receive would take the very batch under test.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub fn holds_a_settled_batch(&self) -> bool {
+        self.state
+            .lock()
+            .expect("watch state poisoned")
+            .settled_in_slot
+            > 0
+    }
+
     /// Receive one already-settled batch without waiting.
+    ///
+    /// With no heal window open, a batch waiting for room behind an empty
+    /// delivery slot is received directly, so a receive reports no batch only
+    /// when nothing settled is left to take.
     pub fn try_recv(&self) -> Result<Option<Batch>, WatchError> {
-        match self
-            .batches
-            .as_ref()
-            .expect("subscription receiver present")
-            .try_recv()
-        {
+        let received = {
+            let mut state = self.state.lock().expect("watch state poisoned");
+            let received = self
+                .batches
+                .as_ref()
+                .expect("subscription receiver present")
+                .try_recv();
+            match received {
+                Ok(Ok(_)) => {
+                    state.settled_in_slot -= 1;
+                    // The slot has room again, for a batch the coalescer is
+                    // holding behind it.
+                    self.handoff.notify_all();
+                    received
+                }
+                // Every batch waiting behind the slot is newer than what the
+                // slot held, so an empty slot puts it next in order. The
+                // coalescer holding it goes on once it is taken.
+                Err(mpsc::TryRecvError::Empty) if !state.healing => match state.unplaced.take() {
+                    Some(batch) => {
+                        self.handoff.notify_all();
+                        Ok(Ok(batch))
+                    }
+                    None => received,
+                },
+                _ => received,
+            }
+        };
+        match received {
             Ok(Ok(batch)) => Ok(Some(batch)),
             Ok(Err(error)) => Err(error),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
@@ -700,10 +793,18 @@ fn publish_control(control: &Arc<(Mutex<SubscriptionState>, Condvar)>, next: Sub
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.watcher.take();
-        // Disconnect a worker blocked behind the bounded delivery slot before
-        // joining it. Backend callbacks write only shared pending state, so
-        // delivery backpressure never blocks event intake.
+        // Disconnect the delivery slot before joining the worker. A terminal
+        // send blocked on the full slot fails, and a coalescer holding a batch,
+        // whether for room in the slot or for a heal window still open, is
+        // woken under the state lock to find the subscription gone. Backend
+        // callbacks write only shared pending state, so delivery backpressure
+        // never blocks event intake.
         self.batches.take();
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.unsubscribed = true;
+            self.handoff.notify_all();
+        }
         self.wake.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -956,8 +1057,12 @@ fn establish(
         }
     }
 
+    let handoff = Arc::new(Condvar::new());
     let worker_state = shared.clone();
-    let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
+    let worker_handoff = handoff.clone();
+    let worker = thread::spawn(move || {
+        run_coalescer(worker_state, worker_handoff, wake_rx, batch_tx);
+    });
     let sensitivity = normalizer.case_sensitivity();
     let owns = OwnWrites {
         ledger: Arc::downgrade(&ledger),
@@ -971,6 +1076,7 @@ fn establish(
             worker: Some(worker),
             control,
             state: shared,
+            handoff,
             wake: Some(wake_tx),
             faults,
             first_heal,
@@ -1375,6 +1481,27 @@ struct State {
     pending: Option<Pending>,
     terminal: Option<WatchError>,
     healing: bool,
+    /// The coalescer has taken the accumulation and is suppressing the batch
+    /// it closes, which it hands over under this lock. Suppression never waits
+    /// on the consumer.
+    closing: bool,
+    /// The batch the coalescer closed and has not placed in the delivery slot:
+    /// waiting for room behind a full slot, or held for an open heal window.
+    /// Any window open while it waits takes it as the window closes, whether
+    /// the window was open when the batch was handed over or opened later.
+    /// With no window open, a receive that finds the slot empty takes it. The
+    /// coalescer closes no other batch while this one waits.
+    unplaced: Option<Batch>,
+    /// How many batches the delivery slot holds. Both ends of the slot move it
+    /// under this lock, so it is exact whenever the lock is held.
+    settled_in_slot: usize,
+    /// The subscription is being dropped: no receive or heal window will take
+    /// a batch again, including one held for a window left open.
+    unsubscribed: bool,
+    /// The coalescer thread unwound. A batch it had taken up is never handed
+    /// over, and no terminal error follows it into the delivery slot, so the
+    /// subscription carries no fact past this one.
+    coalescer_died: bool,
 }
 
 impl State {
@@ -1401,6 +1528,11 @@ impl State {
             pending: None,
             terminal: None,
             healing: false,
+            closing: false,
+            unplaced: None,
+            settled_in_slot: 0,
+            unsubscribed: false,
+            coalescer_died: false,
         }
     }
     fn batch(&mut self) -> &mut Batch {
@@ -1711,9 +1843,14 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
 
 fn run_coalescer(
     state: Arc<Mutex<State>>,
+    handoff: Arc<Condvar>,
     wake: mpsc::Receiver<()>,
     output: mpsc::SyncSender<Result<Batch, WatchError>>,
 ) {
+    let _exit = CoalescerExit {
+        state: &state,
+        handoff: &handoff,
+    };
     loop {
         let wait = {
             let locked = state.lock().expect("watch state poisoned");
@@ -1748,27 +1885,107 @@ fn run_coalescer(
             } else {
                 let root = locked.root.clone();
                 let ledger = locked.ledger.clone();
-                Ok(locked
+                let taken = locked
                     .pending
                     .take()
-                    .map(|pending| (root, ledger, pending.into_batch())))
+                    .map(|pending| (root, ledger, pending.into_batch()));
+                locked.closing = taken.is_some();
+                Ok(taken)
             }
         };
-        // Filesystem observation for suppression is deliberately outside both
-        // watcher locks. A large own-written file must not block the backend
-        // callback from recording newer events, and one slow hash must not
-        // prevent write outcomes from entering the ledger.
-        let item = match work {
-            Err(error) => Some(Err(error)),
-            Ok(Some((root, ledger, batch))) => Some(Ok(suppress(&root, &ledger, batch))),
-            Ok(None) => None,
-        };
-        if let Some(item) = item {
-            let terminal = item.is_err();
-            if output.send(item).is_err() || terminal {
+        match work {
+            Err(error) => {
+                let _ = output.send(Err(error));
                 return;
             }
+            Ok(Some((root, ledger, batch))) => {
+                // Filesystem observation for suppression is deliberately
+                // outside both watcher locks. A large own-written file must not
+                // block the backend callback from recording newer events, and
+                // one slow hash must not prevent write outcomes from entering
+                // the ledger.
+                let batch = suppress(&root, &ledger, batch);
+                if !hand_over(&state, &handoff, &output, batch) {
+                    return;
+                }
+            }
+            Ok(None) => {}
         }
+    }
+}
+
+/// Clears [`State::closing`] when the coalescer thread leaves
+/// [`run_coalescer`], by return or by unwind, and records an unwind as
+/// [`State::coalescer_died`].
+///
+/// A return never leaves the mark set, but an unwind out of suppression does,
+/// and a closing heal waits on that mark. Clearing it here is what lets that
+/// heal return. The state lock is taken even when poisoned, because a poisoned
+/// state lock is one way the coalescer unwinds.
+struct CoalescerExit<'a> {
+    state: &'a Mutex<State>,
+    handoff: &'a Condvar,
+}
+
+impl Drop for CoalescerExit<'_> {
+    fn drop(&mut self) {
+        let mut locked = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        locked.closing = false;
+        locked.coalescer_died |= thread::panicking();
+        self.handoff.notify_all();
+    }
+}
+
+/// Hand one closed batch over: into the delivery slot, or, while a heal window
+/// is open or the slot is full, into [`State::unplaced`] until it can move.
+/// Reports whether the consumer is still there: a dropped subscription ends the
+/// wait even with a heal window open.
+///
+/// A batch only ever enters the slot under the state lock and only while no
+/// heal window is open, which is what lets a window treat the slot as closed to
+/// batches for its whole length: [`Subscription::begin_heal`] takes the same
+/// lock, and a batch that meets an open window is held for it. The terminal
+/// error is the one exception: the coalescer sends it outside the lock, and it
+/// can enter the slot while a window is open. The batch is out of the
+/// coalescer's hands the moment this takes the lock, so a closing window never
+/// waits on a consumer to make room. The coalescer then waits, releasing the
+/// lock, until a receive makes room or takes the batch, or the closing window
+/// takes it; the backend callback is never held behind a slow consumer.
+fn hand_over(
+    state: &Mutex<State>,
+    handoff: &Condvar,
+    output: &mpsc::SyncSender<Result<Batch, WatchError>>,
+    batch: Batch,
+) -> bool {
+    let mut locked = state.lock().expect("watch state poisoned");
+    locked.closing = false;
+    locked.unplaced = Some(batch);
+    handoff.notify_all();
+    loop {
+        if locked.unsubscribed {
+            return false;
+        }
+        if !locked.healing
+            && let Some(batch) = locked.unplaced.take()
+        {
+            match output.try_send(Ok(batch)) {
+                Ok(()) => {
+                    locked.settled_in_slot += 1;
+                    return true;
+                }
+                Err(mpsc::TrySendError::Full(refused)) => {
+                    locked.unplaced =
+                        Some(refused.expect("the slot hands back the batch it refused"));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        if locked.unplaced.is_none() {
+            // Taken by the heal window it was held for, or by a receive that
+            // found the slot empty.
+            return true;
+        }
+        locked = handoff.wait(locked).expect("watch state poisoned");
     }
 }
 
@@ -2124,6 +2341,468 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Path::new("during.md")]
         );
+    }
+
+    /// Fold one report naming `name` into the subscription's accumulation and
+    /// wake the coalescer, without waiting on anything.
+    fn reported(subscription: &Subscription, name: &str) {
+        let observed_root = subscription.state.lock().unwrap().root.clone();
+        ingest(
+            &subscription.state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(observed_root.join(name))),
+        );
+        let _ = subscription.wake.as_ref().unwrap().try_send(());
+    }
+
+    /// Fold one report naming `name` into the subscription's accumulation, wake
+    /// the coalescer, and wait for it to hand over the batch it closes.
+    ///
+    /// The accumulation is empty until the report lands and is taken only by
+    /// the coalescer, which marks itself closing as it takes it and clears the
+    /// mark once the batch is handed over. Seeing both clear is therefore this
+    /// batch in the delivery slot, waiting behind it for room, or held for an
+    /// open heal window.
+    fn closed_by_the_coalescer(subscription: &Subscription, name: &str) {
+        reported(subscription, name);
+        norn_testkit::wait::wait_until(
+            &format!("the coalescer to hand over the batch naming `{name}`"),
+            watch_budget(),
+            || {
+                let state = subscription.state.lock().unwrap();
+                if state.pending.is_none() && !state.closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending(format!(
+                        "accumulation open: {}, closing: {}",
+                        state.pending.is_some(),
+                        state.closing
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// A polling subscription whose delivery slot holds a batch naming
+    /// `placed.md`, with a batch naming `held.md` closed and waiting behind it.
+    ///
+    /// The slot holds one batch, so the coalescer cannot place the second one
+    /// it closes until a consumer takes the first: the construction holds a
+    /// closed, unplaced batch without a pause.
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_batch_waiting_behind_the_slot(label: &str) -> (Scratch, Subscription) {
+        let scratch = Scratch::new(label);
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        closed_by_the_coalescer(&subscription, "placed.md");
+        closed_by_the_coalescer(&subscription, "held.md");
+        assert!(subscription.holds_a_settled_batch());
+        (scratch, subscription)
+    }
+
+    /// Run `step` over the subscription on a thread of its own and hand both
+    /// back, so a step that never returns fails the case at the watch budget
+    /// instead of hanging it.
+    fn returned<T: Send + 'static>(
+        subscription: Subscription,
+        what: &str,
+        step: impl FnOnce(&Subscription) -> T + Send + 'static,
+    ) -> (Subscription, T) {
+        let (done, returned) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = step(&subscription);
+            let _ = done.send((subscription, outcome));
+        });
+        returned
+            .recv_timeout(watch_budget().work())
+            .unwrap_or_else(|_| panic!("{what} did not return"))
+    }
+
+    /// Receive until a batch arrives, within the watch budget.
+    fn received(subscription: &Subscription, what: &str) -> Batch {
+        norn_testkit::wait::wait_until(what, watch_budget(), || match subscription.try_recv() {
+            Ok(Some(batch)) => norn_testkit::wait::Observed::Met(batch),
+            other => norn_testkit::wait::Observed::pending(format!("{other:?}")),
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **No batch enters the delivery slot while a heal window is open.** A
+    /// consumer reports what it takes out of the slot during its heal ahead of
+    /// the window's own facts, and what the slot holds after the window as
+    /// newer than both — so a batch the coalescer closed before the window
+    /// opened, but had not yet placed, belongs to the heal, ahead of the
+    /// window's accumulation. Once the window has taken that batch, the
+    /// coalescer goes on to the changes that follow it.
+    #[test]
+    fn a_batch_closed_before_a_heal_window_reaches_the_heal_and_not_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-closed-before");
+
+        subscription.begin_heal();
+        let placed = subscription
+            .try_recv()
+            .unwrap()
+            .expect("the batch placed before the window");
+        assert_eq!(subscription.try_recv(), Ok(None));
+        let healed = subscription.finish_heal().unwrap();
+
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        assert!(names(&healed, "held.md"), "{healed:?}");
+        assert!(!subscription.holds_a_settled_batch());
+        assert_eq!(subscription.try_recv(), Ok(None));
+
+        closed_by_the_coalescer(&subscription, "after.md");
+        let after = received(&subscription, "the batch closed after the window");
+        assert!(names(&after, "after.md"), "{after:?}");
+    }
+
+    /// **A heal window takes the batch waiting behind a full slot even when
+    /// its consumer receives nothing during it.** The slot keeps the batch it
+    /// held when the window opened, and the waiting batch is the heal's.
+    #[test]
+    fn a_heal_that_receives_nothing_still_takes_the_batch_waiting_behind_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-no-receive");
+
+        subscription.begin_heal();
+        let (subscription, healed) = returned(subscription, "the closing heal", |subscription| {
+            subscription.finish_heal().unwrap()
+        });
+
+        assert!(names(&healed, "held.md"), "{healed:?}");
+        let placed = subscription.try_recv().unwrap().expect("the placed batch");
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        assert_eq!(subscription.try_recv(), Ok(None));
+    }
+
+    /// **On a folding vault a heal keeps the window's spelling over that of
+    /// the batch held for it.** The held batch closed before the window
+    /// opened, so where the two name one identity at two spellings, the
+    /// window's is the later report and the one the tree renders.
+    ///
+    /// The subscription folds at the case behavior its state carries, so the
+    /// case states a folding vault on a volume of either kind.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_keeps_the_windows_spelling_over_the_batch_held_for_it() {
+        let scratch = Scratch::new("heal-window-spelling");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.state.lock().unwrap().normalizer =
+            PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        closed_by_the_coalescer(&subscription, "placed.md");
+        closed_by_the_coalescer(&subscription, "flip.md");
+        assert!(subscription.holds_a_settled_batch());
+
+        subscription.begin_heal();
+        reported(&subscription, "FLIP.md");
+        let healed = subscription.finish_heal().unwrap();
+
+        let flipped: Vec<_> = healed
+            .vault_roots()
+            .iter()
+            .map(|root| root.as_path())
+            .filter(|path| path.to_string_lossy().eq_ignore_ascii_case("flip.md"))
+            .collect();
+        assert_eq!(flipped, [Path::new("FLIP.md")], "{healed:?}");
+    }
+
+    /// **Receiving until no batch is reported takes every settled batch**,
+    /// the one waiting behind the slot included, with no wait for the coalescer
+    /// to move it in.
+    #[test]
+    fn receiving_until_no_batch_takes_the_batch_waiting_behind_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("slot-drained");
+
+        let placed = subscription.try_recv().unwrap().expect("the placed batch");
+        let held = subscription
+            .try_recv()
+            .unwrap()
+            .expect("the batch waiting behind the slot");
+
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        assert!(names(&held, "held.md"), "{held:?}");
+        assert_eq!(subscription.try_recv(), Ok(None));
+        assert!(!subscription.holds_a_settled_batch());
+    }
+
+    /// **Closing a heal with no window open returns at once**, and takes
+    /// nothing a window would have: the batch waiting behind the full slot is
+    /// still the slot's, in order behind the one the slot holds.
+    #[test]
+    fn a_heal_closed_with_no_window_open_leaves_the_waiting_batch_to_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-unopened");
+
+        let (subscription, healed) = returned(subscription, "the unopened heal", |subscription| {
+            subscription.finish_heal().unwrap()
+        });
+
+        assert!(!names(&healed, "held.md"), "{healed:?}");
+        let placed = subscription.try_recv().unwrap().expect("the placed batch");
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        let held = received(&subscription, "the batch waiting behind the slot");
+        assert!(names(&held, "held.md"), "{held:?}");
+    }
+
+    /// **A closing heal waits out the suppression of a batch the coalescer
+    /// took up before the window opened**, and returns that batch. Returning
+    /// without it would leave the batch to reach the slot after the window,
+    /// older than the heal's facts it trails.
+    ///
+    /// Suppression takes the own-write ledger's lock, so holding that lock
+    /// pins the coalescer inside it with the batch taken and not handed over.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_closing_heal_waits_out_the_suppression_of_a_batch_taken_before_its_window() {
+        let scratch = Scratch::new("heal-window-suppressing");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let suppression = ledger.lock().unwrap();
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until(
+            "the coalescer to take the batch up",
+            watch_budget(),
+            || {
+                let state = subscription.state.lock().unwrap();
+                if state.pending.is_none() && state.closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the accumulation is still open")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let healed = subscription.finish_heal();
+            let _ = done.send((subscription, healed));
+        });
+        // A closing heal that does not wait returns inside this grace; one
+        // that waits cannot return inside it at all. The grace decides only
+        // how surely the first is caught, never whether the second passes.
+        let early = finished.recv_timeout(watch_budget().probe());
+        // Released before anything is asserted: the subscription's drop joins
+        // the coalescer this lock pins.
+        drop(suppression);
+        let returned_early = early.is_ok();
+        let (subscription, healed) = early
+            .or_else(|_| finished.recv_timeout(watch_budget().work()))
+            .expect("the heal to close once suppression finished");
+
+        let healed = healed.unwrap();
+        assert!(
+            !returned_early,
+            "the heal closed while the batch taken before it was being suppressed: {healed:?}"
+        );
+        assert!(names(&healed, "suppressing.md"), "{healed:?}");
+        assert!(!subscription.holds_a_settled_batch());
+        assert_eq!(subscription.try_recv(), Ok(None));
+    }
+
+    /// **Dropping a subscription releases a coalescer waiting behind the full
+    /// delivery slot**, so the drop's join returns.
+    #[test]
+    fn dropping_a_subscription_releases_a_coalescer_waiting_behind_the_slot() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("slot-drop");
+
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **Dropping a subscription with a heal window open releases a coalescer
+    /// holding a batch for that window**, so the drop's join returns. No
+    /// window outlives its subscription.
+    #[test]
+    fn dropping_a_subscription_with_a_heal_window_open_releases_the_coalescer_holding_its_batch() {
+        let (_scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-drop");
+
+        subscription.begin_heal();
+
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal refused because the vault root moved leaves a subscription
+    /// that still drops**, releasing a coalescer holding a batch for the
+    /// window the refusal left open.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_refused_by_a_moved_root_leaves_a_subscription_that_drops() {
+        let (scratch, subscription) = a_batch_waiting_behind_the_slot("heal-window-root-moved");
+        subscription.begin_heal();
+        let placed = subscription.try_recv().unwrap().expect("the placed batch");
+        let vault = scratch.path("vault");
+        std::fs::rename(&vault, scratch.path("moved-vault")).unwrap();
+        std::fs::create_dir(&vault).unwrap();
+
+        let refused = subscription.finish_heal();
+
+        assert!(names(&placed, "placed.md"), "{placed:?}");
+        assert!(
+            matches!(refused, Err(WatchError::CoverageLost(_))),
+            "{refused:?}"
+        );
+        dropped_within_the_budget(subscription);
+    }
+
+    /// Drop the subscription on a thread of its own, failing the case if the
+    /// drop's join has not returned within the watch budget.
+    fn dropped_within_the_budget(subscription: Subscription) {
+        let (done, dropped) = mpsc::channel();
+        thread::spawn(move || {
+            drop(subscription);
+            let _ = done.send(());
+        });
+
+        dropped
+            .recv_timeout(watch_budget().work())
+            .expect("the drop to join the coalescer");
+    }
+
+    /// **A heal closes over a coalescer that died suppressing a batch it took
+    /// up**, and reports the watcher stopped. That batch is never handed over,
+    /// so a closing heal that waited for it would wait forever.
+    ///
+    /// Suppression locks the own-write ledger, so a ledger poisoned by a writer
+    /// that panicked while holding it unwinds the coalescer there, with the
+    /// batch taken and not handed over.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_closes_over_a_coalescer_that_died_suppressing_a_batch() {
+        let scratch = Scratch::new("heal-window-coalescer-died");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let _ = thread::spawn(move || {
+            let _held = ledger.lock().unwrap();
+            panic!("a writer panics while holding the own-write ledger");
+        })
+        .join();
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until("the coalescer to die suppressing", watch_budget(), || {
+            if subscription.worker.as_ref().unwrap().is_finished() {
+                norn_testkit::wait::Observed::Met(())
+            } else {
+                norn_testkit::wait::Observed::pending("the coalescer is running")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+        let (subscription, healed) = returned(subscription, "the closing heal", |subscription| {
+            subscription.finish_heal()
+        });
+
+        assert!(matches!(healed, Err(WatchError::Backend(_))), "{healed:?}");
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal already waiting out a suppression returns when the coalescer
+    /// dies inside it**, and reports the watcher stopped. The batch under
+    /// suppression is never handed over, so the only thing that ends the wait
+    /// is the coalescer saying it left.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_waiting_heal_returns_when_the_coalescer_dies_suppressing_its_batch() {
+        let scratch = Scratch::new("heal-window-coalescer-dies-while-waited-on");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let (held, holding) = mpsc::channel();
+        let (panic_now, told) = mpsc::channel::<()>();
+        let writer = thread::spawn(move || {
+            let _held = ledger.lock().unwrap();
+            let _ = held.send(());
+            let _ = told.recv();
+            panic!("a writer panics while holding the own-write ledger");
+        });
+        holding.recv().expect("the writer to hold the ledger");
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until(
+            "the coalescer to take the batch up",
+            watch_budget(),
+            || {
+                if subscription.state.lock().unwrap().closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is not suppressing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let healed = subscription.finish_heal();
+            let _ = done.send((subscription, healed));
+        });
+        let early = finished.recv_timeout(watch_budget().probe());
+        assert!(
+            early.is_err(),
+            "the heal closed while a batch was being suppressed"
+        );
+        drop(panic_now);
+        let _ = writer.join();
+        let (subscription, healed) = finished
+            .recv_timeout(watch_budget().work())
+            .expect("the heal to return once the coalescer died");
+
+        assert!(matches!(healed, Err(WatchError::Backend(_))), "{healed:?}");
+        dropped_within_the_budget(subscription);
+    }
+
+    /// **A heal closed after the coalescer delivered its terminal error
+    /// reports no second failure.** That error is the subscription's last
+    /// fact, and a coalescer that returned after delivering it left no batch
+    /// behind for the heal to wait on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_closed_after_a_delivered_terminal_error_reports_no_second_failure() {
+        let scratch = Scratch::new("heal-window-after-terminal");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.state.lock().unwrap().terminal = Some(WatchError::CoverageLost(vault.clone()));
+        let _ = subscription.wake.as_ref().unwrap().try_send(());
+        norn_testkit::wait::wait_until(
+            "the coalescer to deliver and return",
+            watch_budget(),
+            || {
+                if subscription.worker.as_ref().unwrap().is_finished() {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is running")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        subscription.begin_heal();
+
+        assert_eq!(
+            subscription.try_recv(),
+            Err(WatchError::CoverageLost(vault.clone()))
+        );
+        let healed = subscription.finish_heal();
+        assert!(healed.is_ok(), "{healed:?}");
     }
 
     #[test]
@@ -2703,7 +3382,13 @@ mod tests {
     fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path, hits: &Path) {
         let already_reported = open_a_heal_window(subscription);
         std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change the heal window is open across");
-        wait_for_the_window_to_take_up(label, subscription, hits, TAKEN_UP, &already_reported);
+        wait_for_the_window_to_take_up(
+            label,
+            &subscription.state,
+            hits,
+            TAKEN_UP,
+            &already_reported,
+        );
         subscription
             .finish_heal()
             .expect("the heal window closes over live coverage");
@@ -2760,7 +3445,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
     fn wait_for_the_window_to_take_up(
         label: &str,
-        subscription: &Subscription,
+        state: &Mutex<State>,
         hits: &Path,
         named: &str,
         already_reported: &BTreeSet<RescanScope>,
@@ -2775,7 +3460,7 @@ mod tests {
                      was spent inside the window rather than past it: {}",
                     recorded(hits)
                 );
-                let state = subscription.state.lock().expect("watch state poisoned");
+                let state = state.lock().expect("watch state poisoned");
                 let Some(pending) = state.pending.as_ref() else {
                     return norn_testkit::wait::Observed::Pending("nothing taken up".to_string());
                 };
@@ -3046,7 +3731,7 @@ mod tests {
                 .expect("a change the heal window is open across");
             wait_for_the_window_to_take_up(
                 label,
-                &subscription,
+                &subscription.state,
                 &hits,
                 "healed",
                 &already_reported,
@@ -3085,6 +3770,74 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// **The first heal window stays open to the arm while its close waits out
+    /// a suppression.** A delivery arriving during that wait belongs to the
+    /// heal, so an arm that answered it would be absorbed by the heal instead
+    /// of standing in place of a change the consumer meets.
+    ///
+    /// Suppression takes the own-write ledger's lock, so holding that lock
+    /// pins the coalescer inside it and keeps the closing heal waiting.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_heal_waiting_out_a_suppression_leaves_the_stream_arm_owed() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-stream-closing-heal");
+        let (subscription, _lease) = established_past_the_boundary(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+        );
+        let ledger = subscription.state.lock().unwrap().ledger.clone();
+        let suppression = ledger.lock().unwrap();
+        reported(&subscription, "suppressing.md");
+        norn_testkit::wait::wait_until(
+            "the coalescer to take the batch up",
+            watch_budget(),
+            || {
+                if subscription.state.lock().unwrap().closing {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::pending("the coalescer is not suppressing")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        let already_reported = open_a_heal_window(&subscription);
+        let state = subscription.state.clone();
+
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let healed = subscription.finish_heal();
+            let _ = done.send((subscription, healed));
+        });
+        // The grace in which the closing heal reaches its wait. It decides only
+        // how surely an arm made eligible before the wait is caught, never
+        // whether a heal that keeps it ineligible passes.
+        let early = finished.recv_timeout(watch_budget().probe());
+        assert!(
+            early.is_err(),
+            "the heal closed while a batch was being suppressed"
+        );
+        std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change during the closing heal");
+        wait_for_the_window_to_take_up("polling", &state, &hits, TAKEN_UP, &already_reported);
+        // Released before the heal is read: the heal waits on the coalescer
+        // this lock pins.
+        drop(suppression);
+        let (_subscription, healed) = finished
+            .recv_timeout(watch_budget().work())
+            .expect("the heal to close once suppression finished");
+
+        let healed = healed.unwrap();
+        assert!(names(&healed, "suppressing.md"), "{healed:?}");
+        assert!(names(&healed, TAKEN_UP), "{healed:?}");
+        assert!(healed.rescans().is_empty(), "{healed:?}");
+        assert!(
+            std::fs::metadata(&hits).is_err(),
+            "the stream arm answered a delivery the closing heal took: {}",
+            recorded(&hits)
+        );
     }
 
     /// **An armed stream failure is the last thing the subscription carries.**
@@ -4456,7 +5209,9 @@ mod tests {
         drop(wake_tx);
         let (output_tx, output_rx) = mpsc::sync_channel(1);
 
-        let worker = thread::spawn(move || run_coalescer(state, wake_rx, output_tx));
+        let worker = thread::spawn(move || {
+            run_coalescer(state, Arc::new(Condvar::new()), wake_rx, output_tx);
+        });
         let batch = output_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("the hard deadline to outrank the queued wake")

@@ -24,13 +24,17 @@ publish.workspace = true
 #
 # `notify` is the platform watcher backend. Its event vocabulary never crosses
 # this crate boundary; callers receive only typed dirty sets and rescan scopes.
-# `induced-failure` gates the one place this crate's write-protocol fault seam
-# is reachable from outside it: `write` arms itself from the environment instead
-# of passing no faults at all. It exists because the process-death bars over the
-# publication protocol cannot be stated by a caller that returns — a child dies
-# inside the swap and its parent reads what was left at rest — and because a
-# full disk has no `io::ErrorKind` a test can otherwise ask for. Off by default,
-# so a shipped build reads neither variable and carries no arm.
+# `induced-failure` makes this crate's fault seams reachable from outside it:
+# `write` and the public watch entry points arm themselves from the environment
+# instead of passing no faults at all. It exists because the process-death bars
+# over the publication protocol cannot be stated by a caller that returns — a
+# child dies inside the swap and its parent reads what was left at rest —
+# because a full disk has no `io::ErrorKind` a test can otherwise ask for, and
+# because refused coverage, a failed stream, and a boundary that never arrives
+# are stated about a process the platform does not cooperate with. It also
+# gives a subscription a look at its delivery slot that leaves the batch there,
+# for a suite ordering a change against what a heal window takes. Off by
+# default, so a shipped build reads no arm variable and carries no arm.
 [features]
 induced-failure = []
 
