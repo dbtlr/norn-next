@@ -720,6 +720,9 @@ fn fs_refusal_told_in(place: &str, error: &norn_fs::Refusal) -> String {
         norn_fs::Refusal::RootReplaced { .. } => {
             format!("{place} was replaced under the host")
         }
+        norn_fs::Refusal::NotCaseFolding { .. } => {
+            format!("a folder in {place} does not fold case")
+        }
         norn_fs::Refusal::ExclusiveCreateUnsupported { .. } => {
             format!("the filesystem holding {place} cannot create a file exclusively")
         }

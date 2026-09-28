@@ -120,6 +120,12 @@ pub enum Refusal {
     /// exclusive publication exists to close. `raw_os_error` is what the
     /// filesystem answered.
     ExclusiveCreateUnsupported { path: PathBuf, raw_os_error: i32 },
+    /// A respell was asked of a folder not proven to fold case.
+    ///
+    /// Where two spellings that differ only in case are two names, renaming
+    /// one onto the other is a move, planned as a create and a remove; a plain
+    /// rename there would replace whatever the new spelling names.
+    NotCaseFolding { path: PathBuf },
     /// The operating system refused, and this is what it said.
     ///
     /// **Structurally distinct from every precondition refusal above**: those
@@ -215,6 +221,11 @@ impl fmt::Display for Refusal {
             } => write!(
                 f,
                 "the vault root {} was {staged} when the change was staged and is {current} now",
+                path.display()
+            ),
+            Refusal::NotCaseFolding { path } => write!(
+                f,
+                "{} is in a folder not proven to fold case, so a change of case is a move",
                 path.display()
             ),
             Refusal::ExclusiveCreateUnsupported { path, raw_os_error } => write!(
