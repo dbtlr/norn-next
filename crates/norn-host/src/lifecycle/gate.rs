@@ -244,6 +244,16 @@ impl<T> EntryGate<T> {
         *generation != seen
     }
 
+    /// Whether a hold unwound while it stood, poisoning the gate.
+    ///
+    /// Asked without taking the gate, so it counts no take and runs none of
+    /// the writes left for the next hold. A gate poisoned after this answers
+    /// is still poisoned at the take that follows, and that take answers the
+    /// poison itself.
+    pub(super) fn is_poisoned(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
     /// Clear a poisoned gate, for a case that poisoned it on purpose.
     #[cfg(test)]
     pub(super) fn clear_poison(&self) {

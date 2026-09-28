@@ -2970,8 +2970,62 @@ fn dispatch_taken_job<O: EntryOps>(
     }
 }
 
+/// One tick of the dispatcher thread: reap the entries idle at `now`, poll
+/// every attached entry's watcher, and send every job a full queue handed
+/// back.
+///
+/// **Each step is caught on its own**, so an unwind in one skips neither the
+/// steps after it in this tick nor any later tick: the thread that catches it
+/// goes on ticking, and nothing respawns a dispatcher. What an unwound step
+/// leaves is state a later step already reaches, so the catch reconciles
+/// nothing itself:
+///
+/// - The reap schedules every due detach before it sends any. One it scheduled
+///   and did not send stands as its entry's marker, with the gate held for it,
+///   and the first retry step to find room in the queue sends it: this tick's
+///   where the queue has room, and a later tick's where it is full, since a
+///   full queue refuses the retry's send and leaves the marker standing.
+/// - An unwind inside one entry's poll is caught per entry in
+///   [`poll_watchers`], which reclaims the claim it held; the catch here
+///   answers for the rest of that step.
+/// - The retry leaves every marker it did not reach standing for the next
+///   tick's retry. A send gives its queue slot back on every exit that did not
+///   reach the channel, and the one lock taken between the slot and the
+///   channel is the job sender's, under which nothing panics.
+///
+/// **A poisoned entry gate is passed by in every step.** The entry is
+/// unreachable from there, as it is from every other door, and meeting its
+/// poison would unwind the step before the entries after it. A gate poisoned
+/// between the check and the take unwinds that one step of that one tick, and
+/// the next tick passes the entry by.
+///
+/// Nothing publishes the unwind: no one entry answers for a step, and the host
+/// keeps no account of its own faults.
+fn dispatcher_tick<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) {
+    run_dispatcher_step(|| {
+        let _ = reap_idle_shared(shared, now);
+    });
+    run_dispatcher_step(|| poll_watchers(shared));
+    run_dispatcher_step(|| retry_pending_dispatches(shared));
+}
+
+/// Run one step of [`dispatcher_tick`], catching an unwind out of it.
+fn run_dispatcher_step(step: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(step));
+}
+
+/// Send the job each entry's marker holds, where the entry has no job in the
+/// channel and none in flight: a dispatch a full queue refused left the job
+/// there, and this is what sends it once the queue has room.
 fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
+    #[cfg(test)]
+    if shared.panic_in_dispatch_retry.swap(false, Ordering::SeqCst) {
+        panic!("the retry of refused dispatches unwound before sending any");
+    }
     for entry in shared.entries.snapshot() {
+        if entry.gate.is_poisoned() {
+            continue;
+        }
         let _ = dispatch_pending(shared, &entry);
     }
 }
@@ -3406,6 +3460,13 @@ struct Shared<O: EntryOps> {
     /// one whose asker the turn it handed on to answers.
     #[cfg(test)]
     panic_after_reload_handoff: AtomicBool,
+    /// Unwind the next reap between scheduling the due detaches it found and
+    /// sending them, so each stands as its entry's marker.
+    #[cfg(test)]
+    panic_in_reap_dispatch: AtomicBool,
+    /// Unwind the next retry of refused dispatches before it sends any.
+    #[cfg(test)]
+    panic_in_dispatch_retry: AtomicBool,
     /// Held across every registration change, from the checks it answers on
     /// through the registry write and the serving-set change it makes.
     ///
@@ -4257,6 +4318,10 @@ impl<O: EntryOps> Host<O> {
             attach_gate: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             panic_after_reload_handoff: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_in_reap_dispatch: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_in_dispatch_retry: AtomicBool::new(false),
             registration_gate: Mutex::new(()),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
@@ -4317,9 +4382,7 @@ impl<O: EntryOps> Host<O> {
                 let Some(shared) = dispatcher_shared.upgrade() else {
                     break;
                 };
-                let _ = reap_idle_shared(&shared, Instant::now());
-                poll_watchers(&shared);
-                retry_pending_dispatches(&shared);
+                dispatcher_tick(&shared, Instant::now());
             }
         });
         Ok(Self {
@@ -5416,9 +5479,19 @@ impl<R: ReadSource> HoldOpening<R> {
     }
 }
 
+/// Schedule a detach for every entry idle at `now`, then send each one.
+///
+/// Every due detach is scheduled before any is sent, so one scheduled and not
+/// sent — the send refused for a full queue, or the pass unwound between the
+/// two — stands as its entry's marker for a retry of refused dispatches to
+/// send. An entry whose gate is poisoned is passed by, as
+/// [`dispatcher_tick`] states.
 fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Result<(), HostError> {
     let mut entries = Vec::new();
     for entry in shared.entries.snapshot() {
+        if entry.gate.is_poisoned() {
+            continue;
+        }
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.demand_leases == 0
             && (state.coverage.in_hand() || state.pinned())
@@ -5430,6 +5503,10 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
                 entries.push(entry);
             }
         }
+    }
+    #[cfg(test)]
+    if shared.panic_in_reap_dispatch.swap(false, Ordering::SeqCst) {
+        panic!("the reap unwound before sending the detaches it scheduled");
     }
     for entry in entries {
         dispatch_pending(shared, &entry)?;
@@ -5444,11 +5521,16 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
 /// The claim on each entry is taken here and everything that runs against it
 /// runs in [`poll_claimed_entry`], so an unwind is caught per entry rather than
 /// per pass: the vaults after the one that unwound are polled in this same
-/// tick, and the dispatcher thread — which is also what reaps idle entries and
-/// retries refused dispatches — goes on ticking.
+/// tick. An unwind out of the claim-taking or the reclaim is caught with the
+/// whole step by [`dispatcher_tick`], and an entry whose gate is poisoned is
+/// passed by, as that tick states, so the dispatcher thread — which is also
+/// what reaps idle entries and retries refused dispatches — goes on ticking.
 fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
     for entry in shared.entries.snapshot() {
         let entry = &entry;
+        if entry.gate.is_poisoned() {
+            continue;
+        }
         let (attachment, epoch) = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.claim.is_held() {
@@ -11858,6 +11940,255 @@ mod tests {
         wait_for_state(&host, &a, TrustState::Ready);
     }
 
+    /// Wait until no claim stands on `name`'s entry and no leg is registered
+    /// against it, so a tick the case drives itself finds the entry free.
+    fn wait_for_no_claim(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        wait_until("the entry's claim to end", lifecycle_wait_budget(), || {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            if state.claim.is_held() || state.claim.leg().is_some() {
+                Observed::pending("a claim or a leg stands on the entry")
+            } else {
+                Observed::Met(())
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// A reload of `name` scheduled on its entry and never sent, which is
+    /// where a dispatch the full queue refused leaves it: the job stands as
+    /// the entry's marker with no queue slot, and only a retry of refused
+    /// dispatches sends it. Answers the asker's receiver.
+    fn a_reload_left_to_the_retry(
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> mpsc::Receiver<Result<ReloadJudgment, ReloadRefusal>> {
+        let entry = host.shared.entries.get(name).expect("the vault is served");
+        let (reply, answer) = mpsc::sync_channel(1);
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .claim
+            .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
+        answer
+    }
+
+    /// Wait for the answer to a reload's asker.
+    fn wait_for_reload_answer(
+        answer: &mpsc::Receiver<Result<ReloadJudgment, ReloadRefusal>>,
+    ) -> Result<ReloadJudgment, ReloadRefusal> {
+        wait_until(
+            "the reload left to the retry to answer",
+            lifecycle_wait_budget(),
+            || match answer.try_recv() {
+                Ok(response) => Observed::Met(response),
+                Err(_) => Observed::pending("the reload is still waiting"),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    /// **A reap that unwinds leaves the dispatcher reaping.** The reap runs on
+    /// the dispatcher thread, and its unwind is caught with the step rather
+    /// than ending the thread, so an entry whose lease goes after the unwound
+    /// tick is reaped by a later one.
+    #[test]
+    fn a_reap_that_unwinds_leaves_the_dispatcher_reaping_on_later_ticks() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
+        host.shared
+            .panic_in_reap_dispatch
+            .store(true, Ordering::SeqCst);
+        wait_until(
+            "a dispatcher tick to reach the armed reap",
+            lifecycle_wait_budget(),
+            || {
+                if host.shared.panic_in_reap_dispatch.load(Ordering::SeqCst) {
+                    Observed::pending("the reap has not unwound yet")
+                } else {
+                    Observed::Met(())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// **A reap that unwinds skips nothing else in its tick.** The detach it
+    /// scheduled and did not send stands as the entry's marker, and the retry
+    /// step of that same tick is what sends it; the poll step between them
+    /// still polls the entry a lease holds.
+    ///
+    /// The host's own dispatcher never ticks inside the case, so the one tick
+    /// driven here is the only one that could have polled or sent anything.
+    #[test]
+    fn a_reap_that_unwinds_leaves_its_tick_polling_and_sending_the_detach_it_scheduled() {
+        let ops = Arc::new(FakeOps::default());
+        let idle = VaultName::new("a").unwrap();
+        let held = VaultName::new("b").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&idle, &held]), 1);
+        // Each attach is waited for before the next is asked, so no dispatch
+        // meets a full queue that only a tick would retry.
+        drop(host.demand(&idle, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &idle, TrustState::Ready);
+        let _lease = host.demand(&held, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &held, TrustState::Ready);
+        wait_for_no_claim(&host, &idle);
+        wait_for_no_claim(&host, &held);
+        let polled = polls_of(&ops, &held);
+
+        host.shared
+            .panic_in_reap_dispatch
+            .store(true, Ordering::SeqCst);
+        dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
+
+        assert!(
+            !host.shared.panic_in_reap_dispatch.load(Ordering::SeqCst),
+            "the tick never reached the armed reap"
+        );
+        assert_eq!(
+            polls_of(&ops, &held),
+            polled + 1,
+            "the poll step did not run after the reap unwound"
+        );
+        wait_for_state(&host, &idle, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// **A retry that unwinds leaves the marker it did not send to a later
+    /// tick.** A reload a full queue handed back waits on the retry alone, so
+    /// its asker is answered by the tick after the one whose retry unwound.
+    ///
+    /// The host's own dispatcher never ticks inside the case; the two ticks
+    /// driven here are the only retries there are.
+    #[test]
+    fn a_retry_that_unwinds_leaves_a_queued_reload_to_the_next_tick() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let subject = VaultName::new("a").unwrap();
+        let running = VaultName::new("b").unwrap();
+        let queued = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &running, &queued]),
+            1,
+        );
+        let _lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        wait_for_no_claim(&host, &subject);
+
+        // The one worker is inside an attach and the one channel slot holds
+        // the next, so the reload's dispatch finds the queue full.
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let running_lease = host.demand(&running, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let queued_lease = host.demand(&queued, AttachMode::Durable).unwrap();
+        let answer = a_reload_left_to_the_retry(&host, &subject);
+        let entry = host.shared.entries.get(&subject).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
+        {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            assert!(
+                state.claim.slot().is_none() && state.claim.marker().is_some(),
+                "the full queue did not hand the reload back to its marker"
+            );
+        }
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &running, TrustState::Ready);
+        wait_for_state(&host, &queued, TrustState::Ready);
+
+        host.shared
+            .panic_in_dispatch_retry
+            .store(true, Ordering::SeqCst);
+        dispatcher_tick(&host.shared, Instant::now());
+        assert!(
+            !host.shared.panic_in_dispatch_retry.load(Ordering::SeqCst),
+            "the tick never reached the armed retry"
+        );
+        assert_eq!(
+            answer.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
+            "the reload was sent by the retry that unwound"
+        );
+
+        dispatcher_tick(&host.shared, Instant::now());
+        assert_eq!(
+            wait_for_reload_answer(&answer),
+            Ok(fake_judgment(ReloadOutcome::ConfigOnly))
+        );
+        drop((running_lease, queued_lease));
+    }
+
+    /// **An entry whose gate a panic poisoned is unreachable, and each step of
+    /// the tick still serves every entry after it.** The poisoned entry comes
+    /// first in the set, so a step that met its poison rather than passing it
+    /// by would reach none of the others: the idle entry the reap sends a
+    /// detach for, the held entry the poll reaches, and the entry whose
+    /// reload only the retry sends.
+    #[test]
+    fn a_poisoned_entry_gate_leaves_every_dispatcher_step_serving_the_entries_after_it() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let poisoned = VaultName::new("a").unwrap();
+        let idle = VaultName::new("b").unwrap();
+        let held = VaultName::new("c").unwrap();
+        let reloading = VaultName::new("d").unwrap();
+        // Two workers, so the channel holds both the detach and the reload
+        // the one tick sends.
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&poisoned, &idle, &held, &reloading]),
+            2,
+        );
+        // Each attach is waited for before the next is asked, so no dispatch
+        // meets a full queue that only a tick would retry.
+        drop(host.demand(&idle, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &idle, TrustState::Ready);
+        let _held_lease = host.demand(&held, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &held, TrustState::Ready);
+        let _reloading_lease = host.demand(&reloading, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &reloading, TrustState::Ready);
+        for name in [&idle, &held, &reloading] {
+            wait_for_no_claim(&host, name);
+        }
+        let answer = a_reload_left_to_the_retry(&host, &reloading);
+        let polled = polls_of(&ops, &held);
+        let poisoned_entry = PoisonClearedOnDrop(host.shared.entries.get(&poisoned).unwrap());
+        poison_the_gate(&poisoned_entry.0);
+
+        dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
+
+        assert_eq!(
+            polls_of(&ops, &held),
+            polled + 1,
+            "the poll step did not reach the entry after the poisoned one"
+        );
+        wait_for_state(&host, &idle, TrustState::Unattached);
+        assert_eq!(
+            wait_for_reload_answer(&answer),
+            Ok(fake_judgment(ReloadOutcome::ConfigOnly))
+        );
+    }
+
+    /// An entry whose gate's poison is cleared where this drops. A case that
+    /// poisons a gate holds one declared after its host, so the clearing runs
+    /// before the host's own drop takes every gate, whether the case passed
+    /// or unwound.
+    struct PoisonClearedOnDrop(Arc<Entry<FakeCoverage>>);
+
+    impl Drop for PoisonClearedOnDrop {
+        fn drop(&mut self) {
+            self.0.gate.clear_poison();
+        }
+    }
+
     /// A refusal that finds the coverage out with a leg opens the release
     /// window and leaves the closing to that leg. A leg that unwinds inside
     /// such a window still closes it: the release finishes, the entry stops
@@ -12311,12 +12642,12 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// All three catch sites — the worker seam, the dispatcher's per-entry
-    /// poll and [`give_back`] — are `catch_unwind`, which catches nothing
-    /// under a `panic = "abort"` profile: the process ends at the panic
-    /// instead, and every guarantee the cleanup carries goes with it. The
-    /// strategy is a build-time choice made outside this crate, so this is
-    /// where the crate says which one it is built under.
+    /// Every catch site — the worker seam, the dispatcher's per-entry poll,
+    /// each step of [`dispatcher_tick`] and [`give_back`] — is `catch_unwind`,
+    /// which catches nothing under a `panic = "abort"` profile: the process
+    /// ends at the panic instead, and every guarantee the cleanup carries goes
+    /// with it. The strategy is a build-time choice made outside this crate, so
+    /// this is where the crate says which one it is built under.
     #[test]
     // The constant is the subject: this reads the build's own panic strategy,
     // and a profile that changed it is what makes the assertion false.
