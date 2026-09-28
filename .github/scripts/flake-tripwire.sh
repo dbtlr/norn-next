@@ -21,8 +21,9 @@
 # ledger entry matched, because the two are different claims with different
 # dispositions. A probe-bound breach is one evaluation that took longer than
 # its bound: a reading of the runner, which was not scheduled for that long. A
-# work-bound breach is a condition that never held while every probe answered
-# inside its bound: a reading of the subject.
+# work-bound breach is a condition that never held, with no probe-bound breach
+# rendered behind it: the run carries no evidence of a starved probe, so under
+# a class-A entry it reopens that ruling.
 #
 # usage: flake-tripwire.sh <command> [argument...]
 
@@ -147,9 +148,9 @@ name_the_breached_bounds() {
       echo
       echo "### Flake tripwire: a work bound was breached"
       echo
-      echo "A wait's condition never held inside its work bound, and every probe it made"
-      echo "answered inside its probe bound. This is a reading of the subject rather than a"
-      echo "starved runner, and under a class-A ledger entry it reopens that ruling."
+      echo "A wait's condition never held inside its work bound, and the wait rendered no"
+      echo "probe-bound breach, so the run is not a non-qualifying evidence source on its own"
+      echo "timing. Under a class-A ledger entry a recurrence like this reopens that ruling."
       echo
       while IFS= read -r line; do
         echo "- **line**: \`${line}\`"

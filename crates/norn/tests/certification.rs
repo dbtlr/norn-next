@@ -1455,11 +1455,16 @@ fn a_starved_probe_is_named_as_a_probe_bound_breach_and_meets_its_class_a_entry(
 /// **A work-bound breach is named as one, and is never read as a starved
 /// probe.**
 ///
-/// A wait that passed its work bound answered every probe inside its probe
-/// bound: the runner was scheduled and the condition still never held. That is
-/// a claim about the subject, and under a class-A entry it reopens the ruling,
-/// so a tripwire that filed it with the starved probes would excuse exactly the
-/// failure the ruling keeps open.
+/// A wait that passed its work bound rendered no probe-bound breach, so the run
+/// carries no evidence that the runner starved a probe. Under a class-A entry
+/// such a recurrence reopens the ruling, so a tripwire that filed it with the
+/// starved probes would excuse exactly the failure the ruling keeps open.
+///
+/// The rendering does not show every probe answered inside its bound: a
+/// condition that ends a wait on its own patience returns from inside the probe
+/// before the probe bound is read, and a starved writer thread can be what ran
+/// the patience out, as class-a-lease-changing-hands records. The summary
+/// states the ruled consequence and claims nothing about the runner.
 #[test]
 #[cfg(unix)]
 fn a_work_bound_breach_is_named_as_one_and_never_read_as_a_starved_probe() {
@@ -1499,6 +1504,18 @@ fn a_work_bound_breach_is_named_as_one_and_never_read_as_a_starved_probe() {
         !summary.contains("a probe bound was breached"),
         "a work-bound breach was named as a probe-bound one: {summary}"
     );
+    assert!(
+        summary.contains("reopens that ruling"),
+        "a work-bound breach recurred and the job summary does not state that under a class-A \
+         entry it reopens the ruling: {summary}"
+    );
+    for unrendered in ["inside its probe bound", "starved runner"] {
+        assert!(
+            !summary.contains(unrendered),
+            "the job summary claims `{unrendered}` of a work-bound breach, which its rendering \
+             does not show: {summary}"
+        );
+    }
 }
 
 /// The ledger entry a probe-bound breach is matched to.

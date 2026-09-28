@@ -42,19 +42,19 @@ id: class-a-recovery-handoff
 signature: recovery_handoff_reconciles_an_event_observed_during_the_heal
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17. The 15s work bound stands and is not widened or load-scaled; the host-health preflight gates the evidence instead, so a starved host is a non-qualifying evidence source. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
+disposition: Ruled 2026-08-17. The 15s work bound stands and is not widened or load-scaled; the host-health preflight gates the evidence instead, so a starved host is a non-qualifying evidence source. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it still reopens that ruling.
 
 id: class-a-directory-roots
 signature: directory_roots_merge_add_remove_and_rename_without_touching_siblings
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17, with class-a-recovery-handoff and on the same terms. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
+disposition: Ruled 2026-08-17, with class-a-recovery-handoff and on the same terms. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it still reopens that ruling.
 
 id: class-a-watcher-canary
 signature: the backend reported no event for the canary itself
 class: wall-clock starvation
 first-seen: 2026-08-09
-disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it is not a starved runner and still reopens that ruling.
+disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI is read by the bound it breached, as ruled 2026-09-21 under class-a-probe-bound: a probe-bound breach is a runner that starved a probe, non-qualifying on its own timing, and its rerun is deliberate and recorded, not quiet; a work-bound breach with no probe-bound breach behind it still reopens that ruling.
 
 id: class-a-probe-bound
 signature: stopped at probe
