@@ -2942,6 +2942,11 @@ fn dispatch_pending<O: EntryOps>(
 /// Keeping refusal cleanup with the send makes the take-then-shutdown window
 /// directly exercisable: every exit on which no channel accepted the job gives
 /// back only the slot still naming that job's epoch.
+///
+/// **The slot goes back after the job sender's lock does.** The give-back
+/// takes the entry gate, which panics on a poisoned gate, and a panic under
+/// the sender's lock would poison the sender every later dispatch and the
+/// host's destruction take; the send is the only work done under that lock.
 fn dispatch_taken_job<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -2951,23 +2956,22 @@ fn dispatch_taken_job<O: EntryOps>(
         release_queue_slot(entry, job.epoch());
         return Err(HostError::WorkerStopped);
     }
-    let jobs = shared.jobs.lock().expect("job sender poisoned");
-    let Some(jobs) = jobs.as_ref() else {
-        drop(jobs);
-        release_queue_slot(entry, job.epoch());
-        return Err(HostError::WorkerStopped);
+    let epoch = job.epoch();
+    // What a send no channel accepted answers: a full queue leaves the job to
+    // the retry, and a sender that is gone stops it.
+    let refused = {
+        let jobs = shared.jobs.lock().expect("job sender poisoned");
+        match jobs.as_ref() {
+            Some(jobs) => match jobs.try_send(job) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(_)) => Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => Err(HostError::WorkerStopped),
+            },
+            None => Err(HostError::WorkerStopped),
+        }
     };
-    match jobs.try_send(job.clone()) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(_)) => {
-            release_queue_slot(entry, job.epoch());
-            Ok(())
-        }
-        Err(mpsc::TrySendError::Disconnected(_)) => {
-            release_queue_slot(entry, job.epoch());
-            Err(HostError::WorkerStopped)
-        }
-    }
+    release_queue_slot(entry, epoch);
+    refused
 }
 
 /// One tick of the dispatcher thread: reap the entries idle at `now`, poll
@@ -3620,9 +3624,9 @@ impl<O: EntryOps> Drop for ReadHold<O> {
     /// hold is still outside the gate, rather than making it wait out this
     /// hold's own unpinning behind the lock as well.
     ///
-    /// On an unwinding thread the gate is taken through a poison, as every
-    /// drop that takes it is: a read's query work that unwinds after another
-    /// thread poisoned the gate would otherwise panic a second time here.
+    /// The gate is taken through a poison, as every drop that takes it is: a
+    /// read's query work that unwinds after another thread poisoned the gate
+    /// would otherwise panic a second time here.
     fn drop(&mut self) {
         drop(self.snapshot.take());
         let mut state = self.entry.gate.lock_in_a_drop();
@@ -3996,14 +4000,15 @@ impl<O: EntryOps> Drop for Host<O> {
         // reader — a demand lease holds the shared state itself, so it outlives
         // the host and reads the entry through its own handle.
         //
-        // An entry whose gate a panic poisoned is torn down like any other,
-        // through the poison: its state is what the panicking hold left, and
-        // whatever coverage that state still holds is given back to the ops
-        // rather than left out when the host is gone. Nothing reads the entry
-        // afterwards, so the teardown releases its resources and nothing more.
+        // The serving set and every entry gate are read through a poison. An
+        // entry whose gate a panic poisoned is torn down like any other,
+        // through it: its state is what the panicking hold left, and whatever
+        // coverage that state still holds is given back to the ops rather than
+        // left out when the host is gone. Nothing reads the entry afterwards,
+        // so the teardown releases its resources and nothing more.
         let mut releasing = Vec::new();
-        for entry in self.shared.entries.snapshot() {
-            let mut state = entry.gate.lock_for_destruction();
+        for entry in self.shared.entries.snapshot_in_a_drop() {
+            let mut state = entry.gate.lock_in_a_drop();
             state.claim.invalidate();
             state.claim.open();
             state.pending.clear();
@@ -4054,12 +4059,11 @@ impl<O: EntryOps> Drop for Host<O> {
             // A leg that ended between the loop above and its join gave its
             // attachment back to the entry rather than to the ops, so the
             // entry is asked again for what it holds.
-            let attachment =
-                attachment.or_else(|| entry.gate.lock_for_destruction().coverage.give_up());
+            let attachment = attachment.or_else(|| entry.gate.lock_in_a_drop().coverage.give_up());
             if let Some(attachment) = attachment {
                 give_back(self.shared.ops.as_ref(), entry.name(), attachment);
             }
-            let mut state = entry.gate.lock_for_destruction();
+            let mut state = entry.gate.lock_in_a_drop();
             // Coverage still out with a leg is that leg's to give back, and the
             // window stays open for it: the leg reaches the same release every
             // other one does and publishes there, once the resources are back.
@@ -14482,6 +14486,115 @@ mod tests {
         assert!(!poisoned_state.coverage.in_hand());
     }
 
+    /// **Destruction reads through a poisoned serving set and releases every
+    /// entry.** A removal that meets a poisoned entry gate panics under the
+    /// set's write lock, before it changes the map, so the set it poisons
+    /// still serves every entry; destruction reads that map as it stands.
+    ///
+    /// The host is dropped under `catch_unwind` on a thread that is not
+    /// unwinding, so a read of the set that panics on its poison is answered
+    /// here as a failure rather than aborting the binary.
+    #[test]
+    fn destruction_over_a_poisoned_serving_set_releases_every_entry_without_panicking() {
+        let ops = Arc::new(FakeOps::default());
+        let poisoned = VaultName::new("a").unwrap();
+        let bystander = VaultName::new("b").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&poisoned, &bystander]),
+            1,
+        );
+        for name in [&poisoned, &bystander] {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+        let shared = Arc::clone(&host.shared);
+        let poisoned_entry = shared.entries.get(&poisoned).unwrap();
+        let bystander_entry = shared.entries.get(&bystander).unwrap();
+        wait_for_the_attach_leg_to_end(&poisoned_entry);
+        wait_for_the_attach_leg_to_end(&bystander_entry);
+        poison_the_gate(&poisoned_entry);
+        let removing = Arc::clone(&shared);
+        let removed = thread::spawn(move || removing.entries.remove(&poisoned)).join();
+        assert!(
+            removed.is_err(),
+            "the removal that met a poisoned gate returned instead of poisoning the set"
+        );
+
+        let destruction = std::panic::catch_unwind(AssertUnwindSafe(move || drop(host)));
+
+        assert!(
+            destruction.is_ok(),
+            "destruction panicked on the poisoned serving set"
+        );
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            2,
+            "destruction did not give back the coverage of both entries"
+        );
+        assert_eq!(
+            bystander_entry.gate.lock().unwrap().trust,
+            TrustState::Unattached
+        );
+    }
+
+    /// **A send a full queue refuses gives its slot back outside the job
+    /// sender's lock**, so a gate poisoned between the slot's take and its
+    /// give-back panics that give-back without poisoning the sender, and the
+    /// host's destruction still takes the sender.
+    ///
+    /// The one worker is inside an attach and the one channel slot holds the
+    /// next job, so the send is refused as full; the send runs under
+    /// `catch_unwind`, which catches the give-back's panic on the poison.
+    #[test]
+    fn a_send_refused_over_a_poisoned_gate_leaves_the_job_sender_unpoisoned() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let subject = VaultName::new("a").unwrap();
+        let running = VaultName::new("b").unwrap();
+        let queued = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Absent(&[&subject, &running, &queued]),
+            1,
+        );
+        let _lease = host.demand(&subject, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        wait_for_no_claim(&host, &subject);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let running_lease = host.demand(&running, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let queued_lease = host.demand(&queued, AttachMode::Durable).unwrap();
+        let _answer = a_reload_left_to_the_retry(&host, &subject);
+        let entry = host.shared.entries.get(&subject).unwrap();
+        let job = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .claim
+            .take_slot_for_marked()
+            .expect("the reload stands as the entry's marker");
+        poison_the_gate(&entry);
+
+        let sent = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            dispatch_taken_job(&host.shared, &entry, job)
+        }));
+
+        assert!(
+            sent.is_err(),
+            "the give-back of the refused send's slot did not meet the poison"
+        );
+        assert!(
+            !host.shared.jobs.is_poisoned(),
+            "the give-back panicked under the job sender's lock"
+        );
+        ops.block_attach.store(false, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &running, TrustState::Ready);
+        wait_for_state(&host, &queued, TrustState::Ready);
+        drop((running_lease, queued_lease));
+    }
+
     /// A leg reaching for coverage another leg holds takes none, and the record
     /// of who holds it stands over the refusal. Custody is read rather than
     /// inferred, so an entry with an empty attachment beside a registered leg
@@ -19376,6 +19489,46 @@ mod tests {
         drop(
             host.begin_read(&name)
                 .expect("the read after the unwind was refused"),
+        );
+    }
+
+    /// **A read dropped over a gate another thread poisoned gives its hold
+    /// back on a thread that is not unwinding too.** Every drop-side take of
+    /// an entry gate reads through the poison, so the drop neither panics nor
+    /// keeps the lease or the pin; it is dropped under `catch_unwind`, which
+    /// answers a panic on the poison here as a failure.
+    #[test]
+    fn a_read_dropped_over_a_poisoned_gate_off_the_unwind_path_gives_its_hold_back() {
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+        let read = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+
+        poison_the_gate(&entry);
+        let dropped = std::panic::catch_unwind(AssertUnwindSafe(move || drop(read)));
+
+        assert!(
+            dropped.is_ok(),
+            "the read's drop panicked on the poisoned gate"
+        );
+        entry.gate.clear_poison();
+        let (leases, pinned) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.demand_leases, state.pinned())
+        };
+        assert_eq!(
+            (leases, pinned),
+            (0, false),
+            "the dropped read left its lease or its pin on the entry"
         );
     }
 

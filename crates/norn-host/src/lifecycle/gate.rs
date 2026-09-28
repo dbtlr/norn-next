@@ -342,33 +342,20 @@ impl<T: Stanced> EntryGate<T> {
         }
     }
 
-    /// Take the gate from a drop, waiting for it, and count the take.
-    ///
-    /// **On an unwinding thread it reads through a poisoned gate**, because a
-    /// second panic there aborts the process; on any other thread it panics on
-    /// the poison as every other take of the gate does. Nothing recovers a
-    /// poisoned gate, so what a drop writes through the poison is read by no
-    /// later holder: reading through it is what keeps the drop from panicking,
-    /// and nothing more.
-    pub(super) fn lock_in_a_drop(&self) -> GateHold<'_, T> {
-        if std::thread::panicking() {
-            self.lock().unwrap_or_else(PoisonError::into_inner)
-        } else {
-            self.lock().expect("entry gate poisoned")
-        }
-    }
-
-    /// Take the gate for the host's destruction, waiting for it, and count the
-    /// take.
+    /// Take the gate from a drop, waiting for it, and count the take. Every
+    /// drop-side take of an entry gate comes through here: a read's hold
+    /// giving its pin back, and the host's destruction tearing each entry
+    /// down.
     ///
     /// **It reads through a poisoned gate on every thread**, unwinding or not.
-    /// Destruction takes every entry's gate in turn and gives back what each
-    /// holds, so a panic on one entry's poison would strand the coverage of
-    /// every entry after it and the workers destruction joins; on an unwinding
-    /// thread it would abort the process as well. What destruction writes
-    /// through the poison is read by no later holder, as with
-    /// [`EntryGate::lock_in_a_drop`].
-    pub(super) fn lock_for_destruction(&self) -> GateHold<'_, T> {
+    /// On an unwinding thread a panic here is a second panic and aborts the
+    /// process; on any other thread it would stop a drop that gives resources
+    /// back partway, and destruction would strand the coverage of every entry
+    /// after the poisoned one. Reading through is safe because nothing
+    /// recovers a poisoned gate: what a drop writes through the poison is
+    /// read by no later holder, since every ordinary take still panics on it,
+    /// and that is what keeps the entry unreachable.
+    pub(super) fn lock_in_a_drop(&self) -> GateHold<'_, T> {
         self.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
