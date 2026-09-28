@@ -280,7 +280,11 @@ impl WalkFaults {
     /// a stage named twice is the whole of what an arm here can be given wrong.
     #[cfg(test)]
     pub(crate) fn at(armed: &'static [(Stage, Answer)]) -> WalkFaults {
-        crate::faults::refuse_a_stage_armed_twice(armed, |stage| stage.name(), "this arm");
+        crate::faults::refuse_a_stage_armed_twice(
+            armed,
+            |stage| stage.name().to_string(),
+            "this arm",
+        );
         WalkFaults {
             armed,
             ..WalkFaults::default()
@@ -424,7 +428,7 @@ mod armed {
             ARMED_STAGES,
             Stage::named,
             Answer::named,
-            |stage| stage.name(),
+            |stage| stage.name().to_string(),
         )
     }
 }

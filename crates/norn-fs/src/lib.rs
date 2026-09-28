@@ -14,17 +14,22 @@
 //! is carried by hash preconditions at the write and by the watcher afterwards —
 //! never by exclusion.
 //!
-//! That is why the vocabulary looks the way it does. Every write bears a
-//! precondition and no write can be spelled without one; drift is a normal
-//! outcome that comes back with what was actually observed; and a landed write
-//! reports the identity of what it published so that Norn can recognize its own
-//! change when the filesystem tells it about it.
+//! That is why the vocabulary looks the way it does. Every change is a
+//! transition with a before-state and no change can be spelled without one;
+//! drift is a normal outcome that comes back with what was actually observed;
+//! and a published change reports the identity of what it published, and
+//! whether it is durable, so that Norn can recognize its own change when the
+//! filesystem tells it about it.
 //!
 //! # What is here
 //!
-//! - [`write`](mod@write) — the compare-and-swap kernel: precondition, shadow, verify,
-//!   swap. [`vacate`] and [`move_document`] are the same kernel with different
-//!   endings.
+//! - [`write`](mod@write) — the staging and publishing kernel. [`stage`] checks a
+//!   target through an anchored descent and stages a write's content in a
+//!   shadow; [`publish`] checks everything again and publishes by an exclusive
+//!   rename, a rename or an unlink, making a create's missing folders and
+//!   renaming a respell; [`confirm_landed`] makes a landing a re-send finds
+//!   durable; [`discard`] abandons a staged target; [`remove_empty_folders`]
+//!   takes the folders a removal emptied.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
 //!   why a leaked one is inert, and the sweeps that bound what they cost: one
 //!   [per home](ShadowHome::sweep), and two over the
@@ -49,7 +54,7 @@
 //!   account, and nothing that decides anything.
 //! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
 //!   concludes, the one act that produces one from a file, and the identity a
-//!   landed write reports.
+//!   published write reports.
 //!
 //! **A vault's own mechanism files are part of that.** Norn keeps two per
 //! [maintainership](MaintainershipKey) — the maintainer lock file and the shadow
@@ -64,7 +69,8 @@
 //! # Two rejected shapes, named so they stay rejected
 //!
 //! **An unconditional overwrite.** There is no `force`, no `clobber`, no
-//! precondition-free write, and no combination of arguments that composes one.
+//! transition without a before-state, and no combination of arguments that
+//! composes one.
 //! A caller that means to replace a document reads it first and passes what it
 //! read, which makes it accountable for the bytes it destroys. An affordance
 //! that skipped that would make overwriting cheaper than merging, and the
@@ -81,11 +87,10 @@
 //!
 //! Linux and macOS. The floor is not a preference: a file's identity is its
 //! `(device, inode)` pair, exclusion is `flock`, a published name is made
-//! durable by fsyncing a directory, and a mode is carried forward with
-//! `fchmod` — none of which the standard library spells portably. The atomic
-//! rename at the centre of the protocol *is* portable, so another platform is a
-//! later addition rather than a rewrite; what is not here is a pretence that it
-//! already works.
+//! durable by fsyncing a directory, a mode is carried forward with `fchmod`, and
+//! a create is published by a rename that refuses to replace (`renameat2` and
+//! `renameatx_np`) — none of which the standard library spells portably. What is
+//! not here is a pretence that another platform already works.
 //!
 //! On NFSv2 a rename is not atomic, and `flock` on any NFS is whatever the
 //! server's lock manager offers. A vault on a network mount has the guarantees
@@ -134,4 +139,7 @@ pub use watch::{
     Batch, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError, watch,
     watch_polling,
 };
-pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};
+pub use write::{
+    AfterState, Confirmed, Durability, Landed, Publication, Published, RemovedFolders, Staged,
+    Staging, Transition, confirm_landed, discard, publish, remove_empty_folders, stage,
+};

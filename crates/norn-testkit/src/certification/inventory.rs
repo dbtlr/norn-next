@@ -104,11 +104,17 @@ impl Suite {
 ///
 /// This is what a certification campaign reads to know a single machine cannot
 /// certify the layer: two of these lanes require the case to be *run twice*, on
-/// machines that answer differently.
+/// machines that answer differently, and one requires a run on a machine of one
+/// kind.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Lane {
     /// A filesystem and nothing else. One required outcome everywhere.
     Any,
+    /// A filesystem that folds case. The required outcome is stated over a
+    /// folding volume only, and on a case-sensitive one the carrier stands down
+    /// without asserting. **Covered only by a run on a folding volume**; a run
+    /// on a case-sensitive one passes the case and certifies nothing about it.
+    FoldingVolume,
     /// The machine's one real platform watcher, held under a cross-process
     /// lease: the case attaches a production host, so it contends with every
     /// other binary the runner started rather than only with its own threads.
@@ -130,9 +136,22 @@ impl Lane {
     pub fn name(&self) -> &'static str {
         match self {
             Lane::Any => "any",
+            Lane::FoldingVolume => "folding-volume",
             Lane::RealWatcher => "real-watcher",
             Lane::RealWatcherVolumeFoldingDecides => "real-watcher/volume-folding-decides",
             Lane::RealWatcherBackendDecides => "real-watcher/backend-decides",
+        }
+    }
+
+    /// Whether a case in this lane attaches a production host over the real
+    /// platform watcher, which is what carrying an arm at the production path
+    /// means. A lane that only asks something of the filesystem does not.
+    pub fn needs_real_watcher(&self) -> bool {
+        match self {
+            Lane::Any | Lane::FoldingVolume => false,
+            Lane::RealWatcher
+            | Lane::RealWatcherVolumeFoldingDecides
+            | Lane::RealWatcherBackendDecides => true,
         }
     }
 }
@@ -549,7 +568,7 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-write-kernel-death-at-every-checkpoint",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "process death at each named stage of a compare-and-swap publication leaves one \
+        states: "process death at each named stage of a staged replacement leaves one \
                  whole document — the old one or the new one, never a torn one",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
                   process_death_at_every_checkpoint_leaves_one_whole_document",
@@ -563,6 +582,70 @@ pub const REQUIRED_CASES: &[Case] = &[
                  which is what makes the write kernel's absence assertions mean something",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
                   the_child_role_publishes_under_whatever_it_was_armed_at",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-death-at-each-publication-position",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "process death at each publication position of each kind — a create's and a \
+                 replace's swap, a removal's unlink, a create's folder making, and each kind's \
+                 folder sync — leaves the target old-complete with only a shadow staged, or landed \
+                 with nothing staged",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  process_death_at_each_publication_position_leaves_the_documented_state",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-death-at-the-respell",
+        suite: Suite::InducedFailure,
+        lane: Lane::FoldingVolume,
+        states: "process death at a respell's rename leaves the document under its old spelling \
+                 with its bytes, on a root that folds case",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  process_death_at_the_respell_leaves_the_old_spelling",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-respell-interrupted",
+        suite: Suite::InducedFailure,
+        lane: Lane::FoldingVolume,
+        states: "a respell whose rename fails after its content landed answers interrupted, naming \
+                 the cause, with the new content under the old spelling, on a root that folds case",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_respell_whose_rename_fails_after_its_content_landed_is_interrupted",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-ordinal-selects-one-publication",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an arm with a publication ordinal fires in that publication only: three staged \
+                 creates armed to end at the second swap leave exactly the first landed",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  an_ordinal_arm_fires_at_the_nth_publication_only",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-foreign-writer-inside-a-publication",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a foreign writer acting inside a publication meets the outcome ADR 0031 names: \
+                 drift for an edit or a removal of a replace's or a remove's target, a taken name \
+                 for a create, and a landing another writer made for a removal of a remove's target",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0031_names",
+        feature: None,
+    },
+    Case {
+        id: "induced-write-kernel-typed-failure-at-unlink-mkdir-rmdir",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a failure or a full disk at a removal's unlink, a create's folder making, or a \
+                 folder's removal is a typed refusal carrying the error number, and leaves what it \
+                 was about as it was",
+        carrier: "crates/norn-fs/tests/lockdown.rs::\
+                  a_failure_at_unlink_mkdir_or_rmdir_is_a_typed_refusal",
         feature: None,
     },
     // The contained read path, which every derivation reads a document and
@@ -1345,12 +1428,13 @@ mod tests {
         );
     }
 
-    /// The two lanes a single machine cannot certify are carried by real cases.
+    /// The lanes a single machine cannot certify are carried by real cases.
     /// They are the whole reason a certification campaign is more than one run,
-    /// so a build that lost both would quietly turn the campaign into one.
+    /// so a build that lost them would quietly turn the campaign into one.
     #[test]
     fn the_platform_deciding_lanes_are_carried() {
         for lane in [
+            Lane::FoldingVolume,
             Lane::RealWatcherVolumeFoldingDecides,
             Lane::RealWatcherBackendDecides,
         ] {
@@ -1405,6 +1489,17 @@ mod tests {
         }
     }
 
+    /// A lane that asks only something of the filesystem carries nothing at the
+    /// production path, however it narrows where its case is covered.
+    #[test]
+    fn only_the_real_watcher_lanes_need_a_real_watcher() {
+        assert!(!Lane::Any.needs_real_watcher());
+        assert!(!Lane::FoldingVolume.needs_real_watcher());
+        assert!(Lane::RealWatcher.needs_real_watcher());
+        assert!(Lane::RealWatcherVolumeFoldingDecides.needs_real_watcher());
+        assert!(Lane::RealWatcherBackendDecides.needs_real_watcher());
+    }
+
     /// **An empty unreached table means the production path carries the arms.**
     ///
     /// The table's rows leave by a carrier arriving, so a table that emptied is
@@ -1420,9 +1515,9 @@ mod tests {
             return;
         }
         assert!(
-            REQUIRED_CASES.iter().any(|case| case.suite
-                == Suite::TrustTransition
-                && !matches!(case.lane, Lane::Any)),
+            REQUIRED_CASES
+                .iter()
+                .any(|case| case.suite == Suite::TrustTransition && case.lane.needs_real_watcher()),
             "the unreached table is empty and no trust-transition case runs in a lane that needs \
              a real watcher, so the table reads as `every arm is carried` with nothing carrying \
              one at the production path"

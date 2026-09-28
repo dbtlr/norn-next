@@ -12,9 +12,9 @@
 //! one opening.
 //!
 //! [`ContentHash::of`] is the same guarantee arrived at from the other side — a
-//! caller that already holds the bytes hashes those bytes, and the write kernel's
-//! source-reading leg uses it over a buffer it read through one handle in one
-//! act. What has no spelling anywhere is *open once to hash, then again to
+//! caller that already holds the bytes hashes those bytes, and the write kernel
+//! uses it over the content a caller stages, which is the content it writes.
+//! What has no spelling anywhere is *open once to hash, then again to
 //! read*, because those two halves can be about two files.
 
 use std::fmt;

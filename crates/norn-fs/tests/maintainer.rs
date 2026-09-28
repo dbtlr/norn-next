@@ -21,8 +21,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use norn_fs::{
-    Acquisition, ContentHash, Incumbent, Maintainership, MaintainershipKey, Precondition, Refusal,
-    ShadowHome, move_document, try_acquire, vacate, write,
+    Acquisition, ContentHash, Incumbent, Maintainership, MaintainershipKey, Refusal, ShadowHome,
+    Staging, Transition, publish, stage, try_acquire,
 };
 use norn_testkit::process::{Outcome, Run, RunStatus, Sandbox};
 use norn_testkit::scratch;
@@ -333,7 +333,8 @@ fn a_symlinked_lock_name_is_refused() {
 /// access to files. The strongest form of that is structural — nothing in the
 /// write kernel takes a lock path, so there is no argument by which a write could
 /// consult one — and this is the live half: with the lock held, a create, a
-/// replacement, a removal and a move all run.
+/// replacement and a removal all stage and publish, and a move is a create and
+/// a removal.
 #[test]
 fn a_contended_vault_is_fully_workable() {
     let scratch = Scratch::new("contended-vault");
@@ -355,19 +356,38 @@ fn a_contended_vault_is_fully_workable() {
         "the lock is not held, so nothing here is contended"
     );
 
-    let created = vault.join("fresh.md");
-    write(&created, b"one", Precondition::Create, &shadows).expect("a create under a held lock");
-    write(
-        &created,
-        b"two",
-        Precondition::Replace(ContentHash::of(b"one")),
-        &shadows,
-    )
-    .expect("a replacement under a held lock");
-    let moved = vault.join("moved.md");
-    move_document(&created, &moved, ContentHash::of(b"two"), &shadows)
-        .expect("a move under a held lock");
-    vacate(&moved, ContentHash::of(b"two")).expect("a removal under a held lock");
+    let root = norn_fs::path_identity(&vault)
+        .expect("the vault root")
+        .expect("a vault root");
+    let apply = |path: &str, transition: Transition<'_>| {
+        let Staging::Staged(staged) = stage(&vault, root, Path::new(path), transition, &shadows)
+            .expect("staged under a held lock")
+        else {
+            panic!("{path} staged as already landed");
+        };
+        let _ = publish(&vault, staged, &shadows).expect("published under a held lock");
+    };
+    apply("fresh.md", Transition::Create { content: b"one" });
+    apply(
+        "fresh.md",
+        Transition::Replace {
+            before: ContentHash::of(b"one"),
+            content: b"two",
+        },
+    );
+    apply("moved.md", Transition::Create { content: b"two" });
+    apply(
+        "fresh.md",
+        Transition::Remove {
+            before: ContentHash::of(b"two"),
+        },
+    );
+    apply(
+        "moved.md",
+        Transition::Remove {
+            before: ContentHash::of(b"two"),
+        },
+    );
 }
 
 /// **The bar on foreign interference, through the public surface.** A waiter

@@ -94,7 +94,7 @@ fn the_unreached_trust_transition_arms_are_named() {
 
     let carried_at_the_production_path: Vec<&str> = REQUIRED_CASES
         .iter()
-        .filter(|case| case.suite == Suite::TrustTransition && !matches!(case.lane, Lane::Any))
+        .filter(|case| case.suite == Suite::TrustTransition && case.lane.needs_real_watcher())
         .map(|case| case.id)
         .collect();
     assert!(
@@ -1880,6 +1880,7 @@ fn the_inventory_reports_what_the_layer_requires() {
     }
     for lane in [
         Lane::Any,
+        Lane::FoldingVolume,
         Lane::RealWatcher,
         Lane::RealWatcherVolumeFoldingDecides,
         Lane::RealWatcherBackendDecides,

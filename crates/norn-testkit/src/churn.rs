@@ -118,6 +118,29 @@ pub fn folding(at: &Path) -> io::Result<Folding> {
     })
 }
 
+/// Whether `case`, stated only over a volume that folds case, runs on a volume
+/// that answers `folding`.
+///
+/// Where the volume folds, the case runs. Where it does not, the case has
+/// nothing to assert and stands down, saying so on standard error — **except on
+/// macOS, where a case-sensitive scratch volume is a panic.** The default macOS
+/// volume folds, and the macOS run is the one that asserts these cases, so a
+/// green run there has to mean they ran rather than that they stood down.
+#[track_caller]
+pub fn runs_where_the_volume_folds(folding: Folding, case: &str) -> bool {
+    if folding == Folding::Folded {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        panic!(
+            "{case}: the scratch volume does not fold case, and on macOS a case stated over a \
+             folding volume fails rather than skips"
+        );
+    }
+    eprintln!("{case}: skipped, the scratch volume does not fold case");
+    false
+}
+
 /// One thing done to a tree.
 ///
 /// Each variant is a single filesystem act, because a step is what a suite may
@@ -1329,6 +1352,28 @@ mod tests {
     /// A tree of this module's own, removed when the handle drops.
     fn scratch(name: &str) -> Scratch {
         Scratch::new(&format!("norn-churn-{name}"))
+    }
+
+    /// A case stated over a folding volume runs where the volume folds.
+    #[test]
+    fn a_case_stated_over_folding_runs_on_a_folding_volume() {
+        assert!(runs_where_the_volume_folds(
+            Folding::Folded,
+            "a_case_stated_over_folding"
+        ));
+    }
+
+    /// **On macOS a case-sensitive scratch volume is a failure, not a skip.**
+    /// The default volume there folds, and the macOS run is the one that
+    /// asserts the folding cases, so a green run there has to mean they ran.
+    /// Elsewhere the case stands down.
+    #[test]
+    #[cfg_attr(target_os = "macos", should_panic(expected = "does not fold case"))]
+    fn a_case_stated_over_folding_stands_down_elsewhere_except_on_macos() {
+        assert!(!runs_where_the_volume_folds(
+            Folding::Distinct,
+            "a_case_stated_over_folding"
+        ));
     }
 
     /// **The roll of families is the driver's own source rather than a

@@ -7,27 +7,14 @@
 //! problem rather than the plan's. Collapsing any two of those into one shape
 //! would make the decision a string match.
 //!
-//! **A refusal means nothing was published.** Every variant here is reached
-//! before the swap or in place of it.
-//!
-//! For a **replacement, a removal or a move's source leg** that is exact: the
-//! path a refusal names holds byte for byte what it held when the call began, and
-//! the one thing left behind is a shadow, which is inert (see
-//! [`crate::shadow`]).
-//!
-//! For an **exclusive create** the honest statement is narrower, because the only
-//! primitive that claims a name atomically claims it empty. A create that fails
-//! after claiming takes the name back, and **never removes what it did not
-//! create** — the file is identified before it is removed, so a foreign document
-//! published at that name in the meantime survives. What that costs is the other
-//! direction, and it reads differently depending on why the name was not taken
-//! back. A cleanup the filesystem blocks, or one with no identity to compare
-//! against, leaves this call's own file — holding the content, a prefix of it, or
-//! none of it yet — at a name that had nothing at it. A cleanup skipped because
-//! the name no longer means this
-//! call's file leaves the foreign document that displaced it: the rename that
-//! published that document unlinked this call's file on its way, so these bytes
-//! are on an orphaned inode rather than at the name.
+//! **A refusal means nothing was published.** Every variant is reached while
+//! staging, or in publication before the rename or the unlink, or in place of
+//! it: the path a refusal names holds byte for byte what it held when the call
+//! began, and the one thing left behind is at most a shadow, which is inert
+//! (see [`crate::shadow`]). A create is no exception, because it publishes a
+//! staged shadow by an exclusive rename and never claims its name empty; the
+//! one thing a refused create can leave in the vault is empty folders it made
+//! and could not take back, and [`Refusal::FoldersLeft`] names them.
 //!
 //! Mapping a refusal onto the wire's structured envelope belongs to whoever
 //! serves it. What is here is the engineering fact: which path, and what about
@@ -92,11 +79,13 @@ pub enum Refusal {
         /// The file the name means now.
         current: Identity,
     },
-    /// A create found the destination already taken.
+    /// A name that had to be absent is taken.
     ///
-    /// Reported by the exclusive create itself rather than by a precheck, so a
-    /// destination that springs into existence between a caller's look and this
-    /// call is refused with the racer's bytes untouched.
+    /// A create's before-state is absence, so this is a create's drift: at
+    /// staging, at publication's verification, and from the exclusive rename
+    /// itself, so a name that springs into existence between the last look and
+    /// the rename is refused with the racer's file untouched. A landing
+    /// confirmed as a removal refuses the same way.
     DestinationExists { path: PathBuf },
     /// The path is a symbolic link, which this crate does not write through.
     ///
@@ -106,6 +95,63 @@ pub enum Refusal {
     /// are opposite mistakes and neither is a document write, so the refusal
     /// asks only whether the destination is a link.
     SymlinkDestination { path: PathBuf },
+    /// A folder on the way from the vault root to the path is a symbolic link.
+    ///
+    /// A change is reached from the root one folder at a time and through no
+    /// link, so a linked folder ends the descent rather than carrying the
+    /// change to wherever it points — outside the vault, or into another part
+    /// of it. `ancestor` is the linked folder's own path.
+    LinkedAncestor { path: PathBuf, ancestor: PathBuf },
+    /// The vault root is not the directory the change was staged under.
+    ///
+    /// Staging records the root's identity and publication reopens the root by
+    /// its spelling, so a root moved aside and replaced between the phases is
+    /// caught here rather than receiving a change checked against another tree.
+    RootReplaced {
+        path: PathBuf,
+        /// The directory staging read.
+        staged: Identity,
+        /// The directory the root's spelling names now.
+        current: Identity,
+    },
+    /// The filesystem holding the path cannot rename without replacing, so a
+    /// create cannot be published exclusively there.
+    ///
+    /// There is no fallback: a hard link then an unlink, or a look then a
+    /// rename, are each a check followed by an act, which is the race an
+    /// exclusive publication exists to close. `raw_os_error` is what the
+    /// filesystem answered.
+    ExclusiveCreateUnsupported { path: PathBuf, raw_os_error: i32 },
+    /// The name holds something that is not a regular file — a folder, a pipe,
+    /// a device or a socket — where a replace, a remove or a respell expected
+    /// the document it composed against. A member of the drift family: the
+    /// world is not what the plan was made against.
+    NotRegularFile { path: PathBuf },
+    /// A folder on the path is a file, so a create has nowhere to go.
+    ///
+    /// For a replace or a respell the same fact is drift — the document the
+    /// plan was made against is not there — and for a remove it is the
+    /// after-state, since nothing can be at the path. `folder` is the file's
+    /// own path.
+    FolderIsFile { path: PathBuf, folder: PathBuf },
+    /// The request itself is not one this crate can act on: a path that is not
+    /// a name below the vault root, or a respell whose two names differ in more
+    /// than the ASCII case of the final one. Nothing was read.
+    InvalidRequest { path: PathBuf, reason: &'static str },
+    /// A create refused after it made folders on the way to its name, and
+    /// could not take every one of them back: `refusal` is why it refused, and
+    /// `folders` — relative to the vault root, shallowest first — are the ones
+    /// it made that stand, empty or holding what another writer put there.
+    FoldersLeft {
+        refusal: Box<Refusal>,
+        folders: Vec<PathBuf>,
+    },
+    /// A respell was asked of a folder not proven to fold case.
+    ///
+    /// Where two spellings that differ only in case are two names, renaming
+    /// one onto the other is a move, planned as a create and a remove; a plain
+    /// rename there would replace whatever the new spelling names.
+    NotCaseFolding { path: PathBuf },
     /// The operating system refused, and this is what it said.
     ///
     /// **Structurally distinct from every precondition refusal above**: those
@@ -116,11 +162,13 @@ pub enum Refusal {
     /// placement decision has to be made again rather than that the write was
     /// wrong.
     ///
-    /// The invariant across every one of them is the module's: a replacement's
-    /// destination is **byte-identical to what it held before the call** with at
-    /// most a shadow left behind, and a create's is a name this call either took
-    /// back, left holding its own bytes, or left to the foreign document that
-    /// displaced them.
+    /// So does a staged shadow that is gone or changed at publication: an I/O
+    /// failure for that target, which a re-send stages again, rather than drift
+    /// a caller would re-plan.
+    ///
+    /// The invariant across every one of them is the module's: the path is
+    /// **byte-identical to what it held before the call**, with at most a
+    /// shadow left behind.
     Environment {
         /// What was being attempted, in words that complete "… failed".
         operation: &'static str,
@@ -184,6 +232,53 @@ impl fmt::Display for Refusal {
             Refusal::SymlinkDestination { path } => write!(
                 f,
                 "{} is a symbolic link, and a document is written at its own name",
+                path.display()
+            ),
+            Refusal::LinkedAncestor { path, ancestor } => write!(
+                f,
+                "{} is reached through {}, which is a symbolic link",
+                path.display(),
+                ancestor.display()
+            ),
+            Refusal::RootReplaced {
+                path,
+                staged,
+                current,
+            } => write!(
+                f,
+                "the vault root {} was {staged} when the change was staged and is {current} now",
+                path.display()
+            ),
+            Refusal::NotRegularFile { path } => {
+                write!(f, "{} does not identify a regular file", path.display())
+            }
+            Refusal::FolderIsFile { path, folder } => write!(
+                f,
+                "{} is reached through {}, which is a file",
+                path.display(),
+                folder.display()
+            ),
+            Refusal::InvalidRequest { path, reason } => {
+                write!(f, "{} cannot be changed as asked: {reason}", path.display())
+            }
+            Refusal::FoldersLeft { refusal, folders } => write!(
+                f,
+                "{refusal}; the folders it made that stand are {}",
+                folders
+                    .iter()
+                    .map(|folder| folder.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Refusal::NotCaseFolding { path } => write!(
+                f,
+                "{} is in a folder not proven to fold case, so a change of case is a move",
+                path.display()
+            ),
+            Refusal::ExclusiveCreateUnsupported { path, raw_os_error } => write!(
+                f,
+                "the filesystem holding {} cannot publish a create without replacing \
+                 (error {raw_os_error})",
                 path.display()
             ),
             Refusal::Environment {

@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use norn_fs::{ContentHash, MaintainershipKey, Placement, ShadowHome};
+use norn_fs::{
+    Confirmed, ContentHash, Identity, MaintainershipKey, Placement, Publication, Published,
+    Refusal, ShadowHome, Staged, Staging, Transition,
+};
 use norn_testkit::scratch;
 
 /// The maintainership one scratch tree's shadow home is keyed by.
@@ -47,6 +50,57 @@ impl Scratch {
 
     pub fn shadows(&self) -> &ShadowHome {
         &self.shadows
+    }
+
+    /// Stage `transition` at `relative` below this vault's root.
+    pub fn stage(&self, relative: &str, transition: Transition<'_>) -> Result<Staging, Refusal> {
+        norn_fs::stage(
+            &self.vault(),
+            self.root(),
+            Path::new(relative),
+            transition,
+            &self.shadows,
+        )
+    }
+
+    /// The identity of the vault root, which a plan is made against.
+    pub fn root(&self) -> Identity {
+        norn_fs::path_identity(&self.vault())
+            .expect("the vault root")
+            .expect("a vault root")
+    }
+
+    /// Discard what [`Scratch::stage`] staged.
+    pub fn discard(&self, staged: Staged) {
+        norn_fs::discard(&self.vault(), staged, &self.shadows);
+    }
+
+    /// Publish what [`Scratch::stage`] staged.
+    pub fn publish(&self, staged: Staged) -> Result<Publication, Refusal> {
+        norn_fs::publish(&self.vault(), staged, &self.shadows)
+    }
+
+    /// Stage `transition` and publish it at once, for a case about what a
+    /// whole publication does rather than about the space between its phases.
+    /// A target that stages as already landed is a mistake in the case.
+    pub fn stage_and_publish(
+        &self,
+        relative: &str,
+        transition: Transition<'_>,
+    ) -> Result<Published, Refusal> {
+        let staged = staged(self.stage(relative, transition)?);
+        self.publish(staged).map(wrote)
+    }
+
+    /// The path of the one shadow the home holds.
+    pub fn only_shadow(&self) -> PathBuf {
+        let names = self.shadow_names();
+        assert_eq!(
+            names.len(),
+            1,
+            "expected one staged shadow, found {names:?}"
+        );
+        self.shadows.directory().join(&names[0])
     }
 
     /// The vault root.
@@ -94,6 +148,34 @@ impl Scratch {
             .collect();
         names.sort();
         names
+    }
+}
+
+/// The staged target a staging answered with, where it staged one.
+#[track_caller]
+pub fn staged(staging: Staging) -> Staged {
+    match staging {
+        Staging::Staged(staged) => staged,
+        Staging::Landed(landed) => panic!("{} staged as already landed", landed.path().display()),
+    }
+}
+
+/// The publication a call made, where it made one rather than finding the
+/// target already landed.
+#[track_caller]
+pub fn wrote(publication: Publication) -> Published {
+    match publication {
+        Publication::Wrote(published) => published,
+        other => panic!("the publication did not write: {other:?}"),
+    }
+}
+
+/// The landing a publication found another writer had already made.
+#[track_caller]
+pub fn found(publication: Publication) -> Confirmed {
+    match publication {
+        Publication::Found(found) => found,
+        other => panic!("the target was not found landed: {other:?}"),
     }
 }
 
@@ -213,4 +295,14 @@ pub fn demand_unreadable(path: &Path) {
             path.display()
         );
     }
+}
+
+/// Put a symbolic link where the folder `folder` stands, pointing at the
+/// folder's own contents under a new name — so every name below it still
+/// resolves, and only the descent through a link can tell.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: a foreign writer swapping a folder for a link.
+pub fn swap_folder_for_link(folder: &Path) {
+    let moved = folder.with_extension("real");
+    std::fs::rename(folder, &moved).expect("moving the folder aside");
+    symlink(&moved, folder);
 }

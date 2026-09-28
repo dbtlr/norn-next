@@ -1717,6 +1717,7 @@ mod tests {
     use super::*;
     use crate::path::CaseSensitivity;
     use crate::scratch::Scratch;
+    use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
     use std::io::{Cursor, Read};
 
     /// A walk of `root` whose paging window holds the foreign edit `armed`
@@ -2335,16 +2336,25 @@ mod tests {
         );
     }
 
-    /// Whether this tree's root folds alternate case spellings onto one entry.
+    /// Whether `case` runs on this tree's root: where the root folds alternate
+    /// case spellings onto one entry.
     ///
     /// A case that turns on a folding root is inert on a root that tells
     /// spellings apart: there the stat is exact and no spelling resolves to an
-    /// entry spelled another way.
-    fn folding(root: &Path) -> bool {
-        PathNormalizer::detect(root)
-            .expect("case behavior")
-            .case_sensitivity()
-            == CaseSensitivity::Insensitive
+    /// entry spelled another way, so the case skips — and fails on macOS, where
+    /// the scratch root is expected to fold.
+    #[track_caller]
+    fn folding(root: &Path, case: &str) -> bool {
+        runs_where_the_volume_folds(
+            match PathNormalizer::detect(root)
+                .expect("case behavior")
+                .case_sensitivity()
+            {
+                CaseSensitivity::Insensitive => Folding::Folded,
+                CaseSensitivity::Sensitive => Folding::Distinct,
+            },
+            case,
+        )
     }
 
     /// **A descent component the tree does not list names nothing to descend.**
@@ -2360,7 +2370,10 @@ mod tests {
         let root = scratch.at("");
         scratch.directory("vault/\u{c9}clair");
         scratch.place("\u{c9}clair/note.md", b"body");
-        if !folding(&root) {
+        if !folding(
+            &root,
+            "a_subtree_component_only_the_volume_resolves_is_a_name_the_walk_read_nothing_at",
+        ) {
             return;
         }
 
@@ -2392,7 +2405,10 @@ mod tests {
         let root = scratch.at("");
         scratch.directory("vault/Notes");
         scratch.place("Notes/note.md", b"body");
-        if !folding(&root) {
+        if !folding(
+            &root,
+            "a_subtree_component_the_fold_equates_descends_at_the_callers_spelling",
+        ) {
             return;
         }
 
@@ -2418,7 +2434,11 @@ mod tests {
         scratch.directory("vault/\u{e9}clair");
         scratch.place("\u{e9}clair/note.md", b"body");
         let decomposed = "e\u{301}clair";
-        if !folding(&root) || !scratch.exists(&scratch.at(decomposed)) {
+        if !folding(
+            &root,
+            "a_subtree_component_spelled_in_another_composition_reaches_nothing",
+        ) || !scratch.exists(&scratch.at(decomposed))
+        {
             // A root that does not resolve the decomposed spelling at all has
             // nothing here to confirm: the stat answers absence on its own.
             return;
@@ -2543,7 +2563,10 @@ mod tests {
         scratch.directory("vault/Notes/DEEP");
         scratch.place("Notes/DEEP/Note.md", b"body");
         let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
-        if vault.case_sensitivity() != CaseSensitivity::Insensitive {
+        if !folding(
+            &scratch.at(""),
+            "a_folded_spelling_is_reached_at_the_spelling_the_tree_lists",
+        ) {
             return;
         }
 

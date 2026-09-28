@@ -458,6 +458,7 @@ pub fn canonical_spelling(path: &Path) -> PathBuf {
     spelling
 }
 
+#[cfg(test)]
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     identity_of(left) == identity_of(right)
 }
@@ -631,20 +632,65 @@ fn probe_case_behavior(
     name: &OsStr,
     holds: impl FnOnce(&OsStr) -> Option<bool>,
 ) -> Option<CaseSensitivity> {
-    let alternate = alternate_ascii_case(name)?;
-    let actual_metadata = fs::symlink_metadata(dir.join(name)).ok()?;
+    probe_case_behavior_by(
+        name,
+        |spelling| match fs::symlink_metadata(dir.join(spelling)) {
+            Ok(metadata) => Lookup::Found(identity_of(&metadata)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Lookup::Missing,
+            Err(_) => Lookup::Unanswered,
+        },
+        holds,
+    )
+}
 
-    match fs::symlink_metadata(dir.join(&alternate)) {
-        Ok(other) if !same_identity(&actual_metadata, &other) => Some(CaseSensitivity::Sensitive),
-        Ok(_) => {
-            // If both spellings are actual entries, they may merely be hardlink
-            // aliases. Only lookup of a spelling absent from the directory can
-            // positively demonstrate case-insensitive name resolution.
-            (!holds(&alternate)?).then_some(CaseSensitivity::Insensitive)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(CaseSensitivity::Sensitive),
-        Err(_) => None,
+/// What looking a spelling up in a directory answered, without following a
+/// link at it.
+pub(crate) enum Lookup {
+    /// The spelling resolves to this file.
+    Found(crate::Identity),
+    /// Nothing is at the spelling.
+    Missing,
+    /// The lookup failed for another reason, which proves nothing.
+    Unanswered,
+}
+
+/// The case behavior `name`'s entry proves, asked through `lookup` — by path
+/// for detection, through a directory's handle for the write kernel.
+///
+/// An alternate ASCII spelling of `name` that resolves to a different file, or
+/// to nothing, proves the directory tells spellings apart. One that resolves to
+/// the same file proves it folds only where the alternate is not itself an
+/// entry, which `holds` answers: two listed spellings of one file are hardlink
+/// aliases, not a fold.
+pub(crate) fn probe_case_behavior_by(
+    name: &OsStr,
+    lookup: impl Fn(&OsStr) -> Lookup,
+    holds: impl FnOnce(&OsStr) -> Option<bool>,
+) -> Option<CaseSensitivity> {
+    let alternate = alternate_ascii_case(name)?;
+    let Lookup::Found(actual) = lookup(name) else {
+        return None;
+    };
+    match lookup(&alternate) {
+        Lookup::Found(other) if other != actual => Some(CaseSensitivity::Sensitive),
+        // If both spellings are actual entries, they may merely be hardlink
+        // aliases. Only lookup of a spelling absent from the directory can
+        // positively demonstrate case-insensitive name resolution.
+        Lookup::Found(_) => (!holds(&alternate)?).then_some(CaseSensitivity::Insensitive),
+        Lookup::Missing => Some(CaseSensitivity::Sensitive),
+        Lookup::Unanswered => None,
     }
+}
+
+/// Whether two names are one name under a folding root's key.
+///
+/// The fold is [`fold_onto`]'s, so a name the write kernel matches in a
+/// listing is matched exactly as a walk keys it.
+pub(crate) fn fold_together(left: &[u8], right: &[u8]) -> bool {
+    let mut folded = (Vec::new(), Vec::new());
+    fold_onto(CaseSensitivity::Insensitive, &mut folded.0, left);
+    fold_onto(CaseSensitivity::Insensitive, &mut folded.1, right);
+    folded.0 == folded.1
 }
 
 /// What detection asked of the directories it read and of the names it held,
@@ -701,7 +747,9 @@ fn count(tally: impl FnOnce(&mut DetectionReads)) {
     });
 }
 
-fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
+/// `name` with its first ASCII letter's case changed, or nothing where it has
+/// no ASCII letter: the spelling a probe asks a folder about.
+pub(crate) fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
     let mut bytes = name.as_bytes().to_vec();
     let byte = bytes.iter_mut().find(|byte| byte.is_ascii_alphabetic())?;
     *byte = if byte.is_ascii_lowercase() {

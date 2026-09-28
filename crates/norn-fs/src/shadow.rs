@@ -43,9 +43,8 @@
 //! A shadow's name carries **this process's identifier and a counter that only
 //! ever increases within it**, and it is never derived from the destination's
 //! own name. No write ever picks a name a previous write in the same process
-//! was handed, and the shadow is opened with `create_new`, so a name that is
-//! somehow already taken refuses the write rather than truncating whatever is
-//! there.
+//! was handed, and the shadow is opened exclusively, so a name that is somehow
+//! already taken is skipped for the next one rather than truncated.
 //!
 //! That clause is what makes a leaked shadow inert, and it is why cleanup is
 //! allowed to fail quietly. A deterministic, stem-derived name is the forbidden
@@ -69,10 +68,11 @@
 //!   holding the lock means no other Norn host writes through this home and
 //!   every shadow in it is the residue of a write that is already over.
 //! - **[`ShadowHome::sweep`] in life, on the host's maintenance schedule, is
-//!   bounded by [`SHADOW_AGE_THRESHOLD`].** A live write's shadow exists for as
-//!   long as it takes to write and fsync one document, so an age threshold far
-//!   above that separates residue from work in flight without ever needing to
-//!   ask which process a name belongs to.
+//!   bounded by [`SHADOW_AGE_THRESHOLD`].** A live shadow exists from its
+//!   target's staging to its publication, so an age threshold far above that
+//!   separates residue from work in flight without ever needing to ask which
+//!   process a name belongs to. A shadow the margin does not protect is caught
+//!   at publication, which confirms it before it renames it.
 //! - **[`sweep_fallback_root`] takes what is directly under [`FALLBACK`],
 //!   whatever its age.** Every home is keyed, so no host of this build stages a
 //!   shadow at that level; a shadow-named file there is residue of a build that
@@ -136,12 +136,20 @@ pub const FALLBACK: &str = ".norn/tmp";
 
 /// How old a shadow must be before an in-life sweep removes it.
 ///
-/// A shadow exists for the length of one document's write and fsync. Ten
-/// minutes is three orders of magnitude above that, which is the point: the
-/// threshold is not a guess at how long a write takes, it is a margin wide
-/// enough that no live write is ever inside it. Sweeping is bounded by age
-/// rather than by asking which process owns a name, because a name's process
+/// A shadow's content is written and fsynced when its target is staged, and it
+/// waits there until the target is published or discarded — for a plan of many
+/// targets, until every other target has staged too. Ten minutes is a margin
+/// far above what staging one plan takes, and sweeping is bounded by age rather
+/// than by asking which process owns a name, because a name's process
 /// identifier is reused across boots and is not evidence of anything.
+///
+/// **The margin is not a guarantee a staged shadow survives.** A plan held
+/// longer than this, the tree sweep another registration of the same vault
+/// runs over the shared fallback root, and a sync client in the vault can each
+/// take a shadow before its publication. Publication therefore never trusts a
+/// shadow's name: it confirms the shadow's identity and content first, and a
+/// shadow that is gone or changed refuses that target as an I/O failure, which
+/// a re-send stages again.
 pub const SHADOW_AGE_THRESHOLD: Duration = Duration::from_secs(600);
 
 /// How many shadow names one write tries before the shadow home is declared
@@ -162,6 +170,9 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct ShadowHome {
     directory: PathBuf,
     placement: Placement,
+    /// Where a fallback home sits below the vault root, relative to it; `None`
+    /// for a home under the data root.
+    within_vault: Option<PathBuf>,
 }
 
 /// Which of the two homes a maintainership's shadows landed in.
@@ -290,7 +301,7 @@ impl ShadowHome {
     /// `data_tmp` is expected to exist already — reading its device is what
     /// [`ShadowHome::resolve`] decides `same_device` from, so it has been made by
     /// the time an answer is available.
-    fn resolve_where(
+    pub(crate) fn resolve_where(
         vault_root: &Path,
         data_tmp: &Path,
         key: &MaintainershipKey,
@@ -300,13 +311,16 @@ impl ShadowHome {
             return Ok(ShadowHome {
                 directory: data_tmp.to_path_buf(),
                 placement: Placement::DataRoot,
+                within_vault: None,
             });
         }
-        let fallback = vault_root.join(FALLBACK).join(key.as_path());
+        let within = Path::new(FALLBACK).join(key.as_path());
+        let fallback = vault_root.join(&within);
         make_directory(&fallback)?;
         Ok(ShadowHome {
             directory: fallback,
             placement: Placement::VaultFallback,
+            within_vault: Some(within),
         })
     }
 
@@ -320,13 +334,29 @@ impl ShadowHome {
         self.placement
     }
 
-    /// The path of a shadow nothing has taken yet.
+    /// Where a fallback home sits below the vault root, relative to it, or
+    /// `None` for a home under the data root.
+    ///
+    /// The write kernel reaches a fallback home from the vault root's handle by
+    /// its no-follow descent rather than by this home's path: every name under
+    /// the vault root is one a foreign writer can replace with a link.
+    pub(crate) fn within_vault(&self) -> Option<&Path> {
+        self.within_vault.as_deref()
+    }
+
+    /// The name of a shadow nothing has taken yet, in this home.
     ///
     /// Each call yields a name no previous call in this process yielded. The
     /// destination is not a parameter, because a name derived from it is the
     /// forbidden shape this module's contract clause forbids.
+    pub(crate) fn next_shadow_name(&self) -> std::ffi::OsString {
+        shadow_name().into()
+    }
+
+    /// The path of a shadow nothing has taken yet.
+    #[cfg(test)]
     pub(crate) fn next_shadow(&self) -> PathBuf {
-        self.directory.join(shadow_name())
+        self.directory.join(self.next_shadow_name())
     }
 
     /// Remove the shadows in this home that are at least `older_than` old.
@@ -758,6 +788,7 @@ mod tests {
         let home = ShadowHome {
             directory: PathBuf::from("/data/vaults/notes/tmp"),
             placement: Placement::DataRoot,
+            within_vault: None,
         };
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..1_000 {
@@ -1427,9 +1458,9 @@ mod tests {
     /// survives, and the same shadow aged past it does not.
     ///
     /// The forbidden shape is an in-life sweep that removes whatever it finds: a
-    /// live write's shadow exists for the length of one document's write and
-    /// fsync, and a sweep that took it would make every concurrent write a race
-    /// against the maintenance schedule.
+    /// live shadow exists from its target's staging to its publication, and a
+    /// sweep that took it would make every concurrent plan a race against the
+    /// maintenance schedule.
     #[test]
     fn a_thresholded_sweep_spares_a_shadow_younger_than_its_threshold() {
         let scratch = Scratch::new("shadow-sweep-age");
