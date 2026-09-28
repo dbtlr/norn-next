@@ -17,15 +17,16 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use norn_fs::{
     Acquisition, ContentHash, Incumbent, Maintainership, MaintainershipKey, Precondition, Refusal,
     ShadowHome, move_document, try_acquire, vacate, write,
 };
-use norn_testkit::process::{Run, RunStatus, Sandbox};
+use norn_testkit::process::{Outcome, Run, RunStatus, Sandbox};
 use norn_testkit::scratch;
-use norn_testkit::wait::{Budget, Observed, wait_until};
+use norn_testkit::wait::{Budget, Observed, WaitFailure, wait_until};
 
 /// Which part the child plays.
 const ROLE: &str = "NORN_FS_MAINTAINER_ROLE";
@@ -36,12 +37,31 @@ const ANSWER: &str = "NORN_FS_MAINTAINER_ANSWER";
 /// The file whose appearance tells a holding child to take its `SIGKILL`.
 const DONE: &str = "NORN_FS_MAINTAINER_DONE";
 
+/// How the parent runs this binary as the child: the one case that plays a
+/// part, alone, with its output uncaptured so a panic in it reaches the run's
+/// stderr rather than a report the child prints only once it finishes.
+const CHILD_ARGS: [&str; 4] = [
+    "--exact",
+    "maintainer_role_child",
+    "--test-threads=1",
+    "--nocapture",
+];
+
 /// The backstop deadline on a holding child: never reached in a healthy run,
 /// because the child kills itself the moment the parent says it has seen
 /// everything it needs. What this bounds is a wedged run — a child that never
-/// acquires, or a parent observation that never lands — so it matches the
-/// parent's own wait budget rather than racing it.
+/// acquires, or a parent observation that never lands.
+///
+/// It equals the parent's wait budget, and the parent's wait can start before
+/// the child is spawned, so a parent wait on a wedged child can give up while
+/// the child still runs. That is why a failed wait on the holding child waits
+/// [`HOLDER_REPORT_BOUND`] for the run's report and names it: the failure then
+/// carries the child's end and output whichever bound passes first.
 const BACKSTOP: Duration = Duration::from_secs(30);
+
+/// How long the parent waits for the holding child's run to report: past
+/// [`BACKSTOP`] by the time the harness takes to end a run and read its output.
+const HOLDER_REPORT_BOUND: Duration = BACKSTOP.saturating_add(Duration::from_secs(15));
 
 /// How long a child that plays a part and exits may run before it is killed.
 /// Reaching it is a wedged child rather than a slow one.
@@ -173,10 +193,16 @@ fn take(path: &Path) -> Maintainership {
     .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
-/// Write what the child saw, where the parent will look for it.
+/// Write what one process says, where the other will look for it.
+///
+/// The words are written beside the name and renamed onto it, so a reader that
+/// finds the name finds all of them: a reader polling the name sees either no
+/// file or the whole answer, never an empty or partial one.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the channel between the two processes.
 fn say(answer: &Path, what: &str) {
-    std::fs::write(answer, what).expect("writing the answer");
+    let staged = answer.with_extension("staged");
+    std::fs::write(&staged, what).expect("writing the answer");
+    std::fs::rename(&staged, answer).expect("publishing the answer");
 }
 
 /// A free lock is taken, and the guard reports the file and the identity it was
@@ -511,7 +537,7 @@ fn a_killed_maintainer_releases_its_lock() {
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 let outcome = Run::new(sandbox, child)
-                    .args(["--exact", "maintainer_role_child", "--test-threads=1"])
+                    .args(CHILD_ARGS)
                     .env(ROLE, "hold")
                     .env(LOCK, lock)
                     .env(ANSWER, answer)
@@ -522,16 +548,17 @@ fn a_killed_maintainer_releases_its_lock() {
             });
 
             // The child says so once it holds the lock.
-            let said = wait_until(
-                "the child to hold the lock",
-                budget(),
-                || match try_read_answer(answer) {
+            let said = wait_until("the child to hold the lock", budget(), || {
+                assert_the_holder_runs(&receiver);
+                match try_read_answer(answer) {
                     Ok(said) if said.starts_with("acquired ") => Observed::Met(said),
                     Ok(said) => Observed::pending(format!("the child said {said:?}")),
                     Err(error) => Observed::pending(format!("no answer yet: {error}")),
-                },
-            )
-            .expect("the child to take a free lock");
+                }
+            })
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report("the child to take a free lock", &failure, &receiver)
+            });
             let held_by: u32 = said
                 .trim()
                 .rsplit(' ')
@@ -542,18 +569,22 @@ fn a_killed_maintainer_releases_its_lock() {
 
             // This process is excluded while the child is alive, and the body it
             // stamped names it.
-            let incumbent =
-                wait_until(
-                    "this process to be excluded",
-                    budget(),
-                    || match try_acquire(lock).expect("an attempt") {
-                        Acquisition::Contended { incumbent } => Observed::Met(incumbent),
-                        Acquisition::Acquired(_) => {
-                            Observed::pending("the lock was free while the child held it")
-                        }
-                    },
+            let incumbent = wait_until("this process to be excluded", budget(), || {
+                assert_the_holder_runs(&receiver);
+                match try_acquire(lock).expect("an attempt") {
+                    Acquisition::Contended { incumbent } => Observed::Met(incumbent),
+                    Acquisition::Acquired(_) => {
+                        Observed::pending("the lock was free while the child held it")
+                    }
+                }
+            })
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report(
+                    "a lock held by another process to be contended",
+                    &failure,
+                    &receiver,
                 )
-                .expect("a lock held by another process to be contended");
+            });
             let Incumbent::Named { pid, version, .. } = &incumbent else {
                 panic!("a lock held by another process named no incumbent");
             };
@@ -578,13 +609,19 @@ fn a_killed_maintainer_releases_its_lock() {
                     }
                 },
             )
-            .expect("a dead maintainer's lock to be free");
+            .unwrap_or_else(|failure| {
+                fail_with_the_holders_report(
+                    "a dead maintainer's lock to be free",
+                    &failure,
+                    &receiver,
+                )
+            });
             held_by
         })
     };
 
     let outcome = receiver
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(HOLDER_REPORT_BOUND)
         .expect("the child's run to report")
         .expect("waiting on the child");
     assert_eq!(
@@ -619,13 +656,67 @@ fn run_child(
     answer: &Path,
 ) -> norn_testkit::process::Outcome {
     Run::new(sandbox, child)
-        .args(["--exact", "maintainer_role_child", "--test-threads=1"])
+        .args(CHILD_ARGS)
         .env(ROLE, role)
         .env(LOCK, lock)
         .env(ANSWER, answer)
         .deadline(CHILD_DEADLINE)
         .wait()
         .expect("running the child")
+}
+
+/// Fail at once with how the holding child's run ended, if it has ended.
+///
+/// A holding child ends only when the parent tells it to, so before then a run
+/// that has reported is the answer to every wait on the child: the status it
+/// ended with and what it printed, or why it could not be started at all. A wait
+/// that looked only at what the child said would read a child that never
+/// started, or died before speaking, as one that has not spoken yet.
+fn assert_the_holder_runs(run: &Receiver<std::io::Result<Outcome>>) {
+    match run.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        Ok(report) => panic!(
+            "the holding child's run reported before it was told to end: {}",
+            described(&report)
+        ),
+        Err(TryRecvError::Disconnected) => {
+            panic!("the holding child's run ended without reporting how")
+        }
+    }
+}
+
+/// Fail a wait on the holding child, naming how the child's run ended.
+///
+/// A wait on the child can give up while the child still runs, so this waits
+/// up to [`HOLDER_REPORT_BOUND`] for the run's report: a child still running
+/// at its [`BACKSTOP`] reads as timed out, with what it printed, and is told
+/// apart from one that could not be run or ended on its own.
+fn fail_with_the_holders_report(
+    expected: &str,
+    failure: &WaitFailure,
+    run: &Receiver<std::io::Result<Outcome>>,
+) -> ! {
+    let report = match run.recv_timeout(HOLDER_REPORT_BOUND) {
+        Ok(report) => described(&report),
+        Err(RecvTimeoutError::Timeout) => {
+            format!("did not report within {HOLDER_REPORT_BOUND:?}")
+        }
+        Err(RecvTimeoutError::Disconnected) => "ended without reporting how".to_string(),
+    };
+    panic!("{expected}: {failure}\nthe holding child's run: {report}")
+}
+
+/// How a run ended and what it printed, or why it could not be run.
+fn described(report: &std::io::Result<Outcome>) -> String {
+    match report {
+        Ok(outcome) => format!(
+            "ended with {:?}\nstdout:\n{}\nstderr:\n{}",
+            outcome.status,
+            outcome.stdout_text(),
+            outcome.stderr_text()
+        ),
+        Err(error) => format!("could not be run: {error}"),
+    }
 }
 
 /// What the child has said so far, or why nothing has been read yet.
