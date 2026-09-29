@@ -2224,6 +2224,125 @@ fn scoped_increment(
     close_job(store, root, exclusions, policy, &mut account)
 }
 
+/// One path a plan's publication left, and what the applier knows it holds:
+/// the content hash it published or found there, or absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlanEffect {
+    /// The path, at the spelling the plan writes it at.
+    pub(crate) path: DocumentPath,
+    /// What it holds: a hash, or `None` for nothing.
+    pub(crate) holds: Option<norn_fs::ContentHash>,
+}
+
+/// Commit what a plan's publication left as one changeset, marked with
+/// `provenance`, and answer the counters that changeset read.
+///
+/// **One changeset, whatever the plan's size.** An apply's changeset is what
+/// makes a read see the whole state before it or the whole state after it
+/// (ADR 0031), so this scope never flushes early: the bound a heal chunks by
+/// does not apply, and what the changeset holds is one entry per effect.
+///
+/// **The derivation is the heal's own.** A document the plan left present is
+/// derived by the one derivation every heal and reconcile runs — its bytes are
+/// read back through the anchored read and derived only where they still hash
+/// to what the applier published, which is the composed post-state byte for
+/// byte. The applier keeps no bytes between staging and publication, so reading
+/// them back is how the composed state reaches the store without being held. A
+/// path whose bytes no longer hash to the effect was changed by another writer
+/// in the residual window after publication; it is left to the watcher, which
+/// reports that change because it is not the own write the ledger recorded. A
+/// path the plan left absent dies where a row stands, as a plan's delete.
+///
+/// Every death is entered ahead of every upsert, so a case-only rename's old
+/// spelling dies before its new one is written under a store whose path order
+/// folds case. The job-closing readings a heal runs after its flushes have
+/// nothing to read here: a plan's paths are document paths, which carry no
+/// rendering marker, so its deaths vacate no rendered place, and the changeset
+/// walks no scope whose unaccounted findings a prune would take.
+pub(crate) fn commit_plan_changeset(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    effects: &[PlanEffect],
+    provenance: IncrementProvenance,
+) -> Result<norn_store::DerivationCounters, JobFailure> {
+    let mut account = Account::default();
+    let mut pending = Pending::new(store, effects.len(), root, exclusions, &mut account)?;
+    pending.provenance = provenance;
+    let (deaths, writes): (Vec<&PlanEffect>, Vec<&PlanEffect>) =
+        effects.iter().partition(|left| left.holds.is_none());
+    for left in deaths {
+        let standing = pending
+            .store
+            .begin_request()
+            .stored_document(&left.path)
+            .map_err(store_effect)?;
+        if standing.is_some() {
+            pending.push(Change::Death {
+                path: left.path.clone(),
+                provenance: Provenance::PlanDelete,
+            });
+        }
+    }
+    for left in writes {
+        let path = Path::new(left.path.as_str());
+        let Some(observed) = norn_fs::read_optional_and_hash(root, path).map_err(effect)? else {
+            continue;
+        };
+        if Some(observed.content_hash()) != left.holds {
+            continue;
+        }
+        let standing = pending
+            .store
+            .begin_request()
+            .stored_document(&left.path)
+            .map_err(store_effect)?;
+        pending.rederive(
+            path,
+            left.path.as_str(),
+            observed.bytes(),
+            observed.content_hash().to_string(),
+            standing.as_ref().map(|_| &left.path),
+        );
+    }
+    pending.flush()?;
+    Ok(pending.counters.clone())
+}
+
+/// Derive the whole vault at `root` into `store` by the heal a first attach
+/// runs: the oracle a changeset is compared against.
+#[cfg(test)]
+pub(crate) fn heal_from_zero(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+) -> Result<(), JobFailure> {
+    let progress = ProgressReporter::<ProductionAttachment>::disconnected();
+    heal_documents(
+        store,
+        root,
+        exclusions,
+        ProductionPolicy::new(64, 64).expect("a legal policy"),
+        &progress.healing(),
+    )
+    .map(|_| ())
+}
+
+/// The roots a walk of the vault at `root` does not enter on account of
+/// staged shadows in `shadows`.
+#[cfg(test)]
+pub(crate) fn shadow_exclusions(shadows: &ShadowHome, root: &Path) -> Vec<PathBuf> {
+    shadow_exclusion(shadows.placement(), shadows.directory(), root)
+        .into_iter()
+        .collect()
+}
+
+/// The declaration the store pins, which every changeset is judged under and
+/// which the applier checks a composed result against.
+pub(crate) fn pinned_declaration(store: &mut Store) -> Result<Declared, JobFailure> {
+    Ok(Declaration::read(store)?.model)
+}
+
 /// Converge a dirty directory that addresses no stored rows at all.
 ///
 /// This is the root a backslash, a control byte or bytes that are not UTF-8
@@ -3313,6 +3432,13 @@ struct Pending<'s> {
     /// is what holds a scope's residency independent of how much of the vault it
     /// covers.
     bound: usize,
+    /// Where the post-state of every changeset this scope flushes came from:
+    /// derived from bytes the host read, or composed by the applier. It changes
+    /// no statement the store runs (see [`IncrementProvenance`]).
+    provenance: IncrementProvenance,
+    /// The derivation counters of the last changeset this scope flushed, which
+    /// is how the mark-invariance bar reads one changeset under either mark.
+    counters: norn_store::DerivationCounters,
 }
 
 /// A finding this scope has derived and not yet recorded: the store-facing
@@ -3345,6 +3471,8 @@ impl<'s> Pending<'s> {
             queued: Vec::new(),
             replaced: BTreeSet::new(),
             bound,
+            provenance: IncrementProvenance::Derived,
+            counters: norn_store::DerivationCounters::default(),
         })
     }
 
@@ -3507,16 +3635,16 @@ impl<'s> Pending<'s> {
         if applied {
             self.account.vacated.absorb(&self.changes);
         }
-        let outcome = self
-            .store
-            .begin_request()
+        let mut request = self.store.begin_request();
+        let outcome = request
             .apply_increment(
-                IncrementProvenance::Derived,
+                self.provenance,
                 self.changes.drain(..),
                 &findings,
                 self.declared.model.content_model(),
             )
             .map_err(store_effect)?;
+        self.counters = request.counters().clone();
         // The outcome is the store's account of what this changeset did, and it
         // is recorded rather than dropped: the job that applied it is the only
         // place the tallies are ever visible, since a changeset that landed

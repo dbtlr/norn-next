@@ -7,6 +7,10 @@
 //! filesystem and store crates remain the only owners of those effects.
 
 mod address;
+// A dormant carrier until NORN-295's `Host::apply` job lands: see the module's
+// own documentation for who calls it and why nothing does yet.
+#[cfg_attr(not(test), allow(dead_code))]
+mod applier;
 mod derivation;
 mod evidence;
 mod lifecycle;
