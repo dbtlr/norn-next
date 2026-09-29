@@ -862,6 +862,27 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_of_an_arrived_document_waits_for_the_arrival_it_removes() {
+        let operations = vec![
+            creating("e.md", "new").with_requires(vec![id("z")]),
+            deleting("e.md"),
+            creating("z.md", "z").with_id(id("z")),
+        ];
+        let resolution = planned(&MemoryVault::default(), operations.clone());
+        assert_eq!(
+            unresolved_positions(&resolution, &operations),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("e.md", FileState::absent(), FileState::absent()),
+                transition("z.md", FileState::absent(), present("z")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_move_onto_itself_is_unresolved_rather_than_a_cycle() {
         let vault = MemoryVault::with(&[("a.md", "A")]);
         let resolution = planned(&vault, vec![moving("a.md", "a.md")]);
