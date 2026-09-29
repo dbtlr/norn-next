@@ -1576,3 +1576,32 @@ fn damage_carried_to_a_running_apply_is_published_where_it_ends_ahead_of_its_fac
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, host));
 }
+
+/// **An apply queued behind an attach whose mint fails is answered with the
+/// reader unavailable**, as a read over that entry is refused: the entry
+/// serves every surface but its read seam, no later publication would mint,
+/// and an apply runs only over a reader, so it is not left waiting.
+#[test]
+fn an_apply_queued_behind_an_attach_whose_mint_fails_is_answered_with_the_reader_unavailable() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+    ops.reader_mint_fails.store(true, Ordering::SeqCst);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    let pending = host
+        .admit_apply(&name, a_plan(&name))
+        .expect("an apply over an unattached vault is admitted");
+    wait_for_flag("attach_started", &ops.attach_started);
+    ops.attach_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+            "this coverage mints no read handle"
+        ))
+        .answer(&name)
+    );
+    assert_eq!(host.state(&name), answered(TrustState::Ready));
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop(host);
+}

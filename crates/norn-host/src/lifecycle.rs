@@ -1447,10 +1447,21 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// out of service, parked, or untrusted, whichever leg or door put it
     /// there — answers every apply still queued not applied, with that cause,
     /// so no apply waits on an entry nothing will serve and none runs over a
-    /// verdict published against the store it would plan on.
+    /// verdict published against the store it would plan on. So does a hold
+    /// that ends with the entry serving reads over its own coverage, free,
+    /// and no reader standing: the mint the publication ran failed, nothing
+    /// later mints, and each queued apply is answered with the reader
+    /// unavailable, as a read over the entry is refused.
     fn end_hold(&mut self) {
         if !self.applies.is_empty() && self.stands_on_a_cause() {
             self.answer_queued_applies();
+        } else if !self.applies.is_empty() && self.serves_with_no_reader() {
+            let unavailable = self.reader_unavailable.clone().unwrap_or_else(|| {
+                ReaderUnavailable::new("this entry's coverage holds no read handle")
+            });
+            self.answer_queued_applies_with(
+                ReadRefusal::ReaderUnavailable(unavailable).answer(self.applies.vault()),
+            );
         }
         self.trust_unbroken_since_ready = match &self.trust {
             TrustState::Ready => !self.stands_parked() && self.out_of_service().is_none(),
@@ -2136,6 +2147,23 @@ impl<A: SnapshotSource> EntryState<A> {
     fn answer_queued_applies(&mut self) {
         let vault = self.applies.vault().clone();
         let cause = self.apply_cause(&vault);
+        self.answer_queued_applies_with(cause);
+    }
+
+    /// Whether the entry serves reads over coverage in its own hand, with
+    /// nothing holding it and no reader standing: a publication's mint that
+    /// failed, which nothing but a read asks for again.
+    fn serves_with_no_reader(&self) -> bool {
+        self.reader.is_none()
+            && self.coverage.in_hand()
+            && !self.claim.is_held()
+            && !self.detach_in_flight
+            && self.read_stance() != ReadStance::Refuse
+    }
+
+    /// Answer every apply queued on the entry not applied, with `cause`,
+    /// giving back the demand each one's admission recorded.
+    fn answer_queued_applies_with(&mut self, cause: ErrorEnvelope) {
         let ended_at = Instant::now();
         for apply in self.applies.take_all() {
             give_back_demand(self, apply.recovery_demand, ended_at);

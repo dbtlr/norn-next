@@ -2516,7 +2516,9 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
 - **A queued apply is answered where the cause is published: at the end of the gate hold
   that publishes it.** A hold that ends with the entry out of service, parked or untrusted
   answers every apply still queued not applied, with that cause, and gives back each one's
-  demand; admission refuses on the same predicate. A release that ends unattached with
+  demand; admission refuses on the same predicate. A hold that ends with the entry serving
+  reads, free, over its own coverage and with no reader standing — a publication whose mint
+  failed — answers each with `host/reader-unavailable`, as a read there is refused. A release that ends unattached with
   nothing re-armed answers the queue with `unattached`; a leg's unwind leaves its answer to
   the unwind's own publication, which follows the release. The host's destruction answers
   with the teardown each entry then publishes — releasing coverage, or unattached.
