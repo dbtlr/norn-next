@@ -2,7 +2,7 @@
 //! operations touching it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
@@ -89,6 +89,12 @@ struct Simulated<'view, V> {
     /// whether a name is a folder the plan makes is one lookup however large
     /// the plan.
     standing_below: BTreeMap<NormalizedPath, usize>,
+    /// The spelling each folder identity was first given by a document
+    /// standing beneath it: the tree's, or the one an operation made it at.
+    /// Publication makes a folder before the create it is made for and
+    /// removes none until the end, so a folder keeps that spelling for the
+    /// whole plan.
+    folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
 }
 
 /// Why one operation cannot act on the state it met.
@@ -110,6 +116,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             read_at: BTreeMap::new(),
             spelled: BTreeMap::new(),
             standing_below: BTreeMap::new(),
+            folder_spelled: BTreeMap::new(),
         }
     }
 
@@ -165,7 +172,8 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 
     /// The file a document can be put at for `path`, or why none can: the
     /// name holds a document, a folder the plan makes, or lies beneath a
-    /// document; or `path` spells a folder above it differently from the tree.
+    /// document; or `path` spells a folder above it differently from the tree
+    /// or from the operation that made it.
     fn vacant(
         &mut self,
         path: &DocumentPath,
@@ -191,6 +199,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 "a folder stands at `{path}`, where the plan puts a document beneath it"
             )));
         }
+        if let Some(made) = self.folder_spelled_otherwise(&identity) {
+            return Ok(Err(format!(
+                "`{path}` runs through the folder the plan puts at `{}`: a document is put at the spelling its folder already has, and a folder's change of case is not planned",
+                made.display()
+            )));
+        }
         if spelling.as_str() != spelled_as_asked(&identity) {
             return Ok(Err(format!(
                 "`{path}` is spelled `{spelling}` in the vault: a document is put at the spelling the vault lists, and a folder's change of case is not planned"
@@ -209,6 +223,22 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             .filter_map(|above| self.view.normalizer().normalize(above).ok())
             .filter_map(|above| self.spelled.get(&above))
             .find(|spelling| self.targets[*spelling].after.is_some())
+    }
+
+    /// The spelling of a folder above `identity` that this plan has given
+    /// another spelling than `identity` asks for.
+    fn folder_spelled_otherwise(&self, identity: &NormalizedPath) -> Option<&PathBuf> {
+        identity
+            .as_path()
+            .ancestors()
+            .skip(1)
+            .filter(|above| !above.as_os_str().is_empty())
+            .find_map(|above| {
+                let folder = self.view.normalizer().normalize(above).ok()?;
+                self.folder_spelled
+                    .get(&folder)
+                    .filter(|made| made.as_path() != above)
+            })
     }
 
     /// Set what the file at `spelling` holds so far, counting it beneath
@@ -231,6 +261,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             let Ok(folder) = self.view.normalizer().normalize(above) else {
                 continue;
             };
+            if arrives {
+                self.folder_spelled
+                    .entry(folder.clone())
+                    .or_insert_with(|| above.to_owned());
+            }
             let count = self.standing_below.entry(folder).or_default();
             if arrives {
                 *count += 1;

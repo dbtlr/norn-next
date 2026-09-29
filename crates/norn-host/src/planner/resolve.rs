@@ -1143,6 +1143,29 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_the_plan_makes_spelled_a_second_way_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("a.md", "A")]).folding_case();
+        for second in [creating("dir/y.md", "Y"), moving("a.md", "dir/a.md")] {
+            let resolution = planned(&vault, vec![creating("Dir/x.md", "X"), second]);
+            assert_eq!(
+                resolution.unresolved.len(),
+                1,
+                "{:?}",
+                resolution.unresolved
+            );
+            assert!(
+                detail_of(&resolution, 0).contains("a folder's change of case is not planned"),
+                "{}",
+                detail_of(&resolution, 0)
+            );
+            assert_eq!(
+                resolution.plan.transitions,
+                vec![transition("Dir/x.md", FileState::absent(), present("X"))]
+            );
+        }
+    }
+
+    #[test]
     fn a_plan_over_a_tree_on_disk_reads_it_through_the_vault_s_own_descent() {
         use super::super::view::TreeView;
         let scratch = norn_testkit::scratch::Scratch::new("planner-tree");

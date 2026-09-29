@@ -49,7 +49,8 @@
 //! waits for no other operation vacating that name, and an operation after it
 //! in the plan — a removal, a move on, a rename back — acts on the document at
 //! its new spelling. A folder's change of case is not planned: an operation
-//! naming a folder in a case the tree does not list is left unresolved.
+//! naming a folder in a case the tree does not list, or in a case other than
+//! the one an earlier operation of the plan made it in, is left unresolved.
 //!
 //! **Before-states are read from the files, not the store.** A before-state is
 //! the hash of the bytes a target is composed from, so both sides read them
