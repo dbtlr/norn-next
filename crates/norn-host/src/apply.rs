@@ -100,7 +100,7 @@ pub(crate) fn fully_resolved(resolution: Resolution) -> Result<Resolution, Error
 
 /// The answer to a vault the planner could not read: nothing was planned,
 /// and the environment refusing the read is the cause.
-fn unreadable(error: impl std::fmt::Display) -> ErrorEnvelope {
+pub(crate) fn unreadable(error: impl std::fmt::Display) -> ErrorEnvelope {
     let detail = format!("the vault could not be read to plan against: {error}");
     not_run(
         ErrorEnvelope::new(

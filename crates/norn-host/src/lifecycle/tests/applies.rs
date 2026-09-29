@@ -377,3 +377,61 @@ fn a_dropped_pending_apply_does_not_stop_the_apply() {
     assert_eq!(ops.applies_ran.lock().unwrap().len(), 2);
     drop((lease, host));
 }
+
+/// **An apply admitted over a reconcile waiting in the channel takes the
+/// claim, and the queue slot holds its send until the reconcile arrives.**
+/// The reconcile a poll scheduled is in the channel, behind the one worker
+/// another vault's attach holds, so its marker and its slot both stand.
+/// Admission schedules the apply over that marker — the entry's work at its
+/// own epoch, with the gate held — and the slot the reconcile holds is what
+/// keeps the apply from being sent beside it. When the superseded reconcile
+/// arrives it runs nothing and sends the apply, whose intake derives the
+/// fact the reconcile was scheduled for.
+#[test]
+fn an_apply_over_a_reconcile_in_the_channel_waits_on_its_slot_and_is_sent_when_it_arrives() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("a").unwrap();
+    let holding = VaultName::new("b").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
+    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    wait_for_flag("attach_started", &ops.attach_started);
+
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    let entry = host.shared.entries.get(&name).unwrap();
+    let reconcile = {
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            matches!(state.claim.marker(), Some(Job::Reconcile(..))),
+            "the poll scheduled no reconcile"
+        );
+        state.claim.slot().expect("the reconcile is in the channel")
+    };
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    {
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            matches!(state.claim.marker(), Some(Job::Apply(..))),
+            "the apply did not take the claim over the reconcile"
+        );
+        assert_eq!(
+            state.claim.slot(),
+            Some(reconcile),
+            "the apply was sent beside the reconcile already in the channel"
+        );
+    }
+
+    ops.block_attach.store(false, Ordering::SeqCst);
+    ops.attach_release.store(true, Ordering::SeqCst);
+    let when = wait_for_an_apply(&ops);
+    applied(pending.wait());
+    assert_eq!(
+        when.reconciles, 1,
+        "the superseded reconcile ran, or the apply did not derive its fact"
+    );
+    drop((lease, holding_lease, host));
+}

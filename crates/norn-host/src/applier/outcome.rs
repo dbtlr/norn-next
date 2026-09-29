@@ -5,7 +5,8 @@ use norn_wire::{
     InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
 };
 
-use norn_wire::DocumentPath;
+use norn_fs::Batch;
+use norn_wire::{DocumentPath, FileState};
 
 /// What applying a resolved plan came to.
 ///
@@ -85,14 +86,63 @@ pub(crate) struct Interrupted {
     /// What stopped publication.
     pub(crate) cause: InterruptionCause,
     /// Whether the landed subset committed, or the entry owes a heal. The wire
-    /// does not carry it; the apply job reads it to arm the heal.
-    // A dormant carrier: its reader is NORN-295's `Host::apply` job, which
-    // arms the heal an uncommitted changeset owes and has not landed.
-    #[allow(dead_code)]
+    /// does not carry it; the apply job reads it, through
+    /// [`ApplyOutcome::heal`], to arm the heal.
     pub(crate) changeset: ChangesetOutcome,
 }
 
 impl ApplyOutcome {
+    /// What the entry derives because this outcome's changeset did not
+    /// commit, and an empty batch where it owes none.
+    ///
+    /// **The heal is every path the plan touched**, as the watcher would
+    /// report it had the ledger not expected the apply's own writes: a
+    /// target that landed absent as a removal, since the apply knows the path
+    /// is gone before any backend reports it, and every other as a change,
+    /// which the reconcile reads as the path now stands. A target an
+    /// interruption left unlanded is read again too: a respell cut short
+    /// between its two steps left its content at the old spelling.
+    /// `normalizer` spells each path as the entry's coverage does.
+    pub(crate) fn heal(&self, normalizer: &norn_fs::PathNormalizer) -> Batch {
+        let mut heal = Batch::default();
+        let (plan, landed): (&ResolvedPlan, &[DocumentPath]) = match self {
+            ApplyOutcome::Applied(applied) if applied.changeset == ChangesetOutcome::Healing => {
+                (&applied.plan, &[])
+            }
+            ApplyOutcome::Interrupted(interrupted)
+                if interrupted.changeset == ChangesetOutcome::Healing =>
+            {
+                (&interrupted.plan, &interrupted.landed)
+            }
+            _ => return heal,
+        };
+        let every_target_landed = matches!(self, ApplyOutcome::Applied(_));
+        for transition in &plan.transitions {
+            let Ok(path) = normalizer.normalize(std::path::Path::new(transition.path.as_str()))
+            else {
+                continue;
+            };
+            let landed = every_target_landed || landed.contains(&transition.path);
+            heal.merge(match transition.after {
+                FileState::Absent {} if landed => Batch::vault_removal(path),
+                _ => Batch::vault_change(path),
+            });
+        }
+        heal
+    }
+
+    /// Whether this outcome's changeset did not commit over something that
+    /// landed, so the entry owes the heal [`ApplyOutcome::heal`] names.
+    pub(crate) fn owes_a_heal(&self) -> bool {
+        match self {
+            ApplyOutcome::Applied(applied) => applied.changeset == ChangesetOutcome::Healing,
+            ApplyOutcome::Interrupted(interrupted) => {
+                interrupted.changeset == ChangesetOutcome::Healing
+            }
+            _ => false,
+        }
+    }
+
     /// The outcome as the wire answers it: a report, or a refusal under its
     /// code.
     pub(crate) fn into_wire(self) -> Result<ApplyReport, ErrorEnvelope> {

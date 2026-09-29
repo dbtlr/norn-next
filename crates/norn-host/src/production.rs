@@ -18,8 +18,12 @@ use norn_store::{
     IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
     StoredDocument, StoredPathOrder, SubjectScope,
 };
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
+use norn_wire::{
+    FindingKind, FindingScope, MaintainerIdentity, PlanDocument, UntrustedReason, VaultName,
+};
 
+use crate::applier::Applier;
+use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
@@ -27,9 +31,9 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    AttachmentAdvisory, EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
-    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    ApplyEnd, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing, JobFailure,
+    MintedReader, ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal,
+    RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -216,10 +220,11 @@ pub struct ProductionAttachment {
     subscription: Option<Subscription>,
     store: Store,
     heal_observed: norn_fs::Batch,
-    /// Layer 4 plan-apply consumes this recorder at the product composition
-    /// site: successful writes stay beside coverage so their watcher echoes
-    /// can be hash-confirmed without hiding external edits.
-    _own_writes: OwnWrites,
+    /// Where the one applier records each publication an apply over this
+    /// coverage makes, so the watcher's echo of it is hash-confirmed as the
+    /// apply's own without hiding an external edit. It stands beside the
+    /// coverage because the ledger is the subscription's.
+    own_writes: OwnWrites,
     /// Where this maintainership's shadows are staged, resolved when coverage
     /// is installed. Its placement is read three ways: a walk excludes a
     /// fallback home by its root, maintenance sweeps it, and
@@ -255,7 +260,84 @@ pub struct ProductionAttachment {
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
+/// Apply `plan` over `attachment`: the work of [`EntryOps::apply`].
+///
+/// **The one snapshot is the store as the apply's claim holds it.** The job
+/// holds the entry's claim and this attachment's store is the one writer to
+/// it, so the reading taken here names exactly the state the changeset builds
+/// on, and it is the reading the answer is given under. The planner reads the
+/// files for its before-states, never the store, so nothing else is read off
+/// it before the applier commits.
+fn apply_over(
+    attachment: &mut ProductionAttachment,
+    plan: PlanDocument,
+    progress: &ApplyProgress,
+) -> ApplyEnd {
+    let Some(ground) = attachment.plan_ground() else {
+        return ApplyEnd::answered(Err(crate::apply::unreadable(
+            "the vault root no longer stands where the coverage was installed",
+        )));
+    };
+    let snapshot = {
+        let mut feed = attachment.store.feed_read();
+        match feed.write_generation() {
+            Ok(generation) => StoreReading::of(feed.epoch(), generation),
+            Err(error) => {
+                return ApplyEnd::answered(Err(crate::apply::unreadable(format!(
+                    "the store could not be read: {error}"
+                ))));
+            }
+        }
+    };
+    let resolved = match plan {
+        PlanDocument::Resolved(resolved) => resolved,
+        PlanDocument::Operations(authored) => {
+            match crate::apply::resolve_on(authored, &ground).and_then(crate::apply::fully_resolved)
+            {
+                Ok(resolution) => resolution.plan,
+                Err(refused) => return ApplyEnd::answered(Err(refused)),
+            }
+        }
+    };
+    progress.planned(&resolved);
+    let outcome = Applier {
+        anchor: &ground.root,
+        root: ground.identity,
+        exclusions: &ground.exclusions,
+        shadows: &attachment.shadows,
+        own_writes: &attachment.own_writes,
+        publishing: &|| progress.publishing(),
+    }
+    .apply(resolved, &mut attachment.store);
+    // The heal's paths are spelled as the vault's walk spells them, under
+    // the case behaviour the root proved. A root that cannot be walked any
+    // more is healed whole.
+    let heal = outcome.owes_a_heal().then(|| {
+        match norn_fs::Vault::open(&ground.root, &ground.exclusions) {
+            Ok(vault) => outcome.heal(vault.normalizer()),
+            Err(_) => norn_fs::Batch::rescan(RescanScope::Vault),
+        }
+    });
+    ApplyEnd {
+        answer: outcome.into_wire().map(|report| (snapshot, report)),
+        heal,
+    }
+}
+
 impl ProductionAttachment {
+    /// What a plan over this coverage is resolved against: the covered root,
+    /// the identity it stands at now, and the roots its walk does not enter —
+    /// the fallback shadow home and the schema file. `None` where the root no
+    /// longer stands.
+    fn plan_ground(&self) -> Option<PlanGround> {
+        let identity = norn_fs::path_identity(&self.covered_root).ok()??;
+        Some(PlanGround {
+            root: self.covered_root.clone(),
+            identity,
+            exclusions: exclusions_at(&self.registration, &self.shadows, &self.covered_root),
+        })
+    }
+
     /// Pin `candidate`'s schema into the store and take the content model
     /// back off the pin it wrote.
     fn pin(&mut self, candidate: &ReloadCandidate) -> Result<(), JobFailure> {
@@ -556,7 +638,7 @@ impl ProductionEntryOps {
             .map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
-        attachment._own_writes = own_writes;
+        attachment.own_writes = own_writes;
         attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
         attachment.shadows = shadows;
         attachment.covered_root = covered_root;
@@ -1314,7 +1396,7 @@ impl EntryOps for ProductionEntryOps {
             store,
             subscription: Some(subscription),
             heal_observed: norn_fs::Batch::default(),
-            _own_writes: own_writes,
+            own_writes,
             shadows,
             shadow_advisory,
             skipped_links: SkippedLinks::default(),
@@ -1410,6 +1492,32 @@ impl EntryOps for ProductionEntryOps {
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
         Some(attachment.covered_root.clone())
+    }
+
+    fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+        attachment.plan_ground()
+    }
+
+    /// The apply over this coverage: the store's reading as its one
+    /// snapshot, the operations planned through the one planner on the
+    /// ground the coverage stands on, and the one applier, publishing through
+    /// the coverage's shadow home and own-write ledger and committing to its
+    /// store. Lane-1 work the changeset committed is relayed to the engines
+    /// as every other leg's is.
+    fn apply(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        plan: PlanDocument,
+        progress: &ApplyProgress,
+        reporter: &ProgressReporter<Self::Attachment>,
+    ) -> ApplyEnd {
+        let _job = self.evidence.attributing();
+        let ended = apply_over(attachment, plan, progress);
+        if ended.answer.is_ok() {
+            self.drain_semantic(name, attachment, reporter);
+        }
+        ended
     }
 
     /// Read off the controls the attachment holds, so the answer is about the
@@ -14894,7 +15002,7 @@ mod tests {
                 ProductionEntryOps::start_watch(&attachment.registration, &schema)
                     .map_err(watcher)?;
             attachment.subscription = Some(subscription);
-            attachment._own_writes = own_writes;
+            attachment.own_writes = own_writes;
             self.inner.heal(attachment, progress)?;
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);

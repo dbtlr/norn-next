@@ -160,6 +160,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &self.recorded,
+            publishing: &|| {},
         };
         applier.apply(plan, &mut self.store)
     }
@@ -1468,6 +1469,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &meddling,
+            publishing: &|| {},
         };
         applier.apply(plan, &mut self.store)
     }

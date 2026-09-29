@@ -56,8 +56,7 @@ pub(crate) struct Drawn {
 /// for the same content cycle and for what else follows content through
 /// moves: drift of a source a target that has not landed draws on, the
 /// schema baseline each result is judged against, and the stand-in for a
-/// before-state an apply cannot see. The applier is itself a dormant carrier
-/// until NORN-295's `Host::apply` reaches it.
+/// before-state an apply cannot see.
 #[derive(Debug, Default)]
 pub(crate) struct Lineage {
     /// Each file an operation touches, and the source of what it holds at

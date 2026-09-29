@@ -150,8 +150,9 @@ impl Batch {
     /// are private, so this constructor is the one way a consumer outside this
     /// crate stands a per-path invalidation up without a coalescer: the host's
     /// absorbing-wait cases, which drive a pump with the reports they name
-    /// rather than the ones a platform happens to deliver, are its present
-    /// callers.
+    /// rather than the ones a platform happens to deliver, are callers, and
+    /// so is `norn-host`'s apply job, handing its entry the paths a changeset
+    /// that did not commit leaves to heal.
     pub fn vault_change(root: NormalizedPath) -> Self {
         Self {
             vault_roots: BTreeSet::from([root]),
@@ -170,11 +171,11 @@ impl Batch {
     /// The batch's fields are private, so this is the one way that standing is
     /// spelled from outside the crate; the host's fold cases, which stand a
     /// delivery up from the reports they name rather than the ones a platform
-    /// happens to produce, are its present callers. Layer 4 plan-apply is the
-    /// consuming layer past them: an apply that vacates a path knows the path
-    /// is gone before any backend reports it, and an invalidation it hands an
-    /// attachment has to say so or the root it names would speak for whatever
-    /// the same window left standing beneath it.
+    /// happens to produce, are callers too. So is `norn-host`'s apply job,
+    /// whose changeset did not commit: an apply that vacates a path knows the
+    /// path is gone before any backend reports it, and the heal it hands its
+    /// entry has to say so or the root it names would speak for whatever the
+    /// same window left standing beneath it.
     pub fn vault_removal(root: NormalizedPath) -> Self {
         Self {
             retired: BTreeSet::from([root.clone()]),
@@ -816,9 +817,8 @@ impl Drop for Subscription {
 /// A host keeps one beside its attachment, and the one applier (Layer 4
 /// plan-apply, `norn-host`'s `applier`) records every publication through it
 /// the moment it lands, so writes made through Norn can be hash-confirmed and
-/// suppressed when the watcher reports them back. It is live before its
-/// production caller: the applier is reached only by its own cases until
-/// NORN-295's `Host::apply` job lands.
+/// suppressed when the watcher reports them back. The attachment hands it
+/// to the applier each apply job runs.
 #[derive(Clone)]
 pub struct OwnWrites {
     ledger: Weak<Mutex<Ledger>>,

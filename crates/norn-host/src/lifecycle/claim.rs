@@ -133,18 +133,19 @@
 //! second send — [`Claim::take_slot_for_marked`] — has the slot alone to read a
 //! marker recorded beside it against.
 //!
-//! That reader is a dormant carrier over this slot. No producer the current
-//! call graph reaches records a marker beside a standing slot: the ones that
-//! schedule work read an unheld gate first, the one that marks a refused send
-//! frees the slot under the same lock, and the hand-on above holds the gate
-//! for the whole window this slot stands — so today the slot and its absence
-//! part in nothing a run observes. Layer 4's request-driven work submission is
-//! the producer that parts them, naming the work an entry owes at the epoch it
-//! stands at whether the gate is held or not. The slot is kept for it and
-//! covered at its seam by
+//! The apply seam is the producer that parts the slot from its absence.
+//! Admission names the work an entry owes at the epoch it stands at whether
+//! the gate is held or not: an apply admitted over routine derivation that is
+//! scheduled and not yet running — a reconcile or a maintenance scan whose job
+//! may already be in the channel — schedules itself over that marker. Where
+//! the superseded job is in the channel its slot still stands, and the slot is
+//! what refuses the apply a second send beside it; the superseded job's own
+//! arrival frees the slot and sends the marker it finds. Pinned by
+//! `an_apply_over_a_reconcile_in_the_channel_waits_on_its_slot_and_is_sent_when_it_arrives`.
+//! The release re-arm's slot is covered at its seam too, by
 //! `a_release_re_arm_holds_the_queue_slot_against_a_second_send`, which writes
-//! that producer's marker itself, drives a tick against a queue with room for
-//! a second send, and reads the room the tick leaves.
+//! such a marker itself beside the re-arm's slot and reads the room a tick
+//! leaves in a queue with room for a second send.
 //!
 //! **A poll and a job leg do not end each other.** Carried by the [`Leg`] kind
 //! and the equality checks in [`Claim::end_poll`] and [`Claim::end_job_leg`].

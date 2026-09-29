@@ -14722,14 +14722,13 @@ mod tests {
     /// arrival that frees the slot then frees one naming work the entry never
     /// sent.
     ///
-    /// The producer that records the marker is written out here. Every
-    /// producer the call graph reaches today either reads an unheld gate
-    /// before it schedules or frees the slot under the lock it marks in, and
-    /// the hand-on holds the gate for the whole window the re-arm's slot
-    /// stands, so no run reaches this state. Layer 4's request-driven work
-    /// submission is the producer that will: it names the work an entry owes
-    /// at the epoch the entry stands at, held gate or not. The carrier is kept
-    /// for it and covered here at its seam.
+    /// The producer that records the marker is written out here. The one
+    /// producer that marks beside a standing slot — an apply admitted over
+    /// routine derivation already in the channel — marks only over a marker
+    /// standing, and the hand-on holds the gate for the whole window the
+    /// re-arm's slot stands with no marker, so no run reaches this state over
+    /// the re-arm. The slot's refusal is the same reader either way, and it is
+    /// covered here at the re-arm's seam.
     ///
     /// The queue has room for the second send: both workers are held inside
     /// another vault's attach, so the channel carries the re-armed attach
