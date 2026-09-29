@@ -407,7 +407,14 @@ pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, Unkno
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::document::{
+    AuthoredPlan, FileState, PlanCondition, PlanDocument, Provenance, ResolvedPlan, SkippedFinding,
+    Transition,
+};
 pub use plan::hash::{ContentHash, IllegalContentHash};
+pub use plan::operation::{
+    AuthorCondition, IllegalOperationId, Operation, OperationId, OperationKind,
+};
 pub use plan::root::RootIdentity;
 pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};

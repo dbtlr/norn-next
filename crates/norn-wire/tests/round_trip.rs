@@ -15,23 +15,25 @@
 
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
-    Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
-    DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
-    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, IllegalContentHash, KindTally, LadderDeclaration, LinkAddress, LinkFamily,
-    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
-    ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Page,
-    PagedRows, PathRuleKind, PollBackend, Predicate, Published, ReadFailure, ReasonCode,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, RootIdentity, Rung,
-    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams,
-    SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
+    Attention, AuthorCondition, AuthoredPlan, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, Change, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
+    ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
+    CursorOrderChanged, DescribeParams, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentPath, DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
+    FieldValue, FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
+    IllegalOperationId, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
+    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PollBackend, Predicate, Provenance,
+    Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
+    RungSkipReason, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
+    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, Transition, TrustState,
     UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
     UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
     ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
@@ -6613,4 +6615,427 @@ fn a_root_identity_refuses_a_string_nobody_built() {
             "`{text}` was read back as a root identity"
         );
     }
+}
+
+// ── The plan documents ───────────────────────────────────────────────────
+
+/// The wire spelling of the hash `content_hash(fill)` builds.
+fn hash_text(fill: u8) -> String {
+    format!("sha256:{}", format!("{fill:02x}").repeat(32))
+}
+
+fn operation_id(text: &str) -> OperationId {
+    OperationId::new(text).expect("a legal operation id")
+}
+
+/// The identity of the root every plan here is made against.
+fn a_root() -> RootIdentity {
+    RootIdentity::from_device_and_inode(66_306, 2)
+}
+
+/// Every kind an operation is authored in, one each.
+fn operation_kinds() -> Vec<OperationKind> {
+    vec![
+        OperationKind::create_document(path("notes/new.md"), "# New\n"),
+        OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
+        OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
+        OperationKind::delete_document(path("notes/b.md")),
+    ]
+}
+
+/// Every condition an author writes on an operation.
+fn author_conditions() -> Vec<AuthorCondition> {
+    vec![AuthorCondition::content_hash(
+        path("notes/a.md"),
+        content_hash(0xab),
+    )]
+}
+
+/// Every condition a resolved plan carries.
+fn plan_conditions() -> Vec<PlanCondition> {
+    vec![PlanCondition::content_hash(
+        path("notes/c.md"),
+        content_hash(0xcd),
+    )]
+}
+
+/// Every state a side of a transition holds.
+fn file_states() -> Vec<FileState> {
+    vec![FileState::absent(), FileState::present(content_hash(0x01))]
+}
+
+/// Every kind bare, and one operation carrying every optional part.
+fn operations() -> Vec<Operation> {
+    let mut operations: Vec<Operation> =
+        operation_kinds().into_iter().map(Operation::new).collect();
+    operations.push(
+        Operation::new(OperationKind::str_replace(
+            path("notes/a.md"),
+            "draft",
+            "final",
+        ))
+        .with_id(operation_id("edit-a"))
+        .with_requires(vec![operation_id("make-b")])
+        .with_footnote("marks it final")
+        .with_conditions(author_conditions()),
+    );
+    operations
+}
+
+fn a_transition() -> Transition {
+    Transition::new(
+        path("notes/a.md"),
+        FileState::present(content_hash(0xab)),
+        FileState::present(content_hash(0x01)),
+    )
+}
+
+/// A resolved plan carrying one of everything it can carry.
+fn a_resolved_plan() -> ResolvedPlan {
+    ResolvedPlan::new(
+        VaultAddress::name(name("notes")),
+        a_root(),
+        vec![Operation::new(OperationKind::str_replace(
+            path("notes/a.md"),
+            "draft",
+            "final",
+        ))],
+        vec![a_transition()],
+        plan_conditions(),
+    )
+    .with_provenance(Provenance::new(
+        7,
+        vec![SkippedFinding::new(42, "the target names two documents")],
+    ))
+    .with_footnote("finish the draft")
+}
+
+/// The fewest parts a resolved plan is written with.
+fn a_bare_resolved_plan() -> ResolvedPlan {
+    ResolvedPlan::new(
+        VaultAddress::name(name("notes")),
+        a_root(),
+        vec![Operation::new(OperationKind::delete_document(path(
+            "notes/b.md",
+        )))],
+        vec![Transition::new(
+            path("notes/b.md"),
+            FileState::present(content_hash(0x02)),
+            FileState::absent(),
+        )],
+        Vec::new(),
+    )
+}
+
+fn an_authored_plan() -> AuthoredPlan {
+    AuthoredPlan::new(VaultAddress::name(name("notes")), operations())
+}
+
+/// Both documents a caller holds, each bare and each carrying every part.
+fn plan_documents() -> Vec<PlanDocument> {
+    vec![
+        PlanDocument::operations(an_authored_plan()),
+        PlanDocument::operations(an_authored_plan().with_footnote("tidy the notes")),
+        PlanDocument::resolved(a_bare_resolved_plan()),
+        PlanDocument::resolved(a_resolved_plan()),
+    ]
+}
+
+/// The pinned bytes of `a_resolved_plan`, without the document's tag.
+fn resolved_plan_json() -> String {
+    format!(
+        concat!(
+            r#"{{"vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+            r#""operations":[{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}}],"#,
+            r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
+            r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
+            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}}],"#,
+            r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
+            r#""footnote":"finish the draft"}}"#
+        ),
+        ab = hash_text(0xab),
+        one = hash_text(0x01),
+        cd = hash_text(0xcd),
+    )
+}
+
+#[test]
+fn every_plan_shape_survives_the_round_trip() {
+    for kind in operation_kinds() {
+        round_trip(&kind);
+    }
+    for operation in operations() {
+        round_trip(&operation);
+    }
+    for condition in author_conditions() {
+        round_trip(&condition);
+    }
+    for condition in plan_conditions() {
+        round_trip(&condition);
+    }
+    for state in file_states() {
+        round_trip(&state);
+    }
+    round_trip(&a_transition());
+    round_trip(&a_resolved_plan());
+    round_trip(&a_bare_resolved_plan());
+    round_trip(&an_authored_plan());
+    for document in plan_documents() {
+        round_trip(&document);
+    }
+}
+
+/// Each kind is its name under `kind` and its own fields under `fields`, and
+/// a bare operation carries nothing else.
+#[test]
+fn an_operation_is_a_kind_and_its_fields() {
+    let pinned = [
+        r##"{"kind":"create_document","fields":{"path":"notes/new.md","content":"# New\n"}}"##,
+        r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+    ];
+    for (kind, json) in operation_kinds().into_iter().zip(pinned) {
+        assert_eq!(wire(&Operation::new(kind.clone())), json);
+        assert_eq!(wire(&kind), json);
+    }
+}
+
+/// An operation's optional parts sit beside its kind and its fields, and each
+/// is left out of the bytes where it is not written.
+#[test]
+fn an_operation_carries_its_identifier_requirements_footnote_and_conditions() {
+    let full = operations()
+        .pop()
+        .expect("the operation carrying every part");
+    assert_eq!(
+        wire(&full),
+        format!(
+            concat!(
+                r#"{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}},"#,
+                r#""id":"edit-a","requires":["make-b"],"footnote":"marks it final","#,
+                r#""conditions":[{{"condition":"content_hash","path":"notes/a.md","hash":"{ab}"}}]}}"#
+            ),
+            ab = hash_text(0xab)
+        )
+    );
+}
+
+/// A `fields` key written before the `kind` it belongs to still reads.
+#[test]
+fn an_operation_reads_its_fields_before_its_kind() {
+    let read: Operation = serde_json::from_str(
+        r#"{"fields":{"from":"notes/a.md","to":"archive/a.md"},"id":"move-a","kind":"move_document"}"#,
+    )
+    .expect("an operation whose fields precede its kind");
+    assert_eq!(
+        read,
+        Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md")
+        ))
+        .with_id(operation_id("move-a"))
+    );
+}
+
+/// A kind's fields are its own: a field it lacks, another kind's field, and
+/// an identifier that names nothing each refuse the read.
+#[test]
+fn an_operation_refuses_fields_that_are_not_its_kinds() {
+    for json in [
+        r#"{"kind":"delete_document","fields":{}}"#,
+        r#"{"kind":"delete_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
+        r#"{"kind":"create_document","fields":{"path":"notes/new.md"}}"#,
+        r#"{"kind":"delete_document"}"#,
+        r#"{"kind":"delete_document","fields":null}"#,
+        r#"{"kind":"delete_document","fields":{"path":""}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"id":""}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"requires":[""]}"#,
+        r#"{"fields":{"path":"notes/b.md"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+    assert_eq!(OperationId::new(""), Err(IllegalOperationId));
+}
+
+/// A file state is absent, or present with the hash of what it holds.
+#[test]
+fn a_file_state_is_an_object_tagged_state() {
+    assert_eq!(wire(&FileState::absent()), r#"{"state":"absent"}"#);
+    assert_eq!(
+        wire(&FileState::present(content_hash(0x01))),
+        format!(r#"{{"state":"present","hash":"{}"}}"#, hash_text(0x01))
+    );
+}
+
+/// An author's condition and a plan's condition are two types, each tagged
+/// `condition`, and today each says what one file holds.
+#[test]
+fn a_condition_is_an_object_tagged_condition() {
+    assert_eq!(
+        wire(&AuthorCondition::content_hash(
+            path("notes/a.md"),
+            content_hash(0xab)
+        )),
+        format!(
+            r#"{{"condition":"content_hash","path":"notes/a.md","hash":"{}"}}"#,
+            hash_text(0xab)
+        )
+    );
+    assert_eq!(
+        wire(&PlanCondition::content_hash(
+            path("notes/c.md"),
+            content_hash(0xcd)
+        )),
+        format!(
+            r#"{{"condition":"content_hash","path":"notes/c.md","hash":"{}"}}"#,
+            hash_text(0xcd)
+        )
+    );
+}
+
+/// A resolved plan is its vault, its root, its operations, one transition per
+/// file and its conditions, with its provenance and footnote where it has
+/// them; the document a caller sends names which plan it is under `plan`.
+#[test]
+fn a_resolved_plan_is_the_bytes_a_caller_sends_back() {
+    assert_eq!(wire(&a_resolved_plan()), resolved_plan_json());
+    assert_eq!(
+        wire(&PlanDocument::resolved(a_resolved_plan())),
+        format!(r#"{{"plan":"resolved",{}"#, &resolved_plan_json()[1..])
+    );
+    assert_eq!(
+        wire(&a_bare_resolved_plan()),
+        format!(
+            concat!(
+                r#"{{"vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+                r#""operations":[{{"kind":"delete_document","fields":{{"path":"notes/b.md"}}}}],"#,
+                r#""transitions":[{{"path":"notes/b.md","before":{{"state":"present","hash":"{two}"}},"#,
+                r#""after":{{"state":"absent"}}}}],"conditions":[]}}"#
+            ),
+            two = hash_text(0x02)
+        )
+    );
+}
+
+/// An authored plan is its vault and its operations, with a footnote where
+/// it has one.
+#[test]
+fn an_authored_plan_is_its_vault_and_its_operations() {
+    let plan = AuthoredPlan::new(
+        VaultAddress::name(name("notes")),
+        vec![Operation::new(OperationKind::delete_document(path(
+            "notes/b.md",
+        )))],
+    );
+    let operations = r#""operations":[{"kind":"delete_document","fields":{"path":"notes/b.md"}}]"#;
+    assert_eq!(
+        wire(&PlanDocument::operations(plan.clone())),
+        format!(r#"{{"plan":"operations","vault":{{"by":"name","name":"notes"}},{operations}}}"#)
+    );
+    assert_eq!(
+        wire(&PlanDocument::operations(plan.with_footnote("tidy"))),
+        format!(
+            r#"{{"plan":"operations","vault":{{"by":"name","name":"notes"}},{operations},"footnote":"tidy"}}"#
+        )
+    );
+}
+
+/// Insert an unknown key into the object `pointer` names inside `document`.
+fn with_surprise(document: &serde_json::Value, pointer: &str) -> String {
+    let mut edited = document.clone();
+    edited
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap_or_else(|| panic!("{pointer} names no object in {document}"))
+        .insert("surprise".to_string(), serde_json::Value::Bool(true));
+    edited.to_string()
+}
+
+/// **A plan refuses a field it does not know, at every level.** A plan flows
+/// into the host, and a field dropped on the way in — a newer caller's
+/// condition — would weaken a check without a word; the refusal is the
+/// version-mismatch signal.
+#[test]
+fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
+    let resolved = serde_json::to_value(PlanDocument::resolved(a_resolved_plan()))
+        .expect("a resolved plan as JSON");
+    for pointer in [
+        "",
+        "/operations/0",
+        "/operations/0/fields",
+        "/transitions/0",
+        "/transitions/0/before",
+        "/transitions/0/after",
+        "/conditions/0",
+        "/provenance",
+        "/provenance/skipped/0",
+    ] {
+        let json = with_surprise(&resolved, pointer);
+        let refusal = serde_json::from_str::<PlanDocument>(&json)
+            .expect_err(&format!("a plan carrying an unknown field at `{pointer}`"));
+        assert!(
+            refusal.to_string().contains("surprise"),
+            "the refusal at `{pointer}` does not name the field: {refusal}"
+        );
+    }
+    let bare = serde_json::to_value(a_resolved_plan()).expect("a resolved plan as JSON");
+    assert!(
+        serde_json::from_str::<ResolvedPlan>(&with_surprise(&bare, "")).is_err(),
+        "a resolved plan carried outside a document dropped a field it does not know"
+    );
+
+    let authored = serde_json::to_value(PlanDocument::operations(an_authored_plan()))
+        .expect("an authored plan as JSON");
+    for pointer in [
+        "",
+        "/operations/4",
+        "/operations/4/fields",
+        "/operations/4/conditions/0",
+    ] {
+        let json = with_surprise(&authored, pointer);
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a plan carrying an unknown field at `{pointer}` read back"
+        );
+    }
+}
+
+/// A kind, a condition, a state or a document nobody minted fails the read.
+#[test]
+fn a_plan_refuses_a_variant_it_does_not_know() {
+    for json in [
+        r#"{"kind":"rename_document","fields":{"path":"notes/b.md"}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"conditions":[{"condition":"expected_value","path":"notes/b.md"}]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+    assert!(serde_json::from_str::<FileState>(r#"{"state":"missing"}"#).is_err());
+    assert!(
+        serde_json::from_str::<FileState>(r#"{"state":"absent","surprise":true}"#).is_err(),
+        "an absent state dropped a field it does not know"
+    );
+    assert!(
+        serde_json::from_str::<PlanCondition>(r#"{"condition":"backlinks","path":"notes/b.md"}"#)
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            r#"{"plan":"draft","vault":{"by":"name","name":"notes"},"operations":[]}"#
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            r#"{"vault":{"by":"name","name":"notes"},"operations":[]}"#
+        )
+        .is_err(),
+        "a document naming no plan read back as one"
+    );
 }
