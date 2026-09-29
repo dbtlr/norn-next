@@ -80,6 +80,28 @@ pub(super) enum Stop {
     Failed(String),
 }
 
+/// Why a plan failed its checks, before anything was staged.
+#[derive(Debug)]
+pub(super) enum Unfit {
+    /// A check refused: drift, a condition, a schema violation.
+    Refused(Vec<RefusedCheck>),
+    /// The plan's own shape is wrong: its operations', or its transitions
+    /// are not what its operations do.
+    Invalid(PlanFault),
+    /// The vault could not be read, in words.
+    Failed(String),
+}
+
+impl From<Unfit> for Stop {
+    fn from(unfit: Unfit) -> Self {
+        match unfit {
+            Unfit::Refused(checks) => Stop::Refused(checks),
+            Unfit::Invalid(fault) => Stop::Invalid(fault),
+            Unfit::Failed(detail) => Stop::Failed(detail),
+        }
+    }
+}
+
 /// What a kernel refusal means for a plan.
 pub(super) enum Classified {
     /// The target is not what the plan was checked against, and holds this.
@@ -128,26 +150,8 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
     }
 }
 
-/// Check every target of `plan` and stage every written one.
-///
-/// **The checks run in this order**: the store can name every target; before
-/// any vault read, the transitions name exactly the files the operations
-/// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; no target
-/// drifted and every condition holds; the
-/// operations, run again from the before-states, are exactly the plan's
-/// transitions ([`recompose`]); every result passes the vault schema; and the
-/// publication order exists. A plan whose store paths, shape, target places
-/// or recomposition fail is not what its operations do: its own shape is
-/// wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming the files
-/// it disagrees at, never as drift. Drift, a failed condition, a schema
-/// violation, a taken name, a replaced root and an I/O failure each answer as
-/// themselves.
-///
-/// Nothing is published here, and a refusal discards every shadow staged
-/// before it, so a plan stopped in this phase leaves the vault as it found
-/// it. What is returned holds no bytes: the observed and composed contents
-/// are dropped when this returns.
+/// Check every target of `plan` and stage every written one: [`check`], then
+/// [`stage`].
 pub(super) fn check_and_stage(
     anchor: &Path,
     root: norn_fs::Identity,
@@ -156,15 +160,53 @@ pub(super) fn check_and_stage(
     view: &TreeView,
     declared: &Declared,
 ) -> Result<StagedPlan, Stop> {
+    let checked = check(plan, view, declared).map_err(Stop::from)?;
+    stage(anchor, root, shadows, plan, view.normalizer(), checked)
+}
+
+/// A plan every check passed: what each target publishes, and in which
+/// phase, with the lineage its publication order follows. Its contents are
+/// held only until [`stage`] has staged them.
+pub(super) struct Checked {
+    units: Vec<Unit>,
+    contents: Vec<Option<Arc<[u8]>>>,
+    phases: Vec<Phase>,
+    lineage: Lineage,
+    stored: Vec<norn_store::DocumentPath>,
+}
+
+/// Check every target of `plan`, reading the vault and writing nothing.
+///
+/// **The checks run in this order**: the store can name every target; before
+/// any vault read, the transitions name exactly the files the operations
+/// touch, each once ([`shape_disagrees`]); every target stands at the spelling
+/// the vault gives it, at a place the vault reads documents at; no target
+/// drifted and every condition holds; the operations, run again from the
+/// before-states, are exactly the plan's transitions ([`recompose`]); and
+/// every result passes the vault schema. A plan whose store paths, shape,
+/// target places or recomposition fail is not what its operations do: its own
+/// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
+/// the files it disagrees at, never as drift. Drift, a failed condition, a
+/// schema violation, a taken name, a replaced root and an I/O failure each
+/// answer as themselves.
+///
+/// **This is the one judgment of a resolved plan.** An apply stages what it
+/// passes, and a preview of a resolved plan answers from it, so what a caller
+/// previewed is what an apply of the same plan over the same files does.
+pub(super) fn check(
+    plan: &ResolvedPlan,
+    view: &TreeView,
+    declared: &Declared,
+) -> Result<Checked, Unfit> {
     let normalizer = view.normalizer();
-    let stored = stored_paths(plan).map_err(|paths| Stop::Invalid(disagreement(paths)))?;
+    let stored = stored_paths(plan).map_err(|paths| Unfit::Invalid(disagreement(paths)))?;
     let misshapen = shape_disagrees(plan, normalizer);
     if !misshapen.is_empty() {
-        return Err(Stop::Invalid(disagreement(misshapen)));
+        return Err(Unfit::Invalid(disagreement(misshapen)));
     }
     let units = units(plan, normalizer);
     let (states, _) =
-        observe(plan, &units, view).map_err(|error| Stop::Failed(error.to_string()))?;
+        observe(plan, &units, view).map_err(|error| Unfit::Failed(error.to_string()))?;
     let unplaced: Vec<DocumentPath> = states
         .iter()
         .zip(&plan.transitions)
@@ -172,30 +214,30 @@ pub(super) fn check_and_stage(
         .map(|(_, transition)| transition.path.clone())
         .collect();
     if !unplaced.is_empty() {
-        return Err(Stop::Invalid(disagreement(unplaced)));
+        return Err(Unfit::Invalid(disagreement(unplaced)));
     }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
         failed_conditions(plan, view)
-            .map_err(|error| Stop::Failed(error.to_string()))?
+            .map_err(|error| Unfit::Failed(error.to_string()))?
             .into_iter()
             .map(RefusedCheck::condition_failed),
     );
     if !checks.is_empty() {
-        return Err(Stop::Refused(checks));
+        return Err(Unfit::Refused(checks));
     }
     let lineage = recorded_lineage(plan, normalizer);
     let composition = match recompose(plan, &states, &lineage, view)
-        .map_err(|error| Stop::Failed(error.to_string()))?
+        .map_err(|error| Unfit::Failed(error.to_string()))?
     {
         Recomposed::Sound(composition) => composition,
-        Recomposed::Invalid(fault) => return Err(Stop::Invalid(fault)),
+        Recomposed::Invalid(fault) => return Err(Unfit::Invalid(fault)),
     };
     let contents: Vec<Option<Arc<[u8]>>> = units
         .iter()
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
-        .map_err(|path| Stop::Invalid(disagreement([path])))?;
+        .map_err(|path| Unfit::Invalid(disagreement([path])))?;
     drop(composition);
     let schema = Judging {
         plan,
@@ -206,9 +248,40 @@ pub(super) fn check_and_stage(
     };
     checks.extend(schema.checks(&units, &contents));
     if !checks.is_empty() {
-        return Err(Stop::Refused(checks));
+        return Err(Unfit::Refused(checks));
     }
     let phases: Vec<Phase> = units.iter().map(|unit| phase(plan, *unit)).collect();
+    Ok(Checked {
+        units,
+        contents,
+        phases,
+        lineage,
+        stored,
+    })
+}
+
+/// Stage every written target of the plan `checked` passed, in the order they
+/// publish: a shadow for every written target, a create included.
+///
+/// Nothing is published here, and a refusal discards every shadow staged
+/// before it, so a plan stopped in this phase leaves the vault as it found
+/// it. What is returned holds no bytes: the checked contents are dropped when
+/// this returns.
+pub(super) fn stage(
+    anchor: &Path,
+    root: norn_fs::Identity,
+    shadows: &ShadowHome,
+    plan: &ResolvedPlan,
+    normalizer: &PathNormalizer,
+    checked: Checked,
+) -> Result<StagedPlan, Stop> {
+    let Checked {
+        units,
+        contents,
+        phases,
+        lineage,
+        stored,
+    } = checked;
     let order = publication_order(plan, &units, &phases, &lineage, normalizer);
     let mut staged: Vec<StagedTarget> = Vec::with_capacity(units.len());
     for position in order {
@@ -262,6 +335,7 @@ fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, Ve
 }
 
 /// Remove every shadow `staged` holds, publishing nothing.
+#[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 pub(super) fn discard_all(
     anchor: &Path,
     shadows: &ShadowHome,
@@ -385,6 +459,7 @@ impl Judging<'_> {
 }
 
 /// Stage `unit` with `content`, or say why the plan stops.
+#[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 fn stage_one(
     anchor: &Path,
     root: norn_fs::Identity,

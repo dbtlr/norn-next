@@ -160,6 +160,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &self.recorded,
+            publishing: &|| true,
         };
         applier.apply(plan, &mut self.store)
     }
@@ -732,6 +733,7 @@ fn a_target_drawing_on_another_publishes_before_its_source_is_replaced() {
 /// operations, never drift, and names the target as spelled. So nothing is
 /// published, recorded or derived at a second spelling of one file.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel itself: the case pins how it keeps a staged path's spelling.
 fn a_target_spelled_with_a_dot_component_is_invalid() {
     let mut fixture = Fixture::new(&[("a.md", "a\n")]);
     let staged = norn_fs::stage(
@@ -962,12 +964,16 @@ fn each_outcome_crosses_under_its_wire_code() {
         folders_removed: Vec::new(),
     })
     .into_wire()
+    .expect("an applied plan is answered")
     .expect("an applied plan is a report");
     assert!(
         matches!(applied_report, norn_wire::ApplyReport::Applied { plan: carried, .. } if carried == plan)
     );
     let code = |outcome: ApplyOutcome| {
-        let envelope = outcome.into_wire().expect_err("a refusal");
+        let envelope = outcome
+            .into_wire()
+            .expect("a refusal is answered")
+            .expect_err("a refusal");
         let carries_plan = match envelope.detail() {
             ErrorDetail::PlanRefused { .. }
             | ErrorDetail::PlanInterrupted { .. }
@@ -1034,6 +1040,7 @@ impl Fixture {
         let envelope = self
             .apply(plan)
             .into_wire()
+            .expect("a refusal is answered")
             .expect_err("the plan is refused");
         assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
         let paths = match envelope.detail() {
@@ -1116,7 +1123,12 @@ fn a_transition_spelled_in_another_case_is_invalid_where_case_is_told_apart() {
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.transitions[0].path = path("A.md");
     if folds {
-        assert!(fixture.apply(plan).into_wire().is_err());
+        assert!(
+            fixture
+                .apply(plan)
+                .into_wire()
+                .is_some_and(|answer| answer.is_err())
+        );
     } else {
         assert_eq!(
             fixture.refuses_disagreeing(plan),
@@ -1468,6 +1480,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &meddling,
+            publishing: &|| true,
         };
         applier.apply(plan, &mut self.store)
     }
@@ -1595,4 +1608,148 @@ fn a_plan_carrying_a_hash_of_another_algorithm_does_not_read() {
     json["transitions"][0]["before"]["hash"] =
         serde_json::Value::String(format!("sha256:{}", "A".repeat(64)));
     assert!(serde_json::from_value::<ResolvedPlan>(json).is_err());
+}
+
+/// **An apply whose leg no longer stands when it would begin publishing
+/// stops there, removes every shadow it staged and publishes nothing.** The
+/// plan stages a create, an edit and a removal; the question publication
+/// asks before its first target is answered no, as a teardown answers it.
+/// No target is written, no shadow is left, no publication is recorded, and
+/// the outcome carries the resolved plan.
+#[test]
+fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_nothing() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("c.md", "# C\n")]);
+    let plan = fixture.plan(vec![
+        creating("b.md", "# B\n"),
+        editing("a.md", "# A", "# A2"),
+        deleting("c.md"),
+    ]);
+    let before = fixture.tree();
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &|| false,
+    };
+    let outcome = applier.apply(plan.clone(), &mut fixture.store);
+    match outcome {
+        ApplyOutcome::StoodDown => {}
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(fixture.tree(), before, "nothing was published");
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+    assert!(
+        fixture.shadows_left().is_empty(),
+        "{:?}",
+        fixture.shadows_left()
+    );
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// **A heal owed over a path the vault's spelling refuses heals the vault
+/// whole.** A plan's paths are wire paths, and one no vault path normalizes
+/// to names nothing the heal could read again; leaving it out would leave
+/// the store believing whatever it held there, so the heal widens to the
+/// whole vault, as it does where the root cannot be walked.
+#[test]
+fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
+    let path = DocumentPath::new("../outside.md").expect("a wire path");
+    let plan = ResolvedPlan::new(
+        VaultAddress::name(VaultName::new("notes").expect("a legal vault name")),
+        RootIdentity::from_device_and_inode(1, 1),
+        Vec::new(),
+        vec![norn_wire::Transition::new(
+            path,
+            norn_wire::FileState::absent(),
+            norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32])),
+        )],
+        Vec::new(),
+    );
+    let outcome = ApplyOutcome::Applied(super::Applied {
+        plan,
+        changeset: norn_wire::ChangesetOutcome::Healing,
+        targets: Vec::new(),
+        folders_made: Vec::new(),
+        folders_removed: Vec::new(),
+    });
+    let normalizer = norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
+
+    assert_eq!(
+        outcome.heal(&normalizer),
+        norn_fs::Batch::rescan(norn_fs::RescanScope::Vault)
+    );
+}
+
+impl Fixture {
+    /// Preview `plan` as the apply seam previews a resolved plan: the same
+    /// plan and its forecast, or the envelope the preview answers with.
+    fn preview(
+        &mut self,
+        plan: ResolvedPlan,
+    ) -> Result<(ResolvedPlan, norn_wire::Forecast), norn_wire::ErrorEnvelope> {
+        let declared = crate::production::pinned_declaration(&mut self.store).expect("a pin");
+        super::preview(plan, &self.vault, self.root, &self.exclusions, &declared).map_err(
+            |outcome| {
+                outcome
+                    .into_wire()
+                    .expect("a preview never stands down")
+                    .expect_err("a preview's refusal is no report")
+            },
+        )
+    }
+}
+
+/// Close `closed` in `fixture`'s vault to this account, then preview and
+/// apply the plan editing `sub/a.md`, and hold that the preview answers
+/// exactly what the apply does: `vault/write-failed`, carrying the plan, with
+/// nothing landed. Skipped where this account reads a mode-000 entry.
+#[cfg(unix)]
+fn previews_as_its_apply_answers_with(closed: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = Fixture::new(&[("sub/a.md", "# A\n")]);
+    let plan = fixture.plan(vec![editing("sub/a.md", "# A", "# A2")]);
+    let closed = fixture.vault.join(closed);
+    let reopened = std::fs::metadata(&closed).unwrap().permissions();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&closed).is_ok() || std::fs::read(&closed).is_ok() {
+        eprintln!("skipped: this account reads a mode-000 entry");
+        std::fs::set_permissions(&closed, reopened).unwrap();
+        return;
+    }
+
+    let previewed = fixture.preview(plan.clone());
+    let applied = fixture
+        .apply(plan.clone())
+        .into_wire()
+        .expect("a refusal is answered");
+    std::fs::set_permissions(&closed, reopened).unwrap();
+
+    let applied = applied.expect_err("an apply over an unreadable target is refused");
+    assert_eq!(applied.code(), &norn_wire::ReasonCode::VaultWriteFailed);
+    assert_eq!(
+        previewed.expect_err("a preview over an unreadable target is refused"),
+        applied
+    );
+    assert_eq!(fixture.read("sub/a.md").as_deref(), Some("# A\n"));
+}
+
+/// **A target whose bytes cannot be read while a resolved plan is checked is
+/// answered by its preview as its apply answers it**: `vault/write-failed`
+/// with the plan, since nothing landed and sending it again may apply it.
+#[cfg(unix)]
+#[test]
+fn a_target_unreadable_while_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
+    previews_as_its_apply_answers_with("sub/a.md");
+}
+
+/// **A vault root that cannot be walked when a resolved plan is checked is
+/// answered by its preview as its apply answers it**: both answer
+/// `vault/write-failed` with the plan.
+#[cfg(unix)]
+#[test]
+fn a_root_unwalkable_when_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
+    previews_as_its_apply_answers_with("");
 }

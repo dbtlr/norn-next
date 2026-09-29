@@ -18,8 +18,12 @@ use norn_store::{
     IncrementProvenance, Provenance, RebuildReason, SchemaPin, Store, StoreError, StoreReading,
     StoredDocument, StoredPathOrder, SubjectScope,
 };
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, UntrustedReason, VaultName};
+use norn_wire::{
+    FindingKind, FindingScope, MaintainerIdentity, PlanDocument, UntrustedReason, VaultName,
+};
 
+use crate::applier::Applier;
+use crate::apply::PlanGround;
 use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
@@ -27,9 +31,10 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    AttachmentAdvisory, EntryOps, Established, Healing, JobFailure, MintedReader, ProgressReporter,
-    ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal, RegistryUnwritable, ReloadError,
-    ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    ApplyEnd, ApplyEnding, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing,
+    JobFailure, MintedReader, ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork,
+    RecordRefusal, RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal,
+    SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -176,6 +181,9 @@ pub struct ProductionAttachment {
     /// The canonical directory shared by this attachment's watcher, walks,
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
+    /// The identity `covered_root` proved when this coverage was installed,
+    /// as the watcher's root anchor holds it.
+    root_identity: norn_fs::Identity,
     /// The control files this attachment acts under, and, through
     /// `undeclarable`, why this build cannot act on the vault's schema
     /// declaration where it cannot.
@@ -198,14 +206,15 @@ pub struct ProductionAttachment {
     /// [`ProductionAttachment::drop_controls_held_for_rung_three`]
     /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
-    /// The content model of the schema the store pins, built off the pin by
+    /// The declaration of the schema the store pins, built off the pin by
     /// the one construction every deriving act builds its declaration by, so
     /// a read compiles against the bytes its store pins rather than against
-    /// the controls a leg holds beside them.
+    /// the controls a leg holds beside them, and a preview judges a composed
+    /// result under the declaration an apply judges it under.
     ///
     /// Taken again wherever the store's pin can have moved: where the store
     /// is opened or reopened, and after every pin.
-    pinned_model: Arc<ContentModel>,
+    pinned: Arc<Declared>,
     /// Whether the engines are owed the config `controls` carries.
     ///
     /// It is set only where a leg holds controls it could not pin because
@@ -216,10 +225,11 @@ pub struct ProductionAttachment {
     subscription: Option<Subscription>,
     store: Store,
     heal_observed: norn_fs::Batch,
-    /// Layer 4 plan-apply consumes this recorder at the product composition
-    /// site: successful writes stay beside coverage so their watcher echoes
-    /// can be hash-confirmed without hiding external edits.
-    _own_writes: OwnWrites,
+    /// Where the one applier records each publication an apply over this
+    /// coverage makes, so the watcher's echo of it is hash-confirmed as the
+    /// apply's own without hiding an external edit. It stands beside the
+    /// coverage because the ledger is the subscription's.
+    own_writes: OwnWrites,
     /// Where this maintainership's shadows are staged, resolved when coverage
     /// is installed. Its placement is read three ways: a walk excludes a
     /// fallback home by its root, maintenance sweeps it, and
@@ -255,7 +265,103 @@ pub struct ProductionAttachment {
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
+/// Apply `plan` over `attachment`: the work of [`EntryOps::apply`].
+///
+/// **The one snapshot is the store as the apply's claim holds it.** The job
+/// holds the entry's claim and this attachment's store is the one writer to
+/// it, so the reading taken here names exactly the state the changeset builds
+/// on, and it is the reading the answer is given under. The planner reads the
+/// files for its before-states, never the store, so nothing else is read off
+/// it before the applier commits. A store that refuses that reading answers
+/// as a read meeting the same refusal does: `host/read-failed`, or damage the
+/// job publishes with the rebuild it owes.
+///
+/// **The ground is the coverage's**, as a preview's is, and the root is asked
+/// whether it still stands there before anything is planned.
+fn apply_over(
+    name: &VaultName,
+    attachment: &mut ProductionAttachment,
+    plan: PlanDocument,
+    progress: &ApplyProgress,
+    reporter: &ProgressReporter<ProductionAttachment>,
+) -> ApplyEnd {
+    let ground = attachment.plan_ground();
+    let snapshot = {
+        let mut feed = attachment.store.feed_read();
+        match feed.write_generation() {
+            Ok(generation) => StoreReading::of(feed.epoch(), generation),
+            Err(error) => {
+                let told = crate::refusal::store_refusal_told(&error);
+                return match error.damage() {
+                    Some(_) => ApplyEnd::damaged(told),
+                    None => ApplyEnd::answered(Err(norn_wire::ErrorEnvelope::new(
+                        "the store refused a statement this apply ran",
+                        norn_wire::ErrorDetail::read_failed(
+                            norn_wire::ReadFailure::statement(),
+                            told,
+                        ),
+                    ))),
+                };
+            }
+        }
+    };
+    if let Err(refused) = ground.standing(name) {
+        return ApplyEnd::answered(Err(refused));
+    }
+    let resolved = match plan {
+        PlanDocument::Resolved(resolved) => resolved,
+        PlanDocument::Operations(authored) => {
+            match crate::apply::resolve_on(authored, &ground, name)
+                .and_then(crate::apply::fully_resolved)
+            {
+                Ok(resolution) => resolution.plan,
+                Err(refused) => return ApplyEnd::answered(Err(refused)),
+            }
+        }
+    };
+    progress.planned(&resolved);
+    let outcome = Applier {
+        anchor: &ground.root,
+        root: ground.identity,
+        exclusions: &ground.exclusions,
+        shadows: &attachment.shadows,
+        own_writes: &attachment.own_writes,
+        publishing: &|| reporter.begin_publishing(progress),
+    }
+    .apply(resolved, &mut attachment.store);
+    // The heal's paths are spelled as the vault's walk spells them, under
+    // the case behaviour the root proved. A root that cannot be walked any
+    // more is healed whole.
+    let heal = outcome.owes_a_heal().then(|| {
+        match norn_fs::Vault::open(&ground.root, &ground.exclusions) {
+            Ok(vault) => outcome.heal(vault.normalizer()),
+            Err(_) => norn_fs::Batch::rescan(RescanScope::Vault),
+        }
+    });
+    ApplyEnd {
+        answer: match outcome.into_wire() {
+            Some(answer) => ApplyEnding::Answered(answer.map(|report| (snapshot, report))),
+            None => ApplyEnding::StoodDown,
+        },
+        heal,
+    }
+}
+
 impl ProductionAttachment {
+    /// What a plan over this coverage is resolved against: the covered root,
+    /// the identity it proved when the coverage was installed, the roots its
+    /// walk does not enter — the fallback shadow home and the schema file —
+    /// and the declaration the store pins. Read off the attachment alone, so
+    /// it does no I/O.
+    fn plan_ground(&self) -> PlanGround {
+        PlanGround {
+            root: self.covered_root.clone(),
+            identity: self.root_identity,
+            exclusions: exclusions_at(&self.registration, &self.shadows, &self.covered_root),
+            declared: Arc::clone(&self.pinned),
+        }
+    }
+
     /// Pin `candidate`'s schema into the store and take the content model
     /// back off the pin it wrote.
     fn pin(&mut self, candidate: &ReloadCandidate) -> Result<(), JobFailure> {
@@ -266,11 +372,7 @@ impl ProductionAttachment {
     /// Take the content model of the schema the store pins, as a deriving
     /// act reads it.
     fn read_pinned_model(&mut self) -> Result<(), JobFailure> {
-        self.pinned_model = Arc::clone(
-            Declaration::read(&mut self.store)?
-                .model
-                .shared_content_model(),
-        );
+        self.pinned = Arc::new(Declaration::read(&mut self.store)?.model);
         Ok(())
     }
 
@@ -548,6 +650,7 @@ impl ProductionEntryOps {
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let root_identity = subscription.root_identity();
         let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
@@ -556,10 +659,11 @@ impl ProductionEntryOps {
             .map_err(data_dir_effect)?;
         shadows.sweep(Duration::ZERO).map_err(data_dir_effect)?;
         attachment.subscription = Some(subscription);
-        attachment._own_writes = own_writes;
+        attachment.own_writes = own_writes;
         attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
         attachment.shadows = shadows;
         attachment.covered_root = covered_root;
+        attachment.root_identity = root_identity;
         // The first point a recovery holds both the order its new coverage
         // proved and the store it will derive into, and the judgment is taken
         // whatever the declaration says. A store derived under the other order
@@ -1269,6 +1373,7 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, own_writes) =
             Self::start_watch(registration, &schema).map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let root_identity = subscription.root_identity();
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows =
@@ -1306,15 +1411,16 @@ impl EntryOps for ProductionEntryOps {
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             covered_root,
+            root_identity,
             controls: candidate.clone(),
             held_for_rung_three: None,
-            pinned_model: Arc::new(ContentModel::none()),
+            pinned: Arc::new(Declared::unpinned()),
             config_delivery_owed: false,
             maintainership,
             store,
             subscription: Some(subscription),
             heal_observed: norn_fs::Batch::default(),
-            _own_writes: own_writes,
+            own_writes,
             shadows,
             shadow_advisory,
             skipped_links: SkippedLinks::default(),
@@ -1405,11 +1511,52 @@ impl EntryOps for ProductionEntryOps {
     /// builds the declaration it judges under, so a read and a derivation
     /// read one declaration out of one set of bytes.
     fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
-        Arc::clone(&attachment.pinned_model)
+        Arc::clone(attachment.pinned.shared_content_model())
     }
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
         Some(attachment.covered_root.clone())
+    }
+
+    fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+        Some(attachment.plan_ground())
+    }
+
+    /// The apply over this coverage: the store's reading as its one
+    /// snapshot, the operations planned through the one planner on the
+    /// ground the coverage stands on, and the one applier, publishing through
+    /// the coverage's shadow home and own-write ledger and committing to its
+    /// store. Lane-1 work the changeset committed — an applied plan's, or
+    /// the landed subset of an interrupted one — is relayed to the engines as
+    /// every other leg's is.
+    ///
+    /// The maintainership is asked first, as every leg over the coverage asks
+    /// it, so a lock another actor replaced since the job's intake ends the
+    /// leg before its snapshot: nothing is planned, published or committed.
+    fn apply(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        plan: PlanDocument,
+        progress: &ApplyProgress,
+        reporter: &ProgressReporter<Self::Attachment>,
+    ) -> Result<ApplyEnd, JobFailure> {
+        let _job = self.evidence.attributing();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
+        let ended = apply_over(name, attachment, plan, progress, reporter);
+        // Any answered apply may have committed lane-1 work: an applied one,
+        // and an interrupted one whose landed subset committed. A refusal
+        // committed nothing, and its drain finds nothing new.
+        if matches!(ended.answer, ApplyEnding::Answered(_)) {
+            self.drain_semantic(name, attachment, reporter);
+        }
+        Ok(ended)
     }
 
     /// Read off the controls the attachment holds, so the answer is about the
@@ -13390,6 +13537,59 @@ mod tests {
         }
     }
 
+    /// **A preview over ops that record no plan ground answers
+    /// `host/reader-unavailable`**, naming the host defect, never an
+    /// environmental cause the vault did not meet. [`CountedAttach`] does not
+    /// pass the production ground through, as production ops always do.
+    #[test]
+    fn a_preview_over_ops_recording_no_ground_answers_reader_unavailable() {
+        let f = Fixture::new("host-preview-no-ground");
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            CountedAttach {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                attaches: std::sync::Arc::default(),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let refused = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Preview,
+                PlanDocument::operations(plan),
+            ))
+            .expect("a preview over a ready vault is answered")
+            .wait()
+            .expect_err("a preview over no ground answered");
+        assert_eq!(
+            refused.code(),
+            &norn_wire::ReasonCode::HostReaderUnavailable
+        );
+    }
+
     #[test]
     fn a_vault_holding_undecodable_documents_reaches_ready_and_re_attaches_for_none_of_them() {
         let f = Fixture::new("quarantine-ready");
@@ -14564,6 +14764,546 @@ mod tests {
         }
     }
 
+    /// Production ops whose applies outlast the own-write ledger's lifetime,
+    /// with another writer's edits landing while they run.
+    ///
+    /// The apply itself is the production one. What the wrapper adds runs
+    /// after it has published and committed, still inside the job that holds
+    /// the entry's claim: the foreign edits, then a wait past
+    /// [`norn_fs::OWN_WRITE_TTL`], so every ledger entry the apply recorded
+    /// has expired by the time the job drains the watcher.
+    struct OutlastingApply {
+        inner: ProductionEntryOps,
+        meanwhile: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl EntryOps for OutlastingApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            let ended = self.inner.apply(name, attachment, plan, progress, reporter);
+            if let Some(meanwhile) = self.meanwhile.lock().unwrap().take() {
+                meanwhile();
+            }
+            thread::sleep(norn_fs::OWN_WRITE_TTL + Duration::from_millis(500));
+            ended
+        }
+    }
+
+    /// Production ops whose maintainer lock file is replaced by another actor
+    /// on the machine just as an apply's leg begins: after the job's intake,
+    /// whose watcher drain found the lock still current, and before the
+    /// apply takes its snapshot. Every leg but the apply is the production
+    /// one, unchanged.
+    struct LockReplacedBeforeApply {
+        inner: ProductionEntryOps,
+        detaches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EntryOps for LockReplacedBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.detaches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            let lock = attachment.maintainership.path().to_path_buf();
+            fs::remove_file(&lock).unwrap();
+            fs::write(&lock, "replacement lock identity").unwrap();
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+    }
+
+    /// **An apply whose maintainer lock is replaced after its intake publishes
+    /// nothing, commits nothing, and is answered not run**: its leg meets the
+    /// lost maintainership before its snapshot, as every leg over the
+    /// coverage does at its start, and the job answers it through the policy
+    /// a failed turn is answered by — the entry releases its coverage, and the
+    /// apply is answered `host/apply-not-run` with the cause that release
+    /// publishes.
+    #[cfg(unix)]
+    #[test]
+    fn an_apply_whose_lock_is_replaced_after_its_intake_publishes_nothing_and_releases() {
+        let f = Fixture::new("host-apply-lost-maintainership");
+        let target = f.vault().join("note.md");
+        fs::write(&target, "status draft\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let detaches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = crate::Host::new(
+            registry,
+            LockReplacedBeforeApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                detaches: Arc::clone(&detaches),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        drop(lease);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let answered = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                PlanDocument::operations(plan),
+            ))
+            .expect("an apply over a ready vault is admitted")
+            .wait();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "status draft\n",
+            "the apply published after its maintainership was lost: {answered:?}"
+        );
+        let refused = answered.expect_err("the apply answered as applied");
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::HostApplyNotRun);
+        assert!(
+            matches!(
+                refused.detail(),
+                norn_wire::ErrorDetail::ApplyNotRun { plan: None, .. }
+            ),
+            "the apply answered {:?}",
+            refused.detail()
+        );
+        wait_until(
+            "the entry to release its coverage",
+            lifecycle_budget(),
+            || match detaches.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => Observed::pending("no detach ran"),
+                released => Observed::Met(released),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(host);
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .map(|row| row.content_hash),
+            Some(norn_fs::ContentHash::of(b"status draft\n").to_string()),
+            "the apply committed a changeset after its maintainership was lost"
+        );
+    }
+
+    /// **An apply that outlasts the own-write ledger, with another writer's
+    /// edit landing during it, ends in a correct store with that edit
+    /// derived.** The apply does not extend the ledger's lifetime: its
+    /// entries expire while the job still holds the claim, and another writer
+    /// edits both the target the apply wrote and a document it did not. The
+    /// changeset committed what the apply published; the job's end takes in
+    /// what the watcher delivered meanwhile and hands the claim to the
+    /// reconcile that derives it, so the store ends holding the other
+    /// writer's bytes at both paths.
+    #[test]
+    fn an_apply_outlasting_the_own_write_ledger_ends_with_the_foreign_edit_derived() {
+        let f = Fixture::new("host-apply-outlasting-the-ledger");
+        let target = f.vault().join("note.md");
+        let bystander = f.vault().join("other.md");
+        fs::write(&target, "status draft\n").unwrap();
+        fs::write(&bystander, "other before\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let foreign_target = target.clone();
+        let foreign_bystander = bystander.clone();
+        let host = crate::Host::new(
+            registry,
+            OutlastingApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                meanwhile: std::sync::Mutex::new(Some(Box::new(move || {
+                    fs::write(&foreign_target, "status foreign\n").unwrap();
+                    fs::write(&foreign_bystander, "other foreign\n").unwrap();
+                }))),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let answered = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                PlanDocument::operations(plan),
+            ))
+            .expect("an apply over a ready vault is admitted")
+            .wait()
+            .expect("the plan applies");
+        assert!(matches!(
+            answered.report,
+            norn_wire::ApplyReport::Applied {
+                changeset: norn_wire::ChangesetOutcome::Committed,
+                ..
+            }
+        ));
+
+        let stored_hash = |store: &mut Store, path: &str| {
+            store
+                .begin_request()
+                .stored_document(&DocumentPath::new(path).unwrap())
+                .unwrap()
+                .map(|row| row.content_hash)
+        };
+        wait_until(
+            "the store to hold the other writer's bytes",
+            lifecycle_budget(),
+            || {
+                let mut store = Store::open(
+                    derived.join("store.sqlite3"),
+                    proven_order(&f),
+                    crate::DERIVATION_VERSION,
+                )
+                .unwrap();
+                let held = (
+                    stored_hash(&mut store, "note.md"),
+                    stored_hash(&mut store, "other.md"),
+                );
+                let expected = (
+                    Some(norn_fs::ContentHash::of(b"status foreign\n").to_string()),
+                    Some(norn_fs::ContentHash::of(b"other foreign\n").to_string()),
+                );
+                if held == expected {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("the store holds {held:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+    }
+
+    /// A production attachment over a vault holding `note.md`, and the plan
+    /// that edits it: what the production apply's cases below run.
+    fn attached_for_an_apply(
+        f: &Fixture,
+    ) -> (
+        ProductionEntryOps,
+        VaultName,
+        ProductionAttachment,
+        PlanDocument,
+    ) {
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("the vault attaches");
+        let plan = PlanDocument::operations(norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        ));
+        (ops, name, attachment, plan)
+    }
+
+    /// The production apply of `plan` over `attachment`, with no entry to
+    /// report to.
+    fn apply_directly(
+        ops: &ProductionEntryOps,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        plan: PlanDocument,
+    ) -> ApplyEnding {
+        ops.apply(
+            name,
+            attachment,
+            plan,
+            &ApplyProgress::default(),
+            &ProgressReporter::disconnected(),
+        )
+        .expect("the maintainership stands")
+        .answer
+    }
+
+    /// **A production apply whose one snapshot meets a damaged store ends
+    /// damaged**, so its job publishes the damage with the rebuild it owes,
+    /// rather than answering it as a store that refused a statement. The
+    /// store records no write generation, which no reading can be taken
+    /// without; nothing is planned and the note is untouched.
+    #[test]
+    fn a_production_apply_over_a_damaged_store_ends_damaged() {
+        let f = Fixture::new("host-apply-damaged-snapshot");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DELETE FROM meta WHERE key = 'write_generation'",
+        )
+        .unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        assert!(
+            matches!(ended, ApplyEnding::Damaged(_)),
+            "the apply ended {ended:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root replaced since its coverage was
+    /// installed answers `vault/root-changed`**, asked of the filesystem
+    /// before anything is planned, never planning on the directory that now
+    /// stands at the root's path.
+    #[test]
+    fn a_production_apply_over_a_replaced_root_answers_root_changed() {
+        let f = Fixture::new("host-apply-replaced-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        fs::rename(f.vault(), f.root.join("aside")).unwrap();
+        fs::create_dir_all(f.vault().join(".norn")).unwrap();
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::VaultRootChanged);
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root that no longer stands answers not
+    /// run, with the coverage loss a read carries once the entry's watcher
+    /// reports it**, asked of the filesystem before anything is planned
+    /// rather than met as a walk the environment refused.
+    #[test]
+    fn a_production_apply_over_a_vanished_root_answers_not_run_with_the_coverage_loss() {
+        let f = Fixture::new("host-apply-vanished-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        let root = attachment.covered_root.clone();
+        fs::remove_dir_all(f.vault()).unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        let lost = norn_wire::TrustState::untrusted(crate::lifecycle::watcher_lost(
+            WatchError::CoverageLost(root),
+        ));
+        assert_eq!(
+            refused,
+            crate::lifecycle::not_run(
+                crate::lifecycle::ReadRefusal::NotServing(crate::lifecycle::Demand::State(lost))
+                    .answer(&name),
+                None
+            )
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root that stands but cannot be walked
+    /// answers not run, with trust withdrawn for the environment's refusal**
+    /// — the refusal a read carries once the entry's own walk meets the same
+    /// failure — and writes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_production_apply_over_an_unwalkable_root_answers_not_run_with_the_environments_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("host-apply-unwalkable-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(f.vault()).is_ok() {
+            eprintln!("skipped: this account walks a mode-000 directory");
+            fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o755)).unwrap();
+            ops.detach(&name, attachment);
+            return;
+        }
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o755)).unwrap();
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::HostApplyNotRun);
+        let norn_wire::ErrorDetail::ApplyNotRun {
+            cause, plan: None, ..
+        } = refused.detail()
+        else {
+            panic!("the apply answered {:?}", refused.detail());
+        };
+        assert!(
+            matches!(
+                cause.detail(),
+                norn_wire::ErrorDetail::EntryUntrusted {
+                    reason: UntrustedReason::EnvironmentalRefusal { .. },
+                    ..
+                }
+            ),
+            "the cause is not the environment's refusal: {cause:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn external_edit_is_autonomously_pumped_through_warming_to_ready() {
         let f = Fixture::new("host-watch-edit");
@@ -14894,7 +15634,7 @@ mod tests {
                 ProductionEntryOps::start_watch(&attachment.registration, &schema)
                     .map_err(watcher)?;
             attachment.subscription = Some(subscription);
-            attachment._own_writes = own_writes;
+            attachment.own_writes = own_writes;
             self.inner.heal(attachment, progress)?;
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);

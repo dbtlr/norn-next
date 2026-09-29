@@ -145,6 +145,7 @@ fn a_folder_that_is_a_file_is_judged_by_each_kind() {
 /// A path that is not a name below the vault root refuses before anything is
 /// opened: a parent component, an absolute path, or nothing at all.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_path_that_leaves_the_root_is_refused() {
     let scratch = Scratch::new("anchor-uncontained");
     scratch.place("note.md", b"old");
@@ -184,6 +185,7 @@ fn a_path_that_leaves_the_root_is_refused() {
 /// The root is the boundary rather than a name inside it, so refusing a link
 /// there would refuse every vault a person keeps behind one.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_root_spelled_through_a_link_is_the_boundary() {
     let scratch = Scratch::new("anchor-linked-root");
     scratch.place("note.md", b"old");

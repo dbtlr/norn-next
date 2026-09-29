@@ -775,6 +775,7 @@ fn an_edited_shadow_refuses_as_an_io_failure() {
 /// **The bar on a re-send that finds its target landed.** Confirming a landed
 /// target reports its after-state and syncs its folder.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_landed_target_is_confirmed_and_its_folder_synced() {
     let scratch = Scratch::new("confirm-landed");
     let path = scratch.place("folder/note.md", b"the after-state");
@@ -918,6 +919,7 @@ fn the_shadow_is_confirmed_after_the_target_and_the_folders() {
 /// under a root identity the vault root is not refuse as a replaced root, and
 /// read nothing.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_root_the_plan_was_not_made_against_refuses_staging_and_emptying() {
     let scratch = Scratch::new("root-expected");
     scratch.place("note.md", b"old");
@@ -952,6 +954,7 @@ fn a_root_the_plan_was_not_made_against_refuses_staging_and_emptying() {
 /// landed refuses where a file has since come to its name, rather than
 /// reporting it absent.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn confirming_a_removal_that_finds_a_file_refuses() {
     let scratch = Scratch::new("confirm-remove-file");
     let Staging::Landed(landed) = scratch

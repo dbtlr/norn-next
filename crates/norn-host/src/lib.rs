@@ -7,16 +7,11 @@
 //! filesystem and store crates remain the only owners of those effects.
 
 mod address;
-// A dormant carrier until NORN-295's `Host::apply` job lands: see the module's
-// own documentation for who calls it and why nothing does yet.
-#[cfg_attr(not(test), allow(dead_code))]
 mod applier;
+mod apply;
 mod derivation;
 mod evidence;
 mod lifecycle;
-// A dormant carrier until NORN-295's `Host::apply` lands: see the
-// module's own documentation for who calls it and why nothing does yet.
-#[cfg_attr(not(test), allow(dead_code))]
 mod planner;
 mod production;
 mod read;
@@ -28,6 +23,7 @@ mod semantic;
 mod status;
 mod text;
 
+pub use apply::PlanGround;
 pub use derivation::DERIVATION_VERSION;
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
@@ -42,9 +38,10 @@ pub use evidence::{ReadReading, ReadsSince};
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, EntryReloadFailure, Established, Healing, HoldReading, Host,
-    HostError, JobFailure, LifecyclePolicy, LifecyclePolicyError, MintedReader, ProgressReporter,
-    ReadHold, ReadRefusal, ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
+    ApplyEnd, ApplyEnding, ApplyProgress, Demand, DemandLease, EntryOps, EntryReloadFailure,
+    Established, Healing, HoldReading, Host, HostError, JobFailure, LifecyclePolicy,
+    LifecyclePolicyError, MintedReader, PendingApply, ProgressReporter, ReadHold, ReadRefusal,
+    ReadSource, ReaderUnavailable, ReconcileWork, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.

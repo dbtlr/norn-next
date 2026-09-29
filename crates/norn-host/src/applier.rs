@@ -54,12 +54,14 @@
 //! observed and composed bytes are held only while staging, as planning holds
 //! them, and the changeset reads each landed document back when it commits.
 //!
-//! **A dormant carrier.** Its consumer is NORN-295's `Host::apply` job, which
-//! takes the entry's claim, derives the facts delivered by then, plans an
-//! authored plan through the planner, and hands the resolved plan here with
-//! the entry's vault root, root identity, shadow home, own-write recorder and
-//! store. That job has not landed, so nothing outside this module's tests
-//! reaches the applier yet.
+//! **Who applies here.** The apply job, which takes the entry's claim,
+//! derives the facts delivered by then, plans an authored plan through the
+//! planner, and hands the resolved plan here with the entry's vault root,
+//! root identity, shadow home, own-write ledger and store, and a question it
+//! asks just before the first publication: whether its leg still stands. Yes
+//! records the mark from which an apply dropped unanswered may have landed
+//! targets; no is a teardown, and the applier removes every shadow and
+//! publishes nothing.
 //!
 //! [ADR 0031]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md
 
@@ -78,16 +80,17 @@ use std::path::{Path, PathBuf};
 use norn_fs::{OwnWrites, Published, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
-    AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, InterruptionCause, RefusedCheck,
-    ResolvedPlan, RootIdentity, TargetResult,
+    AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, Forecast, InterruptionCause,
+    RefusedCheck, ResolvedPlan, RootIdentity, TargetResult,
 };
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
+use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};
 use publish::{Progress, Publisher, Stopped};
-use stage::Stop;
+use stage::{Stop, Unfit};
 
 /// Where a publication is recorded so the watcher's echo of it is known as
 /// the applier's own.
@@ -127,6 +130,13 @@ pub(crate) struct Applier<'a> {
     pub(crate) shadows: &'a ShadowHome,
     /// Where each publication is recorded.
     pub(crate) own_writes: &'a dyn OwnWriteLedger,
+    /// Asked once, after every target is staged and just before the first
+    /// is published, whether publication may begin: the apply job's check
+    /// that its leg still stands, which records the progress mark — from
+    /// which an apply dropped unanswered may have landed targets — where it
+    /// does. An answer of no is a teardown the apply stops at: every shadow
+    /// is removed and nothing is published.
+    pub(crate) publishing: &'a dyn Fn() -> bool,
 }
 
 impl Applier<'_> {
@@ -162,6 +172,10 @@ impl Applier<'_> {
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
         };
         drop(view);
+        if !(self.publishing)() {
+            stage::discard_all(self.anchor, self.shadows, staged.targets);
+            return ApplyOutcome::StoodDown;
+        }
         let publisher = Publisher {
             anchor: self.anchor,
             root: self.root,
@@ -274,6 +288,49 @@ impl Applier<'_> {
     fn root_identity(&self) -> RootIdentity {
         RootIdentity::from_device_and_inode(self.root.dev, self.root.ino)
     }
+}
+
+/// Preview the resolved `plan` over the vault at `anchor`: judge it as an
+/// apply would, reading the vault and writing nothing.
+///
+/// **The judgment is the apply's own**: the root identity, then every check
+/// [`stage::check`] runs — each target at its before- or after-state, every
+/// condition, the operations recomposed from the before-states, the schema.
+/// Where an apply would go on to stage, the answer is the same plan with its
+/// forecast from what the vault holds; where it would not, the answer is the
+/// outcome an apply of the plan over the same files ends in — a refusal with
+/// its fresh plan, a fault in the plan's shape, or a vault that could not be
+/// read, which an apply answers as a write that failed before anything
+/// landed. So what a caller previewed is what applies, and a plan an
+/// interruption left part-landed previews as itself.
+pub(crate) fn preview(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    exclusions: &[PathBuf],
+    declared: &crate::derivation::Declared,
+) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
+    let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
+    if plan.root != found {
+        return Err(Box::new(ApplyOutcome::RootChanged {
+            expected: plan.root,
+            found,
+        }));
+    }
+    let view = match TreeView::open(anchor, exclusions) {
+        Ok(view) => view,
+        Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
+    };
+    let outcome = match stage::check(&plan, &view, declared) {
+        Ok(_) => match forecast(&plan.transitions, &view) {
+            Ok(forecast) => return Ok((plan, forecast)),
+            Err(error) => write_failed(plan, error.to_string()),
+        },
+        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, checks),
+        Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
+        Err(Unfit::Failed(detail)) => write_failed(plan, detail),
+    };
+    Err(Box::new(outcome))
 }
 
 fn write_failed(plan: ResolvedPlan, detail: String) -> ApplyOutcome {

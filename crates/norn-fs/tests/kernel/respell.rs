@@ -205,6 +205,7 @@ fn a_respell_found_halfway_finishes_the_rename() {
 /// A respell whose new spelling already holds the after-state stages as
 /// landed, and the landing is confirmed.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_respell_already_landed_stages_as_landed() {
     let scratch = Scratch::new("respell-landed");
     if !folds(&scratch, "a_respell_already_landed_stages_as_landed") {

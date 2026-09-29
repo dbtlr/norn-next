@@ -1477,6 +1477,8 @@ cannot tell a signature crossing the seam from legitimate test and helper use. T
 - no SQLite connection opened outside `norn-db`
 - `std::fs` disallowed workspace-wide
 - no `norn-config` registry-surface use outside `norn-host`
+- no `norn-fs` write entry point — `stage`, `publish`, `confirm_landed`, `discard`,
+  `remove_empty_folders` — outside the one applier (invariant 4)
 - no direct stdout writes outside `norn-console`
 
 Where clippy carries the ruleset, one workspace-root `clippy.toml` holds all of it, because
@@ -1489,10 +1491,18 @@ live, and are kept accurate as effects are added — they are not the enforceabl
 enforceable ruleset is the harness's code**; a site missing from a table is a gap in the
 table, and a site the ruleset rejects is rejected whatever the table says.
 
-The other two configured rules carve out inside a single crate each, and that fact is the
-whole map: the SQLite rule's one carve-out is the connection `norn-db` opens, which is
-the seam the rule exists to keep to one place, and the registry rule's are in
-`norn-config`'s own suite, which exercises the surface the rule reserves to `norn-host`.
+The other three configured rules carve out narrowly, and that fact is the whole map: the
+SQLite rule's one carve-out is the connection `norn-db` opens, which is the seam the rule
+exists to keep to one place; the registry rule's are in `norn-config`'s own suite, which
+exercises the surface the rule reserves to `norn-host`; and the write-kernel rule's are the
+applier's staging and publishing functions in `norn-host`, the applier's own suite where a
+case drives the kernel directly, and `norn-fs`'s own suites, which exercise the kernel the
+rule reserves to the applier.
+
+The lint enforces these rules in production code. A test module or integration suite that
+builds its own trees carries a module-wide allow for that scaffolding, which also covers any
+other rule the same lint carries, so a suite is not held to the rules by the lint; a direct
+call it makes to a reserved effect carries its own use-site allow as the audit marker.
 
 Each effect a row names is one of two things. Most are **carried today** by a use-site allow
 in a crate the workspace holds. The rest are **reserved** — the crate is not written yet, or
@@ -2396,7 +2406,9 @@ bound by the applier's lifecycle tests.
 - **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
   raises, under ADR 0030's chain, and refuses at once with the code a read would carry where
   the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
-  unknown vault, or a registration change holding the entry. Everywhere else it queues the
+  unknown vault, or a registration change holding the entry. Over an entry that serves reads
+  with no reader standing, it asks for the reader again as a read does, and refuses with
+  `host/reader-unavailable` where that fails too. Everywhere else it queues the
   apply at once and returns a `PendingApply`, with no settle wait: over an entry taking in a
   change, the apply's own intake derives those facts; over an entry that is unattached,
   attaching from unattached, or releasing for idleness, the apply waits behind the attach its
@@ -2428,8 +2440,12 @@ bound by the applier's lifecycle tests.
   A change made meanwhile is not yet seen, as under a maintenance scan, and an apply that
   ends with facts waiting hands on to the reconcile they owe unless the next apply takes the
   claim. A preview takes its one snapshot the ordinary way and takes no claim. An intake that
-  finds the store damaged answers the apply not applied, with the cause, and leaves the
-  rebuild to run.
+  finds the store damaged, or during which a read met damage and carried it to the claim,
+  answers the apply not applied, with the cause, and leaves the rebuild to run. The apply's
+  own leg asks whether the entry's maintainership still stands before its snapshot, as every
+  leg over the coverage asks at its start. A lock found replaced, or one whose standing cannot
+  be read, ends the leg there with nothing planned, published or committed: the entry answers
+  it as it answers a failed turn, and the apply not applied with the cause that publishes.
 - **Every queued apply is answered once.** Every publication of a cause admission refuses
   for — lost trust, damage, an attach that failed, a park — and every release that re-arms
   nothing, a leg's unwind cleanup and the host's destruction among them, answers every queued
@@ -2461,6 +2477,69 @@ bound by the applier's lifecycle tests.
   publishing stops at its next epoch check, removes its shadows and answers the same. One that
   has begun publishing finishes its publication and its changeset before its leg ends: publication is a rename or an unlink per staged target, and finishing it leaves an applied plan
   where stopping would hand a routine park's caller an interrupted one to re-send.
+
+The implementation settles what those invariants leave open, in `crates/norn-host/src/apply.rs`
+(the verb's handler), `crates/norn-host/src/lifecycle/apply.rs` (the queue, the progress
+record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.rs`:
+
+- **One entry point, one handle.** `Host::apply` answers both modes with a `PendingApply`. A
+  preview's handle holds its answer already: the preview takes an ordinary read hold, plans on
+  the ground the entry's coverage recorded — the covered root, the identity it proved at
+  installation, the roots the walk skips and the declaration the store pins — and writes
+  nothing. The ground is recorded with the entry's declaration and read without I/O under the
+  gate; a preview and an apply each ask the filesystem whether the root still stands there
+  before planning, outside any gate hold, and a root replaced since answers
+  `vault/root-changed`.
+- **A resolved plan previews as the applier judges it.** The applier's own checks run over it
+  — the root identity, every target at its before- or after-state, every condition, the
+  operations recomposed, the schema — reading the vault and staging nothing. Where an apply
+  would go on to stage, the preview answers the same plan and its forecast; where it would
+  not, the preview answers what the apply ends in — a refusal, a fault in the plan's shape, or,
+  where the checks cannot read the vault, `vault/write-failed` with the plan. So what a caller
+  previewed is what applies, and a plan an interruption left part-landed previews as itself.
+- **A failure planning cannot get past answers what a read meeting it carries.** A root that
+  no longer stands answers `host/apply-not-run` with the refusal a read carries once the
+  watcher reports the root's coverage lost; a root that stands and cannot be read while
+  operations are planned, with trust withdrawn for the environment's refusal, as the entry's
+  own walk publishes it. A store that
+  refuses the apply's snapshot answers `host/read-failed`, or, where it is damaged, the job
+  publishes the damage with its rebuild and answers not applied with it.
+- **A queued apply holds the demand admission recorded** until the job running it takes it off
+  the queue, which is what makes it demand to the idle reaper and to a release's re-arm.
+- **Admission takes the claim from routine derivation not yet running.** Over a reconcile turn or
+  maintenance scan that is scheduled and has not begun, the apply is scheduled in its place; the
+  superseded job, where it is already in the channel, holds the queue slot until it arrives, runs
+  nothing, and sends the apply. A leg holding the claim hands it to the queue's head at a turn's
+  end, before a maintenance scan begins, and wherever it ends free. So under a sustained edit
+  stream a queued apply runs within one turn while the entry stays trusted; a turn that ends
+  over a watcher overflow withdraws trust, and that publication answers the queue instead.
+- **The one snapshot is the store's reading under the claim.** The planner reads the files, so
+  the snapshot is the store as the claim holds it — no other writer commits until the apply's
+  changeset — and the answer crosses inside a `VaultAnswer` under that reading and `Ready`.
+- **An unanswered apply's cause is the entry's published demand**, rendered as a read refused
+  over it carries it. The unwind's cleanup reads it once it has published over the entry and
+  answers the apply there, so a caller that asks later is answered with that cause.
+- **The heal is the paths the plan touched**, taken in as facts — a landed removal as a removal,
+  every other path as a change — which the job hands on to the reconcile.
+- **A queued apply is answered where the cause is published: at the end of the gate hold
+  that publishes it.** A hold that ends with the entry out of service, parked or untrusted
+  answers every apply still queued not applied, with that cause, and gives back each one's
+  demand; admission refuses on the same predicate. A hold that ends with the entry serving
+  reads, free, over its own coverage and with no reader standing — a publication whose mint
+  failed — answers each with `host/reader-unavailable`, as a read there is refused. A release that ends unattached with
+  nothing re-armed answers the queue with `unattached`; a leg's unwind leaves its answer to
+  the unwind's own publication, which follows the release. The host's destruction answers
+  with the teardown each entry then publishes — releasing coverage, or unattached.
+- **A rebuild publishes the damage it resolves until it ends**, so no apply queues behind
+  one: admission refuses it with the damage.
+- **Damage a read carried under a claim is published at the leg's next turn end**, with the
+  rebuild as the work the claim goes on to, whether the leg would have ended, taken another
+  turn, or handed on to maintenance or an apply.
+- **The epoch check that stops an apply is the one before its first publication.** The leg
+  asks whether it still stands and records the publishing mark in the same gate hold, so a
+  teardown either comes first — every shadow is removed, nothing is published, and the
+  apply answers not applied with the teardown's cause and its resolved plan — or comes
+  after the mark, and the apply finishes and answers what it did.
 
 Four contracts inside that flow carry weight:
 

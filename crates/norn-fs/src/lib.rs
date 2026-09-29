@@ -136,8 +136,8 @@ pub use walk::{
     WalkError, WalkFact, walk, walk_subtree,
 };
 pub use watch::{
-    Batch, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError, watch,
-    watch_polling,
+    Batch, OWN_WRITE_TTL, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError,
+    watch, watch_polling,
 };
 pub use write::{
     AfterState, Confirmed, Durability, Landed, Publication, Published, RemovedFolders, Staged,
