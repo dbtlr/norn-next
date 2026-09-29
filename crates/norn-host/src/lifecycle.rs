@@ -349,7 +349,8 @@ pub trait EntryOps: Send + Sync + 'static {
     /// [`EntryOps::active_content_model`], so it does no I/O: a preview, which
     /// takes no claim and holds no coverage, plans against the ground the
     /// entry's coverage stands on and asks whether the root still stands there
-    /// itself. The default holds none, and a preview over it is not run.
+    /// itself. The default holds none, which only test ops keep: a preview
+    /// over it answers `host/reader-unavailable`, a host defect.
     fn plan_ground(&self, _: &Self::Attachment) -> Option<PlanGround> {
         None
     }

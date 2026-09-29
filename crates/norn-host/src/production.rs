@@ -13526,6 +13526,59 @@ mod tests {
         }
     }
 
+    /// **A preview over ops that record no plan ground answers
+    /// `host/reader-unavailable`**, naming the host defect, never an
+    /// environmental cause the vault did not meet. [`CountedAttach`] does not
+    /// pass the production ground through, as production ops always do.
+    #[test]
+    fn a_preview_over_ops_recording_no_ground_answers_reader_unavailable() {
+        let f = Fixture::new("host-preview-no-ground");
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            CountedAttach {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                attaches: std::sync::Arc::default(),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let refused = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Preview,
+                PlanDocument::operations(plan),
+            ))
+            .expect("a preview over a ready vault is answered")
+            .wait()
+            .expect_err("a preview over no ground answered");
+        assert_eq!(
+            refused.code(),
+            &norn_wire::ReasonCode::HostReaderUnavailable
+        );
+    }
+
     #[test]
     fn a_vault_holding_undecodable_documents_reaches_ready_and_re_attaches_for_none_of_them() {
         let f = Fixture::new("quarantine-ready");

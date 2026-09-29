@@ -236,10 +236,16 @@ where
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
+        // Production ops record a ground with every declaration, under the
+        // gate hold that publishes the coverage this read holds, so only ops
+        // that report none — test ops — reach the refusal: a host defect,
+        // answered as the read seam it is, never as a cause the vault met.
         let ground = self.plan_ground(name).ok_or_else(|| {
-            unreadable(
-                name,
-                "the entry's coverage records no ground to plan against",
+            ErrorEnvelope::new(
+                "the entry records no ground to plan against, so the preview was not planned",
+                ErrorDetail::reader_unavailable(
+                    "the entry's ops record no plan ground over its coverage",
+                ),
             )
         })?;
         ground.standing(name)?;
