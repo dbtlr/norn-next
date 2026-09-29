@@ -796,6 +796,140 @@ mod tests {
     }
 
     #[test]
+    fn a_document_moved_away_and_back_draws_on_its_own_before_state() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(&vault, vec![moving("a.md", "t.md"), moving("t.md", "a.md")]);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), present("A")),
+                transition("t.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_documents_exchanged_and_exchanged_back_draw_on_their_own_before_states() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let exchange = [
+            moving("a.md", "t.md"),
+            moving("b.md", "a.md"),
+            moving("t.md", "b.md"),
+        ];
+        let resolution = planned(&vault, [exchange.clone(), exchange].concat());
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), present("A")),
+                transition("b.md", present("B"), present("B")),
+                transition("t.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_moved_back_over_a_name_a_create_filled_and_vacated_draws_on_itself() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                moving("a.md", "t.md"),
+                creating("a.md", "new"),
+                moving("a.md", "u.md"),
+                moving("t.md", "a.md"),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), present("A")),
+                transition("t.md", FileState::absent(), FileState::absent()),
+                transition("u.md", FileState::absent(), present("new")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exchange_whose_one_side_is_then_removed_is_no_content_cycle() {
+        // `b` draws on `a`'s before-state, and `a` ends absent, drawing on
+        // nothing: `b` lands, then `a` is removed, and no source is destroyed
+        // before the target drawing on it lands.
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                moving("a.md", "t.md"),
+                moving("b.md", "a.md"),
+                moving("t.md", "b.md"),
+                deleting("a.md"),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), FileState::absent()),
+                transition("b.md", present("B"), present("A")),
+                transition("t.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn of_two_content_cycles_the_one_holding_the_lowest_position_is_reported() {
+        let vault =
+            MemoryVault::with(&[("a.md", "A"), ("b.md", "B"), ("c.md", "C"), ("d.md", "D")]);
+        let operations = vec![
+            moving("a.md", "t.md"),
+            moving("b.md", "a.md"),
+            moving("t.md", "b.md"),
+            moving("c.md", "u.md"),
+            moving("d.md", "c.md"),
+            moving("u.md", "d.md"),
+        ];
+        assert_eq!(
+            refused(&vault, operations),
+            PlanFault::content_cycle(vec![0, 2, 1])
+        );
+    }
+
+    #[test]
+    fn a_case_only_rename_carries_no_content_into_a_cycle() {
+        // The rename keeps `a`'s content in its own file, so the cycle is
+        // carried by the three moves after it alone.
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]).folding_case();
+        let operations = vec![
+            moving("a.md", "A.md"),
+            moving("A.md", "t.md"),
+            moving("b.md", "A.md"),
+            moving("t.md", "b.md"),
+        ];
+        assert_eq!(
+            refused(&vault, operations),
+            PlanFault::content_cycle(vec![1, 3, 2])
+        );
+    }
+
+    #[test]
     fn a_document_moved_away_and_replaced_by_a_create_is_no_content_cycle() {
         // `b` draws on `a`, and `a` is written from its operation's own
         // content, which no publication destroys.

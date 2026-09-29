@@ -20,7 +20,7 @@
 //! on each other, and [`content_cycle`] refuses it here. The two cannot be
 //! one check, since composition needs the order the first one settles.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
@@ -56,32 +56,55 @@ struct Drawn {
 /// carry its content, each file's moves in the order they compose, starting
 /// from the file whose moves hold the lowest position.
 ///
-/// The planner calls this on the order a resolved plan's operations compose
-/// in; the applier calls it on a resolved plan's operations in their
-/// recorded order, so one rule judges both.
+/// **A dormant carrier for the applier.** The planner calls this on the
+/// order a resolved plan's operations compose in. Its second consumer is
+/// NORN-295's applier, which will call it on a resolved plan's operations in
+/// their recorded order so one rule judges both; that applier has not landed
+/// on this branch, so the planner is its only caller today.
 pub(crate) fn content_cycle(
     operations: &[Operation],
     order: &[usize],
     normalizer: &PathNormalizer,
 ) -> Option<Vec<usize>> {
-    let drawing = lineage(operations, order, normalizer);
-    // Each file draws on at most one other, so a cycle is found by walking
-    // from each file along what it draws on until the walk meets itself.
+    first_cycle(&lineage(operations, order, normalizer), &mut 0)
+}
+
+/// The cycle among `drawing` whose moves hold the lowest position, counting
+/// in `steps` each time the walk follows a file to the one it draws on.
+///
+/// **Each file is followed once.** Each file draws on at most one other, so
+/// a walk from a file not yet seen follows what it draws on until it reaches
+/// a file an earlier walk finished, a file drawing on nothing, or a file on
+/// its own path, which closes a cycle. Every file it passed is then finished,
+/// so the whole search is linear in the files that draw on another.
+fn first_cycle(drawing: &BTreeMap<NormalizedPath, Drawn>, steps: &mut usize) -> Option<Vec<usize>> {
+    let mut finished: BTreeSet<&NormalizedPath> = BTreeSet::new();
     let mut cycles: Vec<Vec<usize>> = Vec::new();
     for start in drawing.keys() {
-        let mut walked: Vec<&NormalizedPath> = vec![start];
-        let mut at = start;
-        while let Some(drawn) = drawing.get(at) {
-            at = &drawn.from;
-            if at == start {
-                cycles.push(carriers(&walked, &drawing));
-                break;
-            }
-            if walked.contains(&at) {
-                break;
-            }
-            walked.push(at);
+        if finished.contains(start) {
+            continue;
         }
+        // The walk's path, and each file's place on it.
+        let mut path: Vec<&NormalizedPath> = Vec::new();
+        let mut on_path: BTreeMap<&NormalizedPath, usize> = BTreeMap::new();
+        let mut at = start;
+        loop {
+            on_path.insert(at, path.len());
+            path.push(at);
+            let Some(drawn) = drawing.get(at) else {
+                break;
+            };
+            *steps += 1;
+            at = &drawn.from;
+            if let Some(&closes) = on_path.get(at) {
+                cycles.push(carriers(&path[closes..], drawing));
+                break;
+            }
+            if finished.contains(at) {
+                break;
+            }
+        }
+        finished.extend(path);
     }
     cycles.into_iter().min()
 }
@@ -150,4 +173,44 @@ fn lineage(
         .into_iter()
         .filter_map(|(file, drawn)| drawn.filter(|drawn| drawn.from != file).map(|d| (file, d)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use norn_fs::CaseSensitivity;
+    use norn_wire::DocumentPath;
+
+    use super::*;
+
+    fn moving(from: &str, to: &str) -> Operation {
+        Operation::new(OperationKind::move_document(
+            DocumentPath::new(from).expect("a legal document path"),
+            DocumentPath::new(to).expect("a legal document path"),
+        ))
+    }
+
+    #[test]
+    fn a_long_chain_of_moves_is_walked_once_per_file() {
+        // `d3999` moves to a new name, then each document moves into the
+        // name the one before it vacated: every file draws on the next, and
+        // nothing closes.
+        let files = 4000;
+        let mut operations = vec![moving(&format!("d{}.md", files - 1), "end.md")];
+        operations.extend(
+            (1..files)
+                .rev()
+                .map(|to| moving(&format!("d{}.md", to - 1), &format!("d{to}.md"))),
+        );
+        let order: Vec<usize> = (0..operations.len()).collect();
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let drawing = lineage(&operations, &order, &normalizer);
+        assert_eq!(drawing.len(), files);
+        let mut steps = 0;
+        assert_eq!(first_cycle(&drawing, &mut steps), None);
+        assert!(
+            steps <= drawing.len(),
+            "the walk followed {steps} steps over {} files",
+            drawing.len()
+        );
+    }
 }
