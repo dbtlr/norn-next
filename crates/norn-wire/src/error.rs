@@ -347,7 +347,8 @@ pub enum ReasonCode {
     HostReadFailed,
     /// `host/apply-not-run` — a lifecycle cause answered the apply before it
     /// published anything: a park, trust withheld or lost, damaged derived
-    /// state, or the host's teardown. No document was written. The detail is
+    /// state, an attach that failed, or the host's teardown. No document was
+    /// written. The detail is
     /// the cause, as the refusal it publishes, and the resolved plan where
     /// planning had finished.
     #[serde(rename = "host/apply-not-run")]
