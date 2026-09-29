@@ -1526,8 +1526,9 @@ impl EntryOps for ProductionEntryOps {
     /// snapshot, the operations planned through the one planner on the
     /// ground the coverage stands on, and the one applier, publishing through
     /// the coverage's shadow home and own-write ledger and committing to its
-    /// store. Lane-1 work the changeset committed is relayed to the engines
-    /// as every other leg's is.
+    /// store. Lane-1 work the changeset committed — an applied plan's, or
+    /// the landed subset of an interrupted one — is relayed to the engines as
+    /// every other leg's is.
     fn apply(
         &self,
         name: &VaultName,
@@ -1538,7 +1539,10 @@ impl EntryOps for ProductionEntryOps {
     ) -> ApplyEnd {
         let _job = self.evidence.attributing();
         let ended = apply_over(name, attachment, plan, progress, reporter);
-        if matches!(ended.answer, ApplyEnding::Answered(Ok(_))) {
+        // Any answered apply may have committed lane-1 work: an applied one,
+        // and an interrupted one whose landed subset committed. A refusal
+        // committed nothing, and its drain finds nothing new.
+        if matches!(ended.answer, ApplyEnding::Answered(_)) {
             self.drain_semantic(name, attachment, reporter);
         }
         ended
