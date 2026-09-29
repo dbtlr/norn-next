@@ -772,7 +772,8 @@ pub enum ErrorDetail {
         /// leaves out every operation whose targets all landed and every
         /// operation it lists as unresolved.
         plan: ResolvedPlan,
-        /// What the fresh plan would do, marking every target that drifted.
+        /// What the fresh plan would do beyond the transitions it names:
+        /// every target that drifted, and the folders it makes and removes.
         forecast: Forecast,
         /// Each check that refused.
         checks: Vec<RefusedCheck>,

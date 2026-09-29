@@ -22,25 +22,24 @@ use norn_wire::{
     DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
     DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
     ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FileState, FindParams,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, ForecastTarget,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
-    IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily,
-    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
-    ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
-    Operation, OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, ResolvedTag, RollUp, RootIdentity, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams, SearchReport,
-    SetParams, SetReport, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
-    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
+    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
+    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
+    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
+    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -7336,23 +7335,11 @@ fn folder(text: &str) -> FolderPath {
     FolderPath::new(text).expect("a legal folder path")
 }
 
-/// A forecast naming a drifted target, a target it creates, and a folder it
-/// makes and one it removes.
+/// A forecast naming a drifted target, a folder the plan makes and one it
+/// removes.
 fn a_forecast() -> Forecast {
     Forecast::new(
-        vec![
-            ForecastTarget::new(
-                path("notes/a.md"),
-                FileState::present(content_hash(0xab)),
-                FileState::present(content_hash(0x01)),
-            )
-            .drifted(),
-            ForecastTarget::new(
-                path("archive/new.md"),
-                FileState::absent(),
-                FileState::present(content_hash(0x02)),
-            ),
-        ],
+        vec![path("notes/a.md")],
         vec![folder("archive")],
         vec![folder("notes/old")],
     )
@@ -7626,25 +7613,26 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
     );
 }
 
-/// A forecast names each target with its two states and whether it drifted,
-/// and the folders the plan makes and removes.
+/// **A forecast carries only what the plan beside it does not.** Each
+/// transition is the resolved plan's own, so a forecast names the targets that
+/// drifted and the folders the plan makes and removes, and a vault-wide
+/// preview carries each transition once.
 #[test]
-fn a_forecast_names_its_targets_and_its_folders() {
+fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
     assert_eq!(
         wire(&a_forecast()),
-        format!(
-            concat!(
-                r#"{{"targets":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
-                r#""after":{{"state":"present","hash":"{one}"}},"drifted":true}},"#,
-                r#"{{"path":"archive/new.md","before":{{"state":"absent"}},"#,
-                r#""after":{{"state":"present","hash":"{two}"}},"drifted":false}}],"#,
-                r#""folders_made":["archive"],"folders_removed":["notes/old"]}}"#
-            ),
-            ab = hash_text(0xab),
-            one = hash_text(0x01),
-            two = hash_text(0x02),
-        )
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"]}"#
     );
+    let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
+    for transition in &a_resolved_plan().transitions {
+        let after = wire(&transition.after);
+        assert_eq!(
+            previewed.matches(&after).count(),
+            1,
+            "a preview carries the transition of {} more than once: {previewed}",
+            transition.path
+        );
+    }
 }
 
 /// A forecast is an answer, so it drops a field it does not know where a plan
@@ -7652,11 +7640,9 @@ fn a_forecast_names_its_targets_and_its_folders() {
 #[test]
 fn a_forecast_drops_a_field_it_does_not_know() {
     let json = serde_json::to_value(a_forecast()).expect("a forecast as JSON");
-    for pointer in ["", "/targets/0"] {
-        let read: Forecast = serde_json::from_str(&with_surprise(&json, pointer))
-            .unwrap_or_else(|error| panic!("a forecast with a field at `{pointer}`: {error}"));
-        assert_eq!(read, a_forecast());
-    }
+    let read: Forecast = serde_json::from_str(&with_surprise(&json, ""))
+        .unwrap_or_else(|error| panic!("a forecast with a field it does not know: {error}"));
+    assert_eq!(read, a_forecast());
 }
 
 /// An apply names its mode, and there is no default: a request without one
@@ -7767,7 +7753,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
         format!(
             concat!(
                 r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
-                r#""plan":{plan},"forecast":{{"targets":[],"folders_made":[],"folders_removed":[]}},"#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[]}},"#,
                 r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
                 r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#

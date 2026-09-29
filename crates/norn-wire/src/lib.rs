@@ -96,9 +96,10 @@
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
 //! between two [`FileState`]s, each absent or a [`ContentHash`], the
 //! [`PlanCondition`]s its planning read, and the [`Provenance`] a repair plan
-//! cites, with the [`SkippedFinding`]s it left alone. A preview answers with a
-//! [`Forecast`] of [`ForecastTarget`]s and the [`FolderPath`]s a plan makes
-//! and removes; an applied plan with its [`ChangesetOutcome`] and the
+//! cites, with the [`SkippedFinding`]s it left alone. A preview answers with
+//! the resolved plan and a [`Forecast`] of what the plan does not carry — the
+//! targets that drifted and the [`FolderPath`]s a plan makes and removes; an
+//! applied plan with its [`ChangesetOutcome`] and the
 //! [`TargetResult`] of each [`AppliedTarget`]. An apply that ends any other
 //! way ends in a code, whose detail carries the [`RefusedCheck`]s and the
 //! [`UnresolvedOperation`]s — each with its [`UnresolvedReason`] — of a
@@ -298,7 +299,7 @@
 //! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
 //! [`FolderPath::new`], the constructor on each [`RefusedCheck`],
 //! [`UnresolvedReason`], [`InterruptionCause`], [`PlanFault`] and
-//! [`ApplyReport`] variant, [`ForecastTarget::new`], [`Forecast::new`],
+//! [`ApplyReport`] variant, [`Forecast::new`],
 //! [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
 //! [`ApplyParams::new`]. The plan types the applier destructures, below, can
 //! be written as literals and keep their constructors all the same:
@@ -509,7 +510,7 @@ pub use plan::document::{
     AuthoredPlan, FileState, OperationsTag, PlanCondition, PlanDocument, Provenance, ResolvedPlan,
     ResolvedTag, SkippedFinding, Transition,
 };
-pub use plan::forecast::{FolderPath, Forecast, ForecastTarget};
+pub use plan::forecast::{FolderPath, Forecast};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
     AuthorCondition, IllegalOperationId, Operation, OperationId, OperationKind,

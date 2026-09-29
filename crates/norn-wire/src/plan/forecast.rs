@@ -1,14 +1,20 @@
 //! What a plan would do, as a preview and a refusal report it.
 //!
 //! **A forecast is an answer, not a plan.** It is read the way every answer
-//! is, dropping a field it does not know; the file states inside it are plan
-//! types and refuse one wherever they are read.
+//! is, dropping a field it does not know.
+//!
+//! **A forecast carries only what the plan beside it does not.** It always
+//! crosses beside a resolved plan, which already names each target and its
+//! two states, so a forecast repeating them would carry every transition of
+//! a vault-wide preview twice. What the plan cannot say is left: which targets
+//! drifted, and the folders the plan makes and removes.
 //!
 //! **A drifted target is marked, not judged.** A fresh plan resolved after a
 //! refusal marks every target that drifted, because a hash cannot tell a file
 //! edited after this plan landed on it from one edited before: the mark says
 //! the target may already carry this plan's change, and applying the fresh
-//! plan is the caller's decision.
+//! plan is the caller's decision. A preview resolved from what the vault
+//! holds has no drifted target.
 //!
 //! **A folder is its own path type.** Folders are not transitions, and the
 //! forecast and the applied report name the folders a plan makes and removes.
@@ -24,7 +30,6 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::IllegalPath;
 use crate::document::DocumentPath;
-use crate::plan::document::FileState;
 
 /// What a folder path is called in a refusal that names one.
 const FOLDER_PATH: &str = "folder path";
@@ -102,47 +107,15 @@ impl JsonSchema for FolderPath {
     }
 }
 
-/// One file a plan changes, as a forecast names it.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[non_exhaustive]
-pub struct ForecastTarget {
-    /// The file changed.
-    pub path: DocumentPath,
-    /// What the file must hold before the write.
-    pub before: FileState,
-    /// What the file holds after it.
-    pub after: FileState,
-    /// Whether the file held neither state when the plan was resolved afresh.
-    /// A drifted file may already carry this plan's change.
-    pub drifted: bool,
-}
-
-impl ForecastTarget {
-    /// The file at `path`, changing from `before` to `after`, not drifted.
-    pub const fn new(path: DocumentPath, before: FileState, after: FileState) -> Self {
-        ForecastTarget {
-            path,
-            before,
-            after,
-            drifted: false,
-        }
-    }
-
-    /// The same target, marked drifted.
-    #[must_use]
-    pub const fn drifted(mut self) -> Self {
-        self.drifted = true;
-        self
-    }
-}
-
-/// What a resolved plan would do: each file it changes, and the folders it
-/// makes and removes.
+/// What a resolved plan would do that the plan itself does not say: which of
+/// its targets drifted, and the folders it makes and removes.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct Forecast {
-    /// Each file the plan changes.
-    pub targets: Vec<ForecastTarget>,
+    /// Each target that held neither its before-state nor its after-state
+    /// when the plan was resolved afresh. A drifted target may already carry
+    /// this plan's change. Empty on a preview.
+    pub drifted: Vec<DocumentPath>,
     /// The folders the plan makes for the files it creates.
     pub folders_made: Vec<FolderPath>,
     /// The folders the plan's removals leave empty, which it removes.
@@ -150,15 +123,15 @@ pub struct Forecast {
 }
 
 impl Forecast {
-    /// A plan changing `targets`, making `folders_made` and removing
-    /// `folders_removed`.
+    /// A plan whose targets `drifted` drifted, making `folders_made` and
+    /// removing `folders_removed`.
     pub const fn new(
-        targets: Vec<ForecastTarget>,
+        drifted: Vec<DocumentPath>,
         folders_made: Vec<FolderPath>,
         folders_removed: Vec<FolderPath>,
     ) -> Self {
         Forecast {
-            targets,
+            drifted,
             folders_made,
             folders_removed,
         }

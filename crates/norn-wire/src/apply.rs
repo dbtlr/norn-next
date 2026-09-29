@@ -116,7 +116,8 @@ pub enum ApplyReport {
     Previewed {
         /// The resolved plan. Sending it back applies it.
         plan: ResolvedPlan,
-        /// What it would do.
+        /// What it would do beyond the transitions the plan names: the
+        /// folders it makes and removes.
         forecast: Forecast,
     },
     /// Every target of the plan stands at its after-state.

@@ -19,21 +19,21 @@ use norn_wire::{
     DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
     DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
     Facet, FacetKind, FieldType, FieldValue, FileState, FindParams, FindReport, FindingKind,
-    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, ForecastTarget, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally,
-    LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    Moved, NameSet, NotReady, Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
-    RungSkipReason, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
-    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
-    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
+    GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily,
+    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady,
+    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
+    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
+    SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport,
+    TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams,
+    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -258,7 +258,6 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<ResolvedPlan>(),
         schema_of::<PlanDocument>(),
         schema_of::<FolderPath>(),
-        schema_of::<ForecastTarget>(),
         schema_of::<Forecast>(),
         schema_of::<RefusedCheck>(),
         schema_of::<UnresolvedReason>(),
@@ -3110,19 +3109,16 @@ fn an_apply_report_advertises_its_outcome_tag() {
     let forecast = schema_of::<Forecast>();
     assert_eq!(
         property_names(&forecast),
-        ["targets", "folders_made", "folders_removed"]
+        ["drifted", "folders_made", "folders_removed"]
             .into_iter()
             .collect()
     );
     assert_eq!(
-        property_names(definition(&forecast, "ForecastTarget")),
-        ["path", "before", "after", "drifted"].into_iter().collect()
+        forecast["properties"]["drifted"]["items"]["$ref"].as_str(),
+        Some("#/$defs/DocumentPath"),
+        "a forecast names a drifted target by its path alone"
     );
-    for answer in [
-        &forecast,
-        definition(&forecast, "ForecastTarget"),
-        branch(&schema, "outcome", "applied"),
-    ] {
+    for answer in [&forecast, branch(&schema, "outcome", "applied")] {
         assert!(
             !refuses_unknown_keys(answer),
             "an answer refuses a key: {answer}"
