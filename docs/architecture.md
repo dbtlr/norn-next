@@ -2490,6 +2490,23 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   over it carries it, read once the unwind's cleanup has published over the entry.
 - **The heal is the paths the plan touched**, taken in as facts — a landed removal as a removal,
   every other path as a change — which the job hands on to the reconcile.
+- **A queued apply is answered where the cause is published: at the end of the gate hold
+  that publishes it.** A hold that ends with the entry out of service, parked or untrusted
+  answers every apply still queued not applied, with that cause, and gives back each one's
+  demand; admission refuses on the same predicate. A release that ends unattached with
+  nothing re-armed answers the queue with `unattached`; a leg's unwind leaves its answer to
+  the unwind's own publication, which follows the release. The host's destruction answers
+  with the teardown each entry then publishes — releasing coverage, or unattached.
+- **A rebuild publishes the damage it resolves until it ends**, so no apply queues behind
+  one: admission refuses it with the damage.
+- **Damage a read carried under a claim is published at the leg's next turn end**, with the
+  rebuild as the work the claim goes on to, whether the leg would have ended, taken another
+  turn, or handed on to maintenance or an apply.
+- **The epoch check that stops an apply is the one before its first publication.** The leg
+  asks whether it still stands and records the publishing mark in the same gate hold, so a
+  teardown either comes first — every shadow is removed, nothing is published, and the
+  apply answers not applied with the teardown's cause and its resolved plan — or comes
+  after the mark, and the apply finishes and answers what it did.
 
 Four contracts inside that flow carry weight:
 
