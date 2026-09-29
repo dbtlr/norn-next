@@ -116,6 +116,7 @@ fn a_create_whose_missing_folder_became_a_link_refuses() {
 /// folder and each empty one above it, stops at the first that is not empty,
 /// and reports what it removed, deepest first.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn empty_folders_are_removed_upward_until_one_is_not_empty() {
     let scratch = Scratch::new("folders-empty");
     scratch.directory("a/b/c");
@@ -138,6 +139,7 @@ fn empty_folders_are_removed_upward_until_one_is_not_empty() {
 
 /// The vault root is never removed, however empty it is.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn emptying_upward_never_removes_the_root() {
     let scratch = Scratch::new("folders-root");
     scratch.directory("a/b");
@@ -155,6 +157,7 @@ fn emptying_upward_never_removes_the_root() {
 /// A folder already gone is where emptying starts from, not a refusal: the
 /// folders above it are emptied as if it had been removed here.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn emptying_upward_from_a_folder_already_gone_empties_what_is_above() {
     let scratch = Scratch::new("folders-gone");
     scratch.directory("a");
@@ -168,6 +171,7 @@ fn emptying_upward_from_a_folder_already_gone_empties_what_is_above() {
 /// Emptying upward descends through no link: a folder reached through a link
 /// refuses, and what the link points at is untouched.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn emptying_upward_through_a_link_refuses() {
     let scratch = Scratch::new("folders-empty-link");
     let outside = scratch.vault().with_extension("outside");
@@ -191,6 +195,7 @@ fn emptying_upward_through_a_link_refuses() {
 /// A path that is not a folder below the root refuses before anything is
 /// removed.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn emptying_upward_from_a_path_that_leaves_the_root_is_refused() {
     let scratch = Scratch::new("folders-uncontained");
     scratch.directory("a");

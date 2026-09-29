@@ -336,6 +336,7 @@ fn a_symlinked_lock_name_is_refused() {
 /// replacement and a removal all stage and publish, and a move is a create and
 /// a removal.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
 fn a_contended_vault_is_fully_workable() {
     let scratch = Scratch::new("contended-vault");
     let vault = scratch.path("vault");

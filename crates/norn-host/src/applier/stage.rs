@@ -262,6 +262,7 @@ fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, Ve
 }
 
 /// Remove every shadow `staged` holds, publishing nothing.
+#[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 pub(super) fn discard_all(
     anchor: &Path,
     shadows: &ShadowHome,
@@ -385,6 +386,7 @@ impl Judging<'_> {
 }
 
 /// Stage `unit` with `content`, or say why the plan stops.
+#[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 fn stage_one(
     anchor: &Path,
     root: norn_fs::Identity,

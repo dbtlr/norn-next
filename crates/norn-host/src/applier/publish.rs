@@ -92,6 +92,7 @@ impl Publisher<'_> {
     }
 
     /// Publish or confirm one unit.
+    #[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
     fn publish_one(
         &self,
         publishing: &Publishing<'_>,
@@ -168,6 +169,7 @@ impl Publisher<'_> {
     /// applied; the report names the folders removed, and the wire has no
     /// place for one that was not, so a failure here reaches the caller only
     /// as a folder missing from that list. A re-send empties it again.
+    #[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
     fn empty_folders(&self, removed: &[DocumentPath], progress: &mut Progress) {
         let mut folders: Vec<PathBuf> = removed
             .iter()

@@ -152,6 +152,28 @@ pub const LINT_RULES: &[LintRule] = &[
             ("disallowed-methods", "norn_config::registry::mutate"),
         ],
     },
+    LintRule {
+        name: "no norn-fs write entry point outside the one applier",
+        state: LintState::Live,
+        // Staging and publication are how a plan reaches the vault, and the
+        // applier in norn-host is their one caller: a second caller is a
+        // second execution path. The kernel's own suites carve themselves out
+        // at the use site, as the applier does.
+        prefixes: &[
+            ("disallowed-methods", "norn_fs::stage"),
+            ("disallowed-methods", "norn_fs::publish"),
+            ("disallowed-methods", "norn_fs::confirm_landed"),
+            ("disallowed-methods", "norn_fs::discard"),
+            ("disallowed-methods", "norn_fs::remove_empty_folders"),
+        ],
+        required: &[
+            ("disallowed-methods", "norn_fs::stage"),
+            ("disallowed-methods", "norn_fs::publish"),
+            ("disallowed-methods", "norn_fs::confirm_landed"),
+            ("disallowed-methods", "norn_fs::discard"),
+            ("disallowed-methods", "norn_fs::remove_empty_folders"),
+        ],
+    },
 ];
 
 /// What an edge-held invariant asks of the allowlist.
@@ -244,9 +266,10 @@ pub const INVARIANTS: &[Invariant] = &[
     Invariant {
         number: 4,
         claim: "one plan vocabulary and one applier; a second execution path is a defect",
-        mechanisms: &[Mechanism::Review(
-            "whether a change is a second spelling of an existing operation",
-        )],
+        mechanisms: &[
+            Mechanism::Lint("no norn-fs write entry point outside the one applier"),
+            Mechanism::Review("whether a change is a second spelling of an existing operation"),
+        ],
     },
     Invariant {
         number: 5,

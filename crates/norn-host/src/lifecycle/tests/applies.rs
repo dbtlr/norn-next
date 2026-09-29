@@ -900,20 +900,22 @@ fn an_apply_queued_during_a_schema_reload_runs_only_after_it_publishes_ready() {
     drop(lease);
 }
 
+/// What [`an_apply_handed_off_into_a_full_queue`] leaves a case: the host,
+/// the vault the apply was admitted against, the apply's handle and the two
+/// vaults' leases.
+type HandedOff = (
+    Host<Arc<FakeOps>>,
+    VaultName,
+    PendingApply,
+    [DemandLease<Arc<FakeOps>>; 2],
+);
+
 /// Two ready vaults on one worker, `a` and `b`, with an apply queued on
 /// `a` behind a reconcile turn and `b`'s reconcile filling the job queue
 /// when that turn ends: the turn's hand-off meets a full queue, and so does
 /// the send its leg's end tries again. Answers the host, the two names, the
 /// apply's handle and the leases.
-fn an_apply_handed_off_into_a_full_queue(
-    ops: &Arc<FakeOps>,
-    maintenance_due: bool,
-) -> (
-    Host<Arc<FakeOps>>,
-    VaultName,
-    PendingApply,
-    [DemandLease<Arc<FakeOps>>; 2],
-) {
+fn an_apply_handed_off_into_a_full_queue(ops: &Arc<FakeOps>, maintenance_due: bool) -> HandedOff {
     let a = VaultName::new("a").unwrap();
     let b = VaultName::new("b").unwrap();
     let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&a, &b]), 1);

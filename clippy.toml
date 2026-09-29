@@ -123,6 +123,16 @@ disallowed-methods = [
     # which erases the use-site marker this rule exists to leave.
     { path = "norn_config::registry::read", reason = "the registry surface is norn-host's; the machine surface is what a client reads" },
     { path = "norn_config::registry::mutate", reason = "the registry surface is norn-host's; the machine surface is what a client reads" },
+    # No norn-fs write entry point outside the one applier (invariant 4). The
+    # kernel's staging and publication are how a plan reaches the vault, and
+    # the applier in norn-host is the one caller: a second caller is a second
+    # execution path. The kernel's own suites carve themselves out, since
+    # exercising these functions is what they are for.
+    { path = "norn_fs::stage", reason = "the one applier is the one caller of the vault write kernel" },
+    { path = "norn_fs::publish", reason = "the one applier is the one caller of the vault write kernel" },
+    { path = "norn_fs::confirm_landed", reason = "the one applier is the one caller of the vault write kernel" },
+    { path = "norn_fs::discard", reason = "the one applier is the one caller of the vault write kernel" },
+    { path = "norn_fs::remove_empty_folders", reason = "the one applier is the one caller of the vault write kernel" },
 ]
 
 # The types that open a filesystem handle. A type only ever obtained from a

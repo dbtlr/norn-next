@@ -1477,6 +1477,8 @@ cannot tell a signature crossing the seam from legitimate test and helper use. T
 - no SQLite connection opened outside `norn-db`
 - `std::fs` disallowed workspace-wide
 - no `norn-config` registry-surface use outside `norn-host`
+- no `norn-fs` write entry point — `stage`, `publish`, `confirm_landed`, `discard`,
+  `remove_empty_folders` — outside the one applier (invariant 4)
 - no direct stdout writes outside `norn-console`
 
 Where clippy carries the ruleset, one workspace-root `clippy.toml` holds all of it, because
@@ -1489,10 +1491,12 @@ live, and are kept accurate as effects are added — they are not the enforceabl
 enforceable ruleset is the harness's code**; a site missing from a table is a gap in the
 table, and a site the ruleset rejects is rejected whatever the table says.
 
-The other two configured rules carve out inside a single crate each, and that fact is the
-whole map: the SQLite rule's one carve-out is the connection `norn-db` opens, which is
-the seam the rule exists to keep to one place, and the registry rule's are in
-`norn-config`'s own suite, which exercises the surface the rule reserves to `norn-host`.
+The other three configured rules carve out narrowly, and that fact is the whole map: the
+SQLite rule's one carve-out is the connection `norn-db` opens, which is the seam the rule
+exists to keep to one place; the registry rule's are in `norn-config`'s own suite, which
+exercises the surface the rule reserves to `norn-host`; and the write-kernel rule's are the
+applier's staging and publishing functions in `norn-host` and `norn-fs`'s own suites, which
+exercise the kernel the rule reserves to the applier.
 
 Each effect a row names is one of two things. Most are **carried today** by a use-site allow
 in a crate the workspace holds. The rest are **reserved** — the crate is not written yet, or

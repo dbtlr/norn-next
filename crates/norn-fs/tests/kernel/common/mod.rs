@@ -53,6 +53,7 @@ impl Scratch {
     }
 
     /// Stage `transition` at `relative` below this vault's root.
+    #[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
     pub fn stage(&self, relative: &str, transition: Transition<'_>) -> Result<Staging, Refusal> {
         norn_fs::stage(
             &self.vault(),
@@ -71,11 +72,13 @@ impl Scratch {
     }
 
     /// Discard what [`Scratch::stage`] staged.
+    #[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
     pub fn discard(&self, staged: Staged) {
         norn_fs::discard(&self.vault(), staged, &self.shadows);
     }
 
     /// Publish what [`Scratch::stage`] staged.
+    #[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
     pub fn publish(&self, staged: Staged) -> Result<Publication, Refusal> {
         norn_fs::publish(&self.vault(), staged, &self.shadows)
     }

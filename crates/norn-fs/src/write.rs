@@ -2799,6 +2799,7 @@ mod tests {
     /// name and something else can take it. The forbidden shape is a removal
     /// by name, which deletes a file this call did not make.
     #[test]
+    #[allow(clippy::disallowed_methods)] // The kernel's own suite: its write entry points are what it exercises.
     fn a_discard_never_removes_a_file_it_did_not_stage() {
         let scratch = Scratch::new("write-discard-foreign");
         let staged = staged_in(
