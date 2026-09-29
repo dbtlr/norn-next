@@ -36,7 +36,9 @@
 //! already matches its after-state is landed whoever put it there, a
 //! hand-edited after-state included, so a plan every one of whose targets
 //! already holds its after-state answers applied, every target found, and
-//! writes nothing (see [`recompose`]).
+//! writes nothing (see [`recompose`]). The one exception is a target whose
+//! after-state equals its before-state: it is recomposed from the bytes it
+//! holds, so an edit made to change nothing there is refused.
 //!
 //! A refusal answers with a fresh plan ([`refresh`]); so does a plan that is
 //! not what its operations do, with every operation resolved afresh and no

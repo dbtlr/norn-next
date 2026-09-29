@@ -62,7 +62,10 @@ pub(super) enum Recomposed {
 /// (ADR 0031's landed rule). So a plan whose after-states were edited by hand
 /// to what the vault already holds is not caught here: every target is
 /// judged landed, nothing is recomposed against those after-states, and the
-/// plan answers applied with every target found, writing nothing.
+/// plan answers applied with every target found, writing nothing. A target
+/// whose after-state equals its before-state is the exception: its held bytes
+/// are its before-bytes, so it is recomposed from them, and an operation that
+/// would change it refuses the plan.
 pub(super) fn recompose<V: VaultView>(
     plan: &ResolvedPlan,
     states: &[TargetState],
