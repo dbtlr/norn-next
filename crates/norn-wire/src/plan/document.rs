@@ -61,7 +61,6 @@ use crate::plan::root::RootIdentity;
 /// `{"state":"present","hash":"sha256:…"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-#[non_exhaustive]
 pub enum FileState {
     /// Nothing stands at the path.
     Absent {},
@@ -118,7 +117,6 @@ impl Transition {
 /// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
-#[non_exhaustive]
 pub enum PlanCondition {
     /// The file at the path holds exactly the bytes with this hash.
     #[non_exhaustive]

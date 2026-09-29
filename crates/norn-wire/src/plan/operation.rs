@@ -116,7 +116,6 @@ impl JsonSchema for OperationId {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-#[non_exhaustive]
 pub enum OperationKind {
     /// Create a document that does not exist yet, holding exactly this
     /// content.
@@ -196,7 +195,6 @@ impl OperationKind {
 /// `{"condition":"content_hash","path":"notes/a.md","hash":"sha256:…"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
-#[non_exhaustive]
 pub enum AuthorCondition {
     /// The file at the path holds exactly the bytes with this hash. On a file
     /// the plan writes, it becomes that file's before-state; on any other

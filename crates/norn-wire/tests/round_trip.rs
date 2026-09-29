@@ -7762,3 +7762,55 @@ fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
         );
     }
 }
+
+/// What the one applier decides for each kind, state and condition, written
+/// the way it must be: a match with no wildcard arm, outside this crate. The
+/// four enums are plain, so a member minted without a decision here fails to
+/// compile rather than falling into a default.
+fn applier_decision(operation: &Operation) -> String {
+    let writes = match &operation.kind {
+        OperationKind::CreateDocument { path, .. } => format!("create {path}"),
+        OperationKind::StrReplace { path, .. } => format!("edit {path}"),
+        OperationKind::MoveDocument { from, to, .. } => format!("move {from} to {to}"),
+        OperationKind::DeleteDocument { path, .. } => format!("delete {path}"),
+    };
+    let observed: Vec<String> = operation
+        .conditions
+        .iter()
+        .map(|condition| match condition {
+            AuthorCondition::ContentHash { path, .. } => format!("hash of {path}"),
+        })
+        .collect();
+    format!("{writes}; {}", observed.join(", "))
+}
+
+fn plan_check(condition: &PlanCondition) -> String {
+    match condition {
+        PlanCondition::ContentHash { path, .. } => format!("hash of {path}"),
+    }
+}
+
+fn state_check(state: &FileState) -> &'static str {
+    match state {
+        FileState::Absent {} => "absent",
+        FileState::Present { .. } => "present",
+    }
+}
+
+#[test]
+fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
+    let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
+    assert_eq!(decisions.len(), operations().len());
+    assert_eq!(
+        decisions.last().map(String::as_str),
+        Some("edit notes/a.md; hash of notes/a.md")
+    );
+    assert_eq!(
+        plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
+        ["hash of notes/c.md"]
+    );
+    assert_eq!(
+        file_states().iter().map(state_check).collect::<Vec<_>>(),
+        ["absent", "present"]
+    );
+}

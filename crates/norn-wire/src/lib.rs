@@ -306,17 +306,23 @@
 //! breaking a caller that only reads; a plain enum makes that arrival break
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
-//! [`FindingScope`] and [`RungSelection`] are the three members of that
+//! [`FindingScope`], [`RungSelection`], [`OperationKind`], [`FileState`],
+//! [`AuthorCondition`] and [`PlanCondition`] are the seven members of that
 //! class: a section composes with an engine's own refusal to say what a client
 //! should do, a scope decides whether a finding is withheld from a document
-//! row, and a selection is resolved to the ladder a search runs. A composer of
+//! row, a selection is resolved to the ladder a search runs, and the one
+//! applier must decide what every operation kind, file state and condition
+//! means — how a kind resolves into transitions, how a state is verified, how
+//! a condition is checked — since a plan it cannot interpret must never apply
+//! as though it could. A composer of
 //! any of them that has not made the decision should fail to compile rather
 //! than fall into a default arm, so none carries the attribute and a new
 //! member is a deliberate break at every composition site. The two rules compose rather
 //! than exclude: [`EngineSection::Malformed`] carries a payload, so the
 //! variant is `#[non_exhaustive]` in its own right and grows by gaining a
 //! field, while the enum around it stays plain and grows by breaking every
-//! composer.
+//! composer — and so does every payload variant of the four plan enums, each
+//! built through its constructor.
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so
