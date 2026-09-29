@@ -7,17 +7,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
-use norn_wire::{FileState, OperationKind, PlanFault, RefusedCheck, ResolvedPlan, Transition};
+use norn_wire::{FileState, PlanFault, RefusedCheck, ResolvedPlan, Transition};
 
-use super::lineage::Lineage;
 use super::observe::{
     TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
-    transition_index, units,
+    recorded_lineage, transition_index, units,
 };
 use super::recompose::{Recomposed, recompose};
 use super::schema;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
+use crate::planner::lineage::Lineage;
 use crate::planner::view::{TreeView, VaultView, wire_hash};
 
 /// A plan every target of which is checked and staged: one fixed-size record
@@ -170,7 +170,7 @@ pub(super) fn check_and_stage(
     if !checks.is_empty() {
         return Err(Stop::Refused(checks));
     }
-    let lineage = Lineage::of(plan, normalizer);
+    let lineage = recorded_lineage(plan, normalizer);
     let composition = match recompose(plan, &states, &lineage, view)
         .map_err(|error| Stop::Failed(error.to_string()))?
     {
@@ -196,7 +196,7 @@ pub(super) fn check_and_stage(
         return Err(Stop::Refused(checks));
     }
     let phases: Vec<Phase> = units.iter().map(|unit| phase(plan, *unit)).collect();
-    let order = publication_order(plan, &units, &phases, normalizer).map_err(Stop::Invalid)?;
+    let order = publication_order(plan, &units, &phases, &lineage, normalizer);
     let mut staged: Vec<StagedTarget> = Vec::with_capacity(units.len());
     for position in order {
         let unit = units[position];
@@ -458,22 +458,21 @@ fn phase(plan: &ResolvedPlan, unit: Unit) -> Phase {
 }
 
 /// The order `units` publish in, by position: creates, then replaces, then
-/// removals; and among the replaces, every target a move draws its content
-/// from after the target it moves to, so no source is replaced before what
-/// draws on it landed. Within one phase the plan's own order breaks ties.
+/// removals; and every target whose content is drawn from another target's
+/// before-state before that source, so no source is replaced or removed
+/// before what draws on it landed. Within one phase the plan's own order
+/// breaks ties.
 ///
-/// **A cycle is refused**, as a content cycle: each of its sources would be
-/// replaced before a target drawing on it landed, so a crash between two of
-/// its publications would leave a content no re-send can recompose.
-/// [`recompose`] refuses the cycles planning refuses; this one closes through
-/// a name the plan makes and takes away again, such as two documents
-/// exchanging places through a third.
+/// **Always an order.** Each file draws on at most one other, and
+/// [`recompose`] refuses a plan whose drawing closes a cycle through the
+/// planner's one content-cycle rule, so what is left to order has no cycle.
 fn publication_order(
     plan: &ResolvedPlan,
     units: &[Unit],
     phases: &[Phase],
+    lineage: &Lineage,
     normalizer: &PathNormalizer,
-) -> Result<Vec<usize>, PlanFault> {
+) -> Vec<usize> {
     let mut by_phase: Vec<usize> = (0..units.len()).collect();
     by_phase.sort_by_key(|&position| phases[position]);
     let index_of = transition_index(plan, normalizer);
@@ -482,47 +481,32 @@ fn publication_order(
         .enumerate()
         .flat_map(|(position, unit)| unit.transitions().map(move |index| (index, position)))
         .collect();
-    // Each unit waits for the units it must follow, and the moves that make
-    // it wait.
-    let mut waits: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
-    for (position, operation) in plan.operations.iter().enumerate() {
-        let OperationKind::MoveDocument { from, to } = &operation.kind else {
+    // Each source's unit waits for the units of the targets drawing on it.
+    let mut waits: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (file, drawn) in lineage.drawing() {
+        let (Some(target), Some(source)) = (index_of.get(file), index_of.get(&drawn.from)) else {
             continue;
         };
-        let (Some(from), Some(to)) = (
-            identity(normalizer, from.as_str()).and_then(|id| index_of.get(&id)),
-            identity(normalizer, to.as_str()).and_then(|id| index_of.get(&id)),
-        ) else {
-            continue;
-        };
-        let (source, destination) = (unit_of[from], unit_of[to]);
-        if source != destination {
-            waits
-                .entry(source)
-                .or_default()
-                .insert(destination, position);
+        let (target, source) = (unit_of[target], unit_of[source]);
+        if source != target {
+            waits.entry(source).or_default().insert(target);
         }
     }
     let mut placed: BTreeSet<usize> = BTreeSet::new();
     let mut order: Vec<usize> = Vec::with_capacity(units.len());
     while order.len() < units.len() {
-        let Some(next) = by_phase.iter().copied().find(|position| {
-            !placed.contains(position)
-                && waits
-                    .get(position)
-                    .is_none_or(|before| before.keys().all(|wait| placed.contains(wait)))
-        }) else {
-            let mut cycle: Vec<usize> = waits
-                .iter()
-                .filter(|(waiting, _)| !placed.contains(waiting))
-                .flat_map(|(_, on)| on.values().copied())
-                .collect();
-            cycle.sort_unstable();
-            cycle.dedup();
-            return Err(PlanFault::content_cycle(cycle));
-        };
+        let next = by_phase
+            .iter()
+            .copied()
+            .find(|position| {
+                !placed.contains(position)
+                    && waits
+                        .get(position)
+                        .is_none_or(|before| before.iter().all(|wait| placed.contains(wait)))
+            })
+            .expect("recomposition refused every content cycle");
         placed.insert(next);
         order.push(next);
     }
-    Ok(order)
+    order
 }

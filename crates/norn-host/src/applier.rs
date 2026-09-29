@@ -18,7 +18,9 @@
 //!   a plan whose transitions say anything its operations do not is refused
 //!   before anything is staged — every composed result against the vault
 //!   schema ([`schema`]), judged against the document its content came from
-//!   ([`lineage`]), and a shadow for every written target, a create included.
+//!   (the planner's one [`lineage`](crate::planner::lineage), followed in the
+//!   plan's recorded order, which also refuses a content cycle), and a shadow
+//!   for every written target, a create included.
 //!   A refusal here discards every shadow and publishes nothing.
 //! - [`publish`] — creates, then replaces, then removals, each verified again
 //!   by the kernel, with every folder a removal left empty removed after
@@ -51,7 +53,6 @@
 //!
 //! [ADR 0031]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md
 
-mod lineage;
 mod observe;
 mod outcome;
 mod publish;

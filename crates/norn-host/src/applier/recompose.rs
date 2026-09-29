@@ -30,9 +30,9 @@ use norn_wire::{
     AuthorCondition, FileState, OperationKind, PlanCondition, PlanFault, ResolvedPlan,
 };
 
-use super::lineage::Lineage;
 use super::observe::{TargetState, identity};
 use crate::planner::compose::{Composition, compose, content_hash};
+use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
 use crate::planner::view::{Entry, VaultView};
@@ -75,6 +75,9 @@ pub(super) fn recompose<V: VaultView>(
         return Ok(Recomposed::Unsound(
             "its operations are not recorded in an order their requirements allow".to_string(),
         ));
+    }
+    if let Some(cycle) = lineage.content_cycle() {
+        return Ok(Recomposed::Invalid(PlanFault::content_cycle(cycle)));
     }
     let composition = compose(&plan.operations, &recorded, &before)?;
     let unseen = |file: &NormalizedPath| before.unseen.contains(file);
@@ -303,8 +306,7 @@ mod tests {
         RootIdentity, Transition, VaultAddress, VaultName,
     };
 
-    use super::super::lineage::Lineage;
-    use super::super::observe::{observe, units};
+    use super::super::observe::{observe, recorded_lineage, units};
     use super::{Recomposed, recompose};
     use crate::planner::compose::content_hash;
     use crate::planner::resolve::resolve;
@@ -326,7 +328,7 @@ mod tests {
     fn recomposed(plan: &ResolvedPlan, vault: &MemoryVault) -> Recomposed {
         let units = units(plan, VaultView::normalizer(vault));
         let (states, _) = observe(plan, &units, vault).expect("an infallible view");
-        let lineage = Lineage::of(plan, VaultView::normalizer(vault));
+        let lineage = recorded_lineage(plan, VaultView::normalizer(vault));
         recompose(plan, &states, &lineage, vault).expect("an infallible view")
     }
 

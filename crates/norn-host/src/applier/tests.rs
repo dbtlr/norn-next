@@ -1181,18 +1181,28 @@ fn a_plan_whose_moves_exchange_two_documents_is_invalid() {
 /// Two documents exchanging places through a third name the plan makes and
 /// takes away is the same content cycle: each draws on the other's
 /// before-state, so neither can publish first without destroying what the
-/// other needs. The planner orders these moves without finding the cycle, so
-/// the applier is where it is refused.
+/// other needs. Planning refuses it; a caller can still send the resolved
+/// plan by hand, and the applier refuses it by the planner's own rule, the
+/// moves named from the file whose moves hold the lowest position.
 #[test]
 fn a_plan_exchanging_two_documents_through_a_third_name_is_invalid() {
     let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
-    let plan = fixture.plan(vec![
+    let operations = vec![
         moving("a.md", "t.md"),
         moving("b.md", "a.md"),
         moving("t.md", "b.md"),
-    ]);
-    assert_eq!(
-        plan.transitions,
+    ];
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let name = VaultName::new("notes").expect("a legal vault name");
+    let authored = AuthoredPlan::new(VaultAddress::name(name), operations.clone());
+    match resolve(authored, fixture.root_identity(), &BTreeSet::new(), &view) {
+        Err(crate::planner::resolve::PlanningFailure::Fault(
+            norn_wire::PlanFault::ContentCycle { .. },
+        )) => {}
+        other => panic!("planning refuses the plan as a content cycle: {other:?}"),
+    }
+    let plan = fixture.by_hand(
+        operations,
         vec![
             norn_wire::Transition::new(path("a.md"), present("# A\n"), present("# B\n")),
             norn_wire::Transition::new(path("b.md"), present("# B\n"), present("# A\n")),
@@ -1201,16 +1211,17 @@ fn a_plan_exchanging_two_documents_through_a_third_name_is_invalid() {
                 norn_wire::FileState::absent(),
                 norn_wire::FileState::absent(),
             ),
-        ]
+        ],
     );
     match fixture.apply(plan) {
         ApplyOutcome::Invalid(norn_wire::PlanFault::ContentCycle { positions, .. }) => {
-            assert_eq!(positions, vec![0, 1, 2]);
+            assert_eq!(positions, vec![0, 2, 1]);
         }
         other => panic!("the plan is invalid as a content cycle: {other:?}"),
     }
     assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
     assert_eq!(fixture.read("b.md").as_deref(), Some("# B\n"));
+    assert!(fixture.read("t.md").is_none());
     assert!(fixture.recorded.calls.borrow().is_empty());
     assert!(fixture.shadows_left().is_empty());
 }

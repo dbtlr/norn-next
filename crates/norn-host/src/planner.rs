@@ -34,7 +34,9 @@
 //!   operations' targets draw on each other's before-states through a name
 //!   nothing stood at, such as two documents exchanging places through a
 //!   temporary name, the plan is refused as `request/plan-invalid`, as a
-//!   direct exchange is by [`order`].
+//!   direct exchange is by [`order`]. The same derivation is the applier's:
+//!   it follows a resolved plan's content through its moves in the recorded
+//!   order, and refuses its content cycles by this one rule.
 //! - [`forecast`](mod@forecast) — the folders the plan makes and removes.
 //!
 //! **Composition is shared with the applier.** A target's after-bytes are a

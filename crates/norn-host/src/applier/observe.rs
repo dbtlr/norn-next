@@ -8,7 +8,7 @@ use std::sync::Arc;
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
 use norn_wire::{FileState, PlanCondition, ResolvedPlan, Transition};
 
-use super::lineage::Lineage;
+use crate::planner::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
 
 /// One publication the kernel makes: a transition on its own, or the two
@@ -170,7 +170,7 @@ pub(super) fn observe<V: VaultView>(
         .into_iter()
         .map(|state| state.expect("every transition is in one unit"))
         .collect();
-    let lineage = Lineage::of(plan, view.normalizer());
+    let lineage = recorded_lineage(plan, view.normalizer());
     let sources = drifted_sources(plan, &mut states, &lineage, view.normalizer());
     Ok((states, sources))
 }
@@ -354,6 +354,14 @@ pub(super) fn failed_conditions<V: VaultView>(
         }
     }
     Ok(failed)
+}
+
+/// Where each file's content in `plan` is drawn from, following its
+/// operations in their recorded order: the planner's one lineage derivation,
+/// over the order a resolved plan composes in.
+pub(super) fn recorded_lineage(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Lineage {
+    let recorded: Vec<usize> = (0..plan.operations.len()).collect();
+    Lineage::of(&plan.operations, &recorded, normalizer)
 }
 
 /// `path`'s identity under the vault's one rule, where it names a file.

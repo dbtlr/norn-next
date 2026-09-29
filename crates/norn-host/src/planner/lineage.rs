@@ -9,7 +9,9 @@
 //! before-state must therefore land before that other target publishes. Where
 //! those requirements close a cycle — two documents exchanging places, or a
 //! rotation among several — no publication order keeps every source standing,
-//! and the plan is refused at planning as a content cycle.
+//! and the plan is refused at planning as a content cycle. The applier holds
+//! a resolved plan to the same rule over its recorded order, since a caller
+//! can send one planning never produced.
 //!
 //! **Which check catches what.** [`super::order`] refuses a cycle among the
 //! operations' own order: a move waits for what vacates its destination only
@@ -26,47 +28,148 @@ use std::path::Path;
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{Operation, OperationKind};
 
-/// Where the content a file holds at the end of a plan was drawn from.
+/// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Drawn {
+pub(crate) struct Drawn {
     /// The file whose before-state the content is.
-    from: NormalizedPath,
+    pub(crate) from: NormalizedPath,
     /// The positions of the moves that carried it there, in the order they
     /// compose.
-    moves: Vec<usize>,
+    pub(crate) moves: Vec<usize>,
 }
 
-/// The positions of the moves closing a content cycle among `operations`,
-/// taken in `order`, or `None` where their targets draw on no cycle.
+/// Which file's before-state every file's content is drawn from, at the end
+/// of a plan and where each of its edits acted.
 ///
 /// **What a target draws on.** Only a move carries content between files: a
 /// file no operation has touched holds its own before-state, a create writes
 /// content its operation carries, a removal leaves nothing, an edit changes
 /// the content a file already holds, and a move takes its source's content to
-/// its destination and leaves the source holding nothing. Following
-/// `operations` at the positions `order` names, in that order, gives each
-/// file whose content at the end is another file's before-state. A case-only
-/// rename, whose two spellings `normalizer` names as one file, keeps its
-/// file's content where it was; a name `normalizer` refuses is no file and
-/// carries nothing.
+/// its destination and leaves the source holding nothing. A case-only rename,
+/// whose two spellings the normalizer names as one file, keeps its file's
+/// content where it was; a name the normalizer refuses is no file and carries
+/// nothing.
 ///
-/// **The cycle.** Each such file must land before the file it draws on is
-/// replaced or removed, and a file drawing on its own before-state waits for
-/// nothing. A cycle among those requirements is reported as the moves that
-/// carry its content, each file's moves in the order they compose, starting
-/// from the file whose moves hold the lowest position.
-///
-/// **A dormant carrier for the applier.** The planner calls this on the
-/// order a resolved plan's operations compose in. Its second consumer is
-/// NORN-295's applier, which will call it on a resolved plan's operations in
-/// their recorded order so one rule judges both; that applier has not landed
-/// on this branch, so the planner is its only caller today.
+/// **One derivation, two consumers.** The planner reads it for the content
+/// cycle alone, on the order a resolved plan's operations compose in. The
+/// applier reads it on a resolved plan's operations in their recorded order,
+/// for the same content cycle and for what else follows content through
+/// moves: drift of a source a target that has not landed draws on, the
+/// schema baseline each result is judged against, and the stand-in for a
+/// before-state an apply cannot see. The applier is itself a dormant carrier
+/// until NORN-295's `Host::apply` reaches it.
+#[derive(Debug, Default)]
+pub(crate) struct Lineage {
+    /// Each file an operation touches, and the source of what it holds at
+    /// the end of the plan: `None` where an operation wrote it or it holds
+    /// nothing.
+    at_end: BTreeMap<NormalizedPath, Option<Drawn>>,
+    /// Each edit's position, and the file whose before-state the content it
+    /// acted on was drawn from.
+    edited: BTreeMap<usize, NormalizedPath>,
+}
+
+impl Lineage {
+    /// Follow `operations` at the positions `order` names, in that order,
+    /// reading every name through `normalizer`.
+    pub(crate) fn of(
+        operations: &[Operation],
+        order: &[usize],
+        normalizer: &PathNormalizer,
+    ) -> Lineage {
+        let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
+        let mut lineage = Lineage::default();
+        for &position in order {
+            match &operations[position].kind {
+                OperationKind::CreateDocument { path, .. }
+                | OperationKind::DeleteDocument { path } => {
+                    if let Some(file) = identity(path.as_str()) {
+                        lineage.at_end.insert(file, None);
+                    }
+                }
+                OperationKind::StrReplace { path, .. } => {
+                    if let Some(file) = identity(path.as_str())
+                        && let Some(source) = lineage.source(&file)
+                    {
+                        lineage.edited.insert(position, source.from);
+                    }
+                }
+                OperationKind::MoveDocument { from, to } => {
+                    let (Some(from), Some(to)) = (identity(from.as_str()), identity(to.as_str()))
+                    else {
+                        continue;
+                    };
+                    if from == to {
+                        continue;
+                    }
+                    let carried = lineage.source(&from).map(|mut drawn| {
+                        drawn.moves.push(position);
+                        drawn
+                    });
+                    lineage.at_end.insert(from, None);
+                    lineage.at_end.insert(to, carried);
+                }
+            }
+        }
+        lineage
+    }
+
+    /// The source of what `file` holds at the end of the plan, where its
+    /// content was drawn from a before-state; a file no operation touches
+    /// draws on its own.
+    pub(crate) fn source(&self, file: &NormalizedPath) -> Option<Drawn> {
+        match self.at_end.get(file) {
+            Some(drawn) => drawn.clone(),
+            None => Some(Drawn {
+                from: file.clone(),
+                moves: Vec::new(),
+            }),
+        }
+    }
+
+    /// The file whose before-state the edit at `position` acted on, where it
+    /// acted on one.
+    pub(crate) fn edited(&self, position: usize) -> Option<&NormalizedPath> {
+        self.edited.get(&position)
+    }
+
+    /// Each file whose content at the end of the plan is another file's
+    /// before-state, and where that content was drawn from.
+    pub(crate) fn drawing(&self) -> impl Iterator<Item = (&NormalizedPath, &Drawn)> {
+        self.at_end.iter().filter_map(|(file, drawn)| {
+            drawn
+                .as_ref()
+                .filter(|drawn| drawn.from != *file)
+                .map(|drawn| (file, drawn))
+        })
+    }
+
+    /// The positions of the moves closing a content cycle, or `None` where
+    /// no target draws on a cycle.
+    ///
+    /// Each file drawing on another must land before the file it draws on is
+    /// replaced or removed, and a file drawing on its own before-state waits
+    /// for nothing. A cycle among those requirements is reported as the
+    /// moves that carry its content, each file's moves in the order they
+    /// compose, starting from the file whose moves hold the lowest position.
+    pub(crate) fn content_cycle(&self) -> Option<Vec<usize>> {
+        first_cycle(&self.drawing_map(), &mut 0)
+    }
+
+    fn drawing_map(&self) -> BTreeMap<&NormalizedPath, &Drawn> {
+        self.drawing().collect()
+    }
+}
+
+/// The positions of the moves closing a content cycle among `operations`,
+/// taken in `order`, or `None` where their targets draw on no cycle: the
+/// rule [`Lineage::content_cycle`] states, over [`Lineage::of`].
 pub(crate) fn content_cycle(
     operations: &[Operation],
     order: &[usize],
     normalizer: &PathNormalizer,
 ) -> Option<Vec<usize>> {
-    first_cycle(&lineage(operations, order, normalizer), &mut 0)
+    Lineage::of(operations, order, normalizer).content_cycle()
 }
 
 /// The cycle among `drawing` whose moves hold the lowest position, counting
@@ -77,10 +180,13 @@ pub(crate) fn content_cycle(
 /// a file an earlier walk finished, a file drawing on nothing, or a file on
 /// its own path, which closes a cycle. Every file it passed is then finished,
 /// so the whole search is linear in the files that draw on another.
-fn first_cycle(drawing: &BTreeMap<NormalizedPath, Drawn>, steps: &mut usize) -> Option<Vec<usize>> {
+fn first_cycle(
+    drawing: &BTreeMap<&NormalizedPath, &Drawn>,
+    steps: &mut usize,
+) -> Option<Vec<usize>> {
     let mut finished: BTreeSet<&NormalizedPath> = BTreeSet::new();
     let mut cycles: Vec<Vec<usize>> = Vec::new();
-    for start in drawing.keys() {
+    for &start in drawing.keys() {
         if finished.contains(start) {
             continue;
         }
@@ -111,7 +217,7 @@ fn first_cycle(drawing: &BTreeMap<NormalizedPath, Drawn>, steps: &mut usize) -> 
 
 /// The moves carrying a cycle's content, from the file whose moves hold the
 /// lowest position.
-fn carriers(cycle: &[&NormalizedPath], drawing: &BTreeMap<NormalizedPath, Drawn>) -> Vec<usize> {
+fn carriers(cycle: &[&NormalizedPath], drawing: &BTreeMap<&NormalizedPath, &Drawn>) -> Vec<usize> {
     let lowest = |file: &&NormalizedPath| drawing[*file].moves.iter().min().copied();
     let first = (0..cycle.len())
         .min_by_key(|&index| lowest(&cycle[index]))
@@ -120,58 +226,6 @@ fn carriers(cycle: &[&NormalizedPath], drawing: &BTreeMap<NormalizedPath, Drawn>
         .iter()
         .chain(&cycle[..first])
         .flat_map(|file| drawing[*file].moves.iter().copied())
-        .collect()
-}
-
-/// Each file whose content at the end of the plan is another file's
-/// before-state, and where that content was drawn from.
-fn lineage(
-    operations: &[Operation],
-    order: &[usize],
-    normalizer: &PathNormalizer,
-) -> BTreeMap<NormalizedPath, Drawn> {
-    let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
-    // Every file an operation touched, and what it holds so far: `None`
-    // where it holds nothing drawn from a before-state.
-    let mut holding: BTreeMap<NormalizedPath, Option<Drawn>> = BTreeMap::new();
-    let held =
-        |holding: &BTreeMap<NormalizedPath, Option<Drawn>>, file: &NormalizedPath| match holding
-            .get(file)
-        {
-            Some(drawn) => drawn.clone(),
-            None => Some(Drawn {
-                from: file.clone(),
-                moves: Vec::new(),
-            }),
-        };
-    for &position in order {
-        match &operations[position].kind {
-            OperationKind::CreateDocument { path, .. } | OperationKind::DeleteDocument { path } => {
-                if let Some(file) = identity(path.as_str()) {
-                    holding.insert(file, None);
-                }
-            }
-            OperationKind::StrReplace { .. } => {}
-            OperationKind::MoveDocument { from, to } => {
-                let (Some(from), Some(to)) = (identity(from.as_str()), identity(to.as_str()))
-                else {
-                    continue;
-                };
-                if from == to {
-                    continue;
-                }
-                let carried = held(&holding, &from).map(|mut drawn| {
-                    drawn.moves.push(position);
-                    drawn
-                });
-                holding.insert(from, None);
-                holding.insert(to, carried);
-            }
-        }
-    }
-    holding
-        .into_iter()
-        .filter_map(|(file, drawn)| drawn.filter(|drawn| drawn.from != file).map(|d| (file, d)))
         .collect()
 }
 
@@ -203,7 +257,8 @@ mod tests {
         );
         let order: Vec<usize> = (0..operations.len()).collect();
         let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
-        let drawing = lineage(&operations, &order, &normalizer);
+        let lineage = Lineage::of(&operations, &order, &normalizer);
+        let drawing = lineage.drawing_map();
         assert_eq!(drawing.len(), files);
         let mut steps = 0;
         assert_eq!(first_cycle(&drawing, &mut steps), None);
