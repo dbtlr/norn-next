@@ -1426,3 +1426,50 @@ fn damage_carried_to_an_apply_claim_before_its_job_runs_is_published_and_answers
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, holding_lease, host));
 }
+
+/// **An apply arriving over damage a read carried to a running turn is
+/// refused at once.** The damage is not yet published — the turn holding the
+/// claim publishes it where it ends — so the entry stands on no published
+/// cause, and the apply is refused with its reader unavailable until the
+/// rebuild, as a read over a serving entry meeting the damage is, rather than
+/// queued behind a turn that ends by answering it.
+#[test]
+fn an_apply_arriving_over_damage_carried_to_a_turn_is_refused_at_once() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
+    hold_a_reconcile_turn(&ops, &host);
+    let _ = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    drop(hold);
+
+    let refused = host
+        .admit_apply(&name, a_plan(&name))
+        .expect_err("an apply over carried damage was admitted");
+    assert_eq!(
+        refused,
+        ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+            "the store found its derived data damaged while other work held this entry; the \
+             entry rebuilds it when that work ends",
+        ))
+        .answer(&name)
+    );
+    assert!(
+        host.shared
+            .entries
+            .get(&name)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .applies
+            .is_empty()
+    );
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
