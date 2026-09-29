@@ -3,8 +3,9 @@
 //!
 //! **One entry point, one handle.** [`Host::apply`] answers both modes with a
 //! [`PendingApply`]. A preview takes an ordinary read hold — the demand and the
-//! refusals a read's hold carries, and one snapshot — plans the operations
-//! through the one planner, and writes nothing, so its handle holds the answer
+//! refusals a read's hold carries, and one snapshot — plans operations through
+//! the one planner or judges a resolved plan through the one applier's
+//! checks, and writes nothing, so its handle holds the answer
 //! already and [`PendingApply::wait`] returns it at once. An apply is admitted
 //! onto its entry's queue ([`Host::admit_apply`]), and its handle waits on the
 //! job that runs it. A caller therefore never branches on the mode to learn how
