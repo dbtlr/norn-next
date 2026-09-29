@@ -1,19 +1,20 @@
 //! Planning: operations resolved against the vault into a resolved plan, or
 //! refused for a fault in their shape.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use norn_wire::{
-    AuthorCondition, AuthoredPlan, DocumentPath, FileState, Forecast, Operation, OperationId,
-    OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition,
+    AuthorCondition, AuthoredPlan, ContentHash, DocumentPath, FileState, Forecast, Operation,
+    OperationId, OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition,
     UnresolvedOperation, UnresolvedReason,
 };
 
 use super::compose::{Composition, compose, content_hash, touches};
 use super::forecast::forecast;
 use super::order::dependencies;
-use super::view::{Remembered, VaultView};
+use super::view::{self, Remembered, VaultView};
 
 /// What planning a plan came to.
 #[derive(Debug)]
@@ -37,9 +38,18 @@ pub(crate) enum PlanningFailure<E> {
 }
 
 /// Plan `authored` against what `view` holds, under the root `root`.
+///
+/// **`met` is what a refresh already landed.** A refused apply's fresh plan
+/// drops every operation whose targets all hold their after-states and
+/// re-resolves the rest (ADR 0031), so an operation that remains may require
+/// one that was dropped. `met` names those: a requirement on one is
+/// satisfied, orders nothing, and is left off the operation the resolved plan
+/// carries, so the fresh plan is a whole plan that can be sent back as it is.
+/// An authored plan and a write verb's operation plan with nothing met.
 pub(crate) fn resolve<V: VaultView>(
     authored: AuthoredPlan,
     root: RootIdentity,
+    met: &BTreeSet<OperationId>,
     view: &V,
 ) -> Result<Resolution, PlanningFailure<V::Error>> {
     let AuthoredPlan {
@@ -48,19 +58,22 @@ pub(crate) fn resolve<V: VaultView>(
         operations,
         footnote,
     } = authored;
-    let dependencies = dependencies(&operations).map_err(PlanningFailure::Fault)?;
     let view = &Remembered::over(view);
+    let dependencies = dependencies(&operations, met, view)?;
     let mut left_out: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     let (order, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-        let failed = failures(&operations, &order, &composition);
+        let failed =
+            failures(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
         if failed.is_empty() {
             break (order, composition);
         }
         left_out.extend(failed);
-        leave_out_what_falls_with(&operations, &mut left_out);
+        leave_out_what_falls_with(&operations, &mut left_out, view);
     };
+    let conditions =
+        plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     let transitions = composition
         .targets
         .into_iter()
@@ -72,13 +85,22 @@ pub(crate) fn resolve<V: VaultView>(
             Transition::new(path, target.before, after)
         })
         .collect::<Vec<_>>();
-    let conditions = plan_conditions(&operations, &order, &transitions);
+    let carried: BTreeSet<&OperationId> = operations
+        .iter()
+        .filter_map(|operation| operation.id.as_ref())
+        .collect();
     let mut plan = ResolvedPlan::new(
         vault,
         root,
         order
             .iter()
-            .map(|&position| operations[position].clone())
+            .map(|&position| {
+                let mut operation = operations[position].clone();
+                operation
+                    .requires
+                    .retain(|id| carried.contains(id) || !met.contains(id));
+                operation
+            })
             .collect(),
         transitions,
         conditions,
@@ -97,61 +119,139 @@ pub(crate) fn resolve<V: VaultView>(
 
 /// The operations of this pass that did not resolve: each that met a state it
 /// cannot act on, or, where every operation acted, each whose author observed
-/// a file the plan writes holding what it no longer holds.
+/// a file holding what it no longer holds.
+///
+/// **What fails because what it requires did not act names that
+/// requirement.** An operation composed after one it requires that failed met
+/// the state that one left, so its own failure says nothing its requirement's
+/// does not: it is unresolved for requiring an unresolved operation.
 ///
 /// **Author conditions wait for a pass where everything acted.** Until then
 /// the pass's files include some only an operation that is about to be left
-/// out touches, and a condition on one of those is a plan condition, not a
-/// before-state.
-fn failures(
+/// out touches, and a condition on one of those is judged against the file as
+/// it stands rather than as a before-state.
+///
+/// **A condition is judged as the vault stands at the plan's after-state**
+/// (ADR 0031): on a file the plan writes, against the before-state the plan
+/// reads there, which it checks; on a file it does not write, against the file
+/// as it stands now, which the plan does not change.
+fn failures<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
     composition: &Composition,
-) -> BTreeMap<usize, UnresolvedReason> {
-    let mut failed: BTreeMap<usize, UnresolvedReason> = composition
-        .unresolvable
-        .iter()
-        .map(|unresolvable| {
-            (
-                unresolvable.position,
-                UnresolvedReason::no_longer_resolves(unresolvable.detail.clone()),
-            )
-        })
-        .collect();
-    if !failed.is_empty() {
-        return failed;
+    view: &V,
+) -> Result<BTreeMap<usize, UnresolvedReason>, V::Error> {
+    if !composition.unresolvable.is_empty() {
+        let failed: BTreeSet<usize> = composition
+            .unresolvable
+            .iter()
+            .map(|unresolvable| unresolvable.position)
+            .collect();
+        let falling = requiring_closure(operations, &failed);
+        let carriers = carriers(operations);
+        return Ok(composition
+            .unresolvable
+            .iter()
+            .map(|unresolvable| {
+                let operation = &operations[unresolvable.position];
+                let unmet = operation.requires.iter().find(|required| {
+                    carriers
+                        .get(required)
+                        .is_some_and(|carrier| falling.contains(carrier))
+                });
+                let reason = match unmet {
+                    Some(required) => UnresolvedReason::requires_unresolved(required.clone()),
+                    None => UnresolvedReason::no_longer_resolves(unresolvable.detail.clone()),
+                };
+                (unresolvable.position, reason)
+            })
+            .collect());
     }
+    let mut failed = BTreeMap::new();
     for &position in order {
         for AuthorCondition::ContentHash { path, hash } in &operations[position].conditions {
-            let Some(target) = composition.targets.get(path) else {
-                continue;
-            };
-            if target.before != FileState::present(hash.clone()) {
-                failed.insert(
-                    position,
-                    UnresolvedReason::no_longer_resolves(format!(
-                        "`{path}` no longer holds the content its author observed"
-                    )),
-                );
+            if let Some(detail) = unmet_condition(path, hash, composition, view)? {
+                failed
+                    .entry(position)
+                    .or_insert_with(|| UnresolvedReason::no_longer_resolves(detail));
             }
         }
     }
-    failed
+    Ok(failed)
+}
+
+/// Why the vault does not meet an author's condition that `path` holds
+/// `hash`, or `None` where it does.
+fn unmet_condition<V: VaultView>(
+    path: &DocumentPath,
+    hash: &ContentHash,
+    composition: &Composition,
+    view: &V,
+) -> Result<Option<String>, V::Error> {
+    let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
+        return Ok(Some(format!("`{path}` names no document in the vault")));
+    };
+    let holds = match composition.before(&identity) {
+        Some(before) => *before == FileState::present(hash.clone()),
+        None => matches!(
+            view.entry(&identity)?,
+            view::Entry::Document { hash: held, .. } if held == *hash
+        ),
+    };
+    Ok((!holds).then(|| format!("`{path}` no longer holds the content its author observed")))
+}
+
+/// Where each identifier is carried.
+fn carriers(operations: &[Operation]) -> BTreeMap<&OperationId, usize> {
+    operations
+        .iter()
+        .enumerate()
+        .filter_map(|(position, operation)| Some((operation.id.as_ref()?, position)))
+        .collect()
+}
+
+/// `failed`, with every operation that requires one of them, directly or
+/// through others.
+fn requiring_closure(operations: &[Operation], failed: &BTreeSet<usize>) -> BTreeSet<usize> {
+    let carriers = carriers(operations);
+    let mut falling = failed.clone();
+    loop {
+        let more: Vec<usize> = operations
+            .iter()
+            .enumerate()
+            .filter(|(position, operation)| {
+                !falling.contains(position)
+                    && operation.requires.iter().any(|required| {
+                        carriers
+                            .get(required)
+                            .is_some_and(|carrier| falling.contains(carrier))
+                    })
+            })
+            .map(|(position, _)| position)
+            .collect();
+        if more.is_empty() {
+            return falling;
+        }
+        falling.extend(more);
+    }
 }
 
 /// Leave out, with the operations already left out, every operation that
 /// falls with one of them: one requiring a left-out operation, and one
 /// touching a file a left-out operation touches, since operations on one file
-/// stand or fall together — each directly or through others.
-fn leave_out_what_falls_with(
+/// stand or fall together — each directly or through others. A file is its
+/// identity, so two spellings of one file are one file here too.
+fn leave_out_what_falls_with<V: VaultView>(
     operations: &[Operation],
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
+    view: &V,
 ) {
-    let mut touching: BTreeMap<&DocumentPath, Vec<usize>> = BTreeMap::new();
+    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let mut touching: BTreeMap<_, Vec<usize>> = BTreeMap::new();
     let mut requiring: BTreeMap<&OperationId, Vec<usize>> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
         for path in touches(&operation.kind) {
-            touching.entry(path).or_default().push(position);
+            touching.entry(identity(path)).or_default().push(position);
         }
         for required in &operation.requires {
             requiring.entry(required).or_default().push(position);
@@ -172,7 +272,12 @@ fn leave_out_what_falls_with(
                 (requirer, UnresolvedReason::requires_unresolved(id))
             });
         let by_file = touches(&operation.kind).flat_map(|path| {
-            touching.get(path).into_iter().flatten().map(move |&sharer| {
+            let sharers = match identity(path) {
+                // A name with no identity is no file anybody else touches.
+                None => None,
+                some => touching.get(&some),
+            };
+            sharers.into_iter().flatten().map(move |&sharer| {
                 (
                     sharer,
                     UnresolvedReason::no_longer_resolves(format!(
@@ -191,25 +296,35 @@ fn leave_out_what_falls_with(
 }
 
 /// The author conditions of the operations that resolved on files the plan
-/// does not write, each once, in the order the operations compose.
-fn plan_conditions(
+/// does not write, each once, at the spelling the tree lists, in the order
+/// the operations compose. Each holds: [`failures`] left out every operation
+/// whose condition does not.
+fn plan_conditions<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
-    transitions: &[Transition],
-) -> Vec<PlanCondition> {
+    composition: &Composition,
+    view: &V,
+) -> Result<Vec<PlanCondition>, V::Error> {
     let mut conditions: Vec<PlanCondition> = Vec::new();
     for &position in order {
         for AuthorCondition::ContentHash { path, hash } in &operations[position].conditions {
-            let written = transitions
-                .iter()
-                .any(|transition| &transition.path == path);
-            let condition = PlanCondition::content_hash(path.clone(), hash.clone());
-            if !written && !conditions.contains(&condition) {
+            let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
+                continue;
+            };
+            if composition.before(&identity).is_some() {
+                continue;
+            }
+            let at = match view.entry(&identity)? {
+                view::Entry::Document { at, .. } => at,
+                _ => path.clone(),
+            };
+            let condition = PlanCondition::content_hash(at, hash.clone());
+            if !conditions.contains(&condition) {
                 conditions.push(condition);
             }
         }
     }
-    conditions
+    Ok(conditions)
 }
 
 #[cfg(test)]
@@ -245,7 +360,7 @@ mod tests {
     }
 
     fn planned(vault: &MemoryVault, operations: Vec<Operation>) -> Resolution {
-        match resolve(authored(operations), root(), vault) {
+        match resolve(authored(operations), root(), &BTreeSet::new(), vault) {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),
         }
@@ -433,7 +548,7 @@ mod tests {
             Operation::new(OperationKind::move_document(path("b.md"), path("a.md"))),
         ];
         assert_eq!(
-            resolve(authored(operations), root(), &vault).map(|_| ()),
+            resolve(authored(operations), root(), &BTreeSet::new(), &vault).map(|_| ()),
             Err(PlanningFailure::Fault(PlanFault::content_cycle(vec![0, 1])))
         );
     }
@@ -532,7 +647,7 @@ mod tests {
     #[test]
     fn an_author_condition_is_judged_against_the_files_the_resolved_plan_writes() {
         let vault = MemoryVault::with(&[("a.md", "draft"), ("c.md", "context")]);
-        let observed = content_hash(b"what the author saw in c.md");
+        let observed = content_hash(b"context");
         let operations = vec![
             Operation::new(OperationKind::str_replace(path("c.md"), "missing", "x")),
             Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final"))
@@ -561,6 +676,446 @@ mod tests {
         let first = planned(&vault, operations);
         let again = planned(&vault, first.plan.operations.clone());
         assert_eq!(again.plan, first.plan);
+    }
+
+    fn moving(from: &str, to: &str) -> Operation {
+        Operation::new(OperationKind::move_document(path(from), path(to)))
+    }
+
+    fn creating(at: &str, content: &str) -> Operation {
+        Operation::new(OperationKind::create_document(path(at), content))
+    }
+
+    fn deleting(at: &str) -> Operation {
+        Operation::new(OperationKind::delete_document(path(at)))
+    }
+
+    fn detail_of(resolution: &Resolution, index: usize) -> String {
+        match &resolution.unresolved[index].reason {
+            UnresolvedReason::NoLongerResolves { detail, .. } => detail.clone(),
+            other => panic!("the operation no longer resolves: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_move_onto_an_absent_name_waits_for_nothing_that_vacates_it() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(&vault, vec![moving("a.md", "b.md"), moving("b.md", "c.md")]);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), FileState::absent()),
+                transition("b.md", FileState::absent(), FileState::absent()),
+                transition("c.md", FileState::absent(), present("A")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_move_onto_an_absent_name_a_later_removal_names_resolves() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(&vault, vec![moving("a.md", "b.md"), deleting("b.md")]);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+    }
+
+    #[test]
+    fn two_documents_exchange_places_through_an_absent_name() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                moving("a.md", "t.md"),
+                moving("b.md", "a.md"),
+                moving("t.md", "b.md"),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), present("B")),
+                transition("b.md", present("B"), present("A")),
+                transition("t.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_create_at_a_name_a_move_vacates_runs_after_the_move() {
+        let vault = MemoryVault::with(&[("a.md", "old")]);
+        let operations = vec![creating("a.md", "new"), moving("a.md", "b.md")];
+        let resolution = planned(&vault, operations.clone());
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.operations,
+            vec![operations[1].clone(), operations[0].clone()]
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("old"), present("new")),
+                transition("b.md", FileState::absent(), present("old")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_move_onto_itself_is_unresolved_rather_than_a_cycle() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(&vault, vec![moving("a.md", "a.md")]);
+        assert_eq!(resolution.unresolved.len(), 1);
+        assert!(
+            detail_of(&resolution, 0).contains("onto itself"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+        assert!(resolution.plan.transitions.is_empty());
+    }
+
+    #[test]
+    fn a_plan_condition_two_operations_carry_is_carried_once() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B"), ("c.md", "C")]);
+        let observed = AuthorCondition::content_hash(path("c.md"), content_hash(b"C"));
+        let resolution = planned(
+            &vault,
+            vec![
+                Operation::new(OperationKind::str_replace(path("a.md"), "A", "a"))
+                    .with_conditions(vec![observed.clone()]),
+                Operation::new(OperationKind::str_replace(path("b.md"), "B", "b"))
+                    .with_conditions(vec![observed]),
+            ],
+        );
+        assert_eq!(
+            resolution.plan.conditions,
+            vec![PlanCondition::content_hash(
+                path("c.md"),
+                content_hash(b"C")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_plan_condition_the_vault_no_longer_meets_leaves_its_operation_unresolved() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("c.md", "changed since")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("a.md"), "A", "a")).with_conditions(
+                vec![AuthorCondition::content_hash(
+                    path("c.md"),
+                    content_hash(b"C"),
+                )],
+            ),
+        ];
+        let resolution = planned(&vault, operations.clone());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![0]);
+        assert!(resolution.plan.conditions.is_empty());
+        assert!(resolution.plan.transitions.is_empty());
+    }
+
+    #[test]
+    fn of_two_conditions_on_one_unwritten_file_only_the_one_it_meets_resolves() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B"), ("c.md", "C")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("a.md"), "A", "a")).with_conditions(
+                vec![AuthorCondition::content_hash(
+                    path("c.md"),
+                    content_hash(b"old C"),
+                )],
+            ),
+            Operation::new(OperationKind::str_replace(path("b.md"), "B", "b")).with_conditions(
+                vec![AuthorCondition::content_hash(
+                    path("c.md"),
+                    content_hash(b"C"),
+                )],
+            ),
+        ];
+        let resolution = planned(&vault, operations.clone());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![0]);
+        assert_eq!(
+            resolution.plan.conditions,
+            vec![PlanCondition::content_hash(
+                path("c.md"),
+                content_hash(b"C")
+            )]
+        );
+    }
+
+    #[test]
+    fn an_operation_that_fails_because_what_it_requires_did_not_act_names_that_requirement() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("a.md"), "missing", "x"))
+                .with_id(id("edit")),
+            Operation::new(OperationKind::str_replace(path("a.md"), "x", "y"))
+                .with_requires(vec![id("edit")]),
+        ];
+        let resolution = planned(&vault, operations);
+        assert_eq!(
+            resolution.unresolved[1].reason,
+            UnresolvedReason::requires_unresolved(id("edit"))
+        );
+    }
+
+    #[test]
+    fn a_create_onto_a_folder_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a/x.md", "x")]);
+        let resolution = planned(&vault, vec![creating("a", "new")]);
+        assert_eq!(resolution.unresolved.len(), 1);
+        assert!(
+            detail_of(&resolution, 0).contains("folder"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+    }
+
+    #[test]
+    fn a_move_onto_a_folder_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a/x.md", "x"), ("b.md", "B")]);
+        let resolution = planned(&vault, vec![moving("b.md", "a")]);
+        assert_eq!(resolution.unresolved.len(), 1);
+        assert!(
+            detail_of(&resolution, 0).contains("folder"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+    }
+
+    #[test]
+    fn a_create_beneath_a_document_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let resolution = planned(&vault, vec![creating("a.md/b.md", "new")]);
+        assert_eq!(resolution.unresolved.len(), 1);
+        assert!(
+            detail_of(&resolution, 0).contains("beneath"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+    }
+
+    #[test]
+    fn a_create_beneath_a_document_the_plan_removes_does_not_resolve() {
+        // Creates publish before removals, so the document still stands when
+        // the create would make a folder of its name.
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let operations = vec![deleting("a.md"), creating("a.md/b.md", "new")];
+        let resolution = planned(&vault, operations.clone());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![1]);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition("a.md", present("A"), FileState::absent())]
+        );
+    }
+
+    #[test]
+    fn a_create_beneath_a_document_the_plan_creates_does_not_resolve() {
+        let vault = MemoryVault::default();
+        for operations in [
+            vec![creating("a.md", "A"), creating("a.md/b.md", "B")],
+            vec![creating("a.md/b.md", "B"), creating("a.md", "A")],
+        ] {
+            let resolution = planned(&vault, operations.clone());
+            assert_eq!(resolution.unresolved.len(), 1, "{operations:?}");
+        }
+    }
+
+    #[test]
+    fn a_requirement_an_earlier_apply_met_orders_nothing_and_leaves_a_whole_plan() {
+        let vault = MemoryVault::with(&[("b.md", "B")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("b.md"), "B", "b"))
+                .with_requires(vec![id("landed")]),
+        ];
+        assert_eq!(
+            resolve(
+                authored(operations.clone()),
+                root(),
+                &BTreeSet::new(),
+                &vault
+            )
+            .map(|_| ()),
+            Err(PlanningFailure::Fault(PlanFault::unknown_requirement(
+                0,
+                id("landed")
+            )))
+        );
+        let met = BTreeSet::from([id("landed")]);
+        let fresh = match resolve(authored(operations), root(), &met, &vault) {
+            Ok(fresh) => fresh,
+            Err(failure) => panic!("a met requirement is no fault: {failure:?}"),
+        };
+        assert!(fresh.unresolved.is_empty());
+        assert!(fresh.plan.operations[0].requires.is_empty());
+        // Sent back as it is, the fresh plan plans as itself.
+        assert_eq!(
+            planned(&vault, fresh.plan.operations.clone()).plan,
+            fresh.plan
+        );
+    }
+
+    #[test]
+    fn a_case_only_rename_on_a_folding_root_is_a_move_between_two_spellings() {
+        let vault = MemoryVault::with(&[("Notes.md", "N")]).folding_case();
+        let resolution = planned(&vault, vec![moving("Notes.md", "notes.md")]);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("Notes.md", present("N"), FileState::absent()),
+                transition("notes.md", FileState::absent(), present("N")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_operation_after_a_case_only_rename_acts_on_the_new_spelling() {
+        let vault = MemoryVault::with(&[("A.md", "x")]).folding_case();
+        let resolution = planned(
+            &vault,
+            vec![
+                moving("A.md", "a.md"),
+                Operation::new(OperationKind::str_replace(path("A.md"), "x", "y")),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("A.md", present("x"), FileState::absent()),
+                transition("a.md", FileState::absent(), present("y")),
+            ]
+        );
+    }
+
+    #[test]
+    fn on_a_folding_root_two_spellings_of_one_document_compose_as_one_target() {
+        let vault = MemoryVault::with(&[("A.md", "one two")]).folding_case();
+        let resolution = planned(
+            &vault,
+            vec![
+                Operation::new(OperationKind::str_replace(path("A.md"), "one", "1")),
+                Operation::new(OperationKind::str_replace(path("a.md"), "two", "2")),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition("A.md", present("one two"), present("1 2"))]
+        );
+    }
+
+    #[test]
+    fn on_a_folding_root_a_create_at_another_spelling_of_a_document_does_not_resolve() {
+        let vault = MemoryVault::with(&[("A.md", "A")]).folding_case();
+        let resolution = planned(&vault, vec![creating("a.md", "new")]);
+        assert!(
+            detail_of(&resolution, 0).contains("a document stands"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+    }
+
+    #[test]
+    fn on_a_root_that_tells_case_apart_two_spellings_are_two_documents() {
+        let vault = MemoryVault::with(&[("A.md", "A"), ("a.md", "a")]);
+        let resolution = planned(&vault, vec![deleting("a.md")]);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition("a.md", present("a"), FileState::absent())]
+        );
+        let resolution = planned(&vault, vec![moving("A.md", "a.md")]);
+        assert!(
+            detail_of(&resolution, 0).contains("a document stands"),
+            "{}",
+            detail_of(&resolution, 0)
+        );
+    }
+
+    #[test]
+    fn a_folder_s_change_of_case_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("Notes/a.md", "A")]).folding_case();
+        for operation in [
+            moving("Notes/a.md", "notes/a.md"),
+            creating("notes/b.md", "B"),
+        ] {
+            let resolution = planned(&vault, vec![operation]);
+            assert_eq!(resolution.unresolved.len(), 1);
+            assert!(
+                detail_of(&resolution, 0).contains("a folder's change of case is not planned"),
+                "{}",
+                detail_of(&resolution, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_over_a_tree_on_disk_reads_it_through_the_vault_s_own_descent() {
+        use super::super::view::TreeView;
+        let scratch = norn_testkit::scratch::Scratch::new("planner-tree");
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case plans over.
+        let place = |at: &str, content: &str| {
+            let full = scratch.join(at);
+            std::fs::create_dir_all(full.parent().expect("a parent")).expect("folders");
+            std::fs::write(full, content).expect("a file");
+        };
+        place("inbox/a.md", "A");
+        place("b.md", "B");
+        place("folder/x.md", "X");
+        let view = TreeView::open(scratch.root(), &[]).expect("a vault");
+        let operations = vec![
+            moving("inbox/a.md", "archive/a.md"),
+            Operation::new(OperationKind::str_replace(path("b.md"), "B", "b")),
+            creating("b.md/c.md", "beneath a document"),
+            creating("folder", "onto a folder"),
+        ];
+        let resolution = match resolve(
+            authored(operations.clone()),
+            root(),
+            &BTreeSet::new(),
+            &view,
+        ) {
+            Ok(resolution) => resolution,
+            Err(failure) => panic!("the plan resolves: {failure:?}"),
+        };
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![2, 3]);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("archive/a.md", FileState::absent(), present("A")),
+                transition("b.md", present("B"), present("b")),
+                transition("inbox/a.md", present("A"), FileState::absent()),
+            ]
+        );
+        let folder = |text| norn_wire::FolderPath::new(text).expect("a legal folder path");
+        assert_eq!(resolution.forecast.folders_made, vec![folder("archive")]);
+        assert_eq!(resolution.forecast.folders_removed, vec![folder("inbox")]);
     }
 
     #[test]

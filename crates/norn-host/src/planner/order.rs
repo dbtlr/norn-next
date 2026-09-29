@@ -1,39 +1,60 @@
 //! The plan's shape: which operation runs after which, and the faults that
-//! make a plan's shape wrong whatever vault it is for.
+//! make a plan's shape wrong.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::path::Path;
 
+use norn_fs::NormalizedPath;
 use norn_wire::{DocumentPath, Operation, OperationId, OperationKind, PlanFault};
+
+use super::resolve::PlanningFailure;
+use super::view::{Entry, VaultView};
 
 /// Which operations each operation runs after, by position.
 ///
 /// **Two kinds of requirement.** An operation runs after the operations its
-/// `requires` names. A move also runs after every other operation that
-/// vacates its destination — a move away from it, or its removal — because
-/// ADR 0031 lets a move's destination be one another operation of the same
-/// plan vacates, and the move then requires it. The second kind is read from
-/// the plan's shape alone, so a plan's order and its faults are the same
-/// whatever vault it is planned against.
+/// `requires` names. A move or a create whose name a document stands at also
+/// runs after every other operation that vacates that name — a move away from
+/// it, or its removal — because ADR 0031 lets a move's destination be absent
+/// at planning or vacated by another operation of the same plan, which the
+/// move then requires, and a create over a vacated name is the same act. A
+/// name nothing stands at needs nothing vacated, so an operation vacating it
+/// later in the plan is no requirement. The second kind is read against what
+/// the vault holds at planning, by identity, so it is the vault that decides
+/// whether a chain of moves closes a cycle.
 pub(crate) struct Dependencies {
     /// For each position, the positions it runs after, ascending.
     after: Vec<Vec<usize>>,
 }
 
-/// The dependencies of `operations`, or the first fault in their shape.
+/// The dependencies of `operations` over what `view` holds, or the first
+/// fault in their shape.
+///
+/// **A requirement already met is no requirement.** `met` names operations an
+/// earlier apply of this plan already landed, which a refresh drops before it
+/// re-resolves what remains (ADR 0031); a requirement on one of them is
+/// satisfied rather than unknown, and orders nothing.
 ///
 /// Faults are looked for in the order [`PlanFault`] lists them: an identifier
-/// carried twice, a requirement nothing carries, a cycle of `requires`, and
-/// last a cycle only a vacated destination closes, which is a content cycle.
-pub(crate) fn dependencies(operations: &[Operation]) -> Result<Dependencies, PlanFault> {
-    let carriers = carriers(operations)?;
-    let explicit = explicit_requirements(operations, &carriers)?;
+/// carried twice, a requirement nothing carries, a cycle of `requires` alone,
+/// and last a cycle that a vacated name closes, alone or with `requires`,
+/// which is a content cycle.
+pub(crate) fn dependencies<V: VaultView>(
+    operations: &[Operation],
+    met: &BTreeSet<OperationId>,
+    view: &V,
+) -> Result<Dependencies, PlanningFailure<V::Error>> {
+    let carriers = carriers(operations).map_err(PlanningFailure::Fault)?;
+    let explicit =
+        explicit_requirements(operations, &carriers, met).map_err(PlanningFailure::Fault)?;
     if let Some(cycle) = first_cycle(&explicit) {
-        return Err(PlanFault::requires_cycle(cycle));
+        return Err(PlanningFailure::Fault(PlanFault::requires_cycle(cycle)));
     }
+    let vacating = vacating_requirements(operations, view).map_err(PlanningFailure::View)?;
     let after: Vec<Vec<usize>> = explicit
         .into_iter()
-        .zip(vacating_requirements(operations))
+        .zip(vacating)
         .map(|(mut explicit, vacating)| {
             explicit.extend(vacating);
             explicit.sort_unstable();
@@ -42,7 +63,7 @@ pub(crate) fn dependencies(operations: &[Operation]) -> Result<Dependencies, Pla
         })
         .collect();
     if let Some(cycle) = first_cycle(&after) {
-        return Err(PlanFault::content_cycle(cycle));
+        return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
     }
     Ok(Dependencies { after })
 }
@@ -107,53 +128,64 @@ fn carriers(operations: &[Operation]) -> Result<BTreeMap<&OperationId, usize>, P
 }
 
 /// The positions each operation's `requires` names, refusing a name nothing
-/// carries.
+/// carries and leaving out a name `met` holds that nothing carries.
 fn explicit_requirements(
     operations: &[Operation],
     carriers: &BTreeMap<&OperationId, usize>,
+    met: &BTreeSet<OperationId>,
 ) -> Result<Vec<Vec<usize>>, PlanFault> {
     operations
         .iter()
         .enumerate()
         .map(|(position, operation)| {
-            operation
-                .requires
-                .iter()
-                .map(|required| {
-                    carriers
-                        .get(required)
-                        .copied()
-                        .ok_or_else(|| PlanFault::unknown_requirement(position, required.clone()))
-                })
-                .collect()
+            let mut required = Vec::new();
+            for id in &operation.requires {
+                match carriers.get(id) {
+                    Some(&carrier) => required.push(carrier),
+                    None if met.contains(id) => {}
+                    None => return Err(PlanFault::unknown_requirement(position, id.clone())),
+                }
+            }
+            Ok(required)
         })
         .collect()
 }
 
-/// For each move, every other operation that vacates its destination.
-fn vacating_requirements(operations: &[Operation]) -> Vec<Vec<usize>> {
-    let mut vacaters: BTreeMap<&DocumentPath, Vec<usize>> = BTreeMap::new();
+/// For each move and create whose name a document stands at, every other
+/// operation that vacates that name.
+fn vacating_requirements<V: VaultView>(
+    operations: &[Operation],
+    view: &V,
+) -> Result<Vec<Vec<usize>>, V::Error> {
+    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let mut vacaters: BTreeMap<NormalizedPath, Vec<usize>> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
-        if let Some(vacated) = vacates(&operation.kind) {
+        if let Some(vacated) = vacates(&operation.kind).and_then(identity) {
             vacaters.entry(vacated).or_default().push(position);
         }
     }
-    operations
-        .iter()
-        .enumerate()
-        .map(|(position, operation)| match &operation.kind {
-            OperationKind::MoveDocument { to, .. } => vacaters
-                .get(to)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&vacater| vacater != position)
-                .collect(),
-            OperationKind::CreateDocument { .. }
-            | OperationKind::StrReplace { .. }
-            | OperationKind::DeleteDocument { .. } => Vec::new(),
-        })
-        .collect()
+    let mut after = Vec::with_capacity(operations.len());
+    for (position, operation) in operations.iter().enumerate() {
+        let mut vacated_first = Vec::new();
+        if let Some(name) = arrives_at(&operation.kind).and_then(identity)
+            && let Some(vacating) = vacaters.get(&name)
+            && matches!(view.entry(&name)?, Entry::Document { .. })
+        {
+            vacated_first.extend(vacating.iter().copied().filter(|&at| at != position));
+        }
+        after.push(vacated_first);
+    }
+    Ok(after)
+}
+
+/// The name an operation puts a document at: a move's destination, or a
+/// create's path.
+fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
+    match kind {
+        OperationKind::MoveDocument { to, .. } => Some(to),
+        OperationKind::CreateDocument { path, .. } => Some(path),
+        OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
+    }
 }
 
 /// The path an operation leaves empty: a move's source, or a removal's path.
@@ -215,6 +247,7 @@ fn first_cycle(after: &[Vec<usize>]) -> Option<Vec<usize>> {
 mod tests {
     use norn_wire::{DocumentPath, OperationId, OperationKind};
 
+    use super::super::view::memory::MemoryVault;
     use super::*;
 
     fn path(text: &str) -> DocumentPath {
@@ -233,17 +266,22 @@ mod tests {
         Operation::new(OperationKind::move_document(path(from), path(to)))
     }
 
+    /// A vault where every document the tests name stands.
+    fn vault() -> MemoryVault {
+        MemoryVault::with(&[("a.md", "a"), ("b.md", "b"), ("c.md", "c"), ("d.md", "d")])
+    }
+
     fn fault(operations: &[Operation]) -> PlanFault {
-        match dependencies(operations) {
-            Ok(_) => panic!("the plan's shape is faulty"),
-            Err(fault) => fault,
+        match dependencies(operations, &BTreeSet::new(), &vault()) {
+            Err(PlanningFailure::Fault(fault)) => fault,
+            _ => panic!("the plan's shape is faulty"),
         }
     }
 
     fn order(operations: &[Operation]) -> Vec<usize> {
-        match dependencies(operations) {
+        match dependencies(operations, &BTreeSet::new(), &vault()) {
             Ok(dependencies) => dependencies.order(|_| true),
-            Err(fault) => panic!("the plan's shape is sound: {fault:?}"),
+            Err(failure) => panic!("the plan's shape is sound: {failure:?}"),
         }
     }
 
@@ -313,6 +351,31 @@ mod tests {
     }
 
     #[test]
+    fn a_create_runs_after_the_operation_vacating_its_name() {
+        let operations = [
+            Operation::new(OperationKind::create_document(path("a.md"), "new")),
+            moving("a.md", "e.md"),
+        ];
+        assert_eq!(order(&operations), vec![1, 0]);
+    }
+
+    #[test]
+    fn a_name_nothing_stands_at_waits_for_nothing_that_vacates_it() {
+        let operations = [moving("a.md", "e.md"), moving("e.md", "f.md")];
+        assert_eq!(order(&operations), vec![0, 1]);
+        let operations = [moving("a.md", "e.md"), moving("e.md", "a.md")];
+        assert_eq!(order(&operations), vec![0, 1]);
+    }
+
+    #[test]
+    fn a_requirement_already_met_orders_nothing() {
+        let operations = [delete("a.md").with_requires(vec![id("landed")])];
+        let met = BTreeSet::from([id("landed")]);
+        let dependencies = dependencies(&operations, &met, &vault()).expect("a sound shape");
+        assert_eq!(dependencies.order(|_| true), vec![0]);
+    }
+
+    #[test]
     fn an_operation_runs_after_what_it_requires_and_otherwise_in_plan_order() {
         let operations = [
             delete("a.md").with_requires(vec![id("c")]),
@@ -330,7 +393,8 @@ mod tests {
             moving("b.md", "c.md"),
             delete("d.md"),
         ];
-        let dependencies = dependencies(&operations).expect("a sound shape");
+        let dependencies =
+            dependencies(&operations, &BTreeSet::new(), &vault()).expect("a sound shape");
         assert_eq!(dependencies.order(|position| position != 1), vec![0, 2]);
     }
 }

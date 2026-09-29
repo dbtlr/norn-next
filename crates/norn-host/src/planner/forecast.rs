@@ -3,13 +3,19 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
+use std::path::Path;
 
+use norn_fs::NormalizedPath;
 use norn_wire::{DocumentPath, FileState, FolderPath, Forecast, Transition};
 
 use super::view::VaultView;
 
 /// The forecast of a plan with `transitions`, over what `view` holds. No
 /// target has drifted from a plan resolved from what the vault holds.
+///
+/// Every folder is judged by its identity under the view's one rule, so a
+/// folder the tree lists in another case is the folder a transition's path
+/// runs through, and is named at the spelling the transition carries.
 pub(crate) fn forecast<V: VaultView>(
     transitions: &[Transition],
     view: &V,
@@ -38,9 +44,10 @@ fn folders_made<V: VaultView>(
     view: &V,
 ) -> Result<Vec<FolderPath>, V::Error> {
     let mut made = BTreeSet::new();
+    let mut judged = BTreeSet::new();
     for path in creates {
-        for folder in folders_above(path) {
-            if !made.contains(&folder) && !view.folder_stands(&folder)? {
+        for (identity, folder) in folders_above(path, view) {
+            if judged.insert(identity.clone()) && !view.folder_stands(&identity)? {
                 made.insert(folder);
             }
         }
@@ -57,37 +64,65 @@ fn folders_removed<V: VaultView>(
     creates: &[&DocumentPath],
     view: &V,
 ) -> Result<Vec<FolderPath>, V::Error> {
-    let receiving: BTreeSet<FolderPath> = creates
+    let receiving: BTreeSet<NormalizedPath> = creates
         .iter()
-        .flat_map(|path| folders_above(path))
+        .flat_map(|path| folders_above(path, view))
+        .map(|(identity, _)| identity)
         .collect();
-    let mut candidates: Vec<FolderPath> = removals
+    let mut candidates: Vec<(NormalizedPath, FolderPath)> = removals
         .iter()
-        .flat_map(|path| folders_above(path))
-        .filter(|folder| !receiving.contains(folder))
-        .collect::<BTreeSet<_>>()
+        .flat_map(|path| folders_above(path, view))
+        .filter(|(identity, _)| !receiving.contains(identity))
+        .collect::<std::collections::BTreeMap<_, _>>()
         .into_iter()
         .collect();
     // Deepest first, so a folder is judged after every folder inside it.
-    candidates.sort_by_key(|folder| Reverse(folder.as_str().matches('/').count()));
-    // Every path the plan leaves nothing at: its removals, then each folder
-    // it empties as that folder is judged.
-    let mut gone: BTreeSet<String> = removals
+    candidates.sort_by_key(|(identity, _)| Reverse(identity.as_path().components().count()));
+    // Every identity the plan leaves nothing at: its removals, then each
+    // folder it empties as that folder is judged.
+    let mut gone: BTreeSet<NormalizedPath> = removals
         .iter()
-        .map(|path| path.as_str().to_string())
+        .filter_map(|path| identity(Path::new(path.as_str()), view))
         .collect();
     let mut removed = BTreeSet::new();
-    for folder in candidates {
-        let emptied = view
-            .folder_entries(&folder)?
-            .iter()
-            .all(|name| gone.contains(&format!("{}/{name}", folder.as_str())));
+    for (folder, spelled) in candidates {
+        let mut emptied = true;
+        for name in view.folder_names(&folder)? {
+            let inside = identity(&folder.as_path().join(name), view);
+            if !inside.is_some_and(|inside| gone.contains(&inside)) {
+                emptied = false;
+                break;
+            }
+        }
         if emptied {
-            gone.insert(folder.as_str().to_string());
-            removed.insert(folder);
+            gone.insert(folder);
+            removed.insert(spelled);
         }
     }
     Ok(removed.into_iter().collect())
+}
+
+/// `path`'s identity under the view's rule.
+fn identity<V: VaultView>(path: &Path, view: &V) -> Option<NormalizedPath> {
+    view.normalizer().normalize(path).ok()
+}
+
+/// Every folder above `path`, with its identity: none for a document at the
+/// vault root.
+fn folders_above<V: VaultView>(path: &DocumentPath, view: &V) -> Vec<(NormalizedPath, FolderPath)> {
+    let Some(document) = identity(Path::new(path.as_str()), view) else {
+        return Vec::new();
+    };
+    document
+        .as_path()
+        .ancestors()
+        .skip(1)
+        .filter(|above| !above.as_os_str().is_empty())
+        .filter_map(|above| {
+            let folder = FolderPath::new(above.to_str()?).ok()?;
+            Some((identity(above, view)?, folder))
+        })
+        .collect()
 }
 
 /// Whether a transition puts a document where none stood.
@@ -104,15 +139,6 @@ fn is_removal(transition: &Transition) -> bool {
         (&transition.before, &transition.after),
         (FileState::Present { .. }, FileState::Absent {})
     )
-}
-
-/// Every folder above `path`, outermost first; none for a document at the
-/// vault root.
-fn folders_above(path: &DocumentPath) -> Vec<FolderPath> {
-    let text = path.as_str();
-    text.match_indices('/')
-        .map(|(at, _)| FolderPath::new(&text[..at]).expect("a non-empty relative prefix"))
-        .collect()
 }
 
 #[cfg(test)]

@@ -2,18 +2,33 @@
 //! operations touching it.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
+use norn_fs::NormalizedPath;
 use norn_wire::{ContentHash, DocumentPath, FileState, Operation, OperationKind};
 
-use super::view::VaultView;
+use super::view::{Entry, VaultView, document_path, wire_hash};
 
 /// What composing a plan's operations came to.
 pub(crate) struct Composition {
-    /// One per file an operation touches.
+    /// One per file an operation touches, by the spelling the plan writes it
+    /// at.
     pub(crate) targets: BTreeMap<DocumentPath, ComposedTarget>,
+    /// The spelling each identity the plan touches was read at, whose target
+    /// carries what the vault held there before the plan.
+    pub(crate) read_at: BTreeMap<NormalizedPath, DocumentPath>,
     /// Each operation that did not resolve against the state it met.
     pub(crate) unresolvable: Vec<Unresolvable>,
+}
+
+impl Composition {
+    /// What the vault held at `identity` before the plan, where the plan
+    /// touches it.
+    pub(crate) fn before(&self, identity: &NormalizedPath) -> Option<&FileState> {
+        let spelling = self.read_at.get(identity)?;
+        Some(&self.targets[spelling].before)
+    }
 }
 
 /// One file's two sides.
@@ -47,110 +62,249 @@ pub(crate) fn compose<V: VaultView>(
         }
     }
     Ok(Composition {
-        targets: vault.into_targets(),
+        targets: vault.targets,
+        read_at: vault.read_at,
         unresolvable,
     })
 }
 
 /// The files the plan touches, each as it stood before and as it stands so
 /// far, over the view the before-states are read from.
+///
+/// **A file is its identity.** Every name an operation carries is normalized
+/// by the view's one rule, so two spellings of one file — `a//b.md` and
+/// `a/b.md`, or on a root that folds case `A.md` and `a.md` — are one file,
+/// held at the spelling the tree lists. The one act that gives an identity a
+/// second spelling is a case-only rename, which writes the file at its new
+/// spelling and takes it away at its old one.
 struct Simulated<'view, V> {
     view: &'view V,
-    files: BTreeMap<DocumentPath, ComposedTarget>,
+    targets: BTreeMap<DocumentPath, ComposedTarget>,
+    /// The spelling each identity was first read at.
+    read_at: BTreeMap<NormalizedPath, DocumentPath>,
+    /// The spelling each identity stands at now: where it was read, or where a
+    /// case-only rename moved it.
+    spelled: BTreeMap<NormalizedPath, DocumentPath>,
 }
 
 /// Why one operation cannot act on the state it met.
 type Unresolved = String;
 
+/// Where one name an operation carries leads.
+enum Place {
+    /// A file the plan composes, at the spelling it is written at.
+    File(NormalizedPath, DocumentPath),
+    /// A place no document is read from or made at, and why.
+    NoFile(Unresolved),
+}
+
 impl<'view, V: VaultView> Simulated<'view, V> {
     fn over(view: &'view V) -> Self {
         Simulated {
             view,
-            files: BTreeMap::new(),
+            targets: BTreeMap::new(),
+            read_at: BTreeMap::new(),
+            spelled: BTreeMap::new(),
         }
     }
 
-    /// The file at `path` as it stands so far, reading its before-state the
-    /// first time the plan touches it.
-    fn file(&mut self, path: &DocumentPath) -> Result<&mut ComposedTarget, V::Error> {
-        if !self.files.contains_key(path) {
-            let bytes = self.view.file(path)?;
-            let before = match &bytes {
-                Some(bytes) => FileState::present(content_hash(bytes)),
-                None => FileState::absent(),
-            };
-            self.files.insert(
-                path.clone(),
-                ComposedTarget {
-                    before,
-                    after: bytes,
-                },
-            );
+    /// Where `path` leads, reading its before-state the first time the plan
+    /// touches its identity.
+    fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
+        let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Ok(Place::NoFile(format!(
+                    "`{path}` names no document in the vault: {error}"
+                )));
+            }
+        };
+        if let Some(spelling) = self.spelled.get(&identity) {
+            return Ok(Place::File(identity, spelling.clone()));
         }
-        Ok(self.files.get_mut(path).expect("inserted above"))
+        let (spelling, before, after) = match self.view.entry(&identity)? {
+            Entry::Document { at, bytes, hash } => (at, FileState::present(hash), Some(bytes)),
+            Entry::Absent { at } => (at, FileState::absent(), None),
+            Entry::Folder => {
+                return Ok(Place::NoFile(format!(
+                    "a folder stands at `{path}`, where a document would be"
+                )));
+            }
+            Entry::Blocked { detail } => return Ok(Place::NoFile(detail)),
+        };
+        self.targets
+            .insert(spelling.clone(), ComposedTarget { before, after });
+        self.read_at.insert(identity.clone(), spelling.clone());
+        self.spelled.insert(identity.clone(), spelling.clone());
+        Ok(Place::File(identity, spelling))
+    }
+
+    /// The document standing so far at the file `path` leads to, or why none
+    /// does.
+    fn standing(
+        &mut self,
+        path: &DocumentPath,
+    ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
+        Ok(match self.place(path)? {
+            Place::NoFile(detail) => Err(detail),
+            Place::File(_, spelling) if self.targets[&spelling].after.is_some() => Ok(spelling),
+            Place::File(..) => Err(format!("no document stands at `{path}`")),
+        })
+    }
+
+    /// The file a document can be put at for `path`, or why none can: the
+    /// name holds a document, a folder the plan makes, or lies beneath a
+    /// document; or `path` spells a folder above it differently from the tree.
+    fn vacant(
+        &mut self,
+        path: &DocumentPath,
+    ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
+        let (identity, spelling) = match self.place(path)? {
+            Place::NoFile(detail) => return Ok(Err(detail)),
+            Place::File(identity, spelling) => (identity, spelling),
+        };
+        if self.targets[&spelling].after.is_some() {
+            return Ok(Err(format!("a document stands at `{path}`")));
+        }
+        if let Some(above) = self.document_above(&identity) {
+            return Ok(Err(format!(
+                "`{path}` lies beneath the document the plan puts at `{above}`"
+            )));
+        }
+        if let Some(below) = self.document_below(&identity) {
+            return Ok(Err(format!(
+                "a folder stands at `{path}`, where the plan puts `{below}`"
+            )));
+        }
+        if spelling.as_str() != spelled_as_asked(&identity) {
+            return Ok(Err(format!(
+                "`{path}` is spelled `{spelling}` in the vault: a document is put at the spelling the vault lists, and a folder's change of case is not planned"
+            )));
+        }
+        Ok(Ok(spelling))
+    }
+
+    /// The document standing so far at a folder above `identity`.
+    fn document_above(&self, identity: &NormalizedPath) -> Option<&DocumentPath> {
+        identity
+            .as_path()
+            .ancestors()
+            .skip(1)
+            .filter(|above| !above.as_os_str().is_empty())
+            .filter_map(|above| self.view.normalizer().normalize(above).ok())
+            .filter_map(|above| self.spelled.get(&above))
+            .find(|spelling| self.targets[*spelling].after.is_some())
+    }
+
+    /// A document standing so far beneath `identity`.
+    fn document_below(&self, identity: &NormalizedPath) -> Option<&DocumentPath> {
+        self.spelled.iter().find_map(|(other, spelling)| {
+            let beneath = other
+                .as_path()
+                .ancestors()
+                .skip(1)
+                .filter_map(|above| self.view.normalizer().normalize(above).ok())
+                .any(|above| above == *identity);
+            (beneath && self.targets[spelling].after.is_some()).then_some(spelling)
+        })
     }
 
     /// Act on `kind`, or say why it cannot act, leaving the state as it was.
     fn apply(&mut self, kind: &OperationKind) -> Result<Result<(), Unresolved>, V::Error> {
-        if let Some(path) = touches(kind).find(|path| !in_its_one_spelling(path)) {
-            return Ok(Err(format!(
-                "`{path}` is not a document path in its one spelling: a name is empty, `.` or `..`"
-            )));
-        }
         Ok(match kind {
-            OperationKind::CreateDocument { path, content } => {
-                let file = self.file(path)?;
-                if file.after.is_some() {
-                    Err(format!(
-                        "something stands at `{path}`, where the document would be created"
-                    ))
-                } else {
-                    file.after = Some(Arc::from(content.as_bytes()));
-                    Ok(())
-                }
-            }
+            OperationKind::CreateDocument { path, content } => self.vacant(path)?.map(|spelling| {
+                self.target(&spelling).after = Some(Arc::from(content.as_bytes()));
+            }),
             OperationKind::StrReplace {
                 path,
                 old_str,
                 new_str,
-            } => {
-                let file = self.file(path)?;
-                match &file.after {
-                    None => Err(format!("no document stands at `{path}` to edit")),
-                    Some(bytes) => replace_once(bytes, old_str, new_str).map(|replaced| {
+            } => match self.standing(path)? {
+                Err(detail) => Err(detail),
+                Ok(spelling) => {
+                    let file = self.target(&spelling);
+                    let bytes = file.after.as_ref().expect("a document stands");
+                    replace_once(bytes, old_str, new_str).map(|replaced| {
                         file.after = Some(replaced);
-                    }),
+                    })
                 }
-            }
-            OperationKind::MoveDocument { from, to } => {
-                let Some(moved) = self.file(from)?.after.clone() else {
-                    return Ok(Err(format!("no document stands at `{from}` to move")));
-                };
-                let destination = self.file(to)?;
-                if destination.after.is_some() {
-                    Err(format!(
-                        "something stands at `{to}`, where the document would be moved"
-                    ))
-                } else {
-                    destination.after = Some(moved);
-                    self.file(from)?.after = None;
-                    Ok(())
-                }
-            }
-            OperationKind::DeleteDocument { path } => {
-                let file = self.file(path)?;
-                if file.after.take().is_some() {
-                    Ok(())
-                } else {
-                    Err(format!("no document stands at `{path}` to delete"))
-                }
-            }
+            },
+            OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
+            OperationKind::DeleteDocument { path } => self.standing(path)?.map(|spelling| {
+                self.target(&spelling).after = None;
+            }),
         })
     }
 
-    fn into_targets(self) -> BTreeMap<DocumentPath, ComposedTarget> {
-        self.files
+    /// Move the document at `from` to `to`.
+    ///
+    /// **A case-only rename is a move.** On a root that folds case a
+    /// destination differing from its source only in case names the source
+    /// itself (ADR 0031), so the destination is not an occupied name: the
+    /// document is written at the new spelling and taken away at the old, two
+    /// transitions the applier publishes as one respell. A destination whose
+    /// spelling is the source's own is a move onto itself, which names no
+    /// change.
+    fn move_document(
+        &mut self,
+        from: &DocumentPath,
+        to: &DocumentPath,
+    ) -> Result<Result<(), Unresolved>, V::Error> {
+        let source = match self.standing(from)? {
+            Ok(source) => source,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let identity = |path: &DocumentPath| {
+            self.view
+                .normalizer()
+                .normalize(Path::new(path.as_str()))
+                .ok()
+        };
+        let (from_identity, to_identity) = (identity(from), identity(to));
+        let destination = if let Some(to_identity) = to_identity
+            && Some(&to_identity) == from_identity.as_ref()
+        {
+            let respelled = spelled_as_asked(&to_identity);
+            if respelled == source.as_str() {
+                return Ok(Err(format!("`{from}` would be moved onto itself")));
+            }
+            if Path::new(&respelled).parent() != Path::new(source.as_str()).parent() {
+                return Ok(Err(format!(
+                    "`{to}` differs from `{source}` in the case of a folder, and a folder's change of case is not planned"
+                )));
+            }
+            let respelled = DocumentPath::new(&respelled).expect("a normalized document path");
+            self.targets
+                .entry(respelled.clone())
+                .or_insert(ComposedTarget {
+                    before: FileState::absent(),
+                    after: None,
+                });
+            self.spelled.insert(to_identity, respelled.clone());
+            respelled
+        } else {
+            match self.vacant(to)? {
+                Ok(destination) => destination,
+                Err(detail) => return Ok(Err(detail)),
+            }
+        };
+        let moved = self.target(&source).after.take();
+        self.target(&destination).after = moved;
+        Ok(Ok(()))
     }
+
+    fn target(&mut self, spelling: &DocumentPath) -> &mut ComposedTarget {
+        self.targets
+            .get_mut(spelling)
+            .expect("a placed file has a target")
+    }
+}
+
+/// `identity` at the spelling its operation asked for, normalized.
+fn spelled_as_asked(identity: &NormalizedPath) -> String {
+    document_path(identity.as_path())
+        .map(|path| path.as_str().to_string())
+        .unwrap_or_default()
 }
 
 /// The files an operation touches: a move touches its source and its
@@ -163,19 +317,6 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         OperationKind::MoveDocument { from, to } => (from, Some(to)),
     };
     std::iter::once(first).chain(second)
-}
-
-/// Whether `path` is spelled the one way its file is: every name in it
-/// non-empty and neither `.` nor `..`.
-///
-/// A file is one entry in the composition, keyed by its path, so two
-/// spellings of one file would compose as two files. The wire's grammar takes
-/// any relative spelling, so the planner is where a second one is turned
-/// away.
-fn in_its_one_spelling(path: &DocumentPath) -> bool {
-    path.as_str()
-        .split('/')
-        .all(|name| !name.is_empty() && name != "." && name != "..")
 }
 
 /// `bytes` with the one occurrence of `old` replaced by `new`.
@@ -210,14 +351,9 @@ fn replace_once(bytes: &[u8], old: &str, new: &str) -> Result<Arc<[u8]>, Unresol
     Ok(Arc::from(replaced))
 }
 
-/// The wire's content hash of `bytes`: the filesystem layer's SHA-256, spelled
-/// with its algorithm.
+/// The wire's content hash of `bytes`.
 pub(crate) fn content_hash(bytes: &[u8]) -> ContentHash {
-    ContentHash::new(format!(
-        "sha256:{}",
-        norn_fs::ContentHash::of(bytes).to_hex()
-    ))
-    .expect("a SHA-256 digest spells a content hash")
+    wire_hash(norn_fs::ContentHash::of(bytes))
 }
 
 #[cfg(test)]
@@ -355,7 +491,7 @@ mod tests {
             &vault,
             Operation::new(OperationKind::create_document(path("a.md"), "new")),
         );
-        assert!(detail.contains("something stands"), "{detail}");
+        assert!(detail.contains("a document stands"), "{detail}");
     }
 
     #[test]
@@ -409,7 +545,7 @@ mod tests {
             &vault,
             Operation::new(OperationKind::move_document(path("a.md"), path("b.md"))),
         );
-        assert!(detail.contains("something stands"), "{detail}");
+        assert!(detail.contains("a document stands"), "{detail}");
     }
 
     #[test]
@@ -419,7 +555,7 @@ mod tests {
             &vault,
             Operation::new(OperationKind::move_document(path("a.md"), path("a.md"))),
         );
-        assert!(detail.contains("something stands"), "{detail}");
+        assert!(detail.contains("onto itself"), "{detail}");
     }
 
     #[test]
@@ -464,22 +600,44 @@ mod tests {
     }
 
     #[test]
-    fn a_path_in_any_but_its_one_spelling_does_not_resolve() {
+    fn a_path_in_a_second_spelling_is_the_file_its_one_spelling_names() {
         let vault = MemoryVault::with(&[("a/b.md", "b")]);
-        for spelling in ["a//b.md", "./a/b.md", "a/./b.md", "x/../a/b.md", "a/b.md/"] {
-            let detail = unresolvable_detail(
-                &vault,
-                Operation::new(OperationKind::delete_document(path(spelling))),
+        for spelling in ["a//b.md", "./a/b.md", "a/./b.md", "a/b.md/"] {
+            let operations = [Operation::new(OperationKind::delete_document(path(
+                spelling,
+            )))];
+            let composition =
+                compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+            assert!(composition.unresolvable.is_empty(), "{spelling}");
+            assert_eq!(
+                composition.targets.keys().collect::<Vec<_>>(),
+                vec![&path("a/b.md")],
+                "{spelling}"
             );
-            assert!(detail.contains("one spelling"), "{spelling}: {detail}");
         }
+    }
+
+    #[test]
+    fn a_path_climbing_out_through_a_parent_name_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a/b.md", "b")]);
         let detail = unresolvable_detail(
             &vault,
-            Operation::new(OperationKind::move_document(
-                path("a/b.md"),
-                path("c//d.md"),
-            )),
+            Operation::new(OperationKind::delete_document(path("x/../a/b.md"))),
         );
-        assert!(detail.contains("one spelling"), "{detail}");
+        assert!(detail.contains("names no document"), "{detail}");
+    }
+
+    #[test]
+    fn two_spellings_of_one_file_compose_as_one_target() {
+        let vault = MemoryVault::with(&[("a/b.md", "one two")]);
+        let operations = [
+            Operation::new(OperationKind::str_replace(path("a/b.md"), "one", "1")),
+            Operation::new(OperationKind::str_replace(path("a//b.md"), "two", "2")),
+        ];
+        let composition =
+            compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+        assert!(composition.unresolvable.is_empty());
+        assert_eq!(composition.targets.len(), 1);
+        assert_eq!(after_text(&composition, "a/b.md").as_deref(), Some("1 2"));
     }
 }
