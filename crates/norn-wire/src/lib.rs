@@ -158,25 +158,31 @@
 //!   buffer keeps the last of two values written for one key where the derive
 //!   refuses the second, so a plan read inside a request would read otherwise
 //!   than the plan alone. The cursor's rendering is the one runtime use of
-//!   `serde_json` here, and it is in no signature.
+//!   `serde_json` here, and it is in no signature. The plan tags
+//!   [`OperationsTag`] and [`ResolvedTag`] are written by hand on both sides
+//!   too: each is a zero-sized marker, written as its constant and read as a
+//!   one-member vocabulary that refuses any other value.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Seventeen types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   not accept. These types do: the grammars [`VaultName`], [`VaultRoot`],
 //!   [`SchemaSource`], [`Directory`], [`DocumentPath`], [`FolderPath`],
 //!   [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
 //!   [`OperationId`] advertise the pattern or floor their constructors
 //!   hold; [`Operation`] advertises its kind's own branches with its optional
 //!   parts added inside each, since each branch refuses a key it does not
 //!   name; [`PlanDocument`] is one of the two plan types, each advertising
-//!   its own tag; [`Cursor`] is one opaque string
+//!   its own tag, and the tags [`OperationsTag`] and [`ResolvedTag`] are each
+//!   their constant inline; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`],
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
-//!   `uniqueItems` for the distinctness it is measured against as well; and
+//!   `uniqueItems` for the distinctness it is measured against as well;
 //!   [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
-//!   the bound has one spelling.
+//!   the bound has one spelling; [`LadderDeclaration`] advertises that its
+//!   rungs contain a retrieval rung; and [`RungSubtraction`] advertises its
+//!   rungs each once and never every retrieval rung.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally

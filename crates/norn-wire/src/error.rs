@@ -41,13 +41,16 @@
 //! them from this crate today.
 //!
 //! **The codes an apply ends in are minted ahead of its handler.** An apply
-//! that neither previews nor applies ends in one of seven codes, and each
-//! detail carries what a caller needs to act: the fresh resolved plan a
-//! refusal answers with, the plan an interrupted or unknown apply is finished
-//! by sending again, or the fault in the plan's own shape. `vault/plan-interrupted`
-//! is a failure that partly landed, never a refusal: it names what landed. The
-//! host's apply handler raises them, above this layer, so the call graph
-//! reaches none of them from this crate today.
+//! that neither previews nor applies ends in one of seven codes of its own,
+//! beside the admission codes a read carries, which an apply refused at
+//! admission ends in as a read would. Each of the seven details carries what a
+//! caller needs to act: the fresh resolved plan a refusal answers with, the
+//! plan an interrupted or unknown apply is finished by sending again, or the
+//! fault in the plan's own shape. A root-identity refusal carries no plan: the
+//! plan was made against another root, so no plan resolved here would apply
+//! it. `vault/plan-interrupted` is a failure that partly landed, never a
+//! refusal: it names what landed. The host's apply handler raises them, above
+//! this layer, so the call graph reaches none of them from this crate today.
 //!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
@@ -680,7 +683,10 @@ pub enum ErrorDetail {
         detail: String,
     },
     /// The detail of `host/apply-not-run`: the lifecycle cause, and the
-    /// resolved plan where planning had finished.
+    /// resolved plan where planning had finished. The cause is a lifecycle
+    /// refusal under its own code: a park, trust withheld or lost, damaged
+    /// derived state, an attach that failed, or the host's teardown or the
+    /// entry's destruction.
     #[serde(rename = "host/apply-not-run")]
     #[non_exhaustive]
     ApplyNotRun {
