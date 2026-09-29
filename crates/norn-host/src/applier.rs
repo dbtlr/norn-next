@@ -65,7 +65,7 @@ use norn_wire::{
     ResolvedPlan, RootIdentity,
 };
 
-pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted, Refused};
+pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
 use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};

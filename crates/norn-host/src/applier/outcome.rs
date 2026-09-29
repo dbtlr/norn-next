@@ -78,6 +78,9 @@ pub(crate) struct Interrupted {
     pub(crate) cause: InterruptionCause,
     /// Whether the landed subset committed, or the entry owes a heal. The wire
     /// does not carry it; the apply job reads it to arm the heal.
+    // A dormant carrier: its reader is NORN-295's `Host::apply` job, which
+    // arms the heal an uncommitted changeset owes and has not landed.
+    #[allow(dead_code)]
     pub(crate) changeset: ChangesetOutcome,
 }
 

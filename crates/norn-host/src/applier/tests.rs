@@ -360,7 +360,7 @@ impl Fixture {
     }
 }
 
-pub(super) fn refused(outcome: ApplyOutcome) -> super::Refused {
+pub(super) fn refused(outcome: ApplyOutcome) -> super::outcome::Refused {
     match outcome {
         ApplyOutcome::Refused(refused) => *refused,
         other => panic!("the plan is refused: {other:?}"),
@@ -901,5 +901,70 @@ fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
             .targets
             .iter()
             .all(|target| target.result == TargetResult::Found)
+    );
+}
+
+/// Every outcome crosses under the wire's code for it, and every one given
+/// after the plan was checked carries a resolved plan.
+#[test]
+fn each_outcome_crosses_under_its_wire_code() {
+    use norn_wire::{ChangesetOutcome, ErrorDetail, Forecast, InterruptionCause, ReasonCode};
+
+    let fixture = Fixture::new(&[("a.md", "a\n")]);
+    let plan = fixture.plan(vec![deleting("a.md")]);
+    let applied_report = ApplyOutcome::Applied(super::Applied {
+        plan: plan.clone(),
+        changeset: ChangesetOutcome::Committed,
+        targets: Vec::new(),
+        folders_made: Vec::new(),
+        folders_removed: Vec::new(),
+    })
+    .into_wire()
+    .expect("an applied plan is a report");
+    assert!(
+        matches!(applied_report, norn_wire::ApplyReport::Applied { plan: carried, .. } if carried == plan)
+    );
+    let code = |outcome: ApplyOutcome| {
+        let envelope = outcome.into_wire().expect_err("a refusal");
+        let carries_plan = match envelope.detail() {
+            ErrorDetail::PlanRefused { .. }
+            | ErrorDetail::PlanInterrupted { .. }
+            | ErrorDetail::WriteFailed { .. } => true,
+            ErrorDetail::RootChanged { .. } => false,
+            other => panic!("an apply's own detail: {other:?}"),
+        };
+        (envelope.code().clone(), carries_plan)
+    };
+    assert_eq!(
+        code(ApplyOutcome::Refused(Box::new(super::outcome::Refused {
+            plan: plan.clone(),
+            forecast: Forecast::new(Vec::new(), Vec::new(), Vec::new()),
+            checks: Vec::new(),
+            unresolved: Vec::new(),
+        }))),
+        (ReasonCode::VaultPlanRefused, true)
+    );
+    assert_eq!(
+        code(ApplyOutcome::RootChanged {
+            expected: fixture.root_identity(),
+            found: RootIdentity::from_device_and_inode(0, 0),
+        }),
+        (ReasonCode::VaultRootChanged, false)
+    );
+    assert_eq!(
+        code(ApplyOutcome::Interrupted(Box::new(super::Interrupted {
+            plan: plan.clone(),
+            landed: vec![path("a.md")],
+            cause: InterruptionCause::io_failure("a sync failed"),
+            changeset: ChangesetOutcome::Committed,
+        }))),
+        (ReasonCode::VaultPlanInterrupted, true)
+    );
+    assert_eq!(
+        code(ApplyOutcome::WriteFailed {
+            plan,
+            detail: "a disk filled".to_string(),
+        }),
+        (ReasonCode::VaultWriteFailed, true)
     );
 }
