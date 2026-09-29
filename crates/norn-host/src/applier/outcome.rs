@@ -107,7 +107,8 @@ impl ApplyOutcome {
     /// which the reconcile reads as the path now stands. A target an
     /// interruption left unlanded is read again too: a respell cut short
     /// between its two steps left its content at the old spelling.
-    /// `normalizer` spells each path as the entry's coverage does.
+    /// `normalizer` spells each path as the entry's coverage does; a path it
+    /// cannot spell widens the heal to the whole vault.
     pub(crate) fn heal(&self, normalizer: &norn_fs::PathNormalizer) -> Batch {
         let mut heal = Batch::default();
         let (plan, landed): (&ResolvedPlan, &[DocumentPath]) = match self {
@@ -123,9 +124,12 @@ impl ApplyOutcome {
         };
         let every_target_landed = matches!(self, ApplyOutcome::Applied(_));
         for transition in &plan.transitions {
+            // A path no vault path normalizes to names nothing the heal can
+            // read again, so the vault is healed whole, as it is where the
+            // root cannot be walked.
             let Ok(path) = normalizer.normalize(std::path::Path::new(transition.path.as_str()))
             else {
-                continue;
+                return Batch::rescan(norn_fs::RescanScope::Vault);
             };
             let landed = every_target_landed || landed.contains(&transition.path);
             heal.merge(match transition.after {

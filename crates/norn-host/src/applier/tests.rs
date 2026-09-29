@@ -1646,3 +1646,37 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
     );
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
+
+/// **A heal owed over a path the vault's spelling refuses heals the vault
+/// whole.** A plan's paths are wire paths, and one no vault path normalizes
+/// to names nothing the heal could read again; leaving it out would leave
+/// the store believing whatever it held there, so the heal widens to the
+/// whole vault, as it does where the root cannot be walked.
+#[test]
+fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
+    let path = DocumentPath::new("../outside.md").expect("a wire path");
+    let plan = ResolvedPlan::new(
+        VaultAddress::name(VaultName::new("notes").expect("a legal vault name")),
+        RootIdentity::from_device_and_inode(1, 1),
+        Vec::new(),
+        vec![norn_wire::Transition::new(
+            path,
+            norn_wire::FileState::absent(),
+            norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32])),
+        )],
+        Vec::new(),
+    );
+    let outcome = ApplyOutcome::Applied(super::Applied {
+        plan,
+        changeset: norn_wire::ChangesetOutcome::Healing,
+        targets: Vec::new(),
+        folders_made: Vec::new(),
+        folders_removed: Vec::new(),
+    });
+    let normalizer = norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
+
+    assert_eq!(
+        outcome.heal(&normalizer),
+        norn_fs::Batch::rescan(norn_fs::RescanScope::Vault)
+    );
+}
