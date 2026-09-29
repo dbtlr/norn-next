@@ -20,7 +20,7 @@ use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
     DocumentPath, ErrorDetail, Forecast, GetParams, GetReport, Operation, OperationId,
     OperationKind, PlanDocument, PlanFault, ReasonCode, ResolutionTarget, ResolvedPlan,
-    TargetResult, VaultAddress,
+    TargetResult, Transition, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -336,6 +336,55 @@ fn a_resolved_plan_whose_transitions_disagree_previews_as_its_apply_answers() {
         BEFORE
     );
 }
+
+/// **A resolved plan carrying a transition for a file none of its operations
+/// touches previews as its apply answers it**: `request/plan-invalid` naming
+/// that file alone, judged from the plan's shape before the vault is read,
+/// and neither writes.
+#[test]
+fn a_resolved_plan_with_a_transition_for_an_untouched_file_previews_as_plan_invalid() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-extra-transition");
+    std::fs::write(vault.path().join(UNTOUCHED), "# Untouched\n").expect("write a bystander");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let (mut plan, _) = previewed(&host, finalizing(&vault));
+    let edit = plan.transitions[0].clone();
+    plan.transitions.push(Transition::new(
+        DocumentPath::new(UNTOUCHED).unwrap(),
+        edit.before,
+        edit.after,
+    ));
+
+    let answer = |mode| {
+        host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone())))
+            .expect("the request is answered")
+            .wait()
+            .expect_err("a plan with an extra transition is answered as invalid")
+    };
+    let previewed = answer(ApplyMode::Preview);
+    let applied = answer(ApplyMode::Apply);
+    let ErrorDetail::PlanInvalid {
+        fault: PlanFault::TransitionsDisagree { paths, .. },
+        ..
+    } = previewed.detail()
+    else {
+        panic!("the preview answered {:?}", previewed.detail());
+    };
+    assert_eq!(paths, &vec![DocumentPath::new(UNTOUCHED).unwrap()]);
+    assert_eq!(previewed.code(), &ReasonCode::RequestPlanInvalid);
+    assert_eq!(previewed.detail(), applied.detail());
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(UNTOUCHED)).unwrap(),
+        "# Untouched\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
+/// A document no plan here touches.
+const UNTOUCHED: &str = "apply-untouched.md";
 
 /// Every entry under `root`, with its inode and modification time.
 fn tree_state(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
