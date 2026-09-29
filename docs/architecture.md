@@ -2365,9 +2365,10 @@ ordering and composition, over the vault with every target at its recorded befor
 in the plan's recorded order, and refuses unless that order is the one the operations'
 dependencies give and the result is exactly the plan's transitions — one per file, none
 missing, added, repeated or changed, every operation acting and every author condition the
-operations carry checked. A plan that fails this is not what its operations do: it answers
-`vault/plan-refused` with the operations resolved afresh, no check and no target marked
-drifted, since the wire names no check for it and no target drifted. A source is not
+operations carry checked. A plan that fails this is not what its operations do, so its own
+shape is wrong: it answers `request/plan-invalid` with a `transitions_disagree` fault
+naming every file it disagrees at, and no fresh plan, since no target drifted and the
+caller's fix is to preview its operations again. A source is not
 replaced or removed until every other target drawing content from it has durably landed,
 and a plan whose content dependencies form a cycle is refused at planning; the applier
 refuses one as `request/plan-invalid` too, by the planner's one content-cycle rule over
