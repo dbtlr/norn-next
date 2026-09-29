@@ -501,4 +501,55 @@ mod tests {
             "{steps} steps to judge {OPERATIONS} operations"
         );
     }
+
+    /// Judging fates takes a bounded number of steps per operation where
+    /// every operation touches one file, and so each fall reaches the whole
+    /// plan, once, not once per operation.
+    #[test]
+    fn judging_fates_takes_a_bounded_number_of_steps_where_all_operations_share_a_file() {
+        const OPERATIONS: usize = 400;
+        let operations: Vec<Operation> = (0..OPERATIONS).map(|_| editing("shared.md")).collect();
+        FATE_STEPS.with(|steps| steps.set(0));
+        let fates = judged(operations, &[OPERATIONS - 1]);
+        let steps = FATE_STEPS.with(std::cell::Cell::get);
+        assert!(fates.iter().all(|fate| matches!(fate, Fate::Unresolved(_))));
+        assert!(
+            steps <= 16 * OPERATIONS,
+            "{steps} steps to judge {OPERATIONS} operations"
+        );
+    }
+
+    /// An operation requiring several operations names the first of them
+    /// that had already fallen when it fell, not one that fell after it.
+    #[test]
+    fn a_requirement_that_fell_after_the_operation_is_not_the_one_it_names() {
+        let fates = judged(
+            vec![
+                editing("x.md").with_requires(vec![id("b"), id("c")]),
+                editing("x.md").with_id(id("b")),
+                editing("y.md").with_id(id("c")),
+            ],
+            &[2],
+        );
+        assert_eq!(
+            reason(&fates[0]),
+            Some(&UnresolvedReason::requires_unresolved(id("c")))
+        );
+        assert_eq!(reason(&fates[1]), Some(&touching(0)));
+    }
+
+    /// An operation sharing different files with several unresolved
+    /// operations names the lowest position among them.
+    #[test]
+    fn an_operation_sharing_files_with_several_unresolved_names_the_lowest_position() {
+        let fates = judged(
+            vec![
+                editing("b.md"),
+                editing("a.md"),
+                Operation::new(OperationKind::move_document(path("a.md"), path("b.md"))),
+            ],
+            &[0, 1],
+        );
+        assert_eq!(reason(&fates[2]), Some(&touching(0)));
+    }
 }
