@@ -13,10 +13,11 @@ use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
-    AttachMode, ErrorEnvelope, MaintainerIdentity, SetParams, TrustState, UntrustedReason,
-    VaultName, WarmingPhase, WatcherLossCause,
+    AnswerReading, AttachMode, ErrorDetail, ErrorEnvelope, MaintainerIdentity, PlanDocument,
+    SetParams, TrustState, UntrustedReason, VaultAnswer, VaultName, WarmingPhase, WatcherLossCause,
 };
 
+use crate::apply::PlanGround;
 use crate::evidence::{EstablishingHold, ReadEvidence, ReadReading};
 use crate::registry::{
     AliasConflict, RecordRefusal, RegistrationRefusal, RegistryRead, RegistryUnwritable,
@@ -29,10 +30,14 @@ use crate::{
     ReloadOutcome, ReloadRefusal, VaultInspection,
 };
 
+mod apply;
 mod claim;
 mod gate;
 mod serving;
 
+pub(crate) use apply::{ApplyAnswer, not_run};
+pub use apply::{ApplyEnd, ApplyProgress, PendingApply};
+use apply::{ApplyQueue, ApplyReply, QueuedApply};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
@@ -334,6 +339,46 @@ pub trait EntryOps: Send + Sync + 'static {
     /// The root authored control reads must use for this attachment.
     fn control_root(&self, _: &Self::Attachment) -> Option<std::path::PathBuf> {
         None
+    }
+    /// What a plan is resolved against over this attachment: the vault root
+    /// as the coverage spells it, the identity it proved, and the roots its
+    /// walk does not enter.
+    ///
+    /// Recorded where [`EntryOps::control_root`] is, so a preview, which takes
+    /// no claim and holds no coverage, plans against the ground the entry's
+    /// coverage stands on. The default holds none, and a preview over it is
+    /// not run.
+    fn plan_ground(&self, _: &Self::Attachment) -> Option<PlanGround> {
+        None
+    }
+    /// Apply one admitted plan over this attachment, inside the entry's
+    /// claim, after the job has taken in every fact the watcher delivered
+    /// before it: take the one snapshot, plan the operations where the plan
+    /// carries operations, record the resolved plan and the publishing mark
+    /// in `progress`, run the one applier, and answer.
+    ///
+    /// The job holds the claim throughout, so no commit lands in the store
+    /// between the snapshot and the apply's changeset, and the entry stays
+    /// `Ready`: a read meanwhile answers the state before the apply.
+    ///
+    /// The default applies nothing and answers the apply not run.
+    fn apply(
+        &self,
+        _: &VaultName,
+        _: &mut Self::Attachment,
+        _: PlanDocument,
+        _: &ApplyProgress,
+        _: &ProgressReporter<Self::Attachment>,
+    ) -> ApplyEnd {
+        ApplyEnd::answered(Err(not_run(
+            ErrorEnvelope::new(
+                "these entry ops apply no plan",
+                ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
+                    "these entry ops apply no plan",
+                )),
+            ),
+            None,
+        )))
     }
     /// The content model of the schema this attachment's store pins, which
     /// every read answered over this coverage compiles against.
@@ -933,6 +978,9 @@ impl<A: SnapshotSource> Entry<A> {
                 advisories: Vec::new(),
                 store_reading: None,
                 delivered_engine: None,
+                plan_ground: None,
+                applies: ApplyQueue::default(),
+                running_apply: None,
                 recovery_required: false,
                 rebuild_required: false,
                 damage_met_under_a_claim: None,
@@ -1061,6 +1109,23 @@ struct EntryState<A: SnapshotSource> {
     /// fingerprints; `None` where no delivery stands, and once the coverage
     /// goes back.
     delivered_engine: Option<DeliveredEngine>,
+    /// What a plan is resolved against over the coverage the entry holds, as
+    /// [`EntryOps::plan_ground`] read it where the coverage was installed;
+    /// `None` until then, and once the coverage goes back. A preview, which
+    /// holds no coverage, plans against it.
+    plan_ground: Option<PlanGround>,
+    /// The applies admitted against the entry and not yet run, in the order
+    /// they were admitted. Each is demand on the entry while it waits.
+    applies: ApplyQueue,
+    /// A second sender to the caller of the apply a job is running, held
+    /// until that job answers it.
+    ///
+    /// **It is what orders an unwound apply's answer after the unwind's
+    /// publication.** A leg that unwinds drops its own sender with the stack;
+    /// this one is taken by [`reclaim_unwound_leg`] and dropped once the
+    /// unwind has published over the entry, so the caller answered from the
+    /// apply's progress reads where the entry stands after the unwind.
+    running_apply: Option<ApplyReply>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -1958,6 +2023,38 @@ impl<A: SnapshotSource> EntryState<A> {
         }
     }
 
+    /// Whether an apply may take the claim over this entry: it is attached
+    /// and trusted — its coverage in hand, a reader standing, and serving or
+    /// taking in a change over coverage it has served — no damage is known,
+    /// it owes no rung, and nothing parks it, holds it out of service or is
+    /// releasing it.
+    ///
+    /// **This is the store an apply is fit to plan against.** An entry
+    /// attaching, recovering, rebuilding or reloading its schema owes work an
+    /// apply's intake does not do, and publishes neither `Ready` nor a reader
+    /// until that work is done, so a queued apply waits behind it here.
+    fn fit_to_apply(&self) -> bool {
+        self.coverage.in_hand()
+            && self.reader.is_some()
+            && self.damage_met_under_a_claim.is_none()
+            && !self.owes_a_rung()
+            && !self.detach_in_flight
+            && self.read_stance() != ReadStance::Refuse
+    }
+
+    /// Whether the head of the apply queue is owed the claim now: an apply
+    /// is queued and the entry is fit to run it.
+    fn applies_waiting(&self) -> bool {
+        !self.applies.is_empty() && self.fit_to_apply()
+    }
+
+    /// Where the apply an entry is running is answered from once its reply
+    /// is gone: the cause it publishes, as a read refused over it would carry
+    /// it.
+    fn apply_cause(&self, name: &VaultName) -> ErrorEnvelope {
+        ReadRefusal::NotServing(self.published_demand()).answer(name)
+    }
+
     /// What a caller reads off this entry: the park it stands on, or its trust
     /// state where nothing parks it.
     ///
@@ -1991,6 +2088,8 @@ enum Job {
     JudgeReload(VaultName, u64, ReloadReply),
     /// A schema reload's next turn, carrying what its first turn judged.
     ReloadReconcile(VaultName, u64, ReloadJudgment, ReloadReply),
+    /// Run the apply at the head of the entry's queue, holding its claim.
+    Apply(VaultName, u64),
     Detach(VaultName, u64),
 }
 
@@ -2008,6 +2107,7 @@ impl Job {
             | Self::Reload(_, epoch, _)
             | Self::JudgeReload(_, epoch, _)
             | Self::ReloadReconcile(_, epoch, _, _)
+            | Self::Apply(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -2022,6 +2122,7 @@ impl Job {
             | Self::Reload(name, _, _)
             | Self::JudgeReload(name, _, _)
             | Self::ReloadReconcile(name, _, _, _)
+            | Self::Apply(name, _)
             | Self::Detach(name, _) => name,
         }
     }
@@ -2038,6 +2139,7 @@ impl Job {
             | Self::Rebuild(..)
             | Self::Reconcile(..)
             | Self::Maintenance(..)
+            | Self::Apply(..)
             | Self::Detach(..) => None,
         }
     }
@@ -2237,6 +2339,27 @@ fn schedule_demanded_work<A: SnapshotSource>(
         return None;
     }
     Some(schedule_demand(state, name))
+}
+
+/// Schedule the apply at the head of the entry's queue, where the entry is
+/// free and fit to run it.
+///
+/// **Every end of a claim that leaves the entry free reaches here**, beside
+/// the work a demand lease is owed, so an apply queued behind an attach, a
+/// recovery, a rebuild, a reload or a poll takes the claim where that work
+/// ends rather than at a later dispatcher tick.
+fn schedule_queued_apply<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
+    if state.claim.is_held() || !state.applies_waiting() {
+        return None;
+    }
+    Some(
+        state
+            .claim
+            .schedule(|epoch| Job::Apply(name.clone(), epoch)),
+    )
 }
 
 /// Publish the damage a read's store met, and schedule the rebuild that
@@ -2483,6 +2606,7 @@ fn finish_release<O: EntryOps>(
     state.active_fingerprints = None;
     state.active_content_model = Arc::new(ContentModel::none());
     state.control_root = None;
+    state.plan_ground = None;
     state.store_reading = None;
     state.delivered_engine = None;
     // The derived state a damage verdict was about is with the ops, and an
@@ -2802,6 +2926,17 @@ fn reclaim_unwound_leg<O: EntryOps>(
         return;
     };
     let epoch = leg.epoch();
+    // The reply of an apply the leg was running goes last, once the unwind
+    // has published over the entry: its caller is answered from the apply's
+    // progress, with the cause the entry then publishes.
+    let _asker = {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.claim.leg() == Some(leg) {
+            state.running_apply.take()
+        } else {
+            None
+        }
+    };
     let attachment = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.claim.leg() != Some(leg) {
@@ -4007,6 +4142,9 @@ impl<O: EntryOps> Drop for Host<O> {
             state.claim.invalidate();
             state.claim.open();
             state.pending.clear();
+            // No apply runs past the host: each queued one is answered from
+            // its own progress, not applied.
+            state.applies.clear();
             if state.detach_in_flight {
                 // A release is already under way with this entry's resources.
                 // The joins below wait for the leg running it, and whatever it
@@ -4599,6 +4737,125 @@ impl<O: EntryOps> Host<O> {
             ),
             None => ReloadRefusal::Unavailable(Demand::UnknownVault),
         }
+    }
+
+    /// Admit one apply of `plan` against the vault `name`, and answer the
+    /// handle its caller waits on.
+    ///
+    /// **Admission raises the demand a read's hold raises**, recording it
+    /// under the same chain and scheduling the work it owes where the entry
+    /// holds nothing or holds untrusted coverage (ADR 0030). It then refuses at
+    /// once, with the code a read would carry, only where the entry stands on
+    /// a cause: out of service, parked, untrusted — trust withheld or lost,
+    /// damage published — or holding damage a read carried to a claim. The
+    /// demand goes back with the refusal.
+    ///
+    /// Everywhere else the apply is queued at once, its demand standing
+    /// until the job running it takes it off the queue, and nothing here
+    /// waits for the entry to settle. Over a free claim, and over routine
+    /// derivation scheduled and not yet running — a reconcile turn or a
+    /// maintenance scan the apply's own intake stands in for — the apply
+    /// takes the claim here. Over anything else it waits for the work holding
+    /// the claim to end, which hands the claim to the queue's head: at a
+    /// reconcile turn's end, before a maintenance scan begins, and where an
+    /// attach, a recovery, a rebuild or a reload publishes `Ready`.
+    pub(crate) fn admit_apply(
+        &self,
+        name: &VaultName,
+        plan: PlanDocument,
+    ) -> Result<PendingApply, ErrorEnvelope> {
+        let Some(entry) = self.shared.entries.get(name) else {
+            return Err(ReadRefusal::NotServing(Demand::UnknownVault).answer(name));
+        };
+        let (reply, answer) = mpsc::sync_channel(1);
+        let progress = ApplyProgress::default();
+        let dispatch = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if let Some(answer) = state.withdrawal_answer() {
+                return Err(ReadRefusal::NotServing(answer).answer(name));
+            }
+            // The cause is read before the demand schedules anything: the
+            // work it schedules publishes the warming it runs under, and the
+            // entry stood on the cause when the apply arrived.
+            let refusal =
+                if state.stands_parked() || matches!(state.trust, TrustState::Untrusted { .. }) {
+                    Some(state.apply_cause(name))
+                } else if state.damage_met_under_a_claim.is_some() {
+                    Some(
+                        ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                            "the store found its derived data damaged while other work held this \
+                         entry; the entry rebuilds it when that work ends",
+                        ))
+                        .answer(name),
+                    )
+                } else {
+                    None
+                };
+            let awaits_a_change = state.recovery_awaits_a_change();
+            let recovery_demand = record_demand(&mut state, !awaits_a_change);
+            let scheduled = matches!(
+                state.trust,
+                TrustState::Unattached | TrustState::Untrusted { .. }
+            ) && !state.claim.is_held()
+                && !state.detach_in_flight
+                && state.parked().is_none()
+                && !awaits_a_change;
+            if scheduled {
+                schedule_demand(&mut state, name);
+            }
+            if let Some(refusal) = refusal {
+                give_back_demand(&mut state, recovery_demand, Instant::now());
+                drop(state);
+                if scheduled {
+                    let _ = dispatch_pending(&self.shared, &entry);
+                }
+                return Err(refusal);
+            }
+            state.applies.push(QueuedApply {
+                plan,
+                reply,
+                progress: progress.clone(),
+                recovery_demand,
+            });
+            // Routine derivation scheduled and not yet running is work the
+            // apply's intake does itself, so the apply takes the claim over
+            // it: the supersession sends the scheduled job nowhere, and where
+            // it is already in the channel the queue slot it holds keeps the
+            // apply's marker from a second send until it arrives.
+            let over_routine = state.claim.leg().is_none()
+                && matches!(
+                    state.claim.marker(),
+                    Some(Job::Reconcile(..) | Job::Maintenance(..))
+                );
+            let takes = state.applies_waiting() && (!state.claim.is_held() || over_routine);
+            if takes {
+                state
+                    .claim
+                    .schedule(|epoch| Job::Apply(name.clone(), epoch));
+            }
+            scheduled || takes
+        };
+        if dispatch {
+            // The one failure is the worker pool being gone, which is the
+            // host coming down: the apply's reply goes with its queue, and
+            // its caller is answered from its progress.
+            let _ = dispatch_pending(&self.shared, &entry);
+        }
+        let shared = Arc::downgrade(&self.shared);
+        let asked = name.clone();
+        Ok(PendingApply::queued(
+            answer,
+            progress,
+            Box::new(move || unanswered_apply_cause(&shared, &asked)),
+        ))
+    }
+
+    /// The ground a preview of the vault `name` plans against: what the
+    /// entry's coverage recorded, and nothing where it holds none.
+    pub(crate) fn plan_ground(&self, name: &VaultName) -> Option<PlanGround> {
+        let entry = self.shared.entries.get(name)?;
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        state.plan_ground.clone()
     }
 
     /// How many passes that stat every served root this host has run against
@@ -5732,6 +5989,9 @@ fn poll_claimed_entry<O: EntryOps>(
                     schedule = publish_damage_a_read_met(&mut state, name);
                 }
                 if schedule.is_none() {
+                    schedule = schedule_queued_apply(&mut state, name);
+                }
+                if schedule.is_none() {
                     schedule = schedule_demanded_work(&mut state, name);
                 }
                 if schedule.is_none() {
@@ -5833,6 +6093,14 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         if !state.claim.stands_at(epoch) {
             if state.claim.marker().map(Job::epoch) == Some(epoch) {
                 state.claim.drop_marker();
+            }
+            // A marker a producer planted over this job while it was in the
+            // channel — an apply admitted over the routine derivation this
+            // job carried — waited on the slot this arrival has just given
+            // back, and is sent from here rather than at a later tick.
+            if state.claim.marker().is_some() {
+                drop(state);
+                let _ = dispatch_pending(shared, &entry);
             }
             return;
         }
@@ -5941,14 +6209,21 @@ fn end_job_leg<O: EntryOps>(
             // beside a leg still running. The leg's end is what sends it; the
             // dispatcher tick that would otherwise reach it is one poll
             // interval away.
-            if publish_damage_a_read_met(&mut state, name).is_none() {
+            if publish_damage_a_read_met(&mut state, name).is_none()
+                && schedule_queued_apply(&mut state, name).is_none()
+            {
                 schedule_demanded_work(&mut state, name);
             }
             if state.claim.marker().is_some() {
                 drop(state);
                 let _ = dispatch_pending(shared, entry);
             }
-        } else if publish_damage_a_read_met(&mut state, name).is_some() {
+        } else if publish_damage_a_read_met(&mut state, name).is_some()
+            || schedule_queued_apply(&mut state, name).is_some()
+        {
+            // A leg that ended free — an attach, a recovery, a rebuild or a
+            // reload publishing `Ready`, a turn leaving nothing to derive —
+            // hands the claim to the apply queued behind it here.
             drop(state);
             let _ = dispatch_pending(shared, entry);
         }
@@ -5972,6 +6247,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Reload(name, _, _)
         | Job::JudgeReload(name, _, _)
         | Job::ReloadReconcile(name, _, _, _)
+        | Job::Apply(name, _)
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
@@ -6124,6 +6400,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
+                    state.plan_ground = shared.ops.plan_ground(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     state.install_coverage(&*shared.ops, attachment);
@@ -6322,6 +6599,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return Some(attachment);
             }
             state.control_root = shared.ops.control_root(&attachment);
+            state.plan_ground = shared.ops.plan_ground(&attachment);
             state.claim.release();
             let mut next = None;
             let mut reclassify = false;
@@ -6572,6 +6850,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 if !state.claim.stands_at(epoch) {
                     return None;
                 }
+                // A queued apply takes the claim before the next turn would
+                // begin: its own intake derives the facts this turn would
+                // have taken, so the turn is not run at all.
+                if state.applies_waiting() {
+                    let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
+                    drop(state);
+                    dispatch_handoff(shared, entry, epoch, next);
+                    return None;
+                }
                 let Some(attachment) = state.coverage.take(epoch) else {
                     restore_lost_claim(&mut state, Job::Reconcile(name.clone(), epoch));
                     return None;
@@ -6628,7 +6915,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     if handoff_saturated || !state.pending.is_empty() {
                         state.publish_pending_reconcile();
                     }
-                    if state.detach_due {
+                    if state.applies_waiting() {
+                        // A queued apply takes the claim ahead of the next
+                        // turn and of due maintenance: its intake derives the
+                        // facts this turn left, and the maintenance a later
+                        // poll or turn finds due is still due then.
+                        let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
+                        drop(state);
+                        dispatch_handoff(shared, entry, epoch, next);
+                        break None;
+                    } else if state.detach_due {
                         // A teardown the entry is due can be withdrawn by a
                         // demand before it runs, and what the entry then
                         // publishes is what this turn left: `Ready` where it
@@ -6671,93 +6967,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         break None;
                     }
                 }
-                Err(JobFailure::LostMaintainership) => {
-                    begin_release(&mut state);
-                    drop(state);
-                    finish_release(
-                        shared,
-                        entry,
-                        &name,
-                        epoch,
-                        Some(attachment),
-                        ReleaseTail::HonorDemand,
-                    );
-                    break None;
-                }
-                Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.maintainer_contended = Some(incumbent);
-                    begin_release(&mut state);
-                    drop(state);
-                    finish_release(
-                        shared,
-                        entry,
-                        &name,
-                        epoch,
-                        Some(attachment),
-                        ReleaseTail::HonorDemand,
-                    );
-                    break None;
-                }
-                Err(JobFailure::WatcherTerminal(error)) => {
-                    state.coverage.park_by(epoch, attachment);
-                    state.claim.release();
-                    state.require_recovery();
-                    state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    let reclassify = root_moved(&error);
-                    state.withdraw_trust(watcher_lost(error));
-                    let next = schedule_due_detach(&mut state, &name);
-                    drop(state);
-                    // The watcher this leg drained reported that the root
-                    // stopped being covered, and this leg is the one caller
-                    // that consumed the report: the classification rides the
-                    // fact rather than the caller.
-                    if reclassify {
-                        park_on_current_classification(shared, &name);
-                    }
-                    if let Some(job) = next {
-                        dispatch_handoff(shared, entry, epoch, job);
-                    }
-                    break None;
-                }
-                Err(JobFailure::Environmental(detail)) => {
-                    state.coverage.park_by(epoch, attachment);
-                    state.claim.release();
-                    state.require_recovery();
-                    state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
-                    let next = schedule_due_detach(&mut state, &name);
-                    drop(state);
-                    if let Some(job) = next {
-                        dispatch_handoff(shared, entry, epoch, job);
-                    }
-                    break None;
-                }
-                Err(JobFailure::Reload(error)) => {
-                    state.coverage.park_by(epoch, attachment);
-                    state.claim.release();
-                    state.require_recovery();
-                    state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    let detail = state.record_reload_error(error);
-                    state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
-                    let next = schedule_due_detach(&mut state, &name);
-                    drop(state);
-                    if let Some(job) = next {
-                        dispatch_handoff(shared, entry, epoch, job);
-                    }
-                    break None;
-                }
-                // The facts this reconcile took are gone with it, and nothing
-                // is merged back for them: the rebuild's heal reads the vault
-                // whole, so every path the lost batch named is read again by
-                // the leg that follows this one.
-                Err(JobFailure::StoreDamaged(detail)) => {
-                    state.coverage.park_by(epoch, attachment);
-                    state.withdraw_trust_for_damage(detail);
-                    let next = state
-                        .claim
-                        .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
-                    drop(state);
-                    dispatch_handoff(shared, entry, epoch, next);
+                Err(failure) => {
+                    end_turn_on_failure(shared, entry, state, &name, epoch, attachment, failure);
                     break None;
                 }
             }
@@ -6776,10 +6987,20 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             reply,
             ReloadStep::Reconcile(judgment),
         ),
+        Job::Apply(name, epoch) => run_apply_job(shared, entry, name, epoch),
         Job::Maintenance(name, epoch) => {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
+                    return None;
+                }
+                // A queued apply takes the claim before a maintenance scan
+                // would begin; the scan is still due when a later poll or
+                // turn asks.
+                if state.applies_waiting() {
+                    let next = state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch));
+                    drop(state);
+                    dispatch_handoff(shared, entry, epoch, next);
                     return None;
                 }
                 let Some(attachment) = state.coverage.take(epoch) else {
@@ -6824,7 +7045,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // follows to say so. That holds where a teardown is due
                     // too, because a demand can withdraw it before it runs.
                     state.publish_ready_where_nothing_is_left(handoff_saturated);
-                    if state.detach_due {
+                    if state.applies_waiting() {
+                        next = Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)));
+                    } else if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if handoff_saturated || !state.pending.is_empty() {
                         state.publish_pending_reconcile();
@@ -6934,6 +7157,306 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
     }
+}
+
+/// Answer a failed turn of derivation over coverage the leg holds: the policy
+/// the entry owes for what the turn met. A lost or contended maintainership
+/// releases the entry, a terminal watch or a refusing environment owes the
+/// recovery, and damaged derived state withdraws trust and hands the claim on
+/// to rung 3.
+///
+/// A reconcile turn and an apply's intake — which derives the facts delivered
+/// before it as a reconcile turn does — both end here, so the facts either
+/// meets are answered by one policy.
+fn end_turn_on_failure<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    attachment: O::Attachment,
+    failure: JobFailure,
+) {
+    match failure {
+        JobFailure::LostMaintainership => {
+            begin_release(&mut state);
+            drop(state);
+            finish_release(
+                shared,
+                entry,
+                name,
+                epoch,
+                Some(attachment),
+                ReleaseTail::HonorDemand,
+            );
+        }
+        JobFailure::MaintainerContended(incumbent) => {
+            state.maintainer_contended = Some(incumbent);
+            begin_release(&mut state);
+            drop(state);
+            finish_release(
+                shared,
+                entry,
+                name,
+                epoch,
+                Some(attachment),
+                ReleaseTail::HonorDemand,
+            );
+        }
+        JobFailure::WatcherTerminal(error) => {
+            state.coverage.park_by(epoch, attachment);
+            state.claim.release();
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            let reclassify = root_moved(&error);
+            state.withdraw_trust(watcher_lost(error));
+            let next = schedule_due_detach(&mut state, name);
+            drop(state);
+            // The watcher this leg drained reported that the root
+            // stopped being covered, and this leg is the one caller
+            // that consumed the report: the classification rides the
+            // fact rather than the caller.
+            if reclassify {
+                park_on_current_classification(shared, name);
+            }
+            if let Some(job) = next {
+                dispatch_handoff(shared, entry, epoch, job);
+            }
+        }
+        JobFailure::Environmental(detail) => {
+            state.coverage.park_by(epoch, attachment);
+            state.claim.release();
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
+            let next = schedule_due_detach(&mut state, name);
+            drop(state);
+            if let Some(job) = next {
+                dispatch_handoff(shared, entry, epoch, job);
+            }
+        }
+        JobFailure::Reload(error) => {
+            state.coverage.park_by(epoch, attachment);
+            state.claim.release();
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            let detail = state.record_reload_error(error);
+            state.withdraw_trust(UntrustedReason::environmental_refusal(detail));
+            let next = schedule_due_detach(&mut state, name);
+            drop(state);
+            if let Some(job) = next {
+                dispatch_handoff(shared, entry, epoch, job);
+            }
+        }
+        // The facts this reconcile took are gone with it, and nothing
+        // is merged back for them: the rebuild's heal reads the vault
+        // whole, so every path the lost batch named is read again by
+        // the leg that follows this one.
+        JobFailure::StoreDamaged(detail) => {
+            state.coverage.park_by(epoch, attachment);
+            state.withdraw_trust_for_damage(detail);
+            let next = state
+                .claim
+                .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+            drop(state);
+            dispatch_handoff(shared, entry, epoch, next);
+        }
+    }
+}
+
+/// Run the apply at the head of the entry's queue, holding the entry's claim.
+///
+/// **The claim is held from the intake to the changeset**, so the apply's
+/// changeset builds on exactly the state it read. The steps are the seam's:
+///
+/// 1. Take the queue's head and the entry's coverage, where the entry is fit
+///    to plan against; the head's demand goes back, the claim now holding the
+///    entry.
+/// 2. The intake: drain the watcher once, and derive exactly the facts
+///    delivered by then — those the entry had taken in and those the drain
+///    delivered — as a commit of their own, publishing as a reconcile turn
+///    does. Nothing delivered after the drain is taken in until the apply's
+///    changeset has committed. An intake that fails answers the apply not
+///    run, with the cause the failure's policy publishes.
+/// 3. The apply itself, through [`EntryOps::apply`]: the one snapshot, the
+///    plan, the applier, the changeset. The entry stays `Ready` throughout,
+///    so a read meanwhile answers the state before the apply.
+/// 4. The end: the facts the watcher delivered meanwhile are taken in, and
+///    the claim goes to the next queued apply, or to the reconcile those
+///    facts — and a changeset that did not commit — owe, or back.
+///
+/// The answer is sent last, whichever way the apply ended; a caller that
+/// stopped waiting is not an error, and the apply finishes regardless.
+fn run_apply_job<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: VaultName,
+    epoch: u64,
+) -> Option<O::Attachment> {
+    let (mut attachment, apply, mut work) = {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if !state.claim.stands_at(epoch) {
+            return None;
+        }
+        if state.applies.is_empty() {
+            state.claim.release();
+            return None;
+        }
+        if !state.coverage.in_hand() {
+            restore_lost_claim(&mut state, Job::Apply(name.clone(), epoch));
+            return None;
+        }
+        if !state.fit_to_apply() {
+            // Nothing fit to plan against: the queue waits for the work the
+            // entry owes next, which hands it the claim where it publishes
+            // `Ready`.
+            state.claim.release();
+            return None;
+        }
+        let apply = state.applies.take_head().expect("the queue holds an apply");
+        let attachment = state
+            .coverage
+            .take(epoch)
+            .expect("the entry holds its coverage");
+        give_back_demand(&mut state, apply.recovery_demand, Instant::now());
+        state.running_apply = Some(apply.reply.clone());
+        state.pin_for_leg(Leg::Job(epoch));
+        let (work, _) = state.pending.take();
+        (attachment, apply, work)
+    };
+    let QueuedApply {
+        plan,
+        reply,
+        progress,
+        ..
+    } = apply;
+    let reporter = reporter(entry, epoch);
+
+    // The intake.
+    let intake = match drain_observed(&shared.ops, &name, &mut attachment) {
+        Ok((observed, _)) => {
+            let through = {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                state.pending.merge(observed);
+                let (delivered, through) = state.pending.take();
+                work.merge(delivered);
+                if !work.is_empty() && state.trust == TrustState::Ready {
+                    state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+                }
+                through
+            };
+            if work.is_empty() {
+                Ok(through)
+            } else {
+                shared
+                    .ops
+                    .reconcile(
+                        &name,
+                        &mut attachment,
+                        ReconcileWork { batch: work },
+                        &reporter,
+                    )
+                    .map(|()| through)
+            }
+        }
+        Err(failure) => Err(failure),
+    };
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if !state.claim.stands_at(epoch) || state.detach_in_flight {
+        // The entry moved on before the apply planned: it did not run.
+        state.unpin_leg(Leg::Job(epoch));
+        state.running_apply = None;
+        let cause = state.apply_cause(&name);
+        drop(state);
+        let _ = reply.send(Err(not_run(cause, None)));
+        return Some(attachment);
+    }
+    match intake {
+        Ok(through) => {
+            state.pending.derive_through(through);
+            record_advisories(&mut state, &*shared.ops, &attachment);
+            if !state.owes_a_rung() {
+                state.trust = TrustState::Ready;
+            }
+        }
+        Err(failure) => {
+            state.unpin_leg(Leg::Job(epoch));
+            state.running_apply = None;
+            end_turn_on_failure(shared, entry, state, &name, epoch, attachment, failure);
+            let cause = entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .apply_cause(&name);
+            let _ = reply.send(Err(not_run(cause, None)));
+            return None;
+        }
+    }
+    drop(state);
+
+    let ApplyEnd { answer, heal } =
+        shared
+            .ops
+            .apply(&name, &mut attachment, plan, &progress, &reporter);
+    let answer = answer.map(|(snapshot, report)| {
+        VaultAnswer::new(
+            AnswerReading::new(
+                TrustState::Ready,
+                snapshot.epoch(),
+                u64::try_from(snapshot.write_generation()).unwrap_or_default(),
+            ),
+            Vec::new(),
+            report,
+        )
+    });
+
+    // The end: what the watcher delivered while the apply ran.
+    let drained = drain_observed(&shared.ops, &name, &mut attachment);
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    state.unpin_leg(Leg::Job(epoch));
+    state.running_apply = None;
+    if !state.claim.stands_at(epoch) {
+        // The entry moved on while the apply ran; the apply's answer is
+        // still what it did, and the coverage goes back where the leg ends.
+        drop(state);
+        let _ = reply.send(answer);
+        return Some(attachment);
+    }
+    if let Some(heal) = heal {
+        state.pending.merge(heal);
+    }
+    let saturated = match drained {
+        Ok((observed, saturated)) => {
+            state.pending.merge(observed);
+            saturated
+        }
+        Err(failure) => {
+            end_turn_on_failure(shared, entry, state, &name, epoch, attachment, failure);
+            let _ = reply.send(answer);
+            return None;
+        }
+    };
+    state.coverage.park_by(epoch, attachment);
+    let next = if state.applies_waiting() {
+        // The next apply's intake derives whatever this one left waiting.
+        Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)))
+    } else if saturated || !state.pending.is_empty() {
+        state.publish_pending_reconcile();
+        Some(
+            state
+                .claim
+                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+        )
+    } else {
+        state.claim.release();
+        schedule_due_detach(&mut state, &name)
+    };
+    drop(state);
+    let _ = reply.send(answer);
+    if let Some(job) = next {
+        dispatch_handoff(shared, entry, epoch, job);
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -7295,6 +7818,24 @@ fn apply_reload_runtime_failure<O: EntryOps>(
     drop(state);
     let _ = reply.send(response);
     None
+}
+
+/// The cause an apply whose reply was dropped before publication is answered
+/// with: where its entry stands once the reply is gone, as a read refused over
+/// it would carry it; a name the host no longer serves as unknown; and a host
+/// that is gone as an entry holding nothing.
+fn unanswered_apply_cause<O: EntryOps>(
+    shared: &std::sync::Weak<Shared<O>>,
+    name: &VaultName,
+) -> ErrorEnvelope {
+    let Some(shared) = shared.upgrade() else {
+        return ReadRefusal::NotServing(Demand::State(TrustState::Unattached)).answer(name);
+    };
+    let Some(entry) = shared.entries.get(name) else {
+        return ReadRefusal::NotServing(Demand::UnknownVault).answer(name);
+    };
+    let state = entry.gate.lock().unwrap_or_else(PoisonError::into_inner);
+    state.apply_cause(name)
 }
 
 const HANDOFF_BATCH_LIMIT: usize = 8;
@@ -8077,6 +8618,25 @@ mod tests {
         amendments: Mutex<Vec<(Registration, Registration)>>,
         /// Whether every amendment panics before it writes.
         panic_in_amend: AtomicBool,
+        /// Each apply the fake ran, with the reconciles and maintenance
+        /// scans it had run when it did.
+        applies_ran: Mutex<Vec<AppliedWhen>>,
+        block_apply: AtomicBool,
+        apply_started: AtomicBool,
+        apply_release: AtomicBool,
+        panic_in_apply_before_publishing: AtomicBool,
+        panic_in_apply_after_publishing: AtomicBool,
+        heal_in_apply: AtomicBool,
+        /// Facts the watcher delivers to the next polls, whichever thread
+        /// polls: a case sets them where only the leg it drives can poll.
+        facts_on_next_polls: AtomicUsize,
+    }
+
+    /// What had run against the fake when one of its applies ran.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct AppliedWhen {
+        reconciles: usize,
+        maintenances: usize,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -8152,6 +8712,7 @@ mod tests {
     const JUDGE_RELOAD_PANIC: &str = "the fake reload judgment unwound";
     const RETIRE_PANIC: &str = "the fake retirement unwound";
     const AMEND_PANIC: &str = "the fake amendment unwound";
+    const APPLY_PANIC: &str = "the fake apply unwound";
 
     /// The state an entry publishes for a leg that unwound carrying `message`.
     fn unwound(message: &str) -> TrustState {
@@ -8530,6 +9091,9 @@ mod tests {
                     "the watcher cursor points into a truncated page".into(),
                 ));
             }
+            if spend_one(&self.facts_on_next_polls) {
+                return Ok(Some(a_fact()));
+            }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
             if on_job_thread
                 && self
@@ -8569,6 +9133,65 @@ mod tests {
 
         fn maintenance_due(&self, name: &VaultName, _: &FakeCoverage) -> bool {
             takes_the_vault(&self.maintenance_due_at, name)
+        }
+
+        /// A resolved plan is applied as it stands and operations as a plan
+        /// of no transitions; either lands nothing and commits, or answers
+        /// healing where a case asks for a changeset that did not commit.
+        fn apply(
+            &self,
+            _: &VaultName,
+            _: &mut FakeCoverage,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> ApplyEnd {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
+            self.applies_ran
+                .lock()
+                .expect("applies poisoned")
+                .push(AppliedWhen {
+                    reconciles: self.reconciles.load(Ordering::SeqCst),
+                    maintenances: self.maintenances.load(Ordering::SeqCst),
+                });
+            let resolved = match plan {
+                PlanDocument::Resolved(resolved) => resolved,
+                PlanDocument::Operations(authored) => norn_wire::ResolvedPlan::new(
+                    authored.vault,
+                    norn_wire::RootIdentity::from_device_and_inode(1, 1),
+                    authored.operations,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+            progress.planned(&resolved);
+            if self.block_apply.load(Ordering::SeqCst) {
+                self.apply_started.store(true, Ordering::SeqCst);
+                wait_for_release("apply_release", &self.apply_release);
+            }
+            if self.panic_in_apply_before_publishing.load(Ordering::SeqCst) {
+                panic!("{APPLY_PANIC}");
+            }
+            progress.publishing();
+            if self.panic_in_apply_after_publishing.load(Ordering::SeqCst) {
+                panic!("{APPLY_PANIC}");
+            }
+            let healing = self.heal_in_apply.load(Ordering::SeqCst);
+            let report = norn_wire::ApplyReport::applied(
+                resolved,
+                if healing {
+                    norn_wire::ChangesetOutcome::Healing
+                } else {
+                    norn_wire::ChangesetOutcome::Committed
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            ApplyEnd {
+                answer: Ok((fake_reading(1), report)),
+                heal: healing.then(a_fact),
+            }
         }
 
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
@@ -23766,6 +24389,7 @@ mod tests {
             | Job::Reload(..)
             | Job::JudgeReload(..)
             | Job::ReloadReconcile(..)
+            | Job::Apply(..)
             | Job::Detach(..) => None,
         }
     }
@@ -24274,6 +24898,8 @@ mod tests {
         wait_for_state(&host, &blocked, TrustState::Ready);
         drop(lease_blocked);
     }
+
+    mod applies;
 
     /// A vault the set gains while the host runs, and a vault it loses.
     ///
