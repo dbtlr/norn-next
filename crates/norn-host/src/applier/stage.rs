@@ -11,7 +11,7 @@ use norn_wire::{FileState, OperationKind, PlanFault, RefusedCheck, ResolvedPlan,
 
 use super::lineage::Lineage;
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe, spelled_once,
+    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
     transition_index, units,
 };
 use super::recompose::{Recomposed, recompose};
@@ -150,7 +150,7 @@ pub(super) fn check_and_stage(
     declared: &Declared,
 ) -> Result<StagedPlan, Stop> {
     let normalizer = view.normalizer();
-    let stored = stored_paths(plan, normalizer).map_err(Stop::Unsound)?;
+    let stored = stored_paths(plan).map_err(Stop::Unsound)?;
     let units = units(plan, normalizer);
     let (states, _) =
         observe(plan, &units, view).map_err(|error| Stop::Failed(error.to_string()))?;
@@ -221,21 +221,21 @@ pub(super) fn check_and_stage(
 }
 
 /// Every transition's path as the store names it, or why the plan names a
-/// target no other way: at a second spelling of its file, or at a path the
-/// store cannot name, which would be published and never recorded.
-fn stored_paths(
-    plan: &ResolvedPlan,
-    normalizer: &PathNormalizer,
-) -> Result<Vec<norn_store::DocumentPath>, String> {
+/// target at a path the store cannot name, which would be published and never
+/// recorded.
+///
+/// **A plan names each target at one spelling.** The planner writes every
+/// transition at a normalized spelling, and the kernel keeps a path as it is
+/// given — a `./` component included — so a target spelled otherwise, as a
+/// plan edited by hand can be, would be published, recorded and derived at a
+/// second spelling of one file. Normalizing a path drops only its `.` and
+/// empty components, and the store's grammar refuses both, so a path the store
+/// names is already the one spelling of its file.
+fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, String> {
     plan.transitions
         .iter()
         .map(|transition| {
             let path = &transition.path;
-            if !spelled_once(normalizer, path) {
-                return Err(format!(
-                    "`{path}` is not spelled the one way the vault spells its file"
-                ));
-            }
             norn_store::DocumentPath::new(path.as_str())
                 .map_err(|error| format!("`{path}` is no path the store can name: {error}"))
         })

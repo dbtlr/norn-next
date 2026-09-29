@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
+use norn_wire::{FileState, PlanCondition, ResolvedPlan, Transition};
 
 use super::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
@@ -359,19 +359,6 @@ pub(super) fn failed_conditions<V: VaultView>(
 /// `path`'s identity under the vault's one rule, where it names a file.
 pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<NormalizedPath> {
     normalizer.normalize(Path::new(path)).ok()
-}
-
-/// Whether `path` is spelled as the vault's one rule spells it.
-///
-/// **A plan names each target at one spelling.** The planner writes every
-/// transition at a normalized spelling, and the kernel keeps a path as it is
-/// given — a `./` component included — so a target spelled otherwise, as a
-/// plan edited by hand can be, would be published, recorded and derived at a
-/// second spelling of one file. Such a plan is not what its operations do,
-/// and is refused before anything is read.
-pub(super) fn spelled_once(normalizer: &PathNormalizer, path: &DocumentPath) -> bool {
-    identity(normalizer, path.as_str())
-        .is_some_and(|identity| identity.as_path() == Path::new(path.as_str()))
 }
 
 /// Whether a transition puts a document where none stood.

@@ -355,3 +355,49 @@ fn a_respell_cut_short_at_either_step_is_finished_and_its_first_step_is_committe
         "the changeset carries the first step"
     );
 }
+
+/// **A landing not synced stops publication**, whether this apply wrote the
+/// target or found it already landed: a later target may draw on it, so the
+/// apply is interrupted naming what landed, nothing after it publishes, and
+/// the shadows staged for what did not publish are discarded.
+#[test]
+fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
+    for (written_first, armed) in [
+        // The create publishes first and its folder sync fails.
+        (true, "parent-sync@1=fails"),
+        // The create is found already landed, and confirming it syncs its
+        // folders, which fail; confirming counts no publication, so the arm
+        // is bare.
+        (false, "parent-sync=fails"),
+    ] {
+        let (fixture, _) = every_position();
+        let plan = fixture.plan(vec![
+            editing("e.md", "draft", "final"),
+            creating("n.md", "n\n"),
+        ]);
+        if !written_first {
+            fixture.write("n.md", "n\n");
+        }
+        let child = run_child(&fixture, &plan, armed);
+        assert!(child.lived, "{armed}");
+        assert!(!child.hits.is_empty(), "{armed}: the arm fired");
+        let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail() else {
+            panic!("{armed}: the apply is interrupted: {:?}", child.outcome);
+        };
+        assert_eq!(*landed, vec![path("n.md")], "{armed}");
+        assert!(
+            matches!(cause, InterruptionCause::IoFailure { .. }),
+            "{armed}: {cause:?}"
+        );
+        assert_eq!(
+            fixture.read("e.md").as_deref(),
+            Some("status draft\n"),
+            "{armed}: nothing after it published"
+        );
+        assert!(
+            fixture.shadows_left().is_empty(),
+            "{armed}: {:?}",
+            fixture.shadows_left()
+        );
+    }
+}

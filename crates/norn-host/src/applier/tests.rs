@@ -1389,3 +1389,48 @@ fn a_document_put_back_after_its_removal_is_not_committed_as_removed() {
     heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// A condition the plan carries on a file it does not write is checked at
+/// apply: another writer's change to that file refuses the plan, naming the
+/// condition, and nothing is published.
+#[test]
+fn a_plan_condition_another_writer_broke_refuses() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "seen\n")]);
+    let seen = crate::planner::compose::content_hash(b"seen\n");
+    let plan = fixture.plan(vec![editing("a.md", "draft", "final").with_conditions(
+        vec![norn_wire::AuthorCondition::content_hash(
+            path("b.md"),
+            seen.clone(),
+        )],
+    )]);
+    assert_eq!(
+        plan.conditions,
+        vec![norn_wire::PlanCondition::content_hash(
+            path("b.md"),
+            seen.clone()
+        )]
+    );
+    fixture.foreign("b.md", "changed\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(
+            norn_wire::PlanCondition::content_hash(path("b.md"), seen)
+        )]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// A plan that drops a condition its operations carry is refused: the
+/// condition is what its author's operation depends on.
+#[test]
+fn a_plan_dropping_its_operations_condition_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "seen\n")]);
+    let seen = crate::planner::compose::content_hash(b"seen\n");
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final").with_conditions(
+        vec![norn_wire::AuthorCondition::content_hash(path("b.md"), seen)],
+    )]);
+    plan.conditions.clear();
+    fixture.refuses_unsound(plan);
+}
