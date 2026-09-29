@@ -38,6 +38,13 @@ publish.workspace = true
 # default, so a shipped build reads no arm variable and carries no arm.
 [features]
 induced-failure = []
+# `test-support` gates `PathNormalizer::for_sensitivity`, a normalizer under a
+# case behavior a test states rather than one a root proved, so a suite in
+# another crate can judge identity rules on a folding root from a host whose
+# volume does not fold. Off by default, so a shipped build has no way to name
+# an identity under a behavior nobody proved; a crate turns it on only in its
+# dev-dependency on this one.
+test-support = []
 
 [dependencies]
 libc = { workspace = true }

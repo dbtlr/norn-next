@@ -43,5 +43,8 @@ norn-wire = { path = "../norn-wire" }
 # in suites as in the product.
 norn-db = { path = "../norn-db" }
 norn-fixtures = { path = "../norn-fixtures" }
+# The planner's in-memory vault states a root's case behavior outright, so its
+# identity rules are judged on a folding root from any host.
+norn-fs = { path = "../norn-fs", features = ["test-support"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

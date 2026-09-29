@@ -129,7 +129,6 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
 pub(crate) struct TreeView {
     root: PathBuf,
     vault: norn_fs::Vault,
-    normalizer: PathNormalizer,
 }
 
 /// Why the vault on disk could not be read.
@@ -165,7 +164,6 @@ impl TreeView {
         let vault = norn_fs::Vault::open(root, exclusions).map_err(TreeViewError::Walk)?;
         Ok(TreeView {
             root: root.to_owned(),
-            normalizer: PathNormalizer::for_sensitivity(vault.case_sensitivity()),
             vault,
         })
     }
@@ -215,7 +213,7 @@ impl VaultView for TreeView {
     type Error = TreeViewError;
 
     fn normalizer(&self) -> &PathNormalizer {
-        &self.normalizer
+        self.vault.normalizer()
     }
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {

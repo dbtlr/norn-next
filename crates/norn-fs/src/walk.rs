@@ -144,6 +144,13 @@ impl Vault {
         self.normalizer.case_sensitivity()
     }
 
+    /// The identity rule this root proved when the vault was opened: the
+    /// one producer of this root's normalized path identities for a caller
+    /// deciding names against it.
+    pub fn normalizer(&self) -> &PathNormalizer {
+        &self.normalizer
+    }
+
     /// What this vault's walk finds at `relative`: the notation it states in
     /// place of reaching that name, or the kind standing at the end of it.
     ///
@@ -3200,6 +3207,24 @@ mod tests {
         );
         assert_eq!(skip("dir/plain.md"), None, "a file the walk reads");
         assert_eq!(skip("dir"), None, "a directory the walk enters");
+    }
+
+    /// **A vault hands out the identity rule its root proved**, so a caller
+    /// producing that root's identities never states a case behavior itself.
+    #[test]
+    fn a_vault_s_normalizer_names_identities_under_the_behavior_its_root_proved() {
+        let scratch = Scratch::new("vault-normalizer");
+        scratch.place("Note.md", b"n");
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        let proved = PathNormalizer::detect(&scratch.at("")).expect("a provable root");
+        assert_eq!(
+            vault.normalizer().case_sensitivity(),
+            proved.case_sensitivity()
+        );
+        assert_eq!(
+            vault.normalizer().normalize(Path::new("./Note.md")),
+            proved.normalize(Path::new("Note.md"))
+        );
     }
 
     /// **A folder lists every name directly inside it, whatever its kind**, and
