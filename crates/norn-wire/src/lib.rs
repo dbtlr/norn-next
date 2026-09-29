@@ -225,10 +225,11 @@
 //!
 //! # Extension, and what a version skew does
 //!
-//! Public enums are `#[non_exhaustive]`, and so is [`ErrorEnvelope`], which
-//! extends by gaining a field. A variant that carries a payload is
-//! `#[non_exhaustive]` in its own right, so the payload extends by gaining a
-//! field too rather than by breaking every caller that destructured it.
+//! Public enums are `#[non_exhaustive]`, save the plain ones below, and so is
+//! [`ErrorEnvelope`], which extends by gaining a field. A variant that carries
+//! a payload is `#[non_exhaustive]` in its own right, save the plan's below,
+//! so the payload extends by gaining a field too rather than by breaking every
+//! caller that destructured it.
 //! `#[non_exhaustive]` binds across crates, so a shape consumers cannot write
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
@@ -295,14 +296,16 @@
 //! params types, on [`DoctorRegistryParams`], and on each of their reports;
 //! [`ContentHash::from_sha256`], [`ContentHash::new`],
 //! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
-//! [`FolderPath::new`], [`Operation::new`], the constructor on each
-//! [`OperationKind`], [`AuthorCondition`], [`PlanCondition`], [`FileState`],
-//! [`PlanDocument`], [`RefusedCheck`], [`UnresolvedReason`],
-//! [`InterruptionCause`], [`PlanFault`] and [`ApplyReport`] variant,
-//! [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
-//! [`AuthoredPlan::new`], [`ResolvedPlan::new`], [`ForecastTarget::new`],
-//! [`Forecast::new`], [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
-//! [`ApplyParams::new`].
+//! [`FolderPath::new`], the constructor on each [`RefusedCheck`],
+//! [`UnresolvedReason`], [`InterruptionCause`], [`PlanFault`] and
+//! [`ApplyReport`] variant, [`ForecastTarget::new`], [`Forecast::new`],
+//! [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
+//! [`ApplyParams::new`]. The plan types the applier destructures, below, can
+//! be written as literals and keep their constructors all the same:
+//! [`Operation::new`], the constructor on each [`OperationKind`],
+//! [`AuthorCondition`], [`PlanCondition`], [`FileState`] and [`PlanDocument`]
+//! variant, [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
+//! [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -327,8 +330,20 @@
 //! than exclude: [`EngineSection::Malformed`] carries a payload, so the
 //! variant is `#[non_exhaustive]` in its own right and grows by gaining a
 //! field, while the enum around it stays plain and grows by breaking every
-//! composer — and so does every payload variant of the four plan enums, each
-//! built through its constructor.
+//! composer.
+//!
+//! **What the one applier interprets is exhaustively destructurable.** The
+//! payload variants of [`OperationKind`], [`FileState`], [`AuthorCondition`]
+//! and [`PlanCondition`], and the structs [`Operation`], [`Transition`],
+//! [`ResolvedPlan`], [`AuthoredPlan`], [`Provenance`] and [`SkippedFinding`],
+//! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
+//! tag is a public zero-sized marker, [`OperationsTag`] or [`ResolvedTag`]. The
+//! one applier decides what every field of a plan means, so a field added to
+//! any of them must fail to compile where the applier destructures the plan,
+//! rather than pass it under a `..` unread — a field the applier ignores
+//! weakens a check as surely as a key a reader drops. Everything else a caller
+//! reads stays `#[non_exhaustive]` and grows without breaking it; these grow by
+//! breaking the applier, deliberately.
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so
@@ -491,8 +506,8 @@ pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::document::{
-    AuthoredPlan, FileState, PlanCondition, PlanDocument, Provenance, ResolvedPlan, SkippedFinding,
-    Transition,
+    AuthoredPlan, FileState, OperationsTag, PlanCondition, PlanDocument, Provenance, ResolvedPlan,
+    ResolvedTag, SkippedFinding, Transition,
 };
 pub use plan::forecast::{FolderPath, Forecast, ForecastTarget};
 pub use plan::hash::{ContentHash, IllegalContentHash};

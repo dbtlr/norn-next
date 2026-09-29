@@ -122,7 +122,6 @@ impl JsonSchema for OperationId {
 pub enum OperationKind {
     /// Create a document that does not exist yet, holding exactly this
     /// content.
-    #[non_exhaustive]
     CreateDocument {
         /// Where the document is created. Nothing may stand there.
         path: DocumentPath,
@@ -131,7 +130,6 @@ pub enum OperationKind {
     },
     /// Replace one occurrence of a text in a document. The text must occur
     /// exactly once.
-    #[non_exhaustive]
     StrReplace {
         /// The document edited.
         path: DocumentPath,
@@ -141,7 +139,6 @@ pub enum OperationKind {
         new_str: String,
     },
     /// Move a document to a path nothing stands at.
-    #[non_exhaustive]
     MoveDocument {
         /// Where the document stands.
         from: DocumentPath,
@@ -150,7 +147,6 @@ pub enum OperationKind {
         to: DocumentPath,
     },
     /// Remove a document.
-    #[non_exhaustive]
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
@@ -202,7 +198,6 @@ pub enum AuthorCondition {
     /// The file at the path holds exactly the bytes with this hash. On a file
     /// the plan writes, it becomes that file's before-state; on any other
     /// file, it becomes a condition of the resolved plan.
-    #[non_exhaustive]
     ContentHash {
         /// The file observed.
         path: DocumentPath,
@@ -227,7 +222,6 @@ impl AuthorCondition {
 /// The optional parts are left out where they are not written, and a key the
 /// operation does not name is refused.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[non_exhaustive]
 pub struct Operation {
     /// What the operation changes.
     #[serde(flatten)]

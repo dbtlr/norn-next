@@ -27,19 +27,20 @@ use norn_wire::{
     IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily,
     LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
     ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
-    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport,
-    TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState,
-    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
-    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Operation, OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, ResolvedTag, RollUp, RootIdentity, Rung, RungReport,
+    RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams, SearchReport,
+    SetParams, SetReport, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
+    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
+    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -8040,37 +8041,177 @@ fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
 }
 
 /// What the one applier decides for each kind, state and condition, written
-/// the way it must be: a match with no wildcard arm, outside this crate. The
-/// four enums are plain, so a member minted without a decision here fails to
-/// compile rather than falling into a default.
+/// the way it must be: a match with no wildcard arm and a destructuring with
+/// no `..`, outside this crate. The four enums are plain and their variants
+/// and the operation hold no hidden field, so a member minted or a field added
+/// without a decision here fails to compile rather than falling into a
+/// default or being ignored.
 fn applier_decision(operation: &Operation) -> String {
-    let writes = match &operation.kind {
-        OperationKind::CreateDocument { path, .. } => format!("create {path}"),
-        OperationKind::StrReplace { path, .. } => format!("edit {path}"),
-        OperationKind::MoveDocument { from, to, .. } => format!("move {from} to {to}"),
-        OperationKind::DeleteDocument { path, .. } => format!("delete {path}"),
+    let Operation {
+        kind,
+        id,
+        requires,
+        footnote,
+        conditions,
+    } = operation;
+    let writes = match kind {
+        OperationKind::CreateDocument { path, content } => {
+            format!("create {path} with {} bytes", content.len())
+        }
+        OperationKind::StrReplace {
+            path,
+            old_str,
+            new_str,
+        } => format!("edit {path}: {old_str} to {new_str}"),
+        OperationKind::MoveDocument { from, to } => format!("move {from} to {to}"),
+        OperationKind::DeleteDocument { path } => format!("delete {path}"),
     };
-    let observed: Vec<String> = operation
-        .conditions
+    let observed: Vec<String> = conditions
         .iter()
         .map(|condition| match condition {
-            AuthorCondition::ContentHash { path, .. } => format!("hash of {path}"),
+            AuthorCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
         })
         .collect();
-    format!("{writes}; {}", observed.join(", "))
+    let requires: Vec<&str> = requires.iter().map(OperationId::as_str).collect();
+    format!(
+        "{writes} as {}, after [{}], noting {}; {}",
+        id.as_ref().map_or("-", OperationId::as_str),
+        requires.join(", "),
+        footnote.as_deref().unwrap_or("-"),
+        observed.join(", ")
+    )
 }
 
 fn plan_check(condition: &PlanCondition) -> String {
     match condition {
-        PlanCondition::ContentHash { path, .. } => format!("hash of {path}"),
+        PlanCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
     }
 }
 
-fn state_check(state: &FileState) -> &'static str {
+fn state_check(state: &FileState) -> String {
     match state {
-        FileState::Absent {} => "absent",
-        FileState::Present { .. } => "present",
+        FileState::Absent {} => "absent".to_string(),
+        FileState::Present { hash } => format!("present at {hash}"),
     }
+}
+
+/// Everything the one applier reads of a plan document, destructured with no
+/// `..`: a field added to either plan, a transition or the provenance fails
+/// to compile here until the applier decides what it means.
+fn applier_reading(document: &PlanDocument) -> Vec<String> {
+    match document {
+        PlanDocument::Operations(AuthoredPlan {
+            plan: OperationsTag,
+            vault,
+            operations,
+            footnote,
+        }) => {
+            let mut read = vec![format!("operations for {vault:?}, noting {footnote:?}")];
+            read.extend(operations.iter().map(applier_decision));
+            read
+        }
+        PlanDocument::Resolved(ResolvedPlan {
+            plan: ResolvedTag,
+            vault,
+            root,
+            operations,
+            transitions,
+            conditions,
+            provenance,
+            footnote,
+        }) => {
+            let mut read = vec![format!(
+                "resolved for {vault:?} at {root:?}, noting {footnote:?}"
+            )];
+            read.extend(operations.iter().map(applier_decision));
+            read.extend(transitions.iter().map(
+                |Transition {
+                     path,
+                     before,
+                     after,
+                 }| {
+                    format!("{path}: {} to {}", state_check(before), state_check(after))
+                },
+            ));
+            read.extend(conditions.iter().map(plan_check));
+            if let Some(Provenance {
+                finding_generation,
+                skipped,
+            }) = provenance
+            {
+                read.push(format!("planned from generation {finding_generation}"));
+                read.extend(skipped.iter().map(|SkippedFinding { finding, reason }| {
+                    format!("skipped {finding}: {reason}")
+                }));
+            }
+            read
+        }
+    }
+}
+
+#[test]
+fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
+    let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
+    assert_eq!(decisions.len(), operations().len());
+    assert_eq!(
+        decisions.last().map(String::as_str),
+        Some(
+            format!(
+                "edit notes/a.md: draft to final as edit-a, after [make-b], noting marks it final; notes/a.md at {}",
+                hash_text(0xab)
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
+        [format!("notes/c.md at {}", hash_text(0xcd))]
+    );
+    assert_eq!(
+        file_states().iter().map(state_check).collect::<Vec<_>>(),
+        [
+            "absent".to_string(),
+            format!("present at {}", hash_text(0x01))
+        ]
+    );
+}
+
+/// The applier reads every field of both plans, and a plan outside this crate
+/// is written as a literal as well as through its constructor.
+#[test]
+fn the_applier_reads_every_field_of_a_plan() {
+    let read = applier_reading(&PlanDocument::resolved(a_resolved_plan()));
+    assert_eq!(
+        read.last().map(String::as_str),
+        Some("skipped 42: the target names two documents")
+    );
+    assert_eq!(
+        applier_reading(&PlanDocument::operations(an_authored_plan())).len(),
+        operations().len() + 1
+    );
+    let literal = ResolvedPlan {
+        plan: ResolvedTag,
+        vault: VaultAddress::name(name("notes")),
+        root: a_root(),
+        operations: Vec::new(),
+        transitions: Vec::new(),
+        conditions: Vec::new(),
+        provenance: None,
+        footnote: None,
+    };
+    assert_eq!(
+        wire(&literal),
+        r#"{"plan":"resolved","vault":{"by":"name","name":"notes"},"root":"00000000000103020000000000000002","operations":[],"transitions":[],"conditions":[]}"#
+    );
+    assert_eq!(
+        wire(&AuthoredPlan {
+            plan: OperationsTag,
+            vault: VaultAddress::name(name("notes")),
+            operations: Vec::new(),
+            footnote: None,
+        }),
+        r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[]}"#
+    );
 }
 
 /// What the one applier does with a request, written with no wildcard arm:
@@ -8109,23 +8250,5 @@ fn the_applier_decides_every_mode_and_document_without_a_default() {
             "preview the resolved plan",
             "apply the resolved plan",
         ]
-    );
-}
-
-#[test]
-fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
-    let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
-    assert_eq!(decisions.len(), operations().len());
-    assert_eq!(
-        decisions.last().map(String::as_str),
-        Some("edit notes/a.md; hash of notes/a.md")
-    );
-    assert_eq!(
-        plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
-        ["hash of notes/c.md"]
-    );
-    assert_eq!(
-        file_states().iter().map(state_check).collect::<Vec<_>>(),
-        ["absent", "present"]
     );
 }

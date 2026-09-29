@@ -28,10 +28,12 @@
 //! unchanged. So the `plan` tag is a field of each plan rather than of the
 //! document around it: [`AuthoredPlan`] is always written `"plan":"operations"`
 //! and [`ResolvedPlan`] always `"plan":"resolved"`, and each refuses a missing
-//! or another tag when read on its own. The tag is a private field of a
-//! one-member type, so the derive writes it, requires it on the read, refuses
-//! any other value, and advertises it as a required constant — where serde's
-//! struct-level `tag` writes the tag but neither reads nor advertises it.
+//! or another tag when read on its own. The tag is a public field whose type
+//! is a zero-sized marker, [`OperationsTag`] or [`ResolvedTag`], so the derive
+//! writes it, requires it on the read, refuses any other value, and advertises
+//! it as a required constant — where serde's struct-level `tag` writes the tag
+//! but neither reads nor advertises it — and a plan is still written and
+//! destructured as a literal outside this crate.
 //!
 //! **A document reads its plan by that tag.** [`PlanDocument`] is not a
 //! serde-tagged enum, because an internally tagged enum consumes the tag
@@ -67,7 +69,6 @@ pub enum FileState {
     /// Nothing stands at the path.
     Absent {},
     /// The file at the path holds exactly the bytes with this hash.
-    #[non_exhaustive]
     Present {
         /// The hash of what the file holds.
         hash: ContentHash,
@@ -91,7 +92,6 @@ impl FileState {
 /// landed.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-#[non_exhaustive]
 pub struct Transition {
     /// The file changed.
     pub path: DocumentPath,
@@ -121,7 +121,6 @@ impl Transition {
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanCondition {
     /// The file at the path holds exactly the bytes with this hash.
-    #[non_exhaustive]
     ContentHash {
         /// The file the condition is about.
         path: DocumentPath,
@@ -140,7 +139,6 @@ impl PlanCondition {
 /// A finding a repair plan left alone, and why.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-#[non_exhaustive]
 pub struct SkippedFinding {
     /// The finding's identity in the vault's findings.
     pub finding: u64,
@@ -168,7 +166,6 @@ impl SkippedFinding {
 /// the plan is applied.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-#[non_exhaustive]
 pub struct Provenance {
     /// The write generation of the findings the plan was planned from.
     pub finding_generation: u64,
@@ -188,14 +185,38 @@ impl Provenance {
 }
 
 /// The constant a plan type writes under `plan` and requires on the read: a
-/// one-member type, so the derive refuses any other value, with a schema that
-/// is the constant inline.
+/// public zero-sized marker, so a plan is written and destructured as a
+/// literal outside this crate, whose read refuses any other value and whose
+/// schema is the constant inline.
 macro_rules! plan_tag {
-    ($tag:ident, $member:ident, $string:literal) => {
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-        enum $tag {
-            #[serde(rename = $string)]
-            $member,
+    ($tag:ident, $string:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+        pub struct $tag;
+
+        impl Serialize for $tag {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str($string)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $tag {
+            /// The tag is read as a one-member vocabulary, so any other value
+            /// is refused as a variant nobody minted.
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                enum Only {
+                    #[serde(rename = $string)]
+                    Tag,
+                }
+                Only::deserialize(deserializer).map(|Only::Tag| $tag)
+            }
         }
 
         impl JsonSchema for $tag {
@@ -217,17 +238,24 @@ macro_rules! plan_tag {
     };
 }
 
-plan_tag!(OperationsTag, Operations, "operations");
-plan_tag!(ResolvedTag, Resolved, "resolved");
+plan_tag!(
+    OperationsTag,
+    "operations",
+    "The tag an authored plan is written under: always `operations`."
+);
+plan_tag!(
+    ResolvedTag,
+    "resolved",
+    "The tag a resolved plan is written under: always `resolved`."
+);
 
 /// A plan as its author writes it: the vault it is for and its operations,
 /// not yet resolved against what the vault holds.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-#[non_exhaustive]
 pub struct AuthoredPlan {
     /// Which plan this is: always `operations`.
-    plan: OperationsTag,
+    pub plan: OperationsTag,
     /// The vault the plan is for.
     pub vault: VaultAddress,
     /// The operations, in the order they compose.
@@ -241,7 +269,7 @@ impl AuthoredPlan {
     /// The plan for `vault`, made of `operations`.
     pub const fn new(vault: VaultAddress, operations: Vec<Operation>) -> Self {
         AuthoredPlan {
-            plan: OperationsTag::Operations,
+            plan: OperationsTag,
             vault,
             operations,
             footnote: None,
@@ -262,10 +290,9 @@ impl AuthoredPlan {
 /// again after an interruption finishes it.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-#[non_exhaustive]
 pub struct ResolvedPlan {
     /// Which plan this is: always `resolved`.
-    plan: ResolvedTag,
+    pub plan: ResolvedTag,
     /// The vault the plan is for.
     pub vault: VaultAddress,
     /// The identity of the vault's root when the plan was resolved. A vault
@@ -297,7 +324,7 @@ impl ResolvedPlan {
         conditions: Vec<PlanCondition>,
     ) -> Self {
         ResolvedPlan {
-            plan: ResolvedTag::Resolved,
+            plan: ResolvedTag,
             vault,
             root,
             operations,
@@ -439,14 +466,14 @@ impl<'de> Deserialize<'de> for PlanDocument {
                 not_an_operations_field("conditions", conditions.is_some())?;
                 not_an_operations_field("provenance", provenance.is_some())?;
                 Ok(PlanDocument::Operations(AuthoredPlan {
-                    plan: OperationsTag::Operations,
+                    plan: OperationsTag,
                     vault,
                     operations,
                     footnote,
                 }))
             }
             PlanName::Resolved => Ok(PlanDocument::Resolved(ResolvedPlan {
-                plan: ResolvedTag::Resolved,
+                plan: ResolvedTag,
                 vault,
                 root: root.ok_or_else(|| D::Error::missing_field("root"))?,
                 operations,
