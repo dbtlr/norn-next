@@ -14672,6 +14672,194 @@ mod tests {
         }
     }
 
+    /// Production ops whose applies outlast the own-write ledger's lifetime,
+    /// with another writer's edits landing while they run.
+    ///
+    /// The apply itself is the production one. What the wrapper adds runs
+    /// after it has published and committed, still inside the job that holds
+    /// the entry's claim: the foreign edits, then a wait past
+    /// [`norn_fs::OWN_WRITE_TTL`], so every ledger entry the apply recorded
+    /// has expired by the time the job drains the watcher.
+    struct OutlastingApply {
+        inner: ProductionEntryOps,
+        meanwhile: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl EntryOps for OutlastingApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> ApplyEnd {
+            let ended = self.inner.apply(name, attachment, plan, progress, reporter);
+            if let Some(meanwhile) = self.meanwhile.lock().unwrap().take() {
+                meanwhile();
+            }
+            thread::sleep(norn_fs::OWN_WRITE_TTL + Duration::from_millis(500));
+            ended
+        }
+    }
+
+    /// **An apply that outlasts the own-write ledger, with another writer's
+    /// edit landing during it, ends in a correct store with that edit
+    /// derived.** The apply does not extend the ledger's lifetime: its
+    /// entries expire while the job still holds the claim, and another writer
+    /// edits both the target the apply wrote and a document it did not. The
+    /// changeset committed what the apply published; the job's end takes in
+    /// what the watcher delivered meanwhile and hands the claim to the
+    /// reconcile that derives it, so the store ends holding the other
+    /// writer's bytes at both paths.
+    #[test]
+    fn an_apply_outlasting_the_own_write_ledger_ends_with_the_foreign_edit_derived() {
+        let f = Fixture::new("host-apply-outlasting-the-ledger");
+        let target = f.vault().join("note.md");
+        let bystander = f.vault().join("other.md");
+        fs::write(&target, "status draft\n").unwrap();
+        fs::write(&bystander, "other before\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let foreign_target = target.clone();
+        let foreign_bystander = bystander.clone();
+        let host = crate::Host::new(
+            registry,
+            OutlastingApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                meanwhile: std::sync::Mutex::new(Some(Box::new(move || {
+                    fs::write(&foreign_target, "status foreign\n").unwrap();
+                    fs::write(&foreign_bystander, "other foreign\n").unwrap();
+                }))),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let answered = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                PlanDocument::operations(plan),
+            ))
+            .expect("an apply over a ready vault is admitted")
+            .wait()
+            .expect("the plan applies");
+        assert!(matches!(
+            answered.report,
+            norn_wire::ApplyReport::Applied {
+                changeset: norn_wire::ChangesetOutcome::Committed,
+                ..
+            }
+        ));
+
+        let stored_hash = |store: &mut Store, path: &str| {
+            store
+                .begin_request()
+                .stored_document(&DocumentPath::new(path).unwrap())
+                .unwrap()
+                .map(|row| row.content_hash)
+        };
+        wait_until(
+            "the store to hold the other writer's bytes",
+            lifecycle_budget(),
+            || {
+                let mut store = Store::open(
+                    derived.join("store.sqlite3"),
+                    proven_order(&f),
+                    crate::DERIVATION_VERSION,
+                )
+                .unwrap();
+                let held = (
+                    stored_hash(&mut store, "note.md"),
+                    stored_hash(&mut store, "other.md"),
+                );
+                let expected = (
+                    Some(norn_fs::ContentHash::of(b"status foreign\n").to_string()),
+                    Some(norn_fs::ContentHash::of(b"other foreign\n").to_string()),
+                );
+                if held == expected {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("the store holds {held:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+    }
+
     #[test]
     fn external_edit_is_autonomously_pumped_through_warming_to_ready() {
         let f = Fixture::new("host-watch-edit");
