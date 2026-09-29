@@ -74,7 +74,10 @@ pub(crate) fn resolve<V: VaultView>(
     let mut plan = ResolvedPlan::new(
         vault,
         root,
-        kept(&operations, &left_out),
+        order
+            .iter()
+            .map(|&position| operations[position].clone())
+            .collect(),
         transitions,
         conditions,
     );
@@ -91,8 +94,13 @@ pub(crate) fn resolve<V: VaultView>(
 }
 
 /// The operations of this pass that did not resolve: each that met a state it
-/// cannot act on, and each whose author observed a file the plan writes
-/// holding what it no longer holds.
+/// cannot act on, or, where every operation acted, each whose author observed
+/// a file the plan writes holding what it no longer holds.
+///
+/// **Author conditions wait for a pass where everything acted.** Until then
+/// the pass's files include some only an operation that is about to be left
+/// out touches, and a condition on one of those is a plan condition, not a
+/// before-state.
 fn failures(
     operations: &[Operation],
     order: &[usize],
@@ -108,13 +116,15 @@ fn failures(
             )
         })
         .collect();
+    if !failed.is_empty() {
+        return failed;
+    }
     for &position in order {
         for AuthorCondition::ContentHash { path, hash } in &operations[position].conditions {
             let Some(target) = composition.targets.get(path) else {
                 continue;
             };
-            if target.before != FileState::present(hash.clone()) && !failed.contains_key(&position)
-            {
+            if target.before != FileState::present(hash.clone()) {
                 failed.insert(
                     position,
                     UnresolvedReason::no_longer_resolves(format!(
@@ -195,16 +205,6 @@ fn plan_conditions(
         }
     }
     conditions
-}
-
-/// The operations not left out, in plan order.
-fn kept(operations: &[Operation], left_out: &BTreeMap<usize, UnresolvedReason>) -> Vec<Operation> {
-    operations
-        .iter()
-        .enumerate()
-        .filter(|(position, _)| !left_out.contains_key(position))
-        .map(|(_, operation)| operation.clone())
-        .collect()
 }
 
 #[cfg(test)]
@@ -338,7 +338,11 @@ mod tests {
         ];
         let resolution = planned(&vault, operations.clone());
         assert!(resolution.unresolved.is_empty());
-        assert_eq!(resolution.plan.operations, operations);
+        // In the order they compose: the move vacating `b.md` first.
+        assert_eq!(
+            resolution.plan.operations,
+            vec![operations[1].clone(), operations[0].clone()]
+        );
         assert_eq!(
             resolution.plan.transitions,
             vec![
@@ -518,5 +522,39 @@ mod tests {
         assert_eq!(resolution.forecast.folders_made, vec![folder("archive")]);
         assert_eq!(resolution.forecast.folders_removed, vec![folder("inbox")]);
         assert!(resolution.forecast.drifted.is_empty());
+    }
+
+    #[test]
+    fn an_author_condition_is_judged_against_the_files_the_resolved_plan_writes() {
+        let vault = MemoryVault::with(&[("a.md", "draft"), ("c.md", "context")]);
+        let observed = content_hash(b"what the author saw in c.md");
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("c.md"), "missing", "x")),
+            Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final"))
+                .with_conditions(vec![AuthorCondition::content_hash(
+                    path("c.md"),
+                    observed.clone(),
+                )]),
+        ];
+        let resolution = planned(&vault, operations.clone());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![0]);
+        assert_eq!(
+            resolution.plan.conditions,
+            vec![PlanCondition::content_hash(path("c.md"), observed)]
+        );
+    }
+
+    #[test]
+    fn a_resolved_plan_planned_again_is_the_same_plan() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B"), ("d.md", "D")]);
+        let operations = vec![
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md"))),
+            Operation::new(OperationKind::str_replace(path("d.md"), "D", "d")).with_id(id("d")),
+            Operation::new(OperationKind::move_document(path("b.md"), path("c.md")))
+                .with_requires(vec![id("d")]),
+        ];
+        let first = planned(&vault, operations);
+        let again = planned(&vault, first.plan.operations.clone());
+        assert_eq!(again.plan, first.plan);
     }
 }
