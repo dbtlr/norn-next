@@ -458,11 +458,13 @@ pub enum ReasonCode {
     /// position among and the rows the request pages.
     #[serde(rename = "request/cursor-not-taken")]
     RequestCursorNotTaken,
-    /// `request/plan-invalid` — the plan's own shape is wrong, whatever vault
-    /// it is for: an identifier carried twice, a requirement naming no
-    /// operation, operations requiring each other in a cycle, or operations
-    /// drawing content from each other in a cycle. Nothing was written. The
-    /// detail is the fault and the operations involved.
+    /// `request/plan-invalid` — the plan's own shape is wrong: an identifier
+    /// carried twice, a requirement naming no operation, operations requiring
+    /// each other in a cycle, operations drawing content from each other in a
+    /// cycle, or a resolved plan whose transitions are not what its
+    /// operations do. Nothing was written. The detail is the fault and the
+    /// operations or files involved. The caller's fix is to the plan: preview
+    /// its operations again, never to wait for the vault.
     #[serde(rename = "request/plan-invalid")]
     RequestPlanInvalid,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
@@ -852,7 +854,7 @@ pub enum ErrorDetail {
         paged: PagedRows,
     },
     /// The detail of `request/plan-invalid`: what is wrong with the plan's
-    /// shape, and the operations involved.
+    /// shape, and the operations or files involved.
     #[serde(rename = "request/plan-invalid")]
     #[non_exhaustive]
     PlanInvalid {

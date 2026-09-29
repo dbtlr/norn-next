@@ -3195,7 +3195,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "duplicate_id",
             "unknown_requirement",
             "requires_cycle",
-            "content_cycle"
+            "content_cycle",
+            "transitions_disagree"
         ])
     );
     let schema = schema_of::<ErrorDetail>();
