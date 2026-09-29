@@ -4706,6 +4706,8 @@ impl<O: EntryOps> Host<O> {
                 || !state.coverage.in_hand()
                 || state.claim.is_held()
                 || state.detach_in_flight
+                // A queued apply is owed the claim ahead of any reload.
+                || !state.applies.is_empty()
             {
                 return Err(ReloadRefusal::Unavailable(state.published_demand()));
             }

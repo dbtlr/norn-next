@@ -2462,6 +2462,31 @@ bound by the applier's lifecycle tests.
   has begun publishing finishes its publication and its changeset before its leg ends: publication is a rename or an unlink per staged target, and finishing it leaves an applied plan
   where stopping would hand a routine park's caller an interrupted one to re-send.
 
+The implementation settles what those invariants leave open, in `crates/norn-host/src/apply.rs`
+(the verb's handler), `crates/norn-host/src/lifecycle/apply.rs` (the queue, the progress
+record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.rs`:
+
+- **One entry point, one handle.** `Host::apply` answers both modes with a `PendingApply`. A
+  preview's handle holds its answer already: the preview takes an ordinary read hold, plans on
+  the ground the entry's coverage recorded — the covered root, its identity and the roots the
+  walk skips — and writes nothing. A resolved plan previews as its operations resolved afresh,
+  refused as `vault/root-changed` where it was resolved against another root. A vault the
+  planner cannot read answers `host/apply-not-run` with the environment's refusal as the cause.
+- **A queued apply holds the demand admission recorded** until the job running it takes it off
+  the queue, which is what makes it demand to the idle reaper and to a release's re-arm.
+- **Admission takes the claim from routine derivation not yet running.** Over a reconcile turn or
+  maintenance scan that is scheduled and has not begun, the apply is scheduled in its place; the
+  superseded job, where it is already in the channel, holds the queue slot until it arrives, runs
+  nothing, and sends the apply. A leg holding the claim hands it to the queue's head at a turn's
+  end, before a maintenance scan begins, and wherever it ends free.
+- **The one snapshot is the store's reading under the claim.** The planner reads the files, so
+  the snapshot is the store as the claim holds it — no other writer commits until the apply's
+  changeset — and the answer crosses inside a `VaultAnswer` under that reading and `Ready`.
+- **An unanswered apply's cause is the entry's published demand**, rendered as a read refused
+  over it carries it, read once the unwind's cleanup has published over the entry.
+- **The heal is the paths the plan touched**, taken in as facts — a landed removal as a removal,
+  every other path as a change — which the job hands on to the reconcile.
+
 Four contracts inside that flow carry weight:
 
 - **Check and stage everything, then publish.** No target is published until every
