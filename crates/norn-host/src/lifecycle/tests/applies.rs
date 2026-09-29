@@ -1245,3 +1245,48 @@ fn an_apply_over_a_ready_entry_whose_mint_fails_again_is_refused_as_a_read_would
     assert!(ops.applies_ran.lock().unwrap().is_empty());
     drop((lease, host));
 }
+
+/// **Damage a read meets during an apply's intake stops the apply before it
+/// plans.** The read holds the entry's handle while the apply's intake
+/// derives a fact; the read meets damage and carries it to the claim the
+/// apply holds. The apply is answered not applied with the damage its leg
+/// publishes, the rebuild runs, and the apply never ran over the damaged
+/// store.
+#[test]
+fn damage_a_read_meets_during_an_apply_intake_answers_the_apply_not_applied() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let entry = host.shared.entries.get(&name).unwrap();
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
+    ops.block_reconcile.store(true, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("reconcile_started", &ops.reconcile_started);
+    assert!(
+        entry.gate.lock().unwrap().running_apply.is_some(),
+        "the reconcile running is not the apply's intake"
+    );
+
+    let _ = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    drop(hold);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+
+    let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the store is damaged",
+    ));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(damaged)).answer(&name)
+    );
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran over the damage its intake met"
+    );
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}

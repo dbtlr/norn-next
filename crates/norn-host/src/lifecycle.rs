@@ -7418,7 +7418,9 @@ fn end_turn_on_failure<O: EntryOps>(
 ///    delivered — as a commit of their own, publishing as a reconcile turn
 ///    does. Nothing delivered after the drain is taken in until the apply's
 ///    changeset has committed. An intake that fails answers the apply not
-///    run, with the cause the failure's policy publishes.
+///    run, with the cause the failure's policy publishes, and so does one
+///    during which a read carried damage to the claim: the damage is
+///    published with the rebuild it owes, in the hold that ends the intake.
 /// 3. The apply itself, through [`EntryOps::apply`]: the one snapshot, the
 ///    plan, the applier, the changeset. The entry stays `Ready` throughout,
 ///    so a read meanwhile answers the state before the apply.
@@ -7516,6 +7518,23 @@ fn run_apply_job<O: EntryOps>(
         Ok(through) => {
             state.pending.derive_through(through);
             record_advisories(&mut state, &*shared.ops, &attachment);
+            // Damage a read met while the intake held the claim makes the
+            // store unfit to plan against: it is published here, with the
+            // rebuild it owes, and the apply is answered with it unrun. Every
+            // other unfitness is raised by a teardown or a park, which moves
+            // the claim past this leg and is read above.
+            if state.damage_met_under_a_claim.is_some() {
+                state.unpin_leg(Leg::Job(epoch));
+                state.running_apply = None;
+                state.coverage.park_by(epoch, attachment);
+                let rebuild =
+                    hand_on_carried_damage(&mut state, &name).expect("the damage is carried");
+                let cause = state.apply_cause(&name);
+                drop(state);
+                let _ = reply.send(Err(not_run(cause, None)));
+                dispatch_handoff(shared, entry, epoch, rebuild);
+                return None;
+            }
             if !state.owes_a_rung() {
                 state.trust = TrustState::Ready;
             }

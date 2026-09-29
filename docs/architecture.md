@@ -2434,8 +2434,8 @@ bound by the applier's lifecycle tests.
   A change made meanwhile is not yet seen, as under a maintenance scan, and an apply that
   ends with facts waiting hands on to the reconcile they owe unless the next apply takes the
   claim. A preview takes its one snapshot the ordinary way and takes no claim. An intake that
-  finds the store damaged answers the apply not applied, with the cause, and leaves the
-  rebuild to run.
+  finds the store damaged, or during which a read met damage and carried it to the claim,
+  answers the apply not applied, with the cause, and leaves the rebuild to run.
 - **Every queued apply is answered once.** Every publication of a cause admission refuses
   for — lost trust, damage, an attach that failed, a park — and every release that re-arms
   nothing, a leg's unwind cleanup and the host's destruction among them, answers every queued
