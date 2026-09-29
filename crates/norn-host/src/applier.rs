@@ -79,7 +79,7 @@ use norn_fs::{OwnWrites, Published, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
     AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, InterruptionCause, RefusedCheck,
-    ResolvedPlan, RootIdentity,
+    ResolvedPlan, RootIdentity, TargetResult,
 };
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
@@ -194,21 +194,26 @@ impl Applier<'_> {
                 Err(_) => ChangesetOutcome::Healing,
             }
         };
+        // Each transition's result, indexed once, so both lists below are
+        // linear in the plan; a transition published twice keeps its first.
+        let mut result_of: Vec<Option<TargetResult>> = vec![None; plan.transitions.len()];
+        for &(index, result) in &progress.results {
+            result_of[index].get_or_insert(result);
+        }
         let landed: Vec<DocumentPath> = plan
             .transitions
             .iter()
-            .enumerate()
-            .filter(|(index, _)| progress.results.iter().any(|(landed, _)| landed == index))
-            .map(|(_, transition)| transition.path.clone())
+            .zip(&result_of)
+            .filter(|(_, result)| result.is_some())
+            .map(|(transition, _)| transition.path.clone())
             .collect();
         let Some(stopped) = stopped else {
             let targets = plan
                 .transitions
                 .iter()
-                .enumerate()
-                .filter_map(|(index, transition)| {
-                    let (_, result) = progress.results.iter().find(|(at, _)| *at == index)?;
-                    Some(AppliedTarget::new(transition.path.clone(), *result))
+                .zip(&result_of)
+                .filter_map(|(transition, result)| {
+                    Some(AppliedTarget::new(transition.path.clone(), (*result)?))
                 })
                 .collect();
             return ApplyOutcome::Applied(Applied {
