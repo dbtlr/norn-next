@@ -18,8 +18,8 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
-    DocumentPath, GetParams, GetReport, Operation, OperationKind, PlanDocument, ResolutionTarget,
-    TargetResult, VaultAddress,
+    DocumentPath, ErrorDetail, GetParams, GetReport, Operation, OperationId, OperationKind,
+    PlanDocument, ReasonCode, ResolutionTarget, TargetResult, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -125,4 +125,81 @@ fn a_previewed_plan_sent_back_applies_and_a_read_after_it_answers_the_change() {
         body.contains("status final"),
         "a read after the apply answered the state before it: {body:?}"
     );
+}
+
+/// **A preview whose operation does not resolve is refused, never
+/// reported.** An edit whose text the subject does not hold answers
+/// `vault/plan-refused` with the plan the rest resolved to — here none of
+/// it — and the operation left for the caller, and nothing is written.
+#[test]
+fn a_preview_whose_operation_does_not_resolve_is_refused_with_the_operation_left_out() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-unresolved");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let absent_text = Operation::new(OperationKind::str_replace(
+        DocumentPath::new(SUBJECT).expect("a document path"),
+        "no such text",
+        "final",
+    ));
+    let plan = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![absent_text.clone()],
+    ));
+
+    let refused = host
+        .apply(ApplyParams::new(ApplyMode::Preview, plan))
+        .expect("a preview is answered")
+        .wait()
+        .expect_err("a preview of an unresolved operation was reported");
+    assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused {
+        plan, unresolved, ..
+    } = refused.detail()
+    else {
+        panic!("the refusal carries {:?}", refused.detail());
+    };
+    assert!(plan.transitions.is_empty());
+    assert_eq!(
+        unresolved
+            .iter()
+            .map(|left| &left.operation)
+            .collect::<Vec<_>>(),
+        vec![&absent_text]
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
+/// **A preview of operations whose own shape is wrong is refused as
+/// `request/plan-invalid`.** Two operations each requiring the other are no
+/// plan at all.
+#[test]
+fn a_preview_of_operations_requiring_each_other_is_refused_as_an_invalid_plan() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-invalid");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let first = OperationId::new("first").unwrap();
+    let second = OperationId::new("second").unwrap();
+    let edit = |id: &OperationId, requires: &OperationId| {
+        Operation::new(OperationKind::str_replace(
+            DocumentPath::new(SUBJECT).expect("a document path"),
+            "draft",
+            "final",
+        ))
+        .with_id(id.clone())
+        .with_requires(vec![requires.clone()])
+    };
+    let plan = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![edit(&first, &second), edit(&second, &first)],
+    ));
+
+    let refused = host
+        .apply(ApplyParams::new(ApplyMode::Preview, plan))
+        .expect("a preview is answered")
+        .wait()
+        .expect_err("a preview of a cycle was reported");
+    assert_eq!(refused.code(), &ReasonCode::RequestPlanInvalid);
 }
