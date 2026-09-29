@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "12c57b9477f50ca3d01cb87890d460c3a2601c5057fa0190a8a5c3bfa620ee63";
+const CONTRACT_DIGEST: &str = "91f4245e76452c71d5a3daacdaa9e6f4c739128d7470f851c700e1b7f37238fe";
 
 /// The cases carried by tests today, by name.
 ///
@@ -137,7 +137,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is six classes rather than a bag:
+/// residue no subject reaches, and it is seven classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -156,6 +156,11 @@ const BOUND_CASES: &[&str] = &[
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
+/// - **An unbounded call site.** The subject and its bounded form both exist;
+///   what is absent is the bound at named call sites of an existing
+///   declaration — a lock taken without the deadline its bounded take carries
+///   — which is an argument at a call rather than a name any declaration
+///   carries.
 ///
 /// The grounds beside such a reason hold the subjects it cites as present, so
 /// the audit still catches those moving; the claim that something is missing is

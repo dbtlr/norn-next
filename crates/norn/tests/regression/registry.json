@@ -988,7 +988,11 @@
       "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no audit stream and no applier exist."
+        "reason": "the plan and forecast halves have their subject: every file an apply writes is a transition of the resolved plan it answers with, and every folder it makes or removes is named by that plan's forecast, which crates/norn-host/src/planner/forecast.rs computes and the applier, crates/norn-host/src/applier.rs, reports again as the folders it made and removed. What keeps the case dormant is the audit stream the rest of the property is about: no mutation is recorded to an audit sink, no trace id is carried, and the write path writes no log line, so nothing can be asserted of audit records surviving a failure, of sinks, of trace ids or of time correlation.",
+        "grounds": [
+          {"present": "crates/norn-host/src/planner/forecast.rs"},
+          {"present": "crates/norn-host/src/applier.rs"}
+        ]
       }
     },
     {
@@ -1121,11 +1125,15 @@
       "name": "plan-level-atomicity-and-truthful-partial-reporting",
       "kind": "defect-class",
       "venue": 4,
-      "property": "The whole plan validates before the first write — containment, collision, preconditions, every pass — and two operations targeting one path are rejected. On failure a machine-readable per-operation report persists, naming what committed and what remains, including every unmoved or skipped file by name; shared report fields accumulate across passes rather than being overwritten by a later one; recovery is a regenerable plan; and no declared plan field goes unread by the applier.",
+      "property": "The whole plan is checked and staged before the first publication — containment, every target's state, every condition, the recomposed result, the schema — and operations on one path compose in order into one transition per file rather than colliding. A refusal names every drifted target and every operation left unresolved, by name, beside a fresh plan; a publication stopped part-way answers interrupted, naming every target that landed; the resolved plan is the recovery, and re-sending it finishes it with no journal the host keeps; and every field of a resolved plan that states what the apply does — its root, operations, transitions and conditions — is checked by the applier rather than trusted.",
       "sources": ["NRN-147", "NRN-148", "NRN-149", "NRN-107", "NRN-153", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no plan vocabulary and no applier exist."
+        "reason": "restated per ADR 0031, docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md, which governs where the case as mined disagreed with it: two operations on one path compose in order into one transition rather than being rejected, and no per-operation report persists — the host keeps no record of an attempt, an interrupted answer names every landed target, and re-sending the resolved plan is the recovery — so those clauses, and the report fields accumulating across passes, are replaced. The subject is built: the applier, crates/norn-host/src/applier.rs, checks and stages every target before its first publication, and its suite states the clauses — a_staging_refusal_publishes_nothing_creates_and_removals_included, a_refused_plan_answers_a_fresh_plan_that_applies, a_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again, a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_after, re_sending_a_resolved_plan_finishes_it, a_plan_missing_a_transition_is_refused and a_plan_dropping_its_operations_condition_is_refused. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
+        "grounds": [
+          {"present": "docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md"},
+          {"present": "crates/norn-host/src/applier.rs"}
+        ]
       }
     },
     {
@@ -1498,7 +1506,12 @@
       "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no planner and no applier to compare; the generator emits ambiguous-stem and dangling-link trees, and nothing yet consumes them."
+        "reason": "a resolved plan's preview and its apply are one classifier: the applier, crates/norn-host/src/applier.rs, judges a previewed resolved plan through the check an apply stages behind and answers the same plan or the refusal its apply would, as an_interrupted_plan_previews_as_the_same_plan_and_then_applies and a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses in crates/norn-host/tests/applies.rs state; and the planner, crates/norn-host/src/planner/resolve.rs, classifies each operation on its own, resolving an edit only where its text occurs exactly once and leaving any other unresolved rather than rewriting a first match. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The skips-with-reasons clause waits for Layer 5's repair plans, and the generator's ambiguous-stem and dangling-link trees wait for the link-cascading write verbs, which are not built.",
+        "grounds": [
+          {"present": "crates/norn-host/src/applier.rs"},
+          {"present": "crates/norn-host/tests/applies.rs"},
+          {"present": "crates/norn-host/src/planner/resolve.rs"}
+        ]
       }
     },
     {
@@ -1532,7 +1545,11 @@
       "sources": ["NRN-s7", "NRN-234", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no plan type and no applier exist; the pre-and-post directory-and-inode assertion has nothing to run against."
+        "reason": "the applier, crates/norn-host/src/applier.rs, publishes only the plan's transitions and the folders its forecast names, and a staging refusal leaves the tree as it found it, as a_staging_refusal_publishes_nothing_creates_and_removals_included states; a preview writes nothing, every entry of the vault keeping its inode and modification time, as a_preview_leaves_every_entry_of_the_vault_as_it_was in crates/norn-host/tests/applies.rs states. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The move-with-parents-disabled clause waits for the move verb, which is not built.",
+        "grounds": [
+          {"present": "crates/norn-host/src/applier.rs"},
+          {"present": "crates/norn-host/tests/applies.rs"}
+        ]
       }
     },
     {
@@ -1559,7 +1576,10 @@
       "sources": ["NRN-430", "NRN-474", "NRN-475", "NRN-37", "NRN-390", "NRN-119"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no constraint engine and no write path to hold to one verdict; the write path is the last engine this property needs, which is why it binds a layer below the element-versus-collection rule."
+        "reason": "the write path exists and judges a composed result by the derivation's own judge: the applier's schema check, crates/norn-host/src/applier/schema.rs, runs the derivation's plan_document over the post-state bytes under the pinned declaration — the one judgment the validator's findings come from — so the verdict an apply refuses on is the one the store would file for that post-state. What keeps the case dormant is the rest: the apply verb is the one write path, so there are not several to hold to one verdict; an applied answer reports no warnings to compare with the validator's findings; and no type-changing write exists to coerce under the incoming type. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
+        "grounds": [
+          {"present": "crates/norn-host/src/applier/schema.rs"}
+        ]
       }
     },
     {
@@ -1603,7 +1623,12 @@
       "sources": ["NRN-141", "NRN-434", "NRN-142", "NRN-140"],
       "binding": {
         "status": "dormant",
-        "reason": "no write path exists to gate."
+        "reason": "the recompose check is the gate: before anything is staged, crates/norn-host/src/applier/recompose.rs runs the plan's operations again from its before-states and the applier, crates/norn-host/src/applier.rs, refuses unless each result hashes to its transition's after-state — every byte of the composed file, never a projection of it — so a str_replace splice is confirmed against the whole document before it is committed, and the kernel, crates/norn-fs/src/write.rs, verifies each staged target again as it publishes. The adequacy clause — mutating the gate and requiring the suite to go red — has no harness that runs it, and it stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
+        "grounds": [
+          {"present": "crates/norn-host/src/applier/recompose.rs"},
+          {"present": "crates/norn-host/src/applier.rs"},
+          {"present": "crates/norn-fs/src/write.rs"}
+        ]
       }
     },
     {
