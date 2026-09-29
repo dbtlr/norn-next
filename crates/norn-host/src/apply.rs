@@ -65,7 +65,7 @@ use crate::planner::view::TreeView;
 ///
 /// **Read off the coverage, never off the filesystem**: building one does no
 /// I/O, so the entry records it under its gate. Whether the root still
-/// stands where the coverage proved it is asked by [`PlanGround::standing`],
+/// stands where the coverage proved it is asked by `PlanGround::standing`,
 /// outside any gate hold.
 #[derive(Clone)]
 pub struct PlanGround {
