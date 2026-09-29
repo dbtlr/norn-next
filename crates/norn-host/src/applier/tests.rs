@@ -733,6 +733,7 @@ fn a_target_drawing_on_another_publishes_before_its_source_is_replaced() {
 /// operations, never drift, and names the target as spelled. So nothing is
 /// published, recorded or derived at a second spelling of one file.
 #[test]
+#[allow(clippy::disallowed_methods)] // The kernel itself: the case pins how it keeps a staged path's spelling.
 fn a_target_spelled_with_a_dot_component_is_invalid() {
     let mut fixture = Fixture::new(&[("a.md", "a\n")]);
     let staged = norn_fs::stage(

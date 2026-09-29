@@ -1495,8 +1495,14 @@ The other three configured rules carve out narrowly, and that fact is the whole 
 SQLite rule's one carve-out is the connection `norn-db` opens, which is the seam the rule
 exists to keep to one place; the registry rule's are in `norn-config`'s own suite, which
 exercises the surface the rule reserves to `norn-host`; and the write-kernel rule's are the
-applier's staging and publishing functions in `norn-host` and `norn-fs`'s own suites, which
-exercise the kernel the rule reserves to the applier.
+applier's staging and publishing functions in `norn-host`, the applier's own suite where a
+case drives the kernel directly, and `norn-fs`'s own suites, which exercise the kernel the
+rule reserves to the applier.
+
+The lint enforces these rules in production code. A test module or integration suite that
+builds its own trees carries a module-wide allow for that scaffolding, which also covers any
+other rule the same lint carries, so a suite is not held to the rules by the lint; a direct
+call it makes to a reserved effect carries its own use-site allow as the audit marker.
 
 Each effect a row names is one of two things. Most are **carried today** by a use-site allow
 in a crate the workspace holds. The rest are **reserved** — the crate is not written yet, or
