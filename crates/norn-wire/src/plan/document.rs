@@ -22,15 +22,31 @@
 //! reaches it only through a caller sending it back. It is spelled here so a
 //! repair plan is the same document every other plan is.
 //!
-//! **The document is a newtype over each plan.** A resolved plan crosses on
-//! its own inside every answer an apply gives, so it is a type of its own, and
-//! the document a caller sends wraps it under the `plan` tag. The tagged-enum
-//! rule that variants are struct-shaped exists because a newtype variant over
-//! a non-object fails at serialize time; both payloads here are objects, so
-//! the tag merges into them and the schema advertises it there.
+//! **Each plan carries its own tag, so a resolved plan is its own retry
+//! token.** A resolved plan crosses inside every answer an apply gives after
+//! planning, and a caller finishes or retries by sending those bytes back
+//! unchanged. So the `plan` tag is a field of each plan rather than of the
+//! document around it: [`AuthoredPlan`] is always written `"plan":"operations"`
+//! and [`ResolvedPlan`] always `"plan":"resolved"`, and each refuses a missing
+//! or another tag when read on its own. The tag is a private field of a
+//! one-member type, so the derive writes it, requires it on the read, refuses
+//! any other value, and advertises it as a required constant — where serde's
+//! struct-level `tag` writes the tag but neither reads nor advertises it.
+//!
+//! **A document reads its plan by that tag.** [`PlanDocument`] is not a
+//! serde-tagged enum, because an internally tagged enum consumes the tag
+//! before its variant reads the rest, and each plan must see its own. Its read
+//! path buffers the object as JSON, reads the `plan` tag, and hands the object
+//! whole to the plan the tag names, which reads it — tag, fields and all —
+//! exactly as it reads a plan written alone. This is the third runtime use of
+//! `serde_json` in this crate, and it appears in no signature. A document is
+//! written as the plan it holds, so a plan and the document holding it are one
+//! set of bytes.
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::document::DocumentPath;
@@ -171,12 +187,47 @@ impl Provenance {
     }
 }
 
+/// The constant a plan type writes under `plan` and requires on the read: a
+/// one-member type, so the derive refuses any other value, with a schema that
+/// is the constant inline.
+macro_rules! plan_tag {
+    ($tag:ident, $member:ident, $string:literal) => {
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        enum $tag {
+            #[serde(rename = $string)]
+            $member,
+        }
+
+        impl JsonSchema for $tag {
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn schema_name() -> Cow<'static, str> {
+                Cow::Borrowed(stringify!($tag))
+            }
+
+            fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+                json_schema!({
+                    "type": "string",
+                    "const": $string,
+                })
+            }
+        }
+    };
+}
+
+plan_tag!(OperationsTag, Operations, "operations");
+plan_tag!(ResolvedTag, Resolved, "resolved");
+
 /// A plan as its author writes it: the vault it is for and its operations,
 /// not yet resolved against what the vault holds.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthoredPlan {
+    /// Which plan this is: always `operations`.
+    plan: OperationsTag,
     /// The vault the plan is for.
     pub vault: VaultAddress,
     /// The operations, in the order they compose.
@@ -190,6 +241,7 @@ impl AuthoredPlan {
     /// The plan for `vault`, made of `operations`.
     pub const fn new(vault: VaultAddress, operations: Vec<Operation>) -> Self {
         AuthoredPlan {
+            plan: OperationsTag::Operations,
             vault,
             operations,
             footnote: None,
@@ -212,6 +264,8 @@ impl AuthoredPlan {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ResolvedPlan {
+    /// Which plan this is: always `resolved`.
+    plan: ResolvedTag,
     /// The vault the plan is for.
     pub vault: VaultAddress,
     /// The identity of the vault's root when the plan was resolved. A vault
@@ -243,6 +297,7 @@ impl ResolvedPlan {
         conditions: Vec<PlanCondition>,
     ) -> Self {
         ResolvedPlan {
+            plan: ResolvedTag::Resolved,
             vault,
             root,
             operations,
@@ -270,12 +325,12 @@ impl ResolvedPlan {
 
 /// A plan a caller sends: operations it authored, or a resolved plan.
 ///
-/// On the wire a document is the plan's own object tagged `plan`:
-/// `{"plan":"operations","vault":…,"operations":[…]}`,
-/// `{"plan":"resolved","vault":…,"root":…,…}`. A key the plan does not name is
+/// On the wire a document is the plan itself, which names itself under
+/// `plan`: `{"plan":"operations","vault":…,"operations":[…]}`,
+/// `{"plan":"resolved","vault":…,"root":…,…}`. A resolved plan taken
+/// unchanged out of any answer is a document. A key the plan does not name is
 /// refused, at every depth.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "plan", rename_all = "snake_case")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum PlanDocument {
     /// Operations, planned and applied in one request. Sending them again is
@@ -303,5 +358,69 @@ impl PlanDocument {
             PlanDocument::Operations(plan) => &plan.vault,
             PlanDocument::Resolved(plan) => &plan.vault,
         }
+    }
+}
+
+/// The tag each plan is written under, as a refusal of any other names them.
+const PLAN_TAGS: &[&str] = &["operations", "resolved"];
+
+impl Serialize for PlanDocument {
+    /// A document is written as the plan it holds, which carries its own tag.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            PlanDocument::Operations(plan) => plan.serialize(serializer),
+            PlanDocument::Resolved(plan) => plan.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PlanDocument {
+    /// The object is held as JSON until its `plan` tag is read, then read
+    /// whole by the plan the tag names, which checks the tag again and
+    /// refuses any key it does not name.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let document = serde_json::Value::deserialize(deserializer)?;
+        let tag = match document.get("plan") {
+            None => return Err(D::Error::missing_field("plan")),
+            Some(serde_json::Value::String(tag)) => tag.clone(),
+            Some(_) => return Err(D::Error::custom("the `plan` tag is a string")),
+        };
+        match tag.as_str() {
+            "operations" => AuthoredPlan::deserialize(document)
+                .map(PlanDocument::Operations)
+                .map_err(D::Error::custom),
+            "resolved" => ResolvedPlan::deserialize(document)
+                .map(PlanDocument::Resolved)
+                .map_err(D::Error::custom),
+            other => Err(D::Error::unknown_variant(other, PLAN_TAGS)),
+        }
+    }
+}
+
+impl JsonSchema for PlanDocument {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("PlanDocument")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::PlanDocument")
+    }
+
+    /// One of the two plans, each advertising its own tag, so the schema a
+    /// document is validated against is the schema of the plan an answer
+    /// carries.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let operations = generator.subschema_for::<AuthoredPlan>();
+        let resolved = generator.subschema_for::<ResolvedPlan>();
+        json_schema!({
+            "description": "A plan a caller sends: operations it authored, or a resolved plan. A document is the plan itself, which names itself under `plan`, so a resolved plan taken unchanged out of any answer is a document. A key the plan does not name is refused, at every depth.",
+            "oneOf": [operations, resolved],
+        })
     }
 }

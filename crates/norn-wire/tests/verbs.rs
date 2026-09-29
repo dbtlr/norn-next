@@ -268,7 +268,20 @@ fn vault_holders(spelling: &Spelling) -> Vec<&Value> {
                 "{} names its vault twice, on its params and on its plan",
                 spelling.verb
             );
-            documents.iter().collect()
+            documents
+                .iter()
+                .map(
+                    |document| match document.get("$ref").and_then(Value::as_str) {
+                        Some(reference) => {
+                            let name = reference.strip_prefix("#/$defs/").unwrap_or_else(|| {
+                                panic!("{} refers to a plan as {reference}", spelling.verb)
+                            });
+                            &spelling.params["$defs"][name]
+                        }
+                        None => document,
+                    },
+                )
+                .collect()
         }
     }
 }

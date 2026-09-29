@@ -148,19 +148,23 @@
 //!   cannot refuse what it must: it reads its keys into a private shape that
 //!   refuses any it does not name, buffers `fields` as JSON, and reads them as
 //!   the kind names them — the second runtime use of `serde_json` here, in no
-//!   signature. [`Cursor`] alone is written by hand on both sides,
-//!   because its wire shape is one opaque string rather than the fields a
-//!   derive would emit.
+//!   signature. [`Cursor`] and [`PlanDocument`] are written by hand on both
+//!   sides: a cursor's wire shape is one opaque string rather than the fields
+//!   a derive would emit, and a document is written as the plan it holds and
+//!   read by buffering it as JSON, reading its `plan` tag and handing it whole
+//!   to the plan the tag names — the third runtime use of `serde_json`, in no
+//!   signature.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Sixteen types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   not accept. Seventeen types do: the grammars [`VaultName`], [`VaultRoot`],
 //!   [`SchemaSource`], [`Directory`], [`DocumentPath`], [`FolderPath`],
 //!   [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
 //!   [`OperationId`] advertise the pattern or floor their constructors
 //!   hold; [`Operation`] advertises its kind's own branches with its optional
 //!   parts added inside each, since each branch refuses a key it does not
-//!   name; [`Cursor`] is one opaque string
+//!   name; [`PlanDocument`] is one of the two plan types, each advertising
+//!   its own tag; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`],
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
@@ -183,15 +187,14 @@
 //! at runtime, against a shape a consumer was told to expect. A variant that
 //! carries data names its fields.
 //!
-//! **Two plan shapes depart from that, and each payload is an object.**
-//! [`PlanDocument`]'s variants are newtypes over [`AuthoredPlan`] and
-//! [`ResolvedPlan`]: a resolved plan crosses on its own in every apply
-//! outcome, and the document a caller sends wraps that same type rather than
-//! a second spelling of its fields. Both payloads are objects, so the tag
-//! merges into them at serialize time and the schema advertises the merged
-//! shape. [`OperationKind`] is adjacently tagged — its kind under `kind`, its
-//! fields under `fields` — because that is the shape an operation's author
-//! writes, and its fields are structs the tag never enters.
+//! **Two plan shapes carry their tag another way.** [`OperationKind`] is
+//! adjacently tagged — its kind under `kind`, its fields under `fields` —
+//! because that is the shape an operation's author writes, and its fields are
+//! structs the tag never enters. [`AuthoredPlan`] and [`ResolvedPlan`] each
+//! carry their own `plan` tag as a field, so a resolved plan written inside
+//! any answer is the bytes a caller sends back; [`PlanDocument`] is written as
+//! the plan it holds and read by dispatching on that tag, rather than being a
+//! serde-tagged enum that would consume the tag before its plan read it.
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat

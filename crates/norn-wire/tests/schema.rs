@@ -2906,6 +2906,7 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         (
             schema_of::<ResolvedPlan>(),
             vec![
+                "plan",
                 "vault",
                 "root",
                 "operations",
@@ -2917,7 +2918,7 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         ),
         (
             schema_of::<AuthoredPlan>(),
-            vec!["vault", "operations", "footnote"],
+            vec!["plan", "vault", "operations", "footnote"],
         ),
         (schema_of::<Transition>(), vec!["path", "before", "after"]),
         (
@@ -2931,9 +2932,16 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
     }
     assert_eq!(
         required_names(&schema_of::<ResolvedPlan>()),
-        ["vault", "root", "operations", "transitions", "conditions"]
-            .into_iter()
-            .collect()
+        [
+            "plan",
+            "vault",
+            "root",
+            "operations",
+            "transitions",
+            "conditions"
+        ]
+        .into_iter()
+        .collect()
     );
     for schema in [schema_of::<AuthorCondition>(), schema_of::<PlanCondition>()] {
         assert_eq!(tag_constants(&schema, "condition"), ["content_hash"]);
@@ -2954,23 +2962,53 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
     }
 }
 
-/// A plan document advertises the two plans under its `plan` tag, each branch
-/// the plan's own fields with the tag merged in and no other key admitted.
+/// A plan document is one of the two plans, each advertising its own `plan`
+/// tag as a required constant, its own fields and no other key: the plan a
+/// document holds is the plan an answer carries, one schema for both.
 #[test]
 fn a_plan_document_advertises_both_plans_under_its_plan_tag() {
     let schema = schema_of::<PlanDocument>();
+    let plans: Vec<&Value> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            let name = branch["$ref"]
+                .as_str()
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .unwrap_or_else(|| panic!("a document branch is not a plan: {branch}"));
+            definition(&schema, name)
+        })
+        .collect();
     assert_eq!(
-        sorted(tag_constants(&schema, "plan")),
+        sorted(plans.iter().map(|plan| {
+            tag_constant(plan, "plan")
+                .unwrap_or_else(|| panic!("a plan advertises no `plan` tag: {plan}"))
+        })),
         sorted(["operations", "resolved"])
     );
-    let operations = branch(&schema, "plan", "operations");
+    let plan = |tag: &str| {
+        *plans
+            .iter()
+            .find(|plan| tag_constant(plan, "plan") == Some(tag))
+            .expect("the plan under the tag")
+    };
+    for (plan_type, tag) in [
+        (schema_of::<AuthoredPlan>(), "operations"),
+        (schema_of::<ResolvedPlan>(), "resolved"),
+    ] {
+        assert_eq!(
+            tag_constant(&plan_type, "plan"),
+            Some(tag),
+            "a plan written alone does not advertise the tag its document does"
+        );
+    }
+    let operations = plan("operations");
     assert_eq!(
         property_names(operations),
         ["plan", "vault", "operations", "footnote"]
             .into_iter()
             .collect()
     );
-    let resolved = branch(&schema, "plan", "resolved");
+    let resolved = plan("resolved");
     assert_eq!(
         property_names(resolved),
         [

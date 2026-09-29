@@ -6757,7 +6757,7 @@ fn plan_documents() -> Vec<PlanDocument> {
 fn resolved_plan_json() -> String {
     format!(
         concat!(
-            r#"{{"vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+            r#"{{"plan":"resolved","vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
             r#""operations":[{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}}],"#,
             r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
             r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
@@ -6917,13 +6917,14 @@ fn a_resolved_plan_is_the_bytes_a_caller_sends_back() {
     assert_eq!(wire(&a_resolved_plan()), resolved_plan_json());
     assert_eq!(
         wire(&PlanDocument::resolved(a_resolved_plan())),
-        format!(r#"{{"plan":"resolved",{}"#, &resolved_plan_json()[1..])
+        resolved_plan_json(),
+        "a resolved plan and the document carrying it are not one set of bytes"
     );
     assert_eq!(
         wire(&a_bare_resolved_plan()),
         format!(
             concat!(
-                r#"{{"vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+                r#"{{"plan":"resolved","vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
                 r#""operations":[{{"kind":"delete_document","fields":{{"path":"notes/b.md"}}}}],"#,
                 r#""transitions":[{{"path":"notes/b.md","before":{{"state":"present","hash":"{two}"}},"#,
                 r#""after":{{"state":"absent"}}}}],"conditions":[]}}"#
@@ -7234,9 +7235,20 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
         tags(&file_states(), "state"),
         advertised::<FileState>(Some("state"))
     );
+    let own_tag = |schema: serde_json::Value| -> String {
+        schema["properties"]["plan"]["const"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a plan advertises no `plan` tag: {schema}"))
+            .to_owned()
+    };
     assert_eq!(
         tags(&plan_documents(), "plan"),
-        advertised::<PlanDocument>(Some("plan"))
+        [
+            own_tag(serde_json::to_value(schemars::schema_for!(AuthoredPlan)).expect("a schema")),
+            own_tag(serde_json::to_value(schemars::schema_for!(ResolvedPlan)).expect("a schema")),
+        ]
+        .into_iter()
+        .collect()
     );
     assert_eq!(
         tags(&refused_checks(), "check"),
@@ -7623,4 +7635,130 @@ fn an_apply_envelope_is_read_as_every_envelope_is() {
         serde_json::from_str::<ErrorEnvelope>(&mismatched.to_string()).is_err(),
         "an envelope whose code is not its detail's read back"
     );
+}
+
+/// Each plan carries its own `plan` tag wherever it is written, so the plan
+/// alone and the document carrying it are one set of bytes.
+#[test]
+fn each_plan_carries_its_own_tag() {
+    let authored = an_authored_plan();
+    assert!(wire(&authored).starts_with(r#"{"plan":"operations","#));
+    assert_eq!(wire(&authored), wire(&PlanDocument::operations(authored)));
+    assert!(wire(&a_bare_resolved_plan()).starts_with(r#"{"plan":"resolved","#));
+}
+
+/// A plan read alone refuses a missing tag and the other plan's tag, as the
+/// document carrying it does.
+#[test]
+fn a_plan_refuses_a_missing_or_mismatched_tag() {
+    let resolved = serde_json::to_value(a_resolved_plan()).expect("a resolved plan as JSON");
+    let authored = serde_json::to_value(an_authored_plan()).expect("an authored plan as JSON");
+    let retagged = |plan: &serde_json::Value, tag: Option<&str>| -> String {
+        let mut plan = plan.clone();
+        let members = plan.as_object_mut().expect("a plan is an object");
+        match tag {
+            Some(tag) => members.insert("plan".to_string(), tag.into()),
+            None => members.remove("plan"),
+        };
+        plan.to_string()
+    };
+    for tag in [None, Some("operations"), Some("draft")] {
+        let json = retagged(&resolved, tag);
+        assert!(
+            serde_json::from_str::<ResolvedPlan>(&json).is_err(),
+            "a resolved plan tagged {tag:?} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding a resolved plan tagged {tag:?} read back"
+        );
+    }
+    for tag in [None, Some("resolved"), Some("draft")] {
+        let json = retagged(&authored, tag);
+        assert!(
+            serde_json::from_str::<AuthoredPlan>(&json).is_err(),
+            "an authored plan tagged {tag:?} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding an authored plan tagged {tag:?} read back"
+        );
+    }
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            &retagged(&resolved, None).replace(r#"{"#, r#"{"plan":7,"#)
+        )
+        .is_err(),
+        "a document whose tag is no string read back"
+    );
+}
+
+/// **A resolved plan is its own retry token.** Every answer that carries one
+/// carries bytes a caller sends back unchanged: the plan taken out of the
+/// answer reads as the plan an apply request carries, equal to the plan that
+/// went in.
+#[test]
+fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
+    let plan = a_resolved_plan();
+    let mut carriers: Vec<(String, serde_json::Value)> = apply_reports()
+        .into_iter()
+        .filter(|report| {
+            serde_json::to_value(report).expect("a report as JSON")["plan"]
+                == serde_json::to_value(&plan).expect("a plan as JSON")
+        })
+        .map(|report| {
+            let json = serde_json::to_value(&report).expect("a report as JSON");
+            (tag_string(&report, "outcome"), json["plan"].clone())
+        })
+        .collect();
+    let details = [
+        ErrorDetail::plan_refused(plan.clone(), a_forecast(), Vec::new(), Vec::new()),
+        ErrorDetail::plan_interrupted(
+            plan.clone(),
+            vec![path("notes/a.md")],
+            InterruptionCause::io_failure("the disk is full"),
+        ),
+        ErrorDetail::write_failed(plan.clone(), "the disk is full"),
+        ErrorDetail::apply_not_run(a_park(), Some(plan.clone())),
+        ErrorDetail::apply_outcome_unknown(plan.clone()),
+    ];
+    for detail in details {
+        let envelope = ErrorEnvelope::new("the apply did not apply", detail);
+        let json = serde_json::to_value(&envelope).expect("an envelope as JSON");
+        carriers.push((
+            json["code"].as_str().expect("a code").to_owned(),
+            json["detail"]["plan"].clone(),
+        ));
+    }
+    let carried: BTreeSet<&str> = carriers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        carried,
+        [
+            "previewed",
+            "applied",
+            "vault/plan-refused",
+            "vault/plan-interrupted",
+            "vault/write-failed",
+            "host/apply-not-run",
+            "host/apply-outcome-unknown",
+        ]
+        .into_iter()
+        .collect(),
+        "an answer carrying a resolved plan is left out of this check"
+    );
+    for (carrier, carried) in carriers {
+        let request = format!(r#"{{"mode":"apply","plan":{carried}}}"#);
+        let params: ApplyParams = serde_json::from_str(&request).unwrap_or_else(|error| {
+            panic!("the plan {carrier} carries does not read as a request's plan: {error}")
+        });
+        assert_eq!(
+            params.plan,
+            PlanDocument::resolved(plan.clone()),
+            "the plan {carrier} carries read back as another plan"
+        );
+        assert_eq!(
+            serde_json::to_value(&params.plan).expect("a plan as JSON"),
+            carried
+        );
+    }
 }
