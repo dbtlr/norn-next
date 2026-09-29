@@ -88,12 +88,31 @@
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
+//! The one write verb, `apply`, is spelled the same way: [`ApplyParams`] — an
+//! [`ApplyMode`] and a [`PlanDocument`] — answering [`ApplyReport`]. A plan
+//! document is an [`AuthoredPlan`] of [`Operation`]s, each an
+//! [`OperationKind`] with the [`OperationId`] it is required by and the
+//! [`AuthorCondition`]s its author observed, or a [`ResolvedPlan`]: the
+//! [`RootIdentity`] it was resolved against, one [`Transition`] per file
+//! between two [`FileState`]s, each absent or a [`ContentHash`], the
+//! [`PlanCondition`]s its planning read, and the [`Provenance`] a repair plan
+//! cites, with the [`SkippedFinding`]s it left alone. A preview answers with a
+//! [`Forecast`] of [`ForecastTarget`]s and the [`FolderPath`]s a plan makes
+//! and removes; an applied plan with its [`ChangesetOutcome`] and the
+//! [`TargetResult`] of each [`AppliedTarget`]. An apply that ends any other
+//! way ends in a code, whose detail carries the [`RefusedCheck`]s and the
+//! [`UnresolvedOperation`]s — each with its [`UnresolvedReason`] — of a
+//! refusal, the [`InterruptionCause`] of an interruption, or the [`PlanFault`]
+//! of a plan whose own shape is wrong.
+//!
 //! **A registry report and a lifecycle observation carry no answer reading.**
 //! A registration is not answered from a database, and neither a status nor a
 //! reload is a read: a status is taken off what an entry already publishes and
 //! creates no demand, and a reload reports what it applied. So the eight
 //! reports above cross as themselves rather than inside a [`VaultAnswer`],
-//! which is what carries an [`AnswerReading`] for the six verbs that do read.
+//! which is what carries an [`AnswerReading`] for the six verbs that do read
+//! and for `apply`, whose plan is resolved against a snapshot as a read's
+//! answer is.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -112,7 +131,8 @@
 //!   are renamed to the `namespace/what-happened` grammar below. A grammar's
 //!   read path is written by hand where the read is the constructor —
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
-//!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
+//!   [`FolderPath`], [`ResolutionTarget`], [`Directory`], [`ContentHash`],
+//!   [`RootIdentity`], [`OperationId`] and [`Score`] refuse a string outside
 //!   their grammar,
 //!   [`RungSet`] refuses a ladder that runs no rung, [`RegistrySanity`]
 //!   refuses a problem list that names no problem and [`NameSet`] refuses a
@@ -124,16 +144,23 @@
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
-//!   read. [`Cursor`] alone is written by hand on both sides,
+//!   read. [`Operation`]'s read path is written by hand because the derive
+//!   cannot refuse what it must: it reads its keys into a private shape that
+//!   refuses any it does not name, buffers `fields` as JSON, and reads them as
+//!   the kind names them — the second runtime use of `serde_json` here, in no
+//!   signature. [`Cursor`] alone is written by hand on both sides,
 //!   because its wire shape is one opaque string rather than the fields a
 //!   derive would emit.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Eleven types do: the grammars [`VaultName`], [`VaultRoot`],
-//!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
-//!   [`ResolutionTarget`] advertise the pattern or floor their constructors
-//!   hold; [`Cursor`] is one opaque string
+//!   not accept. Sixteen types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`Directory`], [`DocumentPath`], [`FolderPath`],
+//!   [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
+//!   [`OperationId`] advertise the pattern or floor their constructors
+//!   hold; [`Operation`] advertises its kind's own branches with its optional
+//!   parts added inside each, since each branch refuses a key it does not
+//!   name; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`],
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
@@ -155,6 +182,16 @@
 //! time while schemars advertises a schema saying it works: the break arrives
 //! at runtime, against a shape a consumer was told to expect. A variant that
 //! carries data names its fields.
+//!
+//! **Two plan shapes depart from that, and each payload is an object.**
+//! [`PlanDocument`]'s variants are newtypes over [`AuthoredPlan`] and
+//! [`ResolvedPlan`]: a resolved plan crosses on its own in every apply
+//! outcome, and the document a caller sends wraps that same type rather than
+//! a second spelling of its fields. Both payloads are objects, so the tag
+//! merges into them at serialize time and the schema advertises the merged
+//! shape. [`OperationKind`] is adjacently tagged — its kind under `kind`, its
+//! fields under `fields` — because that is the shape an operation's author
+//! writes, and its fields are structs the tag never enters.
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
@@ -204,7 +241,10 @@
 //! [`ErrorDetail::unknown_target`], [`ErrorDetail::reload_busy`],
 //! [`ErrorDetail::reload_failed`], [`ErrorDetail::cursor_order_changed`],
 //! [`ErrorDetail::engine_not_enabled`], [`ErrorDetail::engine_unavailable`],
-//! [`ErrorDetail::engine_failed`],
+//! [`ErrorDetail::engine_failed`], [`ErrorDetail::apply_not_run`],
+//! [`ErrorDetail::apply_outcome_unknown`], [`ErrorDetail::plan_refused`],
+//! [`ErrorDetail::root_changed`], [`ErrorDetail::plan_interrupted`],
+//! [`ErrorDetail::write_failed`], [`ErrorDetail::plan_invalid`],
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
@@ -245,7 +285,17 @@
 //! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
 //! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
 //! [`EngineHealth::new`], and the `new` on each of the seven vault-namespace
-//! params types, on [`DoctorRegistryParams`], and on each of their reports.
+//! params types, on [`DoctorRegistryParams`], and on each of their reports;
+//! [`ContentHash::from_sha256`], [`ContentHash::new`],
+//! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
+//! [`FolderPath::new`], [`Operation::new`], the constructor on each
+//! [`OperationKind`], [`AuthorCondition`], [`PlanCondition`], [`FileState`],
+//! [`PlanDocument`], [`RefusedCheck`], [`UnresolvedReason`],
+//! [`InterruptionCause`], [`PlanFault`] and [`ApplyReport`] variant,
+//! [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
+//! [`AuthoredPlan::new`], [`ResolvedPlan::new`], [`ForecastTarget::new`],
+//! [`Forecast::new`], [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
+//! [`ApplyParams::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -283,6 +333,20 @@
 //! it does not know: its two selections hold disjoint fields, and a field of
 //! the other one dropped on the way in would read a request that both names a
 //! set and subtracts from one as a request that does only one of them.
+//!
+//! **A plan refuses a field it does not know, at every depth.** The plan
+//! documents, their operations, each kind's fields, their conditions, their
+//! transitions and file states, and a plan's provenance all refuse an unknown
+//! key, where every answer drops one. The divergence follows the direction a
+//! plan flows: an answer flows out to a caller, where a dropped field loses a
+//! fact the caller could not use, but a plan flows into the host, where a
+//! dropped field — a newer caller's condition — would weaken a check without a
+//! word. The refusal is the version-mismatch signal, and a plan carries no
+//! version field because it is short-lived: a caller whose plan is refused
+//! previews again under the build it is talking to. An answer that carries a
+//! plan — a report, a refusal's fresh plan, a forecast's file states — still
+//! drops a field it does not know at its own level, and the plan inside it
+//! still refuses one.
 //!
 //! # The code grammar, and what is not a code
 //!

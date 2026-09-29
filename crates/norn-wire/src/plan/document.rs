@@ -142,6 +142,12 @@ impl SkippedFinding {
     }
 }
 
+// A dormant carrier: Layer 5 repair is the consuming layer. Repair plans cite
+// the finding generation they read and the findings they skipped; no Layer 4
+// planner plans from findings, so nothing in the current call graph emits
+// this, and it is reached only when a caller sends a plan carrying one back.
+// Its published description stays wire-facing, so the roadmap note lives here
+// rather than in the doc comment schemars lifts.
 /// What a repair plan was planned from. It is a record, never checked when
 /// the plan is applied.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
