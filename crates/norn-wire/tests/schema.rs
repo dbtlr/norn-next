@@ -11,25 +11,29 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
-    Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
+    ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
+    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, ChangesetOutcome,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
     ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
     DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
     DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
-    Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow,
-    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, Moved, NameSet, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
-    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    Facet, FacetKind, FieldType, FieldValue, FileState, FindParams, FindReport, FindingKind,
+    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, ForecastTarget, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally,
+    LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    Moved, NameSet, NotReady, Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
     Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    ResolveReport, ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
+    RungSkipReason, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
+    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
+    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -241,6 +245,32 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<EngineHealth>(),
         schema_of::<ContentHash>(),
         schema_of::<RootIdentity>(),
+        schema_of::<OperationId>(),
+        schema_of::<OperationKind>(),
+        schema_of::<AuthorCondition>(),
+        schema_of::<Operation>(),
+        schema_of::<FileState>(),
+        schema_of::<Transition>(),
+        schema_of::<PlanCondition>(),
+        schema_of::<SkippedFinding>(),
+        schema_of::<Provenance>(),
+        schema_of::<AuthoredPlan>(),
+        schema_of::<ResolvedPlan>(),
+        schema_of::<PlanDocument>(),
+        schema_of::<FolderPath>(),
+        schema_of::<ForecastTarget>(),
+        schema_of::<Forecast>(),
+        schema_of::<RefusedCheck>(),
+        schema_of::<UnresolvedReason>(),
+        schema_of::<UnresolvedOperation>(),
+        schema_of::<InterruptionCause>(),
+        schema_of::<PlanFault>(),
+        schema_of::<ApplyMode>(),
+        schema_of::<ApplyParams>(),
+        schema_of::<ChangesetOutcome>(),
+        schema_of::<TargetResult>(),
+        schema_of::<AppliedTarget>(),
+        schema_of::<ApplyReport>(),
     ]
 }
 
@@ -2769,5 +2799,357 @@ fn a_root_identity_advertises_an_opaque_string_compared_for_equality() {
             .as_str()
             .is_some_and(|text| text.contains("equality")),
         "the description does not say the identity is compared for equality: {schema}"
+    );
+}
+
+/// The names a schema advertises as required.
+fn required_names(schema: &Value) -> BTreeSet<&str> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| required.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// Whether a schema object advertises that it refuses a key it does not name.
+fn refuses_unknown_keys(schema: &Value) -> bool {
+    schema.get("additionalProperties") == Some(&Value::Bool(false))
+}
+
+/// The branch of an internally tagged enum that pins `tag` to `constant`.
+fn branch<'a>(schema: &'a Value, tag: &str, constant: &str) -> &'a Value {
+    branches(schema)
+        .iter()
+        .find(|branch| tag_constant(branch, tag) == Some(constant))
+        .unwrap_or_else(|| panic!("no branch pins `{tag}` to `{constant}`: {schema}"))
+}
+
+/// A schema's definition of `name`, from its `$defs`.
+fn definition<'a>(schema: &'a Value, name: &str) -> &'a Value {
+    schema
+        .get("$defs")
+        .and_then(|defs| defs.get(name))
+        .unwrap_or_else(|| panic!("the schema defines no `{name}`: {schema}"))
+}
+
+/// An operation advertises one branch per kind, each pinning its kind under
+/// `kind` and describing that kind's own fields under `fields`, with the
+/// operation's optional parts beside them and no other key admitted at
+/// either level.
+#[test]
+fn an_operation_advertises_each_kind_with_its_fields() {
+    let schema = schema_of::<Operation>();
+    let kinds = [
+        ("create_document", vec!["path", "content"]),
+        ("str_replace", vec!["path", "old_str", "new_str"]),
+        ("move_document", vec!["from", "to"]),
+        ("delete_document", vec!["path"]),
+    ];
+    assert_eq!(
+        sorted(tag_constants(&schema, "kind")),
+        sorted(kinds.iter().map(|(kind, _)| *kind))
+    );
+    for (kind, fields) in &kinds {
+        let branch = branch(&schema, "kind", kind);
+        assert_eq!(
+            property_names(branch),
+            ["kind", "fields", "id", "requires", "footnote", "conditions"]
+                .into_iter()
+                .collect(),
+            "the {kind} branch"
+        );
+        assert_eq!(
+            required_names(branch),
+            ["kind", "fields"].into_iter().collect(),
+            "the {kind} branch requires more than its kind and fields"
+        );
+        assert!(
+            refuses_unknown_keys(branch),
+            "the {kind} branch admits any key"
+        );
+        let fields_schema = &branch["properties"]["fields"];
+        assert_eq!(
+            property_names(fields_schema),
+            fields.iter().copied().collect(),
+            "the {kind} fields"
+        );
+        assert_eq!(
+            required_names(fields_schema),
+            fields.iter().copied().collect(),
+            "the {kind} fields are not all required"
+        );
+        assert!(
+            refuses_unknown_keys(fields_schema),
+            "the {kind} fields admit any key"
+        );
+        assert_eq!(
+            branch["properties"]["conditions"]["items"]["$ref"].as_str(),
+            Some("#/$defs/AuthorCondition")
+        );
+        assert_eq!(
+            branch["properties"]["id"]["$ref"].as_str(),
+            Some("#/$defs/OperationId")
+        );
+    }
+    assert_eq!(
+        definition(&schema, "OperationId")["minLength"].as_u64(),
+        Some(1)
+    );
+}
+
+/// Each plan type advertises its snake_case fields and admits no other key;
+/// the conditions are two types under one tag, and a file state is absent or
+/// present.
+#[test]
+fn every_plan_type_advertises_its_fields_and_admits_no_other() {
+    for (schema, fields) in [
+        (
+            schema_of::<ResolvedPlan>(),
+            vec![
+                "vault",
+                "root",
+                "operations",
+                "transitions",
+                "conditions",
+                "provenance",
+                "footnote",
+            ],
+        ),
+        (
+            schema_of::<AuthoredPlan>(),
+            vec!["vault", "operations", "footnote"],
+        ),
+        (schema_of::<Transition>(), vec!["path", "before", "after"]),
+        (
+            schema_of::<Provenance>(),
+            vec!["finding_generation", "skipped"],
+        ),
+        (schema_of::<SkippedFinding>(), vec!["finding", "reason"]),
+    ] {
+        assert_eq!(property_names(&schema), fields.into_iter().collect());
+        assert!(refuses_unknown_keys(&schema), "{schema} admits any key");
+    }
+    assert_eq!(
+        required_names(&schema_of::<ResolvedPlan>()),
+        ["vault", "root", "operations", "transitions", "conditions"]
+            .into_iter()
+            .collect()
+    );
+    for schema in [schema_of::<AuthorCondition>(), schema_of::<PlanCondition>()] {
+        assert_eq!(tag_constants(&schema, "condition"), ["content_hash"]);
+        let branch = branch(&schema, "condition", "content_hash");
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+        assert_eq!(
+            branch["properties"]["hash"]["$ref"].as_str(),
+            Some("#/$defs/ContentHash")
+        );
+    }
+    let states = schema_of::<FileState>();
+    assert_eq!(
+        sorted(tag_constants(&states, "state")),
+        sorted(["absent", "present"])
+    );
+    for state in ["absent", "present"] {
+        assert!(refuses_unknown_keys(branch(&states, "state", state)));
+    }
+}
+
+/// A plan document advertises the two plans under its `plan` tag, each branch
+/// the plan's own fields with the tag merged in and no other key admitted.
+#[test]
+fn a_plan_document_advertises_both_plans_under_its_plan_tag() {
+    let schema = schema_of::<PlanDocument>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "plan")),
+        sorted(["operations", "resolved"])
+    );
+    let operations = branch(&schema, "plan", "operations");
+    assert_eq!(
+        property_names(operations),
+        ["plan", "vault", "operations", "footnote"]
+            .into_iter()
+            .collect()
+    );
+    let resolved = branch(&schema, "plan", "resolved");
+    assert_eq!(
+        property_names(resolved),
+        [
+            "plan",
+            "vault",
+            "root",
+            "operations",
+            "transitions",
+            "conditions",
+            "provenance",
+            "footnote",
+        ]
+        .into_iter()
+        .collect()
+    );
+    for branch in [operations, resolved] {
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+        assert_eq!(
+            branch["properties"]["vault"]["$ref"].as_str(),
+            Some("#/$defs/VaultAddress")
+        );
+    }
+    assert_eq!(
+        resolved["properties"]["root"]["$ref"].as_str(),
+        Some("#/$defs/RootIdentity")
+    );
+}
+
+/// An apply request advertises its mode and its plan, both required, and its
+/// mode as a bare string.
+#[test]
+fn an_apply_request_advertises_a_required_mode_and_a_plan() {
+    let schema = schema_of::<ApplyParams>();
+    assert_eq!(
+        property_names(&schema),
+        ["mode", "plan"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(&schema),
+        ["mode", "plan"].into_iter().collect()
+    );
+    assert_eq!(
+        schema["properties"]["plan"]["$ref"].as_str(),
+        Some("#/$defs/PlanDocument")
+    );
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<ApplyMode>())
+                .iter()
+                .map(|branch| string_constant(branch).expect("a bare string"))
+        ),
+        sorted(["preview", "apply"])
+    );
+}
+
+/// An apply report advertises its two outcomes under `outcome`, and the
+/// vocabularies inside them as bare strings. A report and a forecast are
+/// answers, so neither refuses a key it does not name.
+#[test]
+fn an_apply_report_advertises_its_outcome_tag() {
+    let schema = schema_of::<ApplyReport>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "outcome")),
+        sorted(["previewed", "applied"])
+    );
+    assert_eq!(
+        property_names(branch(&schema, "outcome", "previewed")),
+        ["outcome", "plan", "forecast"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(branch(&schema, "outcome", "applied")),
+        [
+            "outcome",
+            "plan",
+            "changeset",
+            "targets",
+            "folders_made",
+            "folders_removed",
+        ]
+        .into_iter()
+        .collect()
+    );
+    for (schema, strings) in [
+        (
+            schema_of::<ChangesetOutcome>(),
+            vec!["committed", "healing"],
+        ),
+        (schema_of::<TargetResult>(), vec!["wrote", "found"]),
+    ] {
+        assert_eq!(
+            sorted(
+                branches(&schema)
+                    .iter()
+                    .map(|branch| string_constant(branch).expect("a bare string"))
+            ),
+            sorted(strings)
+        );
+    }
+    let forecast = schema_of::<Forecast>();
+    assert_eq!(
+        property_names(&forecast),
+        ["targets", "folders_made", "folders_removed"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        property_names(definition(&forecast, "ForecastTarget")),
+        ["path", "before", "after", "drifted"].into_iter().collect()
+    );
+    for answer in [
+        &forecast,
+        definition(&forecast, "ForecastTarget"),
+        branch(&schema, "outcome", "applied"),
+    ] {
+        assert!(
+            !refuses_unknown_keys(answer),
+            "an answer refuses a key: {answer}"
+        );
+    }
+    let folder = schema_of::<FolderPath>();
+    assert_eq!(folder["type"].as_str(), Some("string"));
+    assert_eq!(folder["minLength"].as_u64(), Some(1));
+}
+
+/// The reasons an apply's codes carry advertise their tags, and each apply
+/// code's detail advertises the facts it carries.
+#[test]
+fn the_apply_details_advertise_the_typed_facts_they_carry() {
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<RefusedCheck>(), "check")),
+        sorted([
+            "drifted",
+            "condition_failed",
+            "schema_violation",
+            "name_taken"
+        ])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<UnresolvedReason>(), "kind")),
+        sorted(["part_landed", "no_longer_resolves", "requires_unresolved"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<InterruptionCause>(), "kind")),
+        sorted(["io_failure", "name_taken", "foreign_edit"])
+    );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<PlanFault>(), "kind")),
+        sorted([
+            "duplicate_id",
+            "unknown_requirement",
+            "requires_cycle",
+            "content_cycle"
+        ])
+    );
+    let schema = schema_of::<ErrorDetail>();
+    for (code, fields) in [
+        (
+            "vault/plan-refused",
+            vec!["code", "plan", "forecast", "checks", "unresolved"],
+        ),
+        ("vault/root-changed", vec!["code", "expected", "found"]),
+        (
+            "vault/plan-interrupted",
+            vec!["code", "plan", "landed", "cause"],
+        ),
+        ("vault/write-failed", vec!["code", "plan", "detail"]),
+        ("host/apply-not-run", vec!["code", "cause", "plan"]),
+        ("host/apply-outcome-unknown", vec!["code", "plan"]),
+        ("request/plan-invalid", vec!["code", "fault"]),
+    ] {
+        assert_eq!(
+            property_names(branch(&schema, "code", code)),
+            fields.into_iter().collect(),
+            "the {code} detail"
+        );
+    }
+    assert_eq!(
+        branch(&schema, "code", "host/apply-not-run")["properties"]["cause"]["$ref"].as_str(),
+        Some("#/$defs/ErrorEnvelope"),
+        "the cause an apply did not run for is not the one refusal shape"
     );
 }
