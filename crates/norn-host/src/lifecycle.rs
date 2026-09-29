@@ -1158,6 +1158,8 @@ struct EntryState<A: SnapshotSource> {
     /// the verdict here instead, and the end of every claim — a job leg's in
     /// [`end_job_leg`], a watcher poll's in [`poll_claimed_entry`] — publishes
     /// it through [`publish_damage_a_read_met`] once nothing holds the entry.
+    /// A leg that hands the claim on publishes it sooner, with the rebuild as
+    /// the work it hands on to, through [`hand_on_carried_damage`].
     ///
     /// It is a rebuild owed rather than one already published, so it goes
     /// where a rebuild requirement goes: [`EntryState::clear_rebuild`] clears
@@ -2400,11 +2402,12 @@ fn schedule_queued_apply<A: SnapshotSource>(
 /// no release in flight, over coverage the entry holds, in service and
 /// unparked.
 ///
-/// **This is the one place read-met damage is published.** A read over a free
-/// entry reaches it at once through [`Host::withdraw_for_read_damage`]; a read
-/// under a held claim leaves the verdict in
-/// [`EntryState::damage_met_under_a_claim`], and the end of that claim reaches
-/// it here. Where something still holds the entry the verdict stays for the
+/// **This is where read-met damage is published over a free entry.** A read
+/// over a free entry reaches it at once through
+/// [`Host::withdraw_for_read_damage`]; a read under a held claim leaves the
+/// verdict in [`EntryState::damage_met_under_a_claim`], and the end of that
+/// claim reaches it here, unless a hand-on published it first through
+/// [`hand_on_carried_damage`]. Where something still holds the entry the verdict stays for the
 /// end of what holds it, and `None` comes back.
 fn publish_damage_a_read_met<A: SnapshotSource>(
     state: &mut EntryState<A>,
@@ -2422,6 +2425,29 @@ fn publish_damage_a_read_met<A: SnapshotSource>(
     let detail = state.damage_met_under_a_claim.take()?;
     state.withdraw_trust_for_damage(detail);
     Some(schedule_demand(state, name))
+}
+
+/// Publish the damage a read carried to a leg's hand-on, and hand the claim
+/// on to the rebuild it owes, in that one hold.
+///
+/// **A leg that hands the claim on is where a verdict a read carried under it
+/// is published**, not only the end of the claim: a turn, a maintenance scan
+/// or an apply that hands on to more work would otherwise carry the verdict
+/// through that work, and a queued apply behind it would wait on a store
+/// known to be damaged. Published here, the damage answers every queued
+/// apply with its cause as the hold ends, and the rebuild is the next work
+/// the entry runs. The caller has put the leg's coverage back.
+fn hand_on_carried_damage<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
+    let detail = state.damage_met_under_a_claim.take()?;
+    state.withdraw_trust_for_damage(detail);
+    Some(
+        state
+            .claim
+            .hand_on(|epoch| Job::Rebuild(name.clone(), epoch)),
+    )
 }
 
 /// A lease answering `outcome` that holds no entry: the answer to a mode this
@@ -6957,7 +6983,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     if handoff_saturated || !state.pending.is_empty() {
                         state.publish_pending_reconcile();
                     }
-                    if state.applies_waiting() {
+                    if let Some(next) = hand_on_carried_damage(&mut state, &name) {
+                        drop(state);
+                        dispatch_handoff(shared, entry, epoch, next);
+                        break None;
+                    } else if state.applies_waiting() {
                         // A queued apply takes the claim ahead of the next
                         // turn and of due maintenance: its intake derives the
                         // facts this turn left, and the maintenance a later
@@ -7087,7 +7117,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     // follows to say so. That holds where a teardown is due
                     // too, because a demand can withdraw it before it runs.
                     state.publish_ready_where_nothing_is_left(handoff_saturated);
-                    if state.applies_waiting() {
+                    if let Some(job) = hand_on_carried_damage(&mut state, &name) {
+                        next = Some(job);
+                    } else if state.applies_waiting() {
                         next = Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)));
                     } else if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -7479,7 +7511,9 @@ fn run_apply_job<O: EntryOps>(
         }
     };
     state.coverage.park_by(epoch, attachment);
-    let next = if state.applies_waiting() {
+    let next = if let Some(rebuild) = hand_on_carried_damage(&mut state, &name) {
+        Some(rebuild)
+    } else if state.applies_waiting() {
         // The next apply's intake derives whatever this one left waiting.
         Some(state.claim.hand_on(|epoch| Job::Apply(name.clone(), epoch)))
     } else if saturated || !state.pending.is_empty() {

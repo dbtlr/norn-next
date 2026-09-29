@@ -716,3 +716,53 @@ fn a_release_that_re_arms_nothing_answers_every_queued_apply_not_applied() {
     assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     drop(host);
 }
+
+/// **Case 6: read damage carried to a hand-on is published with its rebuild
+/// in that hold, and answers the queue.** A read meets damage while a
+/// reconcile turn holds the entry, so the verdict is carried to the turn's
+/// end; an apply is queued behind the turn, which leaves a fact waiting and
+/// finds maintenance due. The turn's end hands the claim to the rebuild the
+/// damage owes, publishing the damage as it does, rather than to the
+/// maintenance scan: the apply is answered with the damage, no maintenance
+/// scan or apply runs over the damaged store, and the rebuild runs next.
+#[test]
+fn read_damage_carried_to_a_hand_on_is_published_with_its_rebuild_and_answers_the_queue() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
+    hold_a_reconcile_turn(&ops, &host);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    arrange_for(&ops.maintenance_due_at, &name);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    assert!(
+        !matches!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::Untrusted { .. }))
+        ),
+        "the read published the damage beneath the turn"
+    );
+    drop(hold);
+
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the store is damaged",
+    ));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(damaged)).answer(&name)
+    );
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    assert_eq!(
+        ops.maintenances.load(Ordering::SeqCst),
+        0,
+        "a maintenance scan ran over the damage the read met"
+    );
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
