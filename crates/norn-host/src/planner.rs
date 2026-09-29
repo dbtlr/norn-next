@@ -21,10 +21,12 @@
 //! - [`compose`] — each file's after-bytes from its before-bytes and the
 //!   operations touching it, in that order. An operation that cannot act on
 //!   what it meets — an edit whose text does not occur exactly once, a create
-//!   or a move onto a document, onto a folder or beneath a document — does
-//!   not resolve; it is not a fault in the plan.
+//!   or a move onto a document, onto a folder or beneath a document, or any
+//!   operation naming a file whose normalized spelling the store's path
+//!   grammar refuses — does not resolve; it is not a fault in the plan.
 //! - [`resolve`] — the resolved plan: an operation that does not resolve, or
-//!   whose author's condition the vault no longer meets, is left out, with
+//!   whose author's condition the vault no longer meets or names a file the
+//!   store's path grammar refuses, is left out, with
 //!   every operation that touches one of its files or requires it, and what
 //!   remains is one transition per file, the author conditions on files the
 //!   plan does not write, and the root's identity.

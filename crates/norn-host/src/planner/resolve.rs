@@ -191,6 +191,12 @@ fn unmet_condition<V: VaultView>(
     let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
         return Ok(Some(format!("`{path}` names no document in the vault")));
     };
+    if let Some(detail) = view::document_path(identity.as_path())
+        .as_ref()
+        .and_then(view::unholdable)
+    {
+        return Ok(Some(detail));
+    }
     let holds = match composition.before(&identity) {
         Some(before) => *before == FileState::present(hash.clone()),
         None => matches!(
@@ -1345,5 +1351,123 @@ mod tests {
         assert_eq!(resolution.unresolved.len(), 1);
         let reads = vault.reads.borrow();
         assert!(reads.values().all(|&count| count == 1), "{reads:?}");
+    }
+
+    /// Spellings the wire reads as document paths and the index cannot hold:
+    /// a backslash, a control byte, and a leaf whose stem is `.`.
+    const UNHOLDABLE: [&str; 3] = ["a\\b.md", "a\u{1}.md", "..md"];
+
+    fn is_unholdable_detail(resolution: &Resolution, index: usize, at: &str) {
+        let detail = detail_of(resolution, index);
+        assert!(
+            detail.contains(at) && detail.contains("is not a document path"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_create_at_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let resolution = planned(&MemoryVault::default(), vec![creating(at, "new")]);
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+            assert!(resolution.plan.transitions.is_empty(), "{at}");
+        }
+    }
+
+    #[test]
+    fn an_edit_at_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let vault = MemoryVault::with(&[(at, "text")]);
+            let resolution = planned(
+                &vault,
+                vec![Operation::new(OperationKind::str_replace(
+                    path(at),
+                    "text",
+                    "edited",
+                ))],
+            );
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+        }
+    }
+
+    #[test]
+    fn a_removal_at_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let vault = MemoryVault::with(&[(at, "text")]);
+            let resolution = planned(&vault, vec![deleting(at)]);
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+        }
+    }
+
+    #[test]
+    fn a_move_from_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let vault = MemoryVault::with(&[(at, "text")]);
+            let resolution = planned(&vault, vec![moving(at, "b.md")]);
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+            assert!(resolution.plan.transitions.is_empty(), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_move_to_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let vault = MemoryVault::with(&[("a.md", "text")]);
+            let resolution = planned(&vault, vec![moving("a.md", at)]);
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+            assert!(resolution.plan.transitions.is_empty(), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_condition_on_a_path_the_index_cannot_hold_does_not_resolve() {
+        for at in UNHOLDABLE {
+            let vault = MemoryVault::with(&[("a.md", "draft"), (at, "context")]);
+            let resolution = planned(
+                &vault,
+                vec![
+                    Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final"))
+                        .with_conditions(vec![AuthorCondition::content_hash(
+                            path(at),
+                            content_hash(b"context"),
+                        )]),
+                ],
+            );
+            assert_eq!(resolution.unresolved.len(), 1, "{at}");
+            is_unholdable_detail(&resolution, 0, at);
+            assert!(resolution.plan.conditions.is_empty(), "{at}");
+        }
+    }
+
+    /// The index keys a document by its normalized spelling, so a spelling
+    /// the index refuses as written resolves where it normalizes to one the
+    /// index holds.
+    #[test]
+    fn a_path_that_normalizes_to_one_the_index_holds_resolves() {
+        let vault = MemoryVault::with(&[("a/c.md", "C")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                creating("./a//b.md", "new"),
+                Operation::new(OperationKind::str_replace(path("a//c.md"), "C", "c")),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a/b.md", FileState::absent(), present("new")),
+                transition("a/c.md", present("C"), present("c")),
+            ]
+        );
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_wire::{ContentHash, DocumentPath, FileState, Operation, OperationKind};
 
-use super::view::{Entry, VaultView, document_path, wire_hash};
+use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
 
 /// What composing a plan's operations came to.
 pub(crate) struct Composition {
@@ -147,6 +147,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             }
             Entry::Blocked { detail } => return Ok(Place::NoFile(detail)),
         };
+        if let Some(detail) = unholdable(&spelling) {
+            return Ok(Place::NoFile(detail));
+        }
         self.targets.insert(
             spelling.clone(),
             ComposedTarget {
@@ -343,6 +346,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 )));
             }
             let respelled = DocumentPath::new(&respelled).expect("a normalized document path");
+            if let Some(detail) = unholdable(&respelled) {
+                return Ok(Err(detail));
+            }
             self.targets
                 .entry(respelled.clone())
                 .or_insert(ComposedTarget {
