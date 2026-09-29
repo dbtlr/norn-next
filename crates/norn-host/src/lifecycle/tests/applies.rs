@@ -1509,3 +1509,37 @@ fn an_apply_over_an_idle_detach_in_the_channel_is_sent_by_the_superseded_detach(
     assert_eq!(ops.detaches.load(Ordering::SeqCst), 0, "the detach ran");
     drop((holding_lease, host));
 }
+
+/// **An apply admitted while a watcher poll holds the entry takes the claim
+/// where the poll ends.** The poll finds nothing, so it leaves the entry free,
+/// and its end hands the claim to the queued apply with no dispatcher tick.
+#[test]
+fn an_apply_admitted_during_a_watcher_poll_takes_the_claim_where_the_poll_ends() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    *ops.poll_gate.lock().unwrap() = Some(name.clone());
+    let polling = Arc::clone(&host.shared);
+    let poll = thread::spawn(move || poll_watchers(&polling));
+    wait_for_flag("poll_started", &ops.poll_started);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    assert!(
+        !host
+            .shared
+            .entries
+            .get(&name)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .applies
+            .is_empty(),
+        "the apply did not queue behind the poll"
+    );
+    *ops.poll_gate.lock().unwrap() = None;
+    ops.poll_release.store(true, Ordering::SeqCst);
+    poll.join().unwrap();
+
+    applied(answer_of(pending));
+    drop((lease, host));
+}
