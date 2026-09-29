@@ -469,12 +469,15 @@ impl JsonSchema for Operation {
     /// The kind's own schema — one branch per kind, its name a constant under
     /// `kind` and its fields under `fields` — with the operation's optional
     /// parts added to every branch. Each branch already refuses a key it does
-    /// not name, so the parts are added inside it rather than beside it.
+    /// not name, so the parts are added inside it rather than beside it. Each
+    /// part is advertised as the reader takes it: the identifier and the
+    /// footnote admit `null`, read as absent, as a derived optional field
+    /// advertises; the two lists do not.
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let optional_parts = [
             (
                 "id",
-                generator.subschema_for::<OperationId>(),
+                generator.subschema_for::<Option<OperationId>>(),
                 "The identifier other operations of the same plan require it by.",
             ),
             (
@@ -484,7 +487,7 @@ impl JsonSchema for Operation {
             ),
             (
                 "footnote",
-                generator.subschema_for::<String>(),
+                generator.subschema_for::<Option<String>>(),
                 "Words about the operation, for a person reading the plan.",
             ),
             (

@@ -2886,7 +2886,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
             Some("#/$defs/AuthorCondition")
         );
         assert_eq!(
-            branch["properties"]["id"]["$ref"].as_str(),
+            branch["properties"]["id"]["anyOf"][0]["$ref"].as_str(),
             Some("#/$defs/OperationId")
         );
     }
@@ -2894,6 +2894,45 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         definition(&schema, "OperationId")["minLength"].as_u64(),
         Some(1)
     );
+}
+
+/// Whether a schema admits `null`: its type is `null` or a list naming it, or
+/// one of its alternatives admits it.
+fn admits_null(schema: &Value) -> bool {
+    let typed = match schema.get("type") {
+        Some(Value::String(name)) => name == "null",
+        Some(Value::Array(names)) => names.iter().any(|name| name == "null"),
+        _ => false,
+    };
+    typed
+        || ["anyOf", "oneOf"].iter().any(|keyword| {
+            schema
+                .get(keyword)
+                .and_then(Value::as_array)
+                .is_some_and(|alternatives| alternatives.iter().any(admits_null))
+        })
+}
+
+/// **An operation advertises `null` exactly where its reader takes one.** Its
+/// schema is written by hand, so each optional part is checked against the
+/// reader: a part the reader reads as absent when written `null` is
+/// advertised as admitting it, as a derived optional field is, and a part the
+/// reader refuses `null` for is not.
+#[test]
+fn an_operation_advertises_null_exactly_where_its_reader_takes_one() {
+    let schema = schema_of::<Operation>();
+    let branch = branch(&schema, "kind", "delete_document");
+    for part in ["id", "requires", "footnote", "conditions"] {
+        let json = format!(
+            r#"{{"kind":"delete_document","fields":{{"path":"notes/b.md"}},"{part}":null}}"#
+        );
+        assert_eq!(
+            admits_null(&branch["properties"][part]),
+            serde_json::from_str::<Operation>(&json).is_ok(),
+            "the schema and the reader disagree on a null `{part}`: {}",
+            branch["properties"][part]
+        );
+    }
 }
 
 /// Each plan type advertises its snake_case fields and admits no other key;
