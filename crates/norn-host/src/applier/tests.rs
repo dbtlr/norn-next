@@ -1291,3 +1291,101 @@ fn a_result_is_judged_against_the_document_its_content_came_from() {
 fn refused_for(outcome: ApplyOutcome) -> Vec<norn_wire::RefusedCheck> {
     refused(outcome).checks
 }
+
+/// A ledger that lets another writer act on one path the moment the applier
+/// publishes there: between the publication and the changeset.
+struct Meddling {
+    anchor: PathBuf,
+    at: PathBuf,
+    /// What the other writer leaves at the path.
+    leaves: &'static str,
+}
+
+impl OwnWriteLedger for Meddling {
+    fn published(&self, path: &Path, _: &Published) {
+        if path == self.at {
+            std::fs::write(self.anchor.join(path), self.leaves).expect("the foreign write");
+        }
+    }
+}
+
+impl Fixture {
+    /// Apply `plan` while another writer leaves `leaves` at `at` the moment
+    /// the applier publishes there.
+    fn apply_meddled(
+        &mut self,
+        plan: ResolvedPlan,
+        at: &str,
+        leaves: &'static str,
+    ) -> ApplyOutcome {
+        let meddling = Meddling {
+            anchor: self.vault.clone(),
+            at: PathBuf::from(at),
+            leaves,
+        };
+        let applier = Applier {
+            anchor: &self.vault,
+            root: self.root,
+            exclusions: &self.exclusions,
+            shadows: &self.shadows,
+            own_writes: &meddling,
+        };
+        applier.apply(plan, &mut self.store)
+    }
+
+    /// The content hash the store holds for `at`, where it holds a row.
+    fn stored_hash(&mut self, at: &str) -> Option<String> {
+        self.store
+            .begin_request()
+            .stored_document(&norn_store::DocumentPath::new(at).expect("a path"))
+            .expect("a read")
+            .map(|row| row.content_hash)
+    }
+}
+
+/// Another writer's edit between a target's publication and the changeset is
+/// not committed as the plan's: the target's row keeps what it held, and the
+/// edit is the watcher's to report — the own-write ledger's entry names the
+/// published bytes, which the path no longer holds, so it does not absorb the
+/// event — and once it is taken in the store is what a build from zero holds.
+#[test]
+fn a_foreign_edit_after_publication_is_left_to_the_watcher() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "old\n")]);
+    let plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        editing("b.md", "old", "new"),
+    ]);
+    let before = fixture.stored_hash("a.md");
+    applied(fixture.apply_meddled(plan, "a.md", "foreign\n"));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("foreign\n"));
+    assert_eq!(
+        fixture.stored_hash("a.md"),
+        before,
+        "the row is not the plan's"
+    );
+    assert_eq!(
+        fixture.stored_hash("b.md"),
+        Some(norn_fs::ContentHash::of(b"new\n").to_string())
+    );
+    heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// A document another writer puts back between the plan's removal and the
+/// changeset is not recorded as removed: its row stands until the watcher
+/// reports the new document, and once that is taken in the store is what a
+/// build from zero holds.
+#[test]
+fn a_document_put_back_after_its_removal_is_not_committed_as_removed() {
+    let mut fixture = Fixture::new(&[("gone.md", "# Gone\n"), ("b.md", "old\n")]);
+    let plan = fixture.plan(vec![deleting("gone.md"), editing("b.md", "old", "new")]);
+    applied(fixture.apply_meddled(plan, "gone.md", "# Back\n"));
+    assert_eq!(fixture.read("gone.md").as_deref(), Some("# Back\n"));
+    assert_eq!(
+        fixture.stored_hash("gone.md"),
+        Some(norn_fs::ContentHash::of(b"# Gone\n").to_string()),
+        "no death is committed for a document that stands"
+    );
+    heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+    fixture.assert_store_is_a_build_from_zero();
+}

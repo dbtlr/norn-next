@@ -2251,7 +2251,10 @@ pub(crate) struct PlanEffect {
 /// path whose bytes no longer hash to the effect was changed by another writer
 /// in the residual window after publication; it is left to the watcher, which
 /// reports that change because it is not the own write the ledger recorded. A
-/// path the plan left absent dies where a row stands, as a plan's delete.
+/// path the plan left absent is looked at again, at the spelling the tree
+/// lists, and dies where a row stands and no document does, as a plan's
+/// delete; a document standing there again was put back by another writer,
+/// and is the watcher's to report, as the ledger's entry expects absence.
 ///
 /// Every death is entered ahead of every upsert, so a case-only rename's old
 /// spelling dies before its new one is written under a store whose path order
@@ -2271,7 +2274,25 @@ pub(crate) fn commit_plan_changeset(
     pending.provenance = provenance;
     let (deaths, writes): (Vec<&PlanEffect>, Vec<&PlanEffect>) =
         effects.iter().partition(|left| left.holds.is_none());
+    let vault = if deaths.is_empty() {
+        None
+    } else {
+        Some(norn_fs::Vault::open(root, exclusions).map_err(effect)?)
+    };
     for left in deaths {
+        // The spelling the tree lists: a case-only rename's old spelling
+        // reaches its new one on a volume that folds, and dies all the same.
+        if let Some(vault) = &vault
+            && matches!(
+                vault.reach(Path::new(left.path.as_str())).map_err(effect)?,
+                norn_fs::Reach::Stands {
+                    kind: norn_fs::PathKind::RegularFile,
+                    ..
+                }
+            )
+        {
+            continue;
+        }
         let standing = pending
             .store
             .begin_request()
