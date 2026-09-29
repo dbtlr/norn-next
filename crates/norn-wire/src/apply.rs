@@ -34,7 +34,6 @@ use crate::plan::forecast::{FolderPath, Forecast};
 /// On the wire a mode is the flat string itself: `"preview"`, `"apply"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ApplyMode {
     /// Resolve the plan and answer with it and its forecast, writing nothing.
     Preview,

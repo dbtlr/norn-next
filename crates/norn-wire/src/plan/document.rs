@@ -331,7 +331,6 @@ impl ResolvedPlan {
 /// unchanged out of any answer is a document. A key the plan does not name is
 /// refused, at every depth.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
 pub enum PlanDocument {
     /// Operations, planned and applied in one request. Sending them again is
     /// a new change.

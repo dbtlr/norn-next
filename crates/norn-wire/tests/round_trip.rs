@@ -8073,6 +8073,45 @@ fn state_check(state: &FileState) -> &'static str {
     }
 }
 
+/// What the one applier does with a request, written with no wildcard arm:
+/// a mode or a document minted without a decision here fails to compile
+/// rather than falling into "otherwise apply".
+fn applier_route(params: &ApplyParams) -> String {
+    let mode = match params.mode {
+        ApplyMode::Preview => "preview",
+        ApplyMode::Apply => "apply",
+    };
+    let plan = match &params.plan {
+        PlanDocument::Operations(_) => "the operations",
+        PlanDocument::Resolved(_) => "the resolved plan",
+    };
+    format!("{mode} {plan}")
+}
+
+#[test]
+fn the_applier_decides_every_mode_and_document_without_a_default() {
+    let routes: Vec<String> = plan_documents()
+        .into_iter()
+        .take(3)
+        .flat_map(|document| {
+            apply_modes()
+                .into_iter()
+                .map(move |mode| applier_route(&ApplyParams::new(mode, document.clone())))
+        })
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            "preview the operations",
+            "apply the operations",
+            "preview the operations",
+            "apply the operations",
+            "preview the resolved plan",
+            "apply the resolved plan",
+        ]
+    );
+}
+
 #[test]
 fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
     let decisions: Vec<String> = operations().iter().map(applier_decision).collect();

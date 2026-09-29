@@ -310,15 +310,17 @@
 //! breaking a caller that only reads; a plain enum makes that arrival break
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
-//! [`FindingScope`], [`RungSelection`], [`OperationKind`], [`FileState`],
-//! [`AuthorCondition`] and [`PlanCondition`] are the seven members of that
-//! class: a section composes with an engine's own refusal to say what a client
-//! should do, a scope decides whether a finding is withheld from a document
-//! row, a selection is resolved to the ladder a search runs, and the one
-//! applier must decide what every operation kind, file state and condition
-//! means — how a kind resolves into transitions, how a state is verified, how
-//! a condition is checked — since a plan it cannot interpret must never apply
-//! as though it could. A composer of
+//! [`FindingScope`], [`RungSelection`], [`ApplyMode`], [`PlanDocument`],
+//! [`OperationKind`], [`FileState`], [`AuthorCondition`] and [`PlanCondition`]
+//! are the nine members of that class: a section composes with an engine's
+//! own refusal to say what a client should do, a scope decides whether a
+//! finding is withheld from a document row, a selection is resolved to the
+//! ladder a search runs, and the one applier must decide what every mode,
+//! plan document, operation kind, file state and condition means — whether a
+//! request writes, how a document is planned, how a kind resolves into
+//! transitions, how a state is verified, how a condition is checked — since a
+//! request it cannot interpret must never apply as though it could, and a
+//! mode it has not decided must never fall into "otherwise apply". A composer of
 //! any of them that has not made the decision should fail to compile rather
 //! than fall into a default arm, so none carries the attribute and a new
 //! member is a deliberate break at every composition site. The two rules compose rather
