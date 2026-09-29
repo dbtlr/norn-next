@@ -93,7 +93,10 @@ struct Simulated<'view, V> {
     /// standing beneath it: the tree's, or the one an operation made it at.
     /// Publication makes a folder before the create it is made for and
     /// removes none until the end, so a folder keeps that spelling for the
-    /// whole plan.
+    /// whole plan. The spelling is kept even when a later operation of the
+    /// plan removes the document that gave it, so no publication makes the
+    /// folder: a second spelling is then refused where it could have stood,
+    /// which costs the author a re-plan and never a wrong transition.
     folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
 }
 
