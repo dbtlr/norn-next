@@ -14,27 +14,32 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
-    Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile,
-    ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams,
-    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow,
-    Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
-    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
-    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
+    ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
+    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, ChangesetOutcome,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
+    DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
+    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FileState, FindParams,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
+    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
+    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
+    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
+    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -131,6 +136,8 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostReaderUnavailable,
         ReasonCode::HostRegistryUnwritable,
         ReasonCode::HostReadFailed,
+        ReasonCode::HostApplyNotRun,
+        ReasonCode::HostApplyOutcomeUnknown,
         ReasonCode::VaultAmbiguousRoot,
         ReasonCode::VaultAmbiguousTarget,
         ReasonCode::VaultUnknownTarget,
@@ -138,9 +145,14 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
         ReasonCode::VaultUnreadableBound,
+        ReasonCode::VaultPlanRefused,
+        ReasonCode::VaultRootChanged,
+        ReasonCode::VaultPlanInterrupted,
+        ReasonCode::VaultWriteFailed,
         ReasonCode::RequestOutOfBound,
         ReasonCode::RequestPartNotTaken,
         ReasonCode::RequestCursorNotTaken,
+        ReasonCode::RequestPlanInvalid,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -294,6 +306,7 @@ fn error_details() -> Vec<ErrorDetail> {
             .into_iter()
             .map(ErrorDetail::unsupported_attach_mode),
     );
+    details.extend(apply_details());
     details
 }
 
@@ -2456,7 +2469,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds fourteen verbs, and every one of them is the flat string
+/// The registry holds fifteen verbs, and every one of them is the flat string
 /// it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2467,6 +2480,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "count",
         "validate",
         "describe",
+        "apply",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2476,7 +2490,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 14);
+    assert_eq!(Verb::ALL.len(), 15);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2564,10 +2578,11 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 14);
+    assert_eq!(Verb::ALL.len(), 15);
     assert_eq!(
         addressed(Addressing::Required),
         [
+            "apply",
             "count",
             "describe",
             "find",
@@ -6509,5 +6524,1717 @@ fn a_registry_sanity_is_an_object_tagged_state() {
                 .expect("problems that name one")
         ),
         r#"{"state":"problems","problems":[{"problem":"root_missing","name":"notes"}]}"#
+    );
+}
+
+// ── The plan grammars ────────────────────────────────────────────────────
+
+/// A hash of some bytes, spelled from a digest this coverage chose.
+fn content_hash(fill: u8) -> ContentHash {
+    ContentHash::from_sha256([fill; 32])
+}
+
+/// The hash of the empty file, as SHA-256 spells it.
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// The digest of the empty file, as the 32 bytes SHA-256 produces.
+fn empty_sha256_digest() -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte =
+            u8::from_str_radix(&EMPTY_SHA256[index * 2..index * 2 + 2], 16).expect("a hex byte");
+    }
+    digest
+}
+
+/// A hash built from the 32 bytes of a digest is the prefixed, lowercase hex
+/// string a hash is on the wire, and reads back as the same hash.
+#[test]
+fn a_content_hash_is_the_prefixed_hex_of_its_digest() {
+    let hash = ContentHash::from_sha256(empty_sha256_digest());
+    assert_eq!(hash.as_str(), format!("sha256:{EMPTY_SHA256}"));
+    assert_eq!(hash.hex(), EMPTY_SHA256);
+    assert_eq!(wire(&hash), format!("\"sha256:{EMPTY_SHA256}\""));
+    assert_eq!(
+        ContentHash::new(format!("sha256:{EMPTY_SHA256}")),
+        Ok(hash.clone())
+    );
+    round_trip(&hash);
+    round_trip(&content_hash(0));
+    round_trip(&content_hash(0xff));
+}
+
+/// The reader refuses what the constructor refuses: another prefix, another
+/// case, another length, and another algorithm's hash of the same width.
+#[test]
+fn a_content_hash_refuses_a_string_outside_its_grammar() {
+    let blake3_looking = format!("blake3:{EMPTY_SHA256}");
+    let refused = [
+        String::new(),
+        EMPTY_SHA256.to_string(),
+        format!("SHA256:{EMPTY_SHA256}"),
+        format!("sha256:{}", EMPTY_SHA256.to_uppercase()),
+        format!("sha256:{}", &EMPTY_SHA256[..63]),
+        format!("sha256:{EMPTY_SHA256}0"),
+        format!("sha256:{}g", &EMPTY_SHA256[..63]),
+        format!("sha256: {}", &EMPTY_SHA256[..63]),
+        blake3_looking,
+    ];
+    for text in refused {
+        assert_eq!(
+            ContentHash::new(&text),
+            Err(IllegalContentHash),
+            "`{text}` was built as a content hash"
+        );
+        assert!(
+            serde_json::from_str::<ContentHash>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a content hash"
+        );
+    }
+}
+
+/// A root identity is one opaque string built from a device and an inode,
+/// the same pair building the same identity and another pair another.
+#[test]
+fn a_root_identity_is_one_opaque_string_per_device_and_inode() {
+    let identity = RootIdentity::from_device_and_inode(66_306, 2);
+    assert_eq!(wire(&identity), r#""00000000000103020000000000000002""#);
+    assert_eq!(identity, RootIdentity::from_device_and_inode(66_306, 2));
+    assert_ne!(identity, RootIdentity::from_device_and_inode(66_306, 3));
+    assert_ne!(identity, RootIdentity::from_device_and_inode(2, 66_306));
+    for (device, inode) in [(0, 0), (u64::MAX, u64::MAX), (66_306, 2)] {
+        round_trip(&RootIdentity::from_device_and_inode(device, inode));
+    }
+}
+
+/// The reader accepts exactly the strings the constructor can build, so an
+/// identity nobody built is refused rather than compared.
+#[test]
+fn a_root_identity_refuses_a_string_nobody_built() {
+    for text in [
+        "",
+        "junk",
+        "0000000000010302000000000000000",
+        "000000000001030200000000000000020",
+        "00000000000103020000000000000002 ",
+        "0000000000010302000000000000000G",
+        "00000000000103020000000000000O02",
+        "0000000000010302:000000000000002",
+        "00000000000103020000000000000A02",
+    ] {
+        assert!(
+            serde_json::from_str::<RootIdentity>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a root identity"
+        );
+    }
+}
+
+// ── The plan documents ───────────────────────────────────────────────────
+
+/// The wire spelling of the hash `content_hash(fill)` builds.
+fn hash_text(fill: u8) -> String {
+    format!("sha256:{}", format!("{fill:02x}").repeat(32))
+}
+
+fn operation_id(text: &str) -> OperationId {
+    OperationId::new(text).expect("a legal operation id")
+}
+
+/// The identity of the root every plan here is made against.
+fn a_root() -> RootIdentity {
+    RootIdentity::from_device_and_inode(66_306, 2)
+}
+
+/// Every kind an operation is authored in, one each.
+fn operation_kinds() -> Vec<OperationKind> {
+    vec![
+        OperationKind::create_document(path("notes/new.md"), "# New\n"),
+        OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
+        OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
+        OperationKind::delete_document(path("notes/b.md")),
+    ]
+}
+
+/// Every condition an author writes on an operation.
+fn author_conditions() -> Vec<AuthorCondition> {
+    vec![AuthorCondition::content_hash(
+        path("notes/a.md"),
+        content_hash(0xab),
+    )]
+}
+
+/// Every condition a resolved plan carries.
+fn plan_conditions() -> Vec<PlanCondition> {
+    vec![PlanCondition::content_hash(
+        path("notes/c.md"),
+        content_hash(0xcd),
+    )]
+}
+
+/// Every state a side of a transition holds.
+fn file_states() -> Vec<FileState> {
+    vec![FileState::absent(), FileState::present(content_hash(0x01))]
+}
+
+/// Every kind bare, and one operation carrying every optional part.
+fn operations() -> Vec<Operation> {
+    let mut operations: Vec<Operation> =
+        operation_kinds().into_iter().map(Operation::new).collect();
+    operations.push(
+        Operation::new(OperationKind::str_replace(
+            path("notes/a.md"),
+            "draft",
+            "final",
+        ))
+        .with_id(operation_id("edit-a"))
+        .with_requires(vec![operation_id("make-b")])
+        .with_footnote("marks it final")
+        .with_conditions(author_conditions()),
+    );
+    operations
+}
+
+fn a_transition() -> Transition {
+    Transition::new(
+        path("notes/a.md"),
+        FileState::present(content_hash(0xab)),
+        FileState::present(content_hash(0x01)),
+    )
+}
+
+/// A resolved plan carrying one of everything it can carry.
+fn a_resolved_plan() -> ResolvedPlan {
+    ResolvedPlan::new(
+        VaultAddress::name(name("notes")),
+        a_root(),
+        vec![Operation::new(OperationKind::str_replace(
+            path("notes/a.md"),
+            "draft",
+            "final",
+        ))],
+        vec![a_transition()],
+        plan_conditions(),
+    )
+    .with_provenance(Provenance::new(
+        7,
+        vec![SkippedFinding::new(42, "the target names two documents")],
+    ))
+    .with_footnote("finish the draft")
+}
+
+/// The fewest parts a resolved plan is written with.
+fn a_bare_resolved_plan() -> ResolvedPlan {
+    ResolvedPlan::new(
+        VaultAddress::name(name("notes")),
+        a_root(),
+        vec![Operation::new(OperationKind::delete_document(path(
+            "notes/b.md",
+        )))],
+        vec![Transition::new(
+            path("notes/b.md"),
+            FileState::present(content_hash(0x02)),
+            FileState::absent(),
+        )],
+        Vec::new(),
+    )
+}
+
+fn an_authored_plan() -> AuthoredPlan {
+    AuthoredPlan::new(VaultAddress::name(name("notes")), operations())
+}
+
+/// Both documents a caller holds, each bare and each carrying every part.
+fn plan_documents() -> Vec<PlanDocument> {
+    vec![
+        PlanDocument::operations(an_authored_plan()),
+        PlanDocument::operations(an_authored_plan().with_footnote("tidy the notes")),
+        PlanDocument::resolved(a_bare_resolved_plan()),
+        PlanDocument::resolved(a_resolved_plan()),
+    ]
+}
+
+/// The pinned bytes of `a_resolved_plan`, without the document's tag.
+fn resolved_plan_json() -> String {
+    format!(
+        concat!(
+            r#"{{"plan":"resolved","vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+            r#""operations":[{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}}],"#,
+            r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
+            r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
+            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}}],"#,
+            r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
+            r#""footnote":"finish the draft"}}"#
+        ),
+        ab = hash_text(0xab),
+        one = hash_text(0x01),
+        cd = hash_text(0xcd),
+    )
+}
+
+#[test]
+fn every_plan_shape_survives_the_round_trip() {
+    for kind in operation_kinds() {
+        round_trip(&kind);
+    }
+    for operation in operations() {
+        round_trip(&operation);
+    }
+    for condition in author_conditions() {
+        round_trip(&condition);
+    }
+    for condition in plan_conditions() {
+        round_trip(&condition);
+    }
+    for state in file_states() {
+        round_trip(&state);
+    }
+    round_trip(&a_transition());
+    round_trip(&a_resolved_plan());
+    round_trip(&a_bare_resolved_plan());
+    round_trip(&an_authored_plan());
+    for document in plan_documents() {
+        round_trip(&document);
+    }
+}
+
+/// Each kind is its name under `kind` and its own fields under `fields`, and
+/// a bare operation carries nothing else.
+#[test]
+fn an_operation_is_a_kind_and_its_fields() {
+    let pinned = [
+        r##"{"kind":"create_document","fields":{"path":"notes/new.md","content":"# New\n"}}"##,
+        r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+    ];
+    for (kind, json) in operation_kinds().into_iter().zip(pinned) {
+        assert_eq!(wire(&Operation::new(kind.clone())), json);
+        assert_eq!(wire(&kind), json);
+    }
+}
+
+/// An operation's optional parts sit beside its kind and its fields, and each
+/// is left out of the bytes where it is not written.
+#[test]
+fn an_operation_carries_its_identifier_requirements_footnote_and_conditions() {
+    let full = operations()
+        .pop()
+        .expect("the operation carrying every part");
+    assert_eq!(
+        wire(&full),
+        format!(
+            concat!(
+                r#"{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}},"#,
+                r#""id":"edit-a","requires":["make-b"],"footnote":"marks it final","#,
+                r#""conditions":[{{"condition":"content_hash","path":"notes/a.md","hash":"{ab}"}}]}}"#
+            ),
+            ab = hash_text(0xab)
+        )
+    );
+}
+
+/// A `fields` key written before the `kind` it belongs to still reads.
+#[test]
+fn an_operation_reads_its_fields_before_its_kind() {
+    let read: Operation = serde_json::from_str(
+        r#"{"fields":{"from":"notes/a.md","to":"archive/a.md"},"id":"move-a","kind":"move_document"}"#,
+    )
+    .expect("an operation whose fields precede its kind");
+    assert_eq!(
+        read,
+        Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md")
+        ))
+        .with_id(operation_id("move-a"))
+    );
+}
+
+/// A kind's fields are its own: a field it lacks, another kind's field, and
+/// an identifier that names nothing each refuse the read.
+#[test]
+fn an_operation_refuses_fields_that_are_not_its_kinds() {
+    for json in [
+        r#"{"kind":"delete_document","fields":{}}"#,
+        r#"{"kind":"delete_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
+        r#"{"kind":"create_document","fields":{"path":"notes/new.md"}}"#,
+        r#"{"kind":"delete_document"}"#,
+        r#"{"kind":"delete_document","fields":null}"#,
+        r#"{"kind":"delete_document","fields":{"path":""}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"id":""}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"requires":[""]}"#,
+        r#"{"fields":{"path":"notes/b.md"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+    assert_eq!(OperationId::new(""), Err(IllegalOperationId));
+}
+
+/// A file state is absent, or present with the hash of what it holds.
+#[test]
+fn a_file_state_is_an_object_tagged_state() {
+    assert_eq!(wire(&FileState::absent()), r#"{"state":"absent"}"#);
+    assert_eq!(
+        wire(&FileState::present(content_hash(0x01))),
+        format!(r#"{{"state":"present","hash":"{}"}}"#, hash_text(0x01))
+    );
+}
+
+/// An author's condition and a plan's condition are two types, each tagged
+/// `condition`, and today each says what one file holds.
+#[test]
+fn a_condition_is_an_object_tagged_condition() {
+    assert_eq!(
+        wire(&AuthorCondition::content_hash(
+            path("notes/a.md"),
+            content_hash(0xab)
+        )),
+        format!(
+            r#"{{"condition":"content_hash","path":"notes/a.md","hash":"{}"}}"#,
+            hash_text(0xab)
+        )
+    );
+    assert_eq!(
+        wire(&PlanCondition::content_hash(
+            path("notes/c.md"),
+            content_hash(0xcd)
+        )),
+        format!(
+            r#"{{"condition":"content_hash","path":"notes/c.md","hash":"{}"}}"#,
+            hash_text(0xcd)
+        )
+    );
+}
+
+/// A resolved plan is its vault, its root, its operations, one transition per
+/// file and its conditions, with its provenance and footnote where it has
+/// them; the document a caller sends names which plan it is under `plan`.
+#[test]
+fn a_resolved_plan_is_the_bytes_a_caller_sends_back() {
+    assert_eq!(wire(&a_resolved_plan()), resolved_plan_json());
+    assert_eq!(
+        wire(&PlanDocument::resolved(a_resolved_plan())),
+        resolved_plan_json(),
+        "a resolved plan and the document carrying it are not one set of bytes"
+    );
+    assert_eq!(
+        wire(&a_bare_resolved_plan()),
+        format!(
+            concat!(
+                r#"{{"plan":"resolved","vault":{{"by":"name","name":"notes"}},"root":"00000000000103020000000000000002","#,
+                r#""operations":[{{"kind":"delete_document","fields":{{"path":"notes/b.md"}}}}],"#,
+                r#""transitions":[{{"path":"notes/b.md","before":{{"state":"present","hash":"{two}"}},"#,
+                r#""after":{{"state":"absent"}}}}],"conditions":[]}}"#
+            ),
+            two = hash_text(0x02)
+        )
+    );
+}
+
+/// An authored plan is its vault and its operations, with a footnote where
+/// it has one.
+#[test]
+fn an_authored_plan_is_its_vault_and_its_operations() {
+    let plan = AuthoredPlan::new(
+        VaultAddress::name(name("notes")),
+        vec![Operation::new(OperationKind::delete_document(path(
+            "notes/b.md",
+        )))],
+    );
+    let operations = r#""operations":[{"kind":"delete_document","fields":{"path":"notes/b.md"}}]"#;
+    assert_eq!(
+        wire(&PlanDocument::operations(plan.clone())),
+        format!(r#"{{"plan":"operations","vault":{{"by":"name","name":"notes"}},{operations}}}"#)
+    );
+    assert_eq!(
+        wire(&PlanDocument::operations(plan.with_footnote("tidy"))),
+        format!(
+            r#"{{"plan":"operations","vault":{{"by":"name","name":"notes"}},{operations},"footnote":"tidy"}}"#
+        )
+    );
+}
+
+/// Insert an unknown key into the object `pointer` names inside `document`.
+fn with_surprise(document: &serde_json::Value, pointer: &str) -> String {
+    let mut edited = document.clone();
+    edited
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap_or_else(|| panic!("{pointer} names no object in {document}"))
+        .insert("surprise".to_string(), serde_json::Value::Bool(true));
+    edited.to_string()
+}
+
+/// **A plan refuses a field it does not know, at every level.** A plan flows
+/// into the host, and a field dropped on the way in — a newer caller's
+/// condition — would weaken a check without a word; the refusal is the
+/// version-mismatch signal.
+#[test]
+fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
+    let resolved = serde_json::to_value(PlanDocument::resolved(a_resolved_plan()))
+        .expect("a resolved plan as JSON");
+    for pointer in [
+        "",
+        "/operations/0",
+        "/operations/0/fields",
+        "/transitions/0",
+        "/transitions/0/before",
+        "/transitions/0/after",
+        "/conditions/0",
+        "/provenance",
+        "/provenance/skipped/0",
+    ] {
+        let json = with_surprise(&resolved, pointer);
+        let refusal = serde_json::from_str::<PlanDocument>(&json)
+            .expect_err(&format!("a plan carrying an unknown field at `{pointer}`"));
+        assert!(
+            refusal.to_string().contains("surprise"),
+            "the refusal at `{pointer}` does not name the field: {refusal}"
+        );
+    }
+    let bare = serde_json::to_value(a_resolved_plan()).expect("a resolved plan as JSON");
+    assert!(
+        serde_json::from_str::<ResolvedPlan>(&with_surprise(&bare, "")).is_err(),
+        "a resolved plan carried outside a document dropped a field it does not know"
+    );
+
+    let authored = serde_json::to_value(PlanDocument::operations(an_authored_plan()))
+        .expect("an authored plan as JSON");
+    for pointer in [
+        "",
+        "/operations/4",
+        "/operations/4/fields",
+        "/operations/4/conditions/0",
+    ] {
+        let json = with_surprise(&authored, pointer);
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a plan carrying an unknown field at `{pointer}` read back"
+        );
+    }
+}
+
+/// A kind, a condition, a state or a document nobody minted fails the read.
+#[test]
+fn a_plan_refuses_a_variant_it_does_not_know() {
+    for json in [
+        r#"{"kind":"rename_document","fields":{"path":"notes/b.md"}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"},"conditions":[{"condition":"expected_value","path":"notes/b.md"}]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+    assert!(serde_json::from_str::<FileState>(r#"{"state":"missing"}"#).is_err());
+    assert!(
+        serde_json::from_str::<FileState>(r#"{"state":"absent","surprise":true}"#).is_err(),
+        "an absent state dropped a field it does not know"
+    );
+    assert!(
+        serde_json::from_str::<PlanCondition>(r#"{"condition":"backlinks","path":"notes/b.md"}"#)
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            r#"{"plan":"draft","vault":{"by":"name","name":"notes"},"operations":[]}"#
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            r#"{"vault":{"by":"name","name":"notes"},"operations":[]}"#
+        )
+        .is_err(),
+        "a document naming no plan read back as one"
+    );
+}
+
+/// `json` with its one occurrence of `find` replaced by `with`.
+fn spliced(json: &str, find: &str, with: &str) -> String {
+    assert_eq!(
+        json.matches(find).count(),
+        1,
+        "`{find}` does not occur exactly once in {json}"
+    );
+    json.replacen(find, with, 1)
+}
+
+/// Every place a resolved plan is read: alone, as a document, as a request's
+/// plan, inside a report and inside a refusal's detail. Each reading's
+/// refusal, or `None` where it read.
+fn every_reading_of_a_resolved_plan(plan: &str) -> Vec<(&'static str, Option<String>)> {
+    fn refusal<T: DeserializeOwned>(json: &str) -> Option<String> {
+        serde_json::from_str::<T>(json)
+            .err()
+            .map(|error| error.to_string())
+    }
+    vec![
+        ("the plan alone", refusal::<ResolvedPlan>(plan)),
+        ("a document", refusal::<PlanDocument>(plan)),
+        (
+            "a request",
+            refusal::<ApplyParams>(&format!(r#"{{"mode":"apply","plan":{plan}}}"#)),
+        ),
+        (
+            "a report",
+            refusal::<ApplyReport>(&format!(
+                r#"{{"outcome":"previewed","plan":{plan},"forecast":{}}}"#,
+                wire(&a_forecast())
+            )),
+        ),
+        (
+            "a detail",
+            refusal::<ErrorDetail>(&format!(
+                r#"{{"code":"host/apply-outcome-unknown","plan":{plan}}}"#
+            )),
+        ),
+    ]
+}
+
+/// **A key written twice is refused wherever a plan is read.** A plan read
+/// inside a request, a report or a refusal is read by the same derive as the
+/// plan alone, so a duplicate the plan alone refuses — at its own level or
+/// inside an operation, its fields, a condition, a transition, a file state or
+/// its provenance — is refused everywhere, rather than one reading keeping the
+/// last value where another refuses.
+#[test]
+fn a_plan_refuses_a_key_written_twice_wherever_it_is_read() {
+    let bare = wire(&a_bare_resolved_plan());
+    let full = resolved_plan_json();
+    let constructions = [
+        (
+            "the plan's conditions",
+            spliced(
+                &bare,
+                r#""conditions":[]"#,
+                r#""conditions":[],"conditions":[]"#,
+            ),
+        ),
+        (
+            "the plan's tag",
+            spliced(
+                &bare,
+                r#"{"plan":"resolved","#,
+                r#"{"plan":"resolved","plan":"resolved","#,
+            ),
+        ),
+        (
+            "an operation",
+            spliced(
+                &bare,
+                r#"{"kind":"delete_document","#,
+                r#"{"kind":"delete_document","id":"a","id":"b","#,
+            ),
+        ),
+        (
+            "an operation's fields",
+            spliced(
+                &bare,
+                r#""fields":{"path":"notes/b.md"}"#,
+                r#""fields":{"path":"notes/b.md","path":"notes/z.md"}"#,
+            ),
+        ),
+        (
+            "a condition",
+            spliced(
+                &full,
+                r#""path":"notes/c.md","#,
+                r#""path":"notes/c.md","path":"notes/z.md","#,
+            ),
+        ),
+        (
+            "a transition",
+            spliced(
+                &bare,
+                r#"{"path":"notes/b.md","before""#,
+                r#"{"path":"notes/b.md","path":"notes/z.md","before""#,
+            ),
+        ),
+        (
+            "a file state",
+            spliced(
+                &bare,
+                r#""after":{"state":"absent"}"#,
+                r#""after":{"state":"absent","state":"absent"}"#,
+            ),
+        ),
+        (
+            "the provenance",
+            spliced(
+                &full,
+                r#""finding_generation":7"#,
+                r#""finding_generation":7,"finding_generation":8"#,
+            ),
+        ),
+    ];
+    for (place, json) in constructions {
+        for (reading, refusal) in every_reading_of_a_resolved_plan(&json) {
+            let refusal = refusal.unwrap_or_else(|| {
+                panic!("{reading} kept one of two values written for a key of {place}: {json}")
+            });
+            assert!(
+                refusal.contains("duplicate field"),
+                "{reading} refused a key of {place} written twice for another reason: {refusal}"
+            );
+        }
+    }
+
+    let authored = spliced(
+        &wire(&an_authored_plan()),
+        r#"{"plan":"operations","#,
+        r#"{"plan":"operations","footnote":"a","footnote":"b","#,
+    );
+    for refusal in [
+        serde_json::from_str::<AuthoredPlan>(&authored).err(),
+        serde_json::from_str::<PlanDocument>(&authored).err(),
+        serde_json::from_str::<ApplyParams>(&format!(r#"{{"mode":"apply","plan":{authored}}}"#))
+            .err(),
+    ] {
+        let refusal = refusal.expect("an authored plan writing its footnote twice read back");
+        assert!(refusal.to_string().contains("duplicate field"), "{refusal}");
+    }
+}
+
+/// **An operation's fields are read by the derive, not kept last-wins.** A
+/// move naming where it stands twice is refused alone, inside either plan and
+/// inside a report, rather than moving whichever it named last.
+#[test]
+fn an_operation_refuses_a_field_written_twice_wherever_it_is_read() {
+    let doubled = r#"{"kind":"move_document","fields":{"from":"a.md","from":"z.md","to":"b.md"}}"#;
+    let refusal = serde_json::from_str::<Operation>(doubled)
+        .expect_err("an operation naming where it moves from twice");
+    assert!(refusal.to_string().contains("duplicate field"), "{refusal}");
+
+    let authored = spliced(
+        &wire(&an_authored_plan()),
+        r#""operations":["#,
+        &format!(r#""operations":[{doubled},"#),
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(&authored).is_err(),
+        "an authored plan kept the last of two sources for a move"
+    );
+    let resolved = spliced(
+        &wire(&a_bare_resolved_plan()),
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+        doubled,
+    );
+    for (reading, refusal) in every_reading_of_a_resolved_plan(&resolved) {
+        assert!(
+            refusal.is_some_and(|refusal| refusal.contains("duplicate field")),
+            "{reading} kept the last of two sources for a move"
+        );
+    }
+}
+
+/// A document reads the tag wherever it is written, and a field only the
+/// other plan names is refused as the plan alone refuses it.
+#[test]
+fn a_plan_document_reads_as_the_plan_it_holds_reads_alone() {
+    let resolved = wire(&a_bare_resolved_plan());
+    let tag_last = format!(
+        r#"{},"plan":"resolved"}}"#,
+        spliced(&resolved, r#"{"plan":"resolved","#, "{").trim_end_matches('}')
+    );
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&tag_last).expect("a document tagged last"),
+        PlanDocument::resolved(a_bare_resolved_plan())
+    );
+    let without_provenance = spliced(
+        &resolved,
+        r#""conditions":[]"#,
+        r#""conditions":[],"provenance":null"#,
+    );
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&without_provenance).expect("a null provenance"),
+        PlanDocument::resolved(
+            serde_json::from_str::<ResolvedPlan>(&without_provenance).expect("a null provenance")
+        )
+    );
+
+    let authored = wire(&an_authored_plan());
+    for foreign in [
+        r#""root":"00000000000103020000000000000002""#,
+        r#""transitions":[]"#,
+        r#""conditions":[]"#,
+        r#""provenance":null"#,
+    ] {
+        let json = spliced(
+            &authored,
+            r#"{"plan":"operations","#,
+            &format!(r#"{{"plan":"operations",{foreign},"#),
+        );
+        assert!(
+            serde_json::from_str::<AuthoredPlan>(&json).is_err(),
+            "an authored plan carrying {foreign} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding an authored plan carrying {foreign} read back"
+        );
+    }
+    for missing in [
+        r#""root":"00000000000103020000000000000002","#,
+        r#""conditions":[]"#,
+    ] {
+        let json = spliced(&resolved, missing, "").replace(",}", "}");
+        assert!(
+            serde_json::from_str::<ResolvedPlan>(&json).is_err()
+                && serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a resolved plan without {missing} read back"
+        );
+    }
+}
+
+/// **A plan reads the same in any format, alone or inside a request.** Read
+/// outside JSON, a plan inside a request is read by the same derive as the
+/// plan alone, so a value that format reads one way alone — a tagged scalar in
+/// YAML — is read that way inside a request too, rather than passing through a
+/// JSON buffer the format cannot fill.
+#[test]
+fn a_plan_reads_the_same_in_any_format_alone_and_inside_a_request() {
+    fn readings(plan: &str) -> [Option<PlanDocument>; 3] {
+        let request = format!(
+            "mode: apply\nplan:\n{}",
+            plan.lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        );
+        [
+            serde_yaml::from_str::<ResolvedPlan>(plan)
+                .ok()
+                .map(PlanDocument::resolved),
+            serde_yaml::from_str::<PlanDocument>(plan).ok(),
+            serde_yaml::from_str::<ApplyParams>(&request)
+                .ok()
+                .map(|params| params.plan),
+        ]
+    }
+    let plan = serde_yaml::to_string(&a_bare_resolved_plan()).expect("a plan as YAML");
+    let [alone, document, request] = readings(&plan);
+    assert_eq!(alone, Some(PlanDocument::resolved(a_bare_resolved_plan())));
+    assert_eq!(document, alone);
+    assert_eq!(request, alone);
+
+    let tagged = format!("{plan}footnote: !x f\n");
+    let [alone, document, request] = readings(&tagged);
+    assert_eq!(
+        document, alone,
+        "a document read a tagged footnote otherwise"
+    );
+    assert_eq!(request, alone, "a request read a tagged footnote otherwise");
+}
+
+// ── What an apply answers with ───────────────────────────────────────────
+
+fn folder(text: &str) -> FolderPath {
+    FolderPath::new(text).expect("a legal folder path")
+}
+
+/// A forecast naming a drifted target, a folder the plan makes and one it
+/// removes.
+fn a_forecast() -> Forecast {
+    Forecast::new(
+        vec![path("notes/a.md")],
+        vec![folder("archive")],
+        vec![folder("notes/old")],
+    )
+}
+
+/// Every check a refused apply names.
+fn refused_checks() -> Vec<RefusedCheck> {
+    vec![
+        RefusedCheck::drifted(path("notes/a.md"), FileState::present(content_hash(0x0f))),
+        RefusedCheck::drifted(path("notes/b.md"), FileState::absent()),
+        RefusedCheck::condition_failed(PlanCondition::content_hash(
+            path("notes/c.md"),
+            content_hash(0xcd),
+        )),
+        RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::UndeclaredTag,
+            Some("draft".to_string()),
+            "the tag `draft` is not declared",
+        ),
+        RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::FrontmatterUnreadable,
+            None,
+            "the frontmatter does not parse",
+        ),
+        RefusedCheck::name_taken(path("notes/new.md")),
+    ]
+}
+
+/// Every reason an operation is left unresolved.
+fn unresolved_reasons() -> Vec<UnresolvedReason> {
+    vec![
+        UnresolvedReason::part_landed(),
+        UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
+        UnresolvedReason::requires_unresolved(operation_id("make-b")),
+    ]
+}
+
+/// Every cause that stops a publication part-way.
+fn interruption_causes() -> Vec<InterruptionCause> {
+    vec![
+        InterruptionCause::io_failure("the disk is full"),
+        InterruptionCause::name_taken(path("notes/new.md")),
+        InterruptionCause::foreign_edit(path("notes/a.md")),
+    ]
+}
+
+/// Every fault a plan's own shape has.
+fn plan_faults() -> Vec<PlanFault> {
+    vec![
+        PlanFault::duplicate_id(operation_id("edit-a"), vec![0, 3]),
+        PlanFault::unknown_requirement(2, operation_id("make-z")),
+        PlanFault::requires_cycle(vec![1, 2]),
+        PlanFault::content_cycle(vec![0, 1]),
+    ]
+}
+
+fn apply_modes() -> Vec<ApplyMode> {
+    vec![ApplyMode::Preview, ApplyMode::Apply]
+}
+
+fn changeset_outcomes() -> Vec<ChangesetOutcome> {
+    vec![ChangesetOutcome::Committed, ChangesetOutcome::Healing]
+}
+
+fn target_results() -> Vec<TargetResult> {
+    vec![TargetResult::Wrote, TargetResult::Found]
+}
+
+/// Both outcomes an apply answers with.
+fn apply_reports() -> Vec<ApplyReport> {
+    vec![
+        ApplyReport::previewed(a_resolved_plan(), a_forecast()),
+        ApplyReport::applied(
+            a_resolved_plan(),
+            ChangesetOutcome::Committed,
+            vec![
+                AppliedTarget::new(path("notes/a.md"), TargetResult::Wrote),
+                AppliedTarget::new(path("archive/new.md"), TargetResult::Found),
+            ],
+            vec![folder("archive")],
+            vec![folder("notes/old")],
+        ),
+        ApplyReport::applied(
+            a_bare_resolved_plan(),
+            ChangesetOutcome::Healing,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    ]
+}
+
+/// A lifecycle refusal an apply that did not run carries as its cause.
+fn a_park() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "another process maintains this vault",
+        ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+    )
+}
+
+/// Every detail an apply's outcome carries, over every payload it can carry.
+fn apply_details() -> Vec<ErrorDetail> {
+    let mut details = vec![
+        ErrorDetail::plan_refused(
+            a_bare_resolved_plan(),
+            a_forecast(),
+            refused_checks(),
+            unresolved_reasons()
+                .into_iter()
+                .map(|reason| {
+                    UnresolvedOperation::new(
+                        Operation::new(OperationKind::str_replace(
+                            path("notes/a.md"),
+                            "draft",
+                            "final",
+                        )),
+                        reason,
+                    )
+                })
+                .collect(),
+        ),
+        ErrorDetail::root_changed(a_root(), RootIdentity::from_device_and_inode(66_307, 2)),
+        ErrorDetail::write_failed(a_resolved_plan(), "the disk is full"),
+        ErrorDetail::apply_not_run(a_park(), None),
+        ErrorDetail::apply_not_run(a_park(), Some(a_resolved_plan())),
+        ErrorDetail::apply_outcome_unknown(a_resolved_plan()),
+    ];
+    details.extend(interruption_causes().into_iter().map(|cause| {
+        ErrorDetail::plan_interrupted(a_resolved_plan(), vec![path("notes/a.md")], cause)
+    }));
+    details.extend(plan_faults().into_iter().map(ErrorDetail::plan_invalid));
+    details
+}
+
+/// **Every plan vector here holds the whole vocabulary, and the schema is
+/// what says so**, as the vectors above hold theirs.
+#[test]
+fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
+    fn tags<T: Serialize>(values: &[T], tag: &str) -> BTreeSet<String> {
+        values.iter().map(|value| tag_string(value, tag)).collect()
+    }
+    assert_eq!(
+        tags(&operation_kinds(), "kind"),
+        advertised::<OperationKind>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&author_conditions(), "condition"),
+        advertised::<AuthorCondition>(Some("condition"))
+    );
+    assert_eq!(
+        tags(&plan_conditions(), "condition"),
+        advertised::<PlanCondition>(Some("condition"))
+    );
+    assert_eq!(
+        tags(&file_states(), "state"),
+        advertised::<FileState>(Some("state"))
+    );
+    let own_tag = |schema: serde_json::Value| -> String {
+        schema["properties"]["plan"]["const"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a plan advertises no `plan` tag: {schema}"))
+            .to_owned()
+    };
+    assert_eq!(
+        tags(&plan_documents(), "plan"),
+        [
+            own_tag(serde_json::to_value(schemars::schema_for!(AuthoredPlan)).expect("a schema")),
+            own_tag(serde_json::to_value(schemars::schema_for!(ResolvedPlan)).expect("a schema")),
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert_eq!(
+        tags(&refused_checks(), "check"),
+        advertised::<RefusedCheck>(Some("check"))
+    );
+    assert_eq!(
+        tags(&unresolved_reasons(), "kind"),
+        advertised::<UnresolvedReason>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&interruption_causes(), "kind"),
+        advertised::<InterruptionCause>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&plan_faults(), "kind"),
+        advertised::<PlanFault>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&apply_reports(), "outcome"),
+        advertised::<ApplyReport>(Some("outcome"))
+    );
+    assert_eq!(
+        apply_modes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ApplyMode>(None)
+    );
+    assert_eq!(
+        changeset_outcomes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ChangesetOutcome>(None)
+    );
+    assert_eq!(
+        target_results()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TargetResult>(None)
+    );
+}
+
+#[test]
+fn every_apply_shape_survives_the_round_trip() {
+    round_trip(&a_forecast());
+    for check in refused_checks() {
+        round_trip(&check);
+    }
+    for reason in unresolved_reasons() {
+        round_trip(&reason);
+    }
+    for cause in interruption_causes() {
+        round_trip(&cause);
+    }
+    for fault in plan_faults() {
+        round_trip(&fault);
+    }
+    for mode in apply_modes() {
+        round_trip(&mode);
+    }
+    for report in apply_reports() {
+        round_trip(&report);
+    }
+    for document in plan_documents() {
+        for mode in apply_modes() {
+            round_trip(&ApplyParams::new(mode, document.clone()));
+        }
+    }
+    round_trip(&VaultAnswer::new(
+        AnswerReading::new(TrustState::Ready, "epoch-1", 2),
+        Vec::new(),
+        ApplyReport::previewed(a_resolved_plan(), a_forecast()),
+    ));
+}
+
+/// A folder path is a vault-relative path that names something.
+#[test]
+fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
+    assert_eq!(wire(&folder("notes/old")), r#""notes/old""#);
+    round_trip(&folder("archive"));
+    for text in ["", "/", "/notes"] {
+        assert!(
+            FolderPath::new(text).is_err(),
+            "`{text}` was built as a folder path"
+        );
+        assert!(
+            serde_json::from_str::<FolderPath>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a folder path"
+        );
+    }
+    assert_eq!(
+        FolderPath::new("/notes")
+            .expect_err("a rooted folder path")
+            .what(),
+        "folder path"
+    );
+}
+
+/// **A forecast carries only what the plan beside it does not.** Each
+/// transition is the resolved plan's own, so a forecast names the targets that
+/// drifted and the folders the plan makes and removes, and a vault-wide
+/// preview carries each transition once.
+#[test]
+fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
+    assert_eq!(
+        wire(&a_forecast()),
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"]}"#
+    );
+    let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
+    for transition in &a_resolved_plan().transitions {
+        let after = wire(&transition.after);
+        assert_eq!(
+            previewed.matches(&after).count(),
+            1,
+            "a preview carries the transition of {} more than once: {previewed}",
+            transition.path
+        );
+    }
+}
+
+/// A forecast is an answer, so it drops a field it does not know where a plan
+/// refuses one.
+#[test]
+fn a_forecast_drops_a_field_it_does_not_know() {
+    let json = serde_json::to_value(a_forecast()).expect("a forecast as JSON");
+    let read: Forecast = serde_json::from_str(&with_surprise(&json, ""))
+        .unwrap_or_else(|error| panic!("a forecast with a field it does not know: {error}"));
+    assert_eq!(read, a_forecast());
+}
+
+/// An apply names its mode, and there is no default: a request without one
+/// does not read.
+#[test]
+fn an_apply_request_states_its_mode() {
+    let plan = PlanDocument::resolved(a_bare_resolved_plan());
+    let json = wire(&ApplyParams::new(ApplyMode::Preview, plan.clone()));
+    assert_eq!(
+        json,
+        format!(r#"{{"mode":"preview","plan":{}}}"#, wire(&plan))
+    );
+    assert_eq!(flat_string(&ApplyMode::Apply), "apply");
+    assert!(
+        serde_json::from_str::<ApplyParams>(&format!(r#"{{"plan":{}}}"#, wire(&plan))).is_err(),
+        "an apply naming no mode read back as one"
+    );
+    assert!(
+        serde_json::from_str::<ApplyParams>(&format!(
+            r#"{{"mode":"dry_run","plan":{}}}"#,
+            wire(&plan)
+        ))
+        .is_err(),
+        "a mode nobody minted read back as one"
+    );
+    assert_eq!(
+        ApplyParams::new(ApplyMode::Apply, plan.clone())
+            .plan
+            .vault(),
+        &VaultAddress::name(name("notes"))
+    );
+}
+
+/// A preview answers with the resolved plan and its forecast; an applied plan
+/// answers with the plan, whether its changeset committed, what each target
+/// came to and the folders it made and removed.
+#[test]
+fn an_apply_report_is_an_object_tagged_outcome() {
+    let [previewed, applied, _]: [ApplyReport; 3] =
+        apply_reports().try_into().expect("three reports");
+    assert_eq!(
+        wire(&previewed),
+        format!(
+            r#"{{"outcome":"previewed","plan":{},"forecast":{}}}"#,
+            resolved_plan_json(),
+            wire(&a_forecast())
+        )
+    );
+    assert_eq!(
+        wire(&applied),
+        format!(
+            concat!(
+                r#"{{"outcome":"applied","plan":{},"changeset":"committed","#,
+                r#""targets":[{{"path":"notes/a.md","result":"wrote"}},{{"path":"archive/new.md","result":"found"}}],"#,
+                r#""folders_made":["archive"],"folders_removed":["notes/old"]}}"#
+            ),
+            resolved_plan_json()
+        )
+    );
+    assert_eq!(flat_string(&ChangesetOutcome::Healing), "healing");
+}
+
+/// A report is an answer and drops a field it does not know; the plan inside
+/// it is a plan and still refuses one.
+#[test]
+fn an_apply_report_drops_a_field_it_does_not_know_and_its_plan_does_not() {
+    let previewed = apply_reports().remove(0);
+    let json = serde_json::to_value(&previewed).expect("a report as JSON");
+    let read: ApplyReport =
+        serde_json::from_str(&with_surprise(&json, "")).expect("a report with a field it drops");
+    assert_eq!(read, previewed);
+    assert!(
+        serde_json::from_str::<ApplyReport>(&with_surprise(&json, "/plan")).is_err(),
+        "the plan inside a report dropped a field it does not know"
+    );
+}
+
+#[test]
+fn every_apply_detail_survives_the_round_trip() {
+    for detail in apply_details() {
+        round_trip(&detail);
+        round_trip(&ErrorEnvelope::new("the apply did not finish", detail));
+    }
+}
+
+/// A refused plan carries the fresh plan, its forecast, each check that
+/// refused and each operation the fresh plan could not resolve.
+#[test]
+fn a_refused_plan_carries_the_fresh_plan_and_why() {
+    let detail = ErrorDetail::plan_refused(
+        a_bare_resolved_plan(),
+        Forecast::new(Vec::new(), Vec::new(), Vec::new()),
+        vec![RefusedCheck::drifted(
+            path("notes/a.md"),
+            FileState::present(content_hash(0x0f)),
+        )],
+        vec![UnresolvedOperation::new(
+            Operation::new(OperationKind::str_replace(
+                path("notes/a.md"),
+                "draft",
+                "final",
+            )),
+            UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
+        )],
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new("the plan drifted", detail)),
+        format!(
+            concat!(
+                r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[]}},"#,
+                r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
+                r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
+                r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
+            ),
+            plan = wire(&a_bare_resolved_plan()),
+            f = hash_text(0x0f),
+        )
+    );
+}
+
+/// Each check, reason, cause and fault is an object under its own tag.
+#[test]
+fn the_apply_reasons_are_tagged_objects() {
+    assert_eq!(
+        wire(&RefusedCheck::name_taken(path("notes/new.md"))),
+        r#"{"check":"name_taken","path":"notes/new.md"}"#
+    );
+    assert_eq!(
+        wire(&RefusedCheck::condition_failed(
+            PlanCondition::content_hash(path("notes/c.md"), content_hash(0xcd))
+        )),
+        format!(
+            r#"{{"check":"condition_failed","condition":{{"condition":"content_hash","path":"notes/c.md","hash":"{}"}}}}"#,
+            hash_text(0xcd)
+        )
+    );
+    assert_eq!(
+        wire(&RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::UndeclaredTag,
+            Some("draft".to_string()),
+            "the tag `draft` is not declared"
+        )),
+        concat!(
+            r#"{"check":"schema_violation","path":"notes/a.md","kind":"document/undeclared-tag","#,
+            r#""target":"draft","message":"the tag `draft` is not declared"}"#
+        )
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::part_landed()),
+        r#"{"kind":"part_landed"}"#
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::requires_unresolved(operation_id(
+            "make-b"
+        ))),
+        r#"{"kind":"requires_unresolved","requires":"make-b"}"#
+    );
+    assert_eq!(
+        wire(&InterruptionCause::io_failure("the disk is full")),
+        r#"{"kind":"io_failure","detail":"the disk is full"}"#
+    );
+    assert_eq!(
+        wire(&InterruptionCause::foreign_edit(path("notes/a.md"))),
+        r#"{"kind":"foreign_edit","path":"notes/a.md"}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::duplicate_id(operation_id("edit-a"), vec![0, 3])),
+        r#"{"kind":"duplicate_id","id":"edit-a","positions":[0,3]}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::unknown_requirement(2, operation_id("make-z"))),
+        r#"{"kind":"unknown_requirement","position":2,"requires":"make-z"}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::content_cycle(vec![0, 1])),
+        r#"{"kind":"content_cycle","positions":[0,1]}"#
+    );
+}
+
+/// The outcomes that are not a refusal and not an answer carry the plan they
+/// were given, so a caller can finish or retry by sending it again.
+#[test]
+fn the_apply_outcomes_carry_what_a_caller_sends_again() {
+    let plan = wire(&a_bare_resolved_plan());
+    assert_eq!(
+        wire(&ErrorDetail::plan_interrupted(
+            a_bare_resolved_plan(),
+            vec![path("notes/b.md")],
+            InterruptionCause::name_taken(path("notes/new.md")),
+        )),
+        format!(
+            concat!(
+                r#"{{"code":"vault/plan-interrupted","plan":{plan},"landed":["notes/b.md"],"#,
+                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}}}}"#
+            ),
+            plan = plan
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::root_changed(
+            a_root(),
+            RootIdentity::from_device_and_inode(66_307, 2)
+        )),
+        concat!(
+            r#"{"code":"vault/root-changed","expected":"00000000000103020000000000000002","#,
+            r#""found":"00000000000103030000000000000002"}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::write_failed(
+            a_bare_resolved_plan(),
+            "the disk is full"
+        )),
+        format!(r#"{{"code":"vault/write-failed","plan":{plan},"detail":"the disk is full"}}"#)
+    );
+    assert_eq!(
+        wire(&ErrorDetail::apply_outcome_unknown(a_bare_resolved_plan())),
+        format!(r#"{{"code":"host/apply-outcome-unknown","plan":{plan}}}"#)
+    );
+    assert_eq!(
+        wire(&ErrorDetail::apply_not_run(a_park(), None)),
+        format!(
+            r#"{{"code":"host/apply-not-run","cause":{},"plan":null}}"#,
+            wire(&a_park())
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::plan_invalid(PlanFault::requires_cycle(vec![
+            1, 2
+        ]))),
+        r#"{"code":"request/plan-invalid","fault":{"kind":"requires_cycle","positions":[1,2]}}"#
+    );
+}
+
+/// A detail is an answer and drops a field it does not know, and an envelope
+/// whose code is not its detail's refuses the read, as every envelope does.
+#[test]
+fn an_apply_envelope_is_read_as_every_envelope_is() {
+    let envelope = ErrorEnvelope::new(
+        "the root changed",
+        ErrorDetail::root_changed(a_root(), RootIdentity::from_device_and_inode(66_307, 2)),
+    );
+    let json = serde_json::to_value(&envelope).expect("an envelope as JSON");
+    let read: ErrorEnvelope = serde_json::from_str(&with_surprise(&json, "/detail"))
+        .expect("a detail with a field it drops");
+    assert_eq!(read, envelope);
+
+    let mut mismatched = json.clone();
+    mismatched["code"] = serde_json::Value::String("vault/plan-refused".to_string());
+    assert!(
+        serde_json::from_str::<ErrorEnvelope>(&mismatched.to_string()).is_err(),
+        "an envelope whose code is not its detail's read back"
+    );
+}
+
+/// Each plan carries its own `plan` tag wherever it is written, so the plan
+/// alone and the document carrying it are one set of bytes.
+#[test]
+fn each_plan_carries_its_own_tag() {
+    let authored = an_authored_plan();
+    assert!(wire(&authored).starts_with(r#"{"plan":"operations","#));
+    assert_eq!(wire(&authored), wire(&PlanDocument::operations(authored)));
+    assert!(wire(&a_bare_resolved_plan()).starts_with(r#"{"plan":"resolved","#));
+}
+
+/// A plan read alone refuses a missing tag and the other plan's tag, as the
+/// document carrying it does.
+#[test]
+fn a_plan_refuses_a_missing_or_mismatched_tag() {
+    let resolved = serde_json::to_value(a_resolved_plan()).expect("a resolved plan as JSON");
+    let authored = serde_json::to_value(an_authored_plan()).expect("an authored plan as JSON");
+    let retagged = |plan: &serde_json::Value, tag: Option<&str>| -> String {
+        let mut plan = plan.clone();
+        let members = plan.as_object_mut().expect("a plan is an object");
+        match tag {
+            Some(tag) => members.insert("plan".to_string(), tag.into()),
+            None => members.remove("plan"),
+        };
+        plan.to_string()
+    };
+    for tag in [None, Some("operations"), Some("draft")] {
+        let json = retagged(&resolved, tag);
+        assert!(
+            serde_json::from_str::<ResolvedPlan>(&json).is_err(),
+            "a resolved plan tagged {tag:?} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding a resolved plan tagged {tag:?} read back"
+        );
+    }
+    for tag in [None, Some("resolved"), Some("draft")] {
+        let json = retagged(&authored, tag);
+        assert!(
+            serde_json::from_str::<AuthoredPlan>(&json).is_err(),
+            "an authored plan tagged {tag:?} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding an authored plan tagged {tag:?} read back"
+        );
+    }
+    assert!(
+        serde_json::from_str::<PlanDocument>(
+            &retagged(&resolved, None).replace(r#"{"#, r#"{"plan":7,"#)
+        )
+        .is_err(),
+        "a document whose tag is no string read back"
+    );
+}
+
+/// **A resolved plan is its own retry token.** Every answer that carries one
+/// carries bytes a caller sends back unchanged: the plan taken out of the
+/// answer reads as the plan an apply request carries, equal to the plan that
+/// went in.
+#[test]
+fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
+    let plan = a_resolved_plan();
+    let mut carriers: Vec<(String, serde_json::Value)> = apply_reports()
+        .into_iter()
+        .filter(|report| {
+            serde_json::to_value(report).expect("a report as JSON")["plan"]
+                == serde_json::to_value(&plan).expect("a plan as JSON")
+        })
+        .map(|report| {
+            let json = serde_json::to_value(&report).expect("a report as JSON");
+            (tag_string(&report, "outcome"), json["plan"].clone())
+        })
+        .collect();
+    let details = [
+        ErrorDetail::plan_refused(plan.clone(), a_forecast(), Vec::new(), Vec::new()),
+        ErrorDetail::plan_interrupted(
+            plan.clone(),
+            vec![path("notes/a.md")],
+            InterruptionCause::io_failure("the disk is full"),
+        ),
+        ErrorDetail::write_failed(plan.clone(), "the disk is full"),
+        ErrorDetail::apply_not_run(a_park(), Some(plan.clone())),
+        ErrorDetail::apply_outcome_unknown(plan.clone()),
+    ];
+    for detail in details {
+        let envelope = ErrorEnvelope::new("the apply did not apply", detail);
+        let json = serde_json::to_value(&envelope).expect("an envelope as JSON");
+        carriers.push((
+            json["code"].as_str().expect("a code").to_owned(),
+            json["detail"]["plan"].clone(),
+        ));
+    }
+    let carried: BTreeSet<&str> = carriers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        carried,
+        [
+            "previewed",
+            "applied",
+            "vault/plan-refused",
+            "vault/plan-interrupted",
+            "vault/write-failed",
+            "host/apply-not-run",
+            "host/apply-outcome-unknown",
+        ]
+        .into_iter()
+        .collect(),
+        "an answer carrying a resolved plan is left out of this check"
+    );
+    for (carrier, carried) in carriers {
+        let request = format!(r#"{{"mode":"apply","plan":{carried}}}"#);
+        let params: ApplyParams = serde_json::from_str(&request).unwrap_or_else(|error| {
+            panic!("the plan {carrier} carries does not read as a request's plan: {error}")
+        });
+        assert_eq!(
+            params.plan,
+            PlanDocument::resolved(plan.clone()),
+            "the plan {carrier} carries read back as another plan"
+        );
+        assert_eq!(
+            serde_json::to_value(&params.plan).expect("a plan as JSON"),
+            carried
+        );
+    }
+}
+
+/// What the one applier decides for each kind, state and condition, written
+/// the way it must be: a match with no wildcard arm and a destructuring with
+/// no `..`, outside this crate. The four enums are plain and their variants
+/// and the operation hold no hidden field, so a member minted or a field added
+/// without a decision here fails to compile rather than falling into a
+/// default or being ignored.
+fn applier_decision(operation: &Operation) -> String {
+    let Operation {
+        kind,
+        id,
+        requires,
+        footnote,
+        conditions,
+    } = operation;
+    let writes = match kind {
+        OperationKind::CreateDocument { path, content } => {
+            format!("create {path} with {} bytes", content.len())
+        }
+        OperationKind::StrReplace {
+            path,
+            old_str,
+            new_str,
+        } => format!("edit {path}: {old_str} to {new_str}"),
+        OperationKind::MoveDocument { from, to } => format!("move {from} to {to}"),
+        OperationKind::DeleteDocument { path } => format!("delete {path}"),
+    };
+    let observed: Vec<String> = conditions
+        .iter()
+        .map(|condition| match condition {
+            AuthorCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
+        })
+        .collect();
+    let requires: Vec<&str> = requires.iter().map(OperationId::as_str).collect();
+    format!(
+        "{writes} as {}, after [{}], noting {}; {}",
+        id.as_ref().map_or("-", OperationId::as_str),
+        requires.join(", "),
+        footnote.as_deref().unwrap_or("-"),
+        observed.join(", ")
+    )
+}
+
+fn plan_check(condition: &PlanCondition) -> String {
+    match condition {
+        PlanCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
+    }
+}
+
+fn state_check(state: &FileState) -> String {
+    match state {
+        FileState::Absent {} => "absent".to_string(),
+        FileState::Present { hash } => format!("present at {hash}"),
+    }
+}
+
+/// Everything the one applier reads of a plan document, destructured with no
+/// `..`: a field added to either plan, a transition or the provenance fails
+/// to compile here until the applier decides what it means.
+fn applier_reading(document: &PlanDocument) -> Vec<String> {
+    match document {
+        PlanDocument::Operations(AuthoredPlan {
+            plan: OperationsTag,
+            vault,
+            operations,
+            footnote,
+        }) => {
+            let mut read = vec![format!("operations for {vault:?}, noting {footnote:?}")];
+            read.extend(operations.iter().map(applier_decision));
+            read
+        }
+        PlanDocument::Resolved(ResolvedPlan {
+            plan: ResolvedTag,
+            vault,
+            root,
+            operations,
+            transitions,
+            conditions,
+            provenance,
+            footnote,
+        }) => {
+            let mut read = vec![format!(
+                "resolved for {vault:?} at {root:?}, noting {footnote:?}"
+            )];
+            read.extend(operations.iter().map(applier_decision));
+            read.extend(transitions.iter().map(
+                |Transition {
+                     path,
+                     before,
+                     after,
+                 }| {
+                    format!("{path}: {} to {}", state_check(before), state_check(after))
+                },
+            ));
+            read.extend(conditions.iter().map(plan_check));
+            if let Some(Provenance {
+                finding_generation,
+                skipped,
+            }) = provenance
+            {
+                read.push(format!("planned from generation {finding_generation}"));
+                read.extend(skipped.iter().map(|SkippedFinding { finding, reason }| {
+                    format!("skipped {finding}: {reason}")
+                }));
+            }
+            read
+        }
+    }
+}
+
+#[test]
+fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
+    let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
+    assert_eq!(decisions.len(), operations().len());
+    assert_eq!(
+        decisions.last().map(String::as_str),
+        Some(
+            format!(
+                "edit notes/a.md: draft to final as edit-a, after [make-b], noting marks it final; notes/a.md at {}",
+                hash_text(0xab)
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
+        [format!("notes/c.md at {}", hash_text(0xcd))]
+    );
+    assert_eq!(
+        file_states().iter().map(state_check).collect::<Vec<_>>(),
+        [
+            "absent".to_string(),
+            format!("present at {}", hash_text(0x01))
+        ]
+    );
+}
+
+/// The applier reads every field of both plans, and a plan outside this crate
+/// is written as a literal as well as through its constructor.
+#[test]
+fn the_applier_reads_every_field_of_a_plan() {
+    let read = applier_reading(&PlanDocument::resolved(a_resolved_plan()));
+    assert_eq!(
+        read.last().map(String::as_str),
+        Some("skipped 42: the target names two documents")
+    );
+    assert_eq!(
+        applier_reading(&PlanDocument::operations(an_authored_plan())).len(),
+        operations().len() + 1
+    );
+    let literal = ResolvedPlan {
+        plan: ResolvedTag,
+        vault: VaultAddress::name(name("notes")),
+        root: a_root(),
+        operations: Vec::new(),
+        transitions: Vec::new(),
+        conditions: Vec::new(),
+        provenance: None,
+        footnote: None,
+    };
+    assert_eq!(
+        wire(&literal),
+        r#"{"plan":"resolved","vault":{"by":"name","name":"notes"},"root":"00000000000103020000000000000002","operations":[],"transitions":[],"conditions":[]}"#
+    );
+    assert_eq!(
+        wire(&AuthoredPlan {
+            plan: OperationsTag,
+            vault: VaultAddress::name(name("notes")),
+            operations: Vec::new(),
+            footnote: None,
+        }),
+        r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[]}"#
+    );
+}
+
+/// What the one applier does with a request, written with no wildcard arm:
+/// a mode or a document minted without a decision here fails to compile
+/// rather than falling into "otherwise apply".
+fn applier_route(params: &ApplyParams) -> String {
+    let mode = match params.mode {
+        ApplyMode::Preview => "preview",
+        ApplyMode::Apply => "apply",
+    };
+    let plan = match &params.plan {
+        PlanDocument::Operations(_) => "the operations",
+        PlanDocument::Resolved(_) => "the resolved plan",
+    };
+    format!("{mode} {plan}")
+}
+
+#[test]
+fn the_applier_decides_every_mode_and_document_without_a_default() {
+    let routes: Vec<String> = plan_documents()
+        .into_iter()
+        .take(3)
+        .flat_map(|document| {
+            apply_modes()
+                .into_iter()
+                .map(move |mode| applier_route(&ApplyParams::new(mode, document.clone())))
+        })
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            "preview the operations",
+            "apply the operations",
+            "preview the operations",
+            "apply the operations",
+            "preview the resolved plan",
+            "apply the resolved plan",
+        ]
     );
 }

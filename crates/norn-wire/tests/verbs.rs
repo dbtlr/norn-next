@@ -8,17 +8,22 @@
 //! that spells it, and that the vault a request carries is the one vault
 //! address the vocabulary has.
 //!
-//! The table holds all fourteen verbs the registry declares, and the suite
+//! The table holds all fifteen verbs the registry declares, and the suite
 //! holds the table equal to [`Verb::ALL`]: a verb minted without a row here is
 //! a verb no surface can render, and a row here naming a verb the registry
 //! does not hold spells a request nobody can make.
+//!
+//! One verb carries its vault somewhere other than its params' own `vault`:
+//! `apply` sends a plan, and a plan names its vault by address, so every plan
+//! document the params can hold is where its addressing is checked. Each row
+//! says where its vault sits, and the checks read that place.
 
 use norn_wire::{
-    Addressing, CountParams, CountReport, DescribeParams, DescribeReport, DoctorRegistryParams,
-    DoctorRegistryReport, FindParams, FindReport, GetParams, GetReport, ListParams, ListReport,
-    RegisterParams, RegisterReport, ReloadParams, ReloadReport, ResolveParams, ResolveReport,
-    SearchParams, SearchReport, SetParams, SetReport, StatusParams, StatusReport, UnregisterParams,
-    UnregisterReport, ValidateParams, ValidateReport, Verb,
+    Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DescribeParams, DescribeReport,
+    DoctorRegistryParams, DoctorRegistryReport, FindParams, FindReport, GetParams, GetReport,
+    ListParams, ListReport, RegisterParams, RegisterReport, ReloadParams, ReloadReport,
+    ResolveParams, ResolveReport, SearchParams, SearchReport, SetParams, SetReport, StatusParams,
+    StatusReport, UnregisterParams, UnregisterReport, ValidateParams, ValidateReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -44,6 +49,8 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
 /// that ranked it, so it is a type of its own rather than a page.
 struct Spelling {
     verb: Verb,
+    /// Where the request's vault address sits.
+    vault_at: VaultAt,
     params_type: &'static str,
     report_type: &'static str,
     /// The row a paged report carries, and `None` where the report is not a
@@ -53,10 +60,20 @@ struct Spelling {
     report: Value,
 }
 
+/// Where a request's vault address sits.
+#[derive(Clone, Copy)]
+enum VaultAt {
+    /// On the params themselves, as their `vault` field.
+    Params,
+    /// On every plan document the params' `plan` field can hold.
+    Plan,
+}
+
 /// Every verb the registry holds, paired with the two types that spell it.
 fn verb_table() -> Vec<Spelling> {
     vec![
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Find,
             params_type: "FindParams",
             report_type: "Page",
@@ -65,6 +82,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<FindReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Search,
             params_type: "SearchParams",
             report_type: "SearchReport",
@@ -73,6 +91,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<SearchReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Get,
             params_type: "GetParams",
             report_type: "GetReport",
@@ -81,6 +100,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<GetReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Count,
             params_type: "CountParams",
             report_type: "Page",
@@ -89,6 +109,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<CountReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Validate,
             params_type: "ValidateParams",
             report_type: "ValidateReport",
@@ -97,6 +118,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<ValidateReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::Describe,
             params_type: "DescribeParams",
             report_type: "Page",
@@ -105,6 +127,16 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<DescribeReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Plan,
+            verb: Verb::Apply,
+            params_type: "ApplyParams",
+            report_type: "ApplyReport",
+            report_rows: None,
+            params: schema_of::<ApplyParams>(),
+            report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultRegister,
             params_type: "RegisterParams",
             report_type: "RegisterReport",
@@ -113,6 +145,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<RegisterReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultUnregister,
             params_type: "UnregisterParams",
             report_type: "UnregisterReport",
@@ -121,6 +154,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<UnregisterReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultList,
             params_type: "ListParams",
             report_type: "ListReport",
@@ -129,6 +163,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<ListReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultSet,
             params_type: "SetParams",
             report_type: "SetReport",
@@ -137,6 +172,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<SetReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultResolve,
             params_type: "ResolveParams",
             report_type: "ResolveReport",
@@ -145,6 +181,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<ResolveReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultStatus,
             params_type: "StatusParams",
             report_type: "StatusReport",
@@ -153,6 +190,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<StatusReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::VaultReload,
             params_type: "ReloadParams",
             report_type: "ReloadReport",
@@ -161,6 +199,7 @@ fn verb_table() -> Vec<Spelling> {
             report: schema_of::<ReloadReport>(),
         },
         Spelling {
+            vault_at: VaultAt::Params,
             verb: Verb::DoctorRegistry,
             params_type: "DoctorRegistryParams",
             report_type: "DoctorRegistryReport",
@@ -202,6 +241,49 @@ fn vault_reference(params: &Value) -> Option<&str> {
         .as_array()?
         .iter()
         .find_map(|branch| branch.get("$ref").and_then(Value::as_str))
+}
+
+/// The schemas a request's vault address is read off: the params themselves,
+/// or each plan document their `plan` field can hold.
+fn vault_holders(spelling: &Spelling) -> Vec<&Value> {
+    match spelling.vault_at {
+        VaultAt::Params => vec![&spelling.params],
+        VaultAt::Plan => {
+            let reference = spelling.params["properties"]["plan"]["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} names no plan type", spelling.verb));
+            let name = reference
+                .strip_prefix("#/$defs/")
+                .unwrap_or_else(|| panic!("{} refers to its plan as {reference}", spelling.verb));
+            let documents = spelling.params["$defs"][name]["oneOf"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} carries a plan of no kinds", spelling.verb));
+            assert!(
+                !documents.is_empty(),
+                "{} carries a plan of no kinds",
+                spelling.verb
+            );
+            assert!(
+                !property_names(&spelling.params).contains("vault"),
+                "{} names its vault twice, on its params and on its plan",
+                spelling.verb
+            );
+            documents
+                .iter()
+                .map(
+                    |document| match document.get("$ref").and_then(Value::as_str) {
+                        Some(reference) => {
+                            let name = reference.strip_prefix("#/$defs/").unwrap_or_else(|| {
+                                panic!("{} refers to a plan as {reference}", spelling.verb)
+                            });
+                            &spelling.params["$defs"][name]
+                        }
+                        None => document,
+                    },
+                )
+                .collect()
+        }
+    }
 }
 
 /// Every verb the registry holds is spelled by a params type and a report
@@ -268,9 +350,14 @@ fn every_row_pins_the_two_types_its_verb_is_spelled_by() {
 /// all.
 #[test]
 fn every_verbs_params_carry_the_vault_its_addressing_says_it_does() {
-    for spelling in verb_table() {
-        let properties = property_names(&spelling.params);
-        let required = required_names(&spelling.params);
+    let table = verb_table();
+    for (spelling, holder) in table.iter().flat_map(|spelling| {
+        vault_holders(spelling)
+            .into_iter()
+            .map(move |holder| (spelling, holder))
+    }) {
+        let properties = property_names(holder);
+        let required = required_names(holder);
         match spelling.verb.addressing() {
             Addressing::Required => {
                 assert!(
@@ -325,11 +412,13 @@ fn every_verb_that_carries_a_vault_names_it_by_the_one_vault_address() {
             Addressing::None => None,
             _ => Some("#/$defs/VaultAddress"),
         };
-        assert_eq!(
-            vault_reference(&spelling.params),
-            expected,
-            "{} names its vault by the wrong type",
-            spelling.verb
-        );
+        for holder in vault_holders(&spelling) {
+            assert_eq!(
+                vault_reference(holder),
+                expected,
+                "{} names its vault by the wrong type",
+                spelling.verb
+            );
+        }
     }
 }

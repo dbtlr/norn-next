@@ -42,11 +42,26 @@ One file's resolved change within a plan: the state the file must hold before th
 **Resolved plan**:
 A plan whose operations have been resolved into transitions, together with the conditions its resolution depended on. It is what a preview returns and what an apply can re-send.
 
+**Condition**:
+A fact a plan depends on, recorded with the plan and checked before any target is published. An author condition is one the operation's author observed, and on a file the plan writes it becomes that target's before-state; a plan condition is one the planning read and does not write.
+_Avoid_: Precondition, fingerprint
+
+**Root identity**:
+The identity of the directory a vault is rooted at, independent of the address that names it. A resolved plan carries it, so the plan applies only to the vault it was planned over.
+_Avoid_: Vault root (for the identity rather than the path)
+
+**Landed target**:
+A target of a plan that holds its after-state, whichever writer put it there; a removal is landed when its path is absent.
+
+**Drifted target**:
+A target of a resolved plan that holds neither its before-state nor its after-state, so the plan no longer describes it.
+_Avoid_: Stale document, drift (which names where authored control files stand against the served ones)
+
 **Forecast**:
 A report of what a plan would do against a particular observed vault state.
 
 **Interrupted apply**:
-An apply attempt that stopped after at least one of its targets landed and before all of them did. It is not a refusal: it performed part of the requested mutation, and its report names what landed.
+An apply attempt that stopped after at least one of its targets landed and before all of them did. It is not a refusal: it performed part of the requested mutation, and its answer names what landed.
 
 **Refusal**:
 A resolved outcome in which Norn performs no requested mutation or answers no requested read because safety, trust, or preconditions are not satisfied.

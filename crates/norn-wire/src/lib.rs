@@ -88,12 +88,32 @@
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
+//! The one write verb, `apply`, is spelled the same way: [`ApplyParams`] — an
+//! [`ApplyMode`] and a [`PlanDocument`] — answering [`ApplyReport`]. A plan
+//! document is an [`AuthoredPlan`] of [`Operation`]s, each an
+//! [`OperationKind`] with the [`OperationId`] it is required by and the
+//! [`AuthorCondition`]s its author observed, or a [`ResolvedPlan`]: the
+//! [`RootIdentity`] it was resolved against, one [`Transition`] per file
+//! between two [`FileState`]s, each absent or a [`ContentHash`], the
+//! [`PlanCondition`]s its planning read, and the [`Provenance`] a repair plan
+//! cites, with the [`SkippedFinding`]s it left alone. A preview answers with
+//! the resolved plan and a [`Forecast`] of what the plan does not carry — the
+//! targets that drifted and the [`FolderPath`]s a plan makes and removes; an
+//! applied plan with its [`ChangesetOutcome`] and the
+//! [`TargetResult`] of each [`AppliedTarget`]. An apply that ends any other
+//! way ends in a code, whose detail carries the [`RefusedCheck`]s and the
+//! [`UnresolvedOperation`]s — each with its [`UnresolvedReason`] — of a
+//! refusal, the [`InterruptionCause`] of an interruption, or the [`PlanFault`]
+//! of a plan whose own shape is wrong.
+//!
 //! **A registry report and a lifecycle observation carry no answer reading.**
 //! A registration is not answered from a database, and neither a status nor a
 //! reload is a read: a status is taken off what an entry already publishes and
 //! creates no demand, and a reload reports what it applied. So the eight
 //! reports above cross as themselves rather than inside a [`VaultAnswer`],
-//! which is what carries an [`AnswerReading`] for the six verbs that do read.
+//! which is what carries an [`AnswerReading`] for the six verbs that do read
+//! and for `apply`, whose plan is resolved against a snapshot as a read's
+//! answer is.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -112,7 +132,8 @@
 //!   are renamed to the `namespace/what-happened` grammar below. A grammar's
 //!   read path is written by hand where the read is the constructor —
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
-//!   [`ResolutionTarget`], [`Directory`] and [`Score`] refuse a string outside
+//!   [`FolderPath`], [`ResolutionTarget`], [`Directory`], [`ContentHash`],
+//!   [`RootIdentity`], [`OperationId`] and [`Score`] refuse a string outside
 //!   their grammar,
 //!   [`RungSet`] refuses a ladder that runs no rung, [`RegistrySanity`]
 //!   refuses a problem list that names no problem and [`NameSet`] refuses a
@@ -124,23 +145,44 @@
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
-//!   read. [`Cursor`] alone is written by hand on both sides,
-//!   because its wire shape is one opaque string rather than the fields a
-//!   derive would emit.
+//!   read. [`Operation`]'s read path is written by hand because the derive
+//!   cannot refuse what it must: the derive reads it into a private shape
+//!   that refuses any key it does not name and holds every field any kind
+//!   names, and the kind then takes the fields it names, refusing one it lacks
+//!   and one it does not take. [`Cursor`] and [`PlanDocument`] are written by
+//!   hand on both sides: a cursor's wire shape is one opaque string rather
+//!   than the fields a derive would emit, and a document is written as the
+//!   plan it holds and read by the derive into one private shape holding its
+//!   `plan` tag and every field either plan names, from which the plan the
+//!   tag names is built. Neither plan read holds what it reads in a buffer: a
+//!   buffer keeps the last of two values written for one key where the derive
+//!   refuses the second, so a plan read inside a request would read otherwise
+//!   than the plan alone. The cursor's rendering is the one runtime use of
+//!   `serde_json` here, and it is in no signature. The plan tags
+//!   [`OperationsTag`] and [`ResolvedTag`] are written by hand on both sides
+//!   too: each is a zero-sized marker, written as its constant and read as a
+//!   one-member vocabulary that refuses any other value.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does
-//!   not accept. Eleven types do: the grammars [`VaultName`], [`VaultRoot`],
-//!   [`SchemaSource`], [`Directory`], [`DocumentPath`] and
-//!   [`ResolutionTarget`] advertise the pattern or floor their constructors
-//!   hold; [`Cursor`] is one opaque string
+//!   not accept. These types do: the grammars [`VaultName`], [`VaultRoot`],
+//!   [`SchemaSource`], [`Directory`], [`DocumentPath`], [`FolderPath`],
+//!   [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
+//!   [`OperationId`] advertise the pattern or floor their constructors
+//!   hold; [`Operation`] advertises its kind's own branches with its optional
+//!   parts added inside each, since each branch refuses a key it does not
+//!   name; [`PlanDocument`] is one of the two plan types, each advertising
+//!   its own tag, and the tags [`OperationsTag`] and [`ResolvedTag`] are each
+//!   their constant inline; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`],
 //!   [`RegistrySanity`] and [`NameSet`] carry the
 //!   `minItems` floor their read paths keep, the last of them advertising
-//!   `uniqueItems` for the distinctness it is measured against as well; and
+//!   `uniqueItems` for the distinctness it is measured against as well;
 //!   [`CandidateHead`] carries the
 //!   `maxItems` ceiling its read path keeps, read off [`CANDIDATE_HEAD`] so
-//!   the bound has one spelling.
+//!   the bound has one spelling; [`LadderDeclaration`] advertises that its
+//!   rungs contain a retrieval rung; and [`RungSubtraction`] advertises its
+//!   rungs each once and never every retrieval rung.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
@@ -155,6 +197,15 @@
 //! time while schemars advertises a schema saying it works: the break arrives
 //! at runtime, against a shape a consumer was told to expect. A variant that
 //! carries data names its fields.
+//!
+//! **Two plan shapes carry their tag another way.** [`OperationKind`] is
+//! adjacently tagged — its kind under `kind`, its fields under `fields` —
+//! because that is the shape an operation's author writes, and its fields are
+//! structs the tag never enters. [`AuthoredPlan`] and [`ResolvedPlan`] each
+//! carry their own `plan` tag as a field, so a resolved plan written inside
+//! any answer is the bytes a caller sends back; [`PlanDocument`] is written as
+//! the plan it holds and read by dispatching on that tag, rather than being a
+//! serde-tagged enum that would consume the tag before its plan read it.
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
@@ -181,10 +232,11 @@
 //!
 //! # Extension, and what a version skew does
 //!
-//! Public enums are `#[non_exhaustive]`, and so is [`ErrorEnvelope`], which
-//! extends by gaining a field. A variant that carries a payload is
-//! `#[non_exhaustive]` in its own right, so the payload extends by gaining a
-//! field too rather than by breaking every caller that destructured it.
+//! Public enums are `#[non_exhaustive]`, save the plain ones below, and so is
+//! [`ErrorEnvelope`], which extends by gaining a field. A variant that carries
+//! a payload is `#[non_exhaustive]` in its own right, save the plan's below,
+//! so the payload extends by gaining a field too rather than by breaking every
+//! caller that destructured it.
 //! `#[non_exhaustive]` binds across crates, so a shape consumers cannot write
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
@@ -204,7 +256,10 @@
 //! [`ErrorDetail::unknown_target`], [`ErrorDetail::reload_busy`],
 //! [`ErrorDetail::reload_failed`], [`ErrorDetail::cursor_order_changed`],
 //! [`ErrorDetail::engine_not_enabled`], [`ErrorDetail::engine_unavailable`],
-//! [`ErrorDetail::engine_failed`],
+//! [`ErrorDetail::engine_failed`], [`ErrorDetail::apply_not_run`],
+//! [`ErrorDetail::apply_outcome_unknown`], [`ErrorDetail::plan_refused`],
+//! [`ErrorDetail::root_changed`], [`ErrorDetail::plan_interrupted`],
+//! [`ErrorDetail::write_failed`], [`ErrorDetail::plan_invalid`],
 //! [`NotReady::warming`], [`NotReady::unattached`],
 //! [`VaultAddress::name`], [`VaultAddress::root`],
 //! the constructor on each [`Predicate`], [`Anchor`], [`CursorKey`],
@@ -245,7 +300,19 @@
 //! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
 //! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
 //! [`EngineHealth::new`], and the `new` on each of the seven vault-namespace
-//! params types, on [`DoctorRegistryParams`], and on each of their reports.
+//! params types, on [`DoctorRegistryParams`], and on each of their reports;
+//! [`ContentHash::from_sha256`], [`ContentHash::new`],
+//! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
+//! [`FolderPath::new`], the constructor on each [`RefusedCheck`],
+//! [`UnresolvedReason`], [`InterruptionCause`], [`PlanFault`] and
+//! [`ApplyReport`] variant, [`Forecast::new`],
+//! [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
+//! [`ApplyParams::new`]. The plan types the applier destructures, below, can
+//! be written as literals and keep their constructors all the same:
+//! [`Operation::new`], the constructor on each [`OperationKind`],
+//! [`AuthorCondition`], [`PlanCondition`], [`FileState`] and [`PlanDocument`]
+//! variant, [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
+//! [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -253,10 +320,17 @@
 //! breaking a caller that only reads; a plain enum makes that arrival break
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
-//! [`FindingScope`] and [`RungSelection`] are the three members of that
-//! class: a section composes with an engine's own refusal to say what a client
-//! should do, a scope decides whether a finding is withheld from a document
-//! row, and a selection is resolved to the ladder a search runs. A composer of
+//! [`FindingScope`], [`RungSelection`], [`ApplyMode`], [`PlanDocument`],
+//! [`OperationKind`], [`FileState`], [`AuthorCondition`] and [`PlanCondition`]
+//! are the nine members of that class: a section composes with an engine's
+//! own refusal to say what a client should do, a scope decides whether a
+//! finding is withheld from a document row, a selection is resolved to the
+//! ladder a search runs, and the one applier must decide what every mode,
+//! plan document, operation kind, file state and condition means — whether a
+//! request writes, how a document is planned, how a kind resolves into
+//! transitions, how a state is verified, how a condition is checked — since a
+//! request it cannot interpret must never apply as though it could, and a
+//! mode it has not decided must never fall into "otherwise apply". A composer of
 //! any of them that has not made the decision should fail to compile rather
 //! than fall into a default arm, so none carries the attribute and a new
 //! member is a deliberate break at every composition site. The two rules compose rather
@@ -264,6 +338,19 @@
 //! variant is `#[non_exhaustive]` in its own right and grows by gaining a
 //! field, while the enum around it stays plain and grows by breaking every
 //! composer.
+//!
+//! **What the one applier interprets is exhaustively destructurable.** The
+//! payload variants of [`OperationKind`], [`FileState`], [`AuthorCondition`]
+//! and [`PlanCondition`], and the structs [`Operation`], [`Transition`],
+//! [`ResolvedPlan`], [`AuthoredPlan`], [`Provenance`] and [`SkippedFinding`],
+//! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
+//! tag is a public zero-sized marker, [`OperationsTag`] or [`ResolvedTag`]. The
+//! one applier decides what every field of a plan means, so a field added to
+//! any of them must fail to compile where the applier destructures the plan,
+//! rather than pass it under a `..` unread — a field the applier ignores
+//! weakens a check as surely as a key a reader drops. Everything else a caller
+//! reads stays `#[non_exhaustive]` and grows without breaking it; these grow by
+//! breaking the applier, deliberately.
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so
@@ -283,6 +370,19 @@
 //! it does not know: its two selections hold disjoint fields, and a field of
 //! the other one dropped on the way in would read a request that both names a
 //! set and subtracts from one as a request that does only one of them.
+//!
+//! **A plan refuses a field it does not know, at every depth.** The plan
+//! documents, their operations, each kind's fields, their conditions, their
+//! transitions and file states, and a plan's provenance all refuse an unknown
+//! key, where every answer drops one. The divergence follows the direction a
+//! plan flows: an answer flows out to a caller, where a dropped field loses a
+//! fact the caller could not use, but a plan flows into the host, where a
+//! dropped field — a newer caller's condition — would weaken a check without a
+//! word. The refusal is the version-mismatch signal, and a plan carries no
+//! version field because it is short-lived: a caller whose plan is refused
+//! previews again under the build it is talking to. An answer that carries a
+//! plan — a report, or a refusal's fresh plan — still drops a field it does
+//! not know at its own level, and the plan inside it still refuses one.
 //!
 //! # The code grammar, and what is not a code
 //!
@@ -358,6 +458,7 @@
 //! the code the detail belongs to.
 
 mod address;
+mod apply;
 mod base64url;
 mod cursor;
 mod demand;
@@ -368,6 +469,7 @@ mod finding;
 mod finding_row;
 mod glob;
 mod name;
+mod plan;
 mod predicate;
 mod product;
 mod read;
@@ -383,6 +485,9 @@ mod verb;
 pub use address::{
     Directory, IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
+};
+pub use apply::{
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, ChangesetOutcome, TargetResult,
 };
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, HitResume, Moved, NonFiniteScore, OrderPair,
@@ -406,6 +511,19 @@ pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, Unkno
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::document::{
+    AuthoredPlan, FileState, OperationsTag, PlanCondition, PlanDocument, Provenance, ResolvedPlan,
+    ResolvedTag, SkippedFinding, Transition,
+};
+pub use plan::forecast::{FolderPath, Forecast};
+pub use plan::hash::{ContentHash, IllegalContentHash};
+pub use plan::operation::{
+    AuthorCondition, IllegalOperationId, Operation, OperationId, OperationKind,
+};
+pub use plan::outcome::{
+    InterruptionCause, PlanFault, RefusedCheck, UnresolvedOperation, UnresolvedReason,
+};
+pub use plan::root::RootIdentity;
 pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};

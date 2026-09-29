@@ -204,6 +204,8 @@ pub enum Verb {
     Validate,
     /// What a vault declares about itself and what its documents carry.
     Describe,
+    /// Preview or apply a plan: operations, or a resolved plan.
+    Apply,
     /// Register a vault under a name.
     VaultRegister,
     /// Stop serving a registered name and remove its registration.
@@ -229,13 +231,14 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 14] = [
+    pub const ALL: [Verb; 15] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
         Verb::Count,
         Verb::Validate,
         Verb::Describe,
+        Verb::Apply,
         Verb::VaultRegister,
         Verb::VaultUnregister,
         Verb::VaultList,
@@ -255,6 +258,7 @@ impl Verb {
             Verb::Count => "count",
             Verb::Validate => "validate",
             Verb::Describe => "describe",
+            Verb::Apply => "apply",
             Verb::VaultRegister => "vault_register",
             Verb::VaultUnregister => "vault_unregister",
             Verb::VaultList => "vault_list",
@@ -275,13 +279,15 @@ impl Verb {
     pub const fn addressing(&self) -> Addressing {
         match self {
             // A vault address is carried, and the request is answered from
-            // that vault's entry under a hold of it.
+            // that vault's entry under a hold of it. An apply carries its
+            // vault as the address its plan names.
             Verb::Find
             | Verb::Search
             | Verb::Get
             | Verb::Count
             | Verb::Validate
             | Verb::Describe
+            | Verb::Apply
             | Verb::VaultReload => Addressing::Required,
             // No vault address is carried; the request is answered from the
             // serving set and the registry, naming no entry to be held.

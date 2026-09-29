@@ -40,6 +40,18 @@
 //! that rendering lands above this layer, so the call graph reaches none of
 //! them from this crate today.
 //!
+//! **The codes an apply ends in are minted ahead of its handler.** An apply
+//! that neither previews nor applies ends in one of seven codes of its own,
+//! beside the admission codes a read carries, which an apply refused at
+//! admission ends in as a read would. Each of the seven details carries what a
+//! caller needs to act: the fresh resolved plan a refusal answers with, the
+//! plan an interrupted or unknown apply is finished by sending again, or the
+//! fault in the plan's own shape. A root-identity refusal carries no plan: the
+//! plan was made against another root, so no plan resolved here would apply
+//! it. `vault/plan-interrupted` is a failure that partly landed, never a
+//! refusal: it names what landed. The host's apply handler raises them, above
+//! this layer, so the call graph reaches none of them from this crate today.
+//!
 //! The pairing between a code and its detail is structural rather than a rule
 //! constructors keep: [`ErrorEnvelope::new`] takes the code from the detail,
 //! and the read path refuses an envelope whose code is not the code its detail
@@ -54,8 +66,13 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::cursor::{CursorOrderChanged, PagedRows};
 use crate::demand::AttachMode;
+use crate::document::DocumentPath;
 use crate::finding_row::{CandidateHead, Hint};
 use crate::name::VaultName;
+use crate::plan::document::ResolvedPlan;
+use crate::plan::forecast::Forecast;
+use crate::plan::outcome::{InterruptionCause, PlanFault, RefusedCheck, UnresolvedOperation};
+use crate::plan::root::RootIdentity;
 use crate::reading::Rung;
 use crate::reload::ReloadFailure;
 use crate::target::ResolutionTarget;
@@ -331,6 +348,19 @@ pub enum ReasonCode {
     /// detail is which failure, and the store's own account.
     #[serde(rename = "host/read-failed")]
     HostReadFailed,
+    /// `host/apply-not-run` — a lifecycle cause answered the apply before it
+    /// published anything: a park, trust withheld or lost, damaged derived
+    /// state, an attach that failed, or the host's teardown. No document was
+    /// written. The detail is
+    /// the cause, as the refusal it publishes, and the resolved plan where
+    /// planning had finished.
+    #[serde(rename = "host/apply-not-run")]
+    HostApplyNotRun,
+    /// `host/apply-outcome-unknown` — the apply was dropped without an answer
+    /// after its publication began, so some of its targets may have landed.
+    /// Sending the plan again finishes them. The detail is the resolved plan.
+    #[serde(rename = "host/apply-outcome-unknown")]
+    HostApplyOutcomeUnknown,
     /// `vault/ambiguous-root` — the most specific registered root containing
     /// the directory that was asked about is reached by more than one
     /// registration, so the ask names no one vault. A directory that several
@@ -374,6 +404,30 @@ pub enum ReasonCode {
     /// value.
     #[serde(rename = "vault/unreadable-bound")]
     VaultUnreadableBound,
+    /// `vault/plan-refused` — a check refused the apply before anything was
+    /// published, so nothing was written: a target drifted, a condition does
+    /// not hold, a result would violate the vault schema, or a create's name
+    /// is taken. The detail is the plan resolved afresh against what the vault
+    /// holds now, its forecast, each check that refused, and each operation
+    /// the fresh plan leaves for the caller.
+    #[serde(rename = "vault/plan-refused")]
+    VaultPlanRefused,
+    /// `vault/root-changed` — the resolved plan was made against a root whose
+    /// identity is not the vault's now, so nothing was written. The detail is
+    /// the two identities.
+    #[serde(rename = "vault/root-changed")]
+    VaultRootChanged,
+    /// `vault/plan-interrupted` — publication stopped after at least one of
+    /// the plan's targets landed: a failure that partly landed, not a
+    /// refusal. Sending the resolved plan again finishes it. The detail is
+    /// the plan, the targets that landed, and what stopped it.
+    #[serde(rename = "vault/plan-interrupted")]
+    VaultPlanInterrupted,
+    /// `vault/write-failed` — the filesystem refused the apply before any of
+    /// its targets landed, so no document was written. The detail is the
+    /// resolved plan and the failure.
+    #[serde(rename = "vault/write-failed")]
+    VaultWriteFailed,
     /// `request/out-of-bound` — a count the request names on its own shape is
     /// outside the range that count's bound holds it to — a page limit
     /// outside 1 to the maximum, or too many values in one membership part —
@@ -404,6 +458,13 @@ pub enum ReasonCode {
     /// position among and the rows the request pages.
     #[serde(rename = "request/cursor-not-taken")]
     RequestCursorNotTaken,
+    /// `request/plan-invalid` — the plan's own shape is wrong, whatever vault
+    /// it is for: an identifier carried twice, a requirement naming no
+    /// operation, operations requiring each other in a cycle, or operations
+    /// drawing content from each other in a cycle. Nothing was written. The
+    /// detail is the fault and the operations involved.
+    #[serde(rename = "request/plan-invalid")]
+    RequestPlanInvalid,
     /// `engine/not-enabled` — the vault has not enabled the rung the request
     /// asked for. The detail is the rung, and what to do about it.
     #[serde(rename = "engine/not-enabled")]
@@ -621,6 +682,28 @@ pub enum ErrorDetail {
         /// reading a message or a log. Clients never match on it.
         detail: String,
     },
+    /// The detail of `host/apply-not-run`: the lifecycle cause, and the
+    /// resolved plan where planning had finished. The cause is a lifecycle
+    /// refusal under its own code: a park, trust withheld or lost, damaged
+    /// derived state, an attach that failed, or the host's teardown or the
+    /// entry's destruction.
+    #[serde(rename = "host/apply-not-run")]
+    #[non_exhaustive]
+    ApplyNotRun {
+        /// The refusal the cause publishes, under its own code.
+        cause: ErrorEnvelope,
+        /// The resolved plan, and `null` where the apply stopped before
+        /// planning finished.
+        plan: Option<ResolvedPlan>,
+    },
+    /// The detail of `host/apply-outcome-unknown`: the resolved plan. Some of
+    /// its targets may have landed; sending it again finishes them.
+    #[serde(rename = "host/apply-outcome-unknown")]
+    #[non_exhaustive]
+    ApplyOutcomeUnknown {
+        /// The resolved plan.
+        plan: ResolvedPlan,
+    },
     /// The detail of `vault/ambiguous-root`: every registered name that
     /// reaches the most specific registered root containing the directory that
     /// was asked about. No entry is involved; the ask is a resolution of a
@@ -685,6 +768,59 @@ pub enum ErrorDetail {
         /// The value that does not read as that key's declared type.
         value: String,
     },
+    /// The detail of `vault/plan-refused`: the plan resolved afresh, its
+    /// forecast, each check that refused, and each operation the fresh plan
+    /// leaves out. Applying the fresh plan is the caller's decision.
+    #[serde(rename = "vault/plan-refused")]
+    #[non_exhaustive]
+    PlanRefused {
+        /// The plan resolved afresh against what the vault holds now. It
+        /// leaves out every operation whose targets all landed and every
+        /// operation it lists as unresolved.
+        plan: ResolvedPlan,
+        /// What the fresh plan would do beyond the transitions it names:
+        /// every target that drifted, and the folders it makes and removes.
+        forecast: Forecast,
+        /// Each check that refused.
+        checks: Vec<RefusedCheck>,
+        /// Each operation the fresh plan leaves out for the caller to dispose
+        /// of, and why.
+        unresolved: Vec<UnresolvedOperation>,
+    },
+    /// The detail of `vault/root-changed`: the identity the plan was resolved
+    /// against, and the vault's.
+    #[serde(rename = "vault/root-changed")]
+    #[non_exhaustive]
+    RootChanged {
+        /// The root identity the plan carries.
+        expected: RootIdentity,
+        /// The vault's root identity now.
+        found: RootIdentity,
+    },
+    /// The detail of `vault/plan-interrupted`: the plan, the targets that
+    /// landed, and what stopped publication. Sending the plan again finishes
+    /// it.
+    #[serde(rename = "vault/plan-interrupted")]
+    #[non_exhaustive]
+    PlanInterrupted {
+        /// The resolved plan.
+        plan: ResolvedPlan,
+        /// Every target that landed.
+        landed: Vec<DocumentPath>,
+        /// What stopped publication.
+        cause: InterruptionCause,
+    },
+    /// The detail of `vault/write-failed`: the plan, and the failure that
+    /// stopped it before any target landed.
+    #[serde(rename = "vault/write-failed")]
+    #[non_exhaustive]
+    WriteFailed {
+        /// The resolved plan.
+        plan: ResolvedPlan,
+        /// The failure in words, for a person reading a message or a log.
+        /// Clients never match on it.
+        detail: String,
+    },
     /// The detail of `request/out-of-bound`: which bound, the count the
     /// request named and the most it may be, and the key a membership part
     /// is on.
@@ -714,6 +850,14 @@ pub enum ErrorDetail {
         cursor: PagedRows,
         /// The rows the request pages.
         paged: PagedRows,
+    },
+    /// The detail of `request/plan-invalid`: what is wrong with the plan's
+    /// shape, and the operations involved.
+    #[serde(rename = "request/plan-invalid")]
+    #[non_exhaustive]
+    PlanInvalid {
+        /// The fault.
+        fault: PlanFault,
     },
     /// The detail of `engine/not-enabled`: which rung, and what enables it.
     #[serde(rename = "engine/not-enabled")]
@@ -815,6 +959,17 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `host/apply-not-run`, for the lifecycle `cause` and the
+    /// resolved `plan` where planning had finished.
+    pub fn apply_not_run(cause: ErrorEnvelope, plan: Option<ResolvedPlan>) -> Self {
+        ErrorDetail::ApplyNotRun { cause, plan }
+    }
+
+    /// The detail of `host/apply-outcome-unknown`, for the resolved `plan`.
+    pub const fn apply_outcome_unknown(plan: ResolvedPlan) -> Self {
+        ErrorDetail::ApplyOutcomeUnknown { plan }
+    }
+
     /// The detail of `vault/ambiguous-root`, for the `candidates` the
     /// directory resolves under.
     ///
@@ -868,6 +1023,51 @@ impl ErrorDetail {
         }
     }
 
+    /// The detail of `vault/plan-refused`, for the fresh `plan` and its
+    /// `forecast`, the `checks` that refused and the `unresolved` operations.
+    pub const fn plan_refused(
+        plan: ResolvedPlan,
+        forecast: Forecast,
+        checks: Vec<RefusedCheck>,
+        unresolved: Vec<UnresolvedOperation>,
+    ) -> Self {
+        ErrorDetail::PlanRefused {
+            plan,
+            forecast,
+            checks,
+            unresolved,
+        }
+    }
+
+    /// The detail of `vault/root-changed`, for the `expected` identity the
+    /// plan carries and the identity `found`.
+    pub const fn root_changed(expected: RootIdentity, found: RootIdentity) -> Self {
+        ErrorDetail::RootChanged { expected, found }
+    }
+
+    /// The detail of `vault/plan-interrupted`, for the `plan`, the targets
+    /// `landed`, and the `cause` that stopped it.
+    pub const fn plan_interrupted(
+        plan: ResolvedPlan,
+        landed: Vec<DocumentPath>,
+        cause: InterruptionCause,
+    ) -> Self {
+        ErrorDetail::PlanInterrupted {
+            plan,
+            landed,
+            cause,
+        }
+    }
+
+    /// The detail of `vault/write-failed`, for the `plan`, described by
+    /// `detail`.
+    pub fn write_failed(plan: ResolvedPlan, detail: impl Into<String>) -> Self {
+        ErrorDetail::WriteFailed {
+            plan,
+            detail: detail.into(),
+        }
+    }
+
     /// The detail of `request/out-of-bound`, for the `bound` the request's
     /// own shape violated.
     pub const fn out_of_bound(bound: RequestBound) -> Self {
@@ -884,6 +1084,11 @@ impl ErrorDetail {
     /// position among rows the request, paging `paged`, does not read it in.
     pub const fn cursor_not_taken(cursor: PagedRows, paged: PagedRows) -> Self {
         ErrorDetail::CursorNotTaken { cursor, paged }
+    }
+
+    /// The detail of `request/plan-invalid`, for the `fault`.
+    pub const fn plan_invalid(fault: PlanFault) -> Self {
+        ErrorDetail::PlanInvalid { fault }
     }
 
     /// The detail of `engine/not-enabled`, for `rung`, described by `detail`.
@@ -924,6 +1129,8 @@ impl ErrorDetail {
             ErrorDetail::ReaderUnavailable { .. } => ReasonCode::HostReaderUnavailable,
             ErrorDetail::RegistryUnwritable { .. } => ReasonCode::HostRegistryUnwritable,
             ErrorDetail::ReadFailed { .. } => ReasonCode::HostReadFailed,
+            ErrorDetail::ApplyNotRun { .. } => ReasonCode::HostApplyNotRun,
+            ErrorDetail::ApplyOutcomeUnknown { .. } => ReasonCode::HostApplyOutcomeUnknown,
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
             ErrorDetail::AmbiguousTarget { .. } => ReasonCode::VaultAmbiguousTarget,
             ErrorDetail::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
@@ -931,9 +1138,14 @@ impl ErrorDetail {
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
             ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
             ErrorDetail::UnreadableBound { .. } => ReasonCode::VaultUnreadableBound,
+            ErrorDetail::PlanRefused { .. } => ReasonCode::VaultPlanRefused,
+            ErrorDetail::RootChanged { .. } => ReasonCode::VaultRootChanged,
+            ErrorDetail::PlanInterrupted { .. } => ReasonCode::VaultPlanInterrupted,
+            ErrorDetail::WriteFailed { .. } => ReasonCode::VaultWriteFailed,
             ErrorDetail::OutOfBound { .. } => ReasonCode::RequestOutOfBound,
             ErrorDetail::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
             ErrorDetail::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
+            ErrorDetail::PlanInvalid { .. } => ReasonCode::RequestPlanInvalid,
             ErrorDetail::EngineNotEnabled { .. } => ReasonCode::EngineNotEnabled,
             ErrorDetail::EngineUnavailable { .. } => ReasonCode::EngineUnavailable,
             ErrorDetail::EngineFailed { .. } => ReasonCode::EngineFailed,
@@ -1019,8 +1231,8 @@ impl<'de> Deserialize<'de> for ErrorEnvelope {
 mod tests {
     use super::*;
 
-    use crate::document::DocumentPath;
     use crate::finding_row::Candidate;
+    use crate::plan::operation::{Operation, OperationKind};
 
     /// The two names the two collision refusals are read against, judged
     /// through the floor the set keeps.
@@ -1035,6 +1247,25 @@ mod tests {
     /// grammar the type keeps.
     fn a_target() -> ResolutionTarget {
         ResolutionTarget::new("glossary").expect("a legal resolution target")
+    }
+
+    fn a_name() -> VaultName {
+        VaultName::new("notes").expect("a legal vault name")
+    }
+
+    fn a_path() -> DocumentPath {
+        DocumentPath::new("notes/a.md").expect("a legal document path")
+    }
+
+    /// The plan the apply outcomes are read against: one removal, resolved.
+    fn a_plan() -> ResolvedPlan {
+        ResolvedPlan::new(
+            crate::address::VaultAddress::name(a_name()),
+            RootIdentity::from_device_and_inode(1, 2),
+            vec![Operation::new(OperationKind::delete_document(a_path()))],
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Every code the vocabulary holds, read back out of the schema the derive
@@ -1076,6 +1307,8 @@ mod tests {
             ReasonCode::HostReaderUnavailable => "host/reader-unavailable",
             ReasonCode::HostRegistryUnwritable => "host/registry-unwritable",
             ReasonCode::HostReadFailed => "host/read-failed",
+            ReasonCode::HostApplyNotRun => "host/apply-not-run",
+            ReasonCode::HostApplyOutcomeUnknown => "host/apply-outcome-unknown",
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
             ReasonCode::VaultAmbiguousTarget => "vault/ambiguous-target",
             ReasonCode::VaultUnknownTarget => "vault/unknown-target",
@@ -1083,9 +1316,14 @@ mod tests {
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
             ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
             ReasonCode::VaultUnreadableBound => "vault/unreadable-bound",
+            ReasonCode::VaultPlanRefused => "vault/plan-refused",
+            ReasonCode::VaultRootChanged => "vault/root-changed",
+            ReasonCode::VaultPlanInterrupted => "vault/plan-interrupted",
+            ReasonCode::VaultWriteFailed => "vault/write-failed",
             ReasonCode::RequestOutOfBound => "request/out-of-bound",
             ReasonCode::RequestPartNotTaken => "request/part-not-taken",
             ReasonCode::RequestCursorNotTaken => "request/cursor-not-taken",
+            ReasonCode::RequestPlanInvalid => "request/plan-invalid",
             ReasonCode::EngineNotEnabled => "engine/not-enabled",
             ReasonCode::EngineUnavailable => "engine/unavailable",
             ReasonCode::EngineFailed => "engine/failed",
@@ -1126,6 +1364,11 @@ mod tests {
             ReasonCode::HostReadFailed => {
                 ErrorDetail::read_failed(ReadFailure::statement(), "the statement refused")
             }
+            ReasonCode::HostApplyNotRun => ErrorDetail::apply_not_run(
+                ErrorEnvelope::new("the entry is parked", ErrorDetail::entry_held(a_name())),
+                Some(a_plan()),
+            ),
+            ReasonCode::HostApplyOutcomeUnknown => ErrorDetail::apply_outcome_unknown(a_plan()),
             ReasonCode::VaultAmbiguousRoot => ErrorDetail::ambiguous_root(two_names()),
             ReasonCode::VaultAmbiguousTarget => ErrorDetail::ambiguous_target(
                 a_target(),
@@ -1148,6 +1391,22 @@ mod tests {
                 CursorOrderChanged::new("fp-1", Some("fp-2".to_string())),
             ),
             ReasonCode::VaultUnreadableBound => ErrorDetail::unreadable_bound("due", "not-a-date"),
+            ReasonCode::VaultPlanRefused => ErrorDetail::plan_refused(
+                a_plan(),
+                Forecast::new(Vec::new(), Vec::new(), Vec::new()),
+                vec![RefusedCheck::name_taken(a_path())],
+                Vec::new(),
+            ),
+            ReasonCode::VaultRootChanged => ErrorDetail::root_changed(
+                RootIdentity::from_device_and_inode(1, 2),
+                RootIdentity::from_device_and_inode(1, 3),
+            ),
+            ReasonCode::VaultPlanInterrupted => ErrorDetail::plan_interrupted(
+                a_plan(),
+                vec![a_path()],
+                InterruptionCause::io_failure("the disk is full"),
+            ),
+            ReasonCode::VaultWriteFailed => ErrorDetail::write_failed(a_plan(), "the disk is full"),
             ReasonCode::RequestOutOfBound => {
                 ErrorDetail::out_of_bound(RequestBound::page_rows(5_000, 1_024))
             }
@@ -1156,6 +1415,9 @@ mod tests {
             }
             ReasonCode::RequestCursorNotTaken => {
                 ErrorDetail::cursor_not_taken(PagedRows::Tally, PagedRows::Document)
+            }
+            ReasonCode::RequestPlanInvalid => {
+                ErrorDetail::plan_invalid(PlanFault::content_cycle(vec![0, 1]))
             }
             ReasonCode::EngineNotEnabled => ErrorDetail::engine_not_enabled(
                 Rung::Vector,
