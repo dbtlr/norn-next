@@ -381,9 +381,8 @@
 //! word. The refusal is the version-mismatch signal, and a plan carries no
 //! version field because it is short-lived: a caller whose plan is refused
 //! previews again under the build it is talking to. An answer that carries a
-//! plan — a report, a refusal's fresh plan, a forecast's file states — still
-//! drops a field it does not know at its own level, and the plan inside it
-//! still refuses one.
+//! plan — a report, or a refusal's fresh plan — still drops a field it does
+//! not know at its own level, and the plan inside it still refuses one.
 //!
 //! # The code grammar, and what is not a code
 //!

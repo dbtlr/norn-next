@@ -43,7 +43,7 @@ One file's resolved change within a plan: the state the file must hold before th
 A plan whose operations have been resolved into transitions, together with the conditions its resolution depended on. It is what a preview returns and what an apply can re-send.
 
 **Condition**:
-A fact a plan depends on and does not write, recorded with the plan and checked before any target is published. An author condition is one the operation's author observed; a plan condition is one the planning read.
+A fact a plan depends on, recorded with the plan and checked before any target is published. An author condition is one the operation's author observed, and on a file the plan writes it becomes that target's before-state; a plan condition is one the planning read and does not write.
 _Avoid_: Precondition, fingerprint
 
 **Root identity**:
