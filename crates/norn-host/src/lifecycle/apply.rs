@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use norn_fs::Batch;
 use norn_store::StoreReading;
-use norn_wire::{ApplyReport, ErrorDetail, ErrorEnvelope, PlanDocument, ResolvedPlan, VaultAnswer};
+use norn_wire::{
+    ApplyReport, ErrorDetail, ErrorEnvelope, PlanDocument, ResolvedPlan, VaultAnswer, VaultName,
+};
 
 /// What an apply answers its caller with: the report, inside the answer a
 /// read's report crosses in, or the code it ended in.
@@ -146,28 +148,57 @@ pub(super) struct QueuedApply {
 ///
 /// **Each one is demand on the entry** while it waits: its admission
 /// recorded a demand lease, which is given back when the job running it
-/// takes it off the queue, so no idle detach begins over a queued apply and
-/// a release that ends with one queued re-arms the attach it owes.
-#[derive(Default)]
-pub(super) struct ApplyQueue(VecDeque<QueuedApply>);
+/// takes it off the queue, or when it is answered unrun, so no idle detach
+/// begins over a queued apply and a release that ends with one queued re-arms
+/// the attach it owes.
+///
+/// The queue knows its vault's name, because it is answered from the one
+/// place every publication over the entry passes — the end of a gate hold —
+/// which has the entry's state and nothing else.
+pub(super) struct ApplyQueue {
+    vault: VaultName,
+    queued: VecDeque<QueuedApply>,
+}
 
 impl ApplyQueue {
+    /// An empty queue for the vault `vault`.
+    pub(super) fn for_vault(vault: VaultName) -> Self {
+        ApplyQueue {
+            vault,
+            queued: VecDeque::new(),
+        }
+    }
+
+    /// The vault this queue's applies were admitted against.
+    pub(super) fn vault(&self) -> &VaultName {
+        &self.vault
+    }
+
     pub(super) fn push(&mut self, apply: QueuedApply) {
-        self.0.push_back(apply);
+        self.queued.push_back(apply);
     }
 
     pub(super) fn take_head(&mut self) -> Option<QueuedApply> {
-        self.0.pop_front()
+        self.queued.pop_front()
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.queued.is_empty()
     }
 
-    /// Drop every queued apply: each caller is answered from its own
-    /// progress record.
-    pub(super) fn clear(&mut self) {
-        self.0.clear();
+    /// Take every queued apply off the queue, in the order they were
+    /// admitted.
+    pub(super) fn take_all(&mut self) -> VecDeque<QueuedApply> {
+        std::mem::take(&mut self.queued)
+    }
+}
+
+impl QueuedApply {
+    /// Answer this apply not applied, for `cause`: it never ran, so no
+    /// document was written and no plan was resolved. A caller that stopped
+    /// waiting is not an error.
+    pub(super) fn answer_unrun(self, cause: ErrorEnvelope) {
+        let _ = self.reply.send(Err(not_run(cause, None)));
     }
 }
 

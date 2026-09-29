@@ -435,3 +435,284 @@ fn an_apply_over_a_reconcile_in_the_channel_waits_on_its_slot_and_is_sent_when_i
     );
     drop((lease, holding_lease, host));
 }
+
+/// The answer `pending` gives, waited for within the lifecycle budget, so a
+/// queued apply nothing answers fails the case rather than hanging it.
+fn answer_of(pending: PendingApply) -> ApplyAnswer {
+    let (sent, answer) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sent.send(pending.wait());
+    });
+    wait_until(
+        "the apply to be answered",
+        lifecycle_wait_budget(),
+        || match answer.try_recv() {
+            Ok(answered) => Observed::Met(answered),
+            Err(_) => Observed::pending("the apply is still waiting"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The cause an apply answered not applied carries, where it stopped before
+/// planning: no plan beside it.
+fn not_applied_cause(answer: ApplyAnswer) -> ErrorEnvelope {
+    let refused = answer.expect_err("the apply answered as applied");
+    match refused.detail() {
+        ErrorDetail::ApplyNotRun {
+            cause, plan: None, ..
+        } => cause.clone(),
+        other => panic!("the apply answered {other:?}"),
+    }
+}
+
+/// **Case 7: a leg's unwind answers every queued apply not applied, with
+/// the unwind as its cause.** The apply queues behind a reconcile turn that
+/// then panics. The unwind's cleanup releases the entry and publishes the
+/// leg's unwind, re-arming nothing, so the apply is answered with that
+/// cause rather than left waiting on an entry nothing will serve.
+#[test]
+fn a_leg_unwind_answers_every_queued_apply_not_applied_with_the_unwind() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.panic_in_reconcile.store(true, Ordering::SeqCst);
+    hold_a_reconcile_turn(&ops, &host);
+    let first = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let second = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    let expected = ReadRefusal::NotServing(Demand::State(unwound(RECONCILE_PANIC))).answer(&name);
+    assert_eq!(not_applied_cause(answer_of(first)), expected);
+    assert_eq!(not_applied_cause(answer_of(second)), expected);
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop((lease, host));
+}
+
+/// **Case 8: lost trust answers every queued apply not applied, with the
+/// trust it lost.** The apply queues behind a reconcile turn whose watcher
+/// fails terminally. The turn publishes the entry untrusted and owing a
+/// recovery no lease has asked for, and the apply is answered with that
+/// cause: it runs over no store the entry no longer vouches for, and does not
+/// wait for a recovery nothing has asked for.
+#[test]
+fn lost_trust_answers_every_queued_apply_not_applied_with_the_loss() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.terminal_reconcile.store(true, Ordering::SeqCst);
+    hold_a_reconcile_turn(&ops, &host);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    let lost = TrustState::untrusted(watcher_lost(WatchError::Backend("lost".into())));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(lost)).answer(&name)
+    );
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop((lease, host));
+}
+
+/// **Case 9: a failed attach answers every queued apply not applied, with
+/// its failure.** The apply is admitted over an unattached vault, so it
+/// queues behind the attach its demand owes, and that attach fails: the
+/// failure the attach publishes is the apply's answer.
+#[test]
+fn a_failed_attach_answers_every_queued_apply_not_applied_with_its_failure() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    ops.terminal_attach.store(true, Ordering::SeqCst);
+    let pending = host
+        .admit_apply(&name, a_plan(&name))
+        .expect("an apply over an unattached vault is admitted");
+    wait_for_flag("attach_started", &ops.attach_started);
+    assert!(
+        !host
+            .shared
+            .entries
+            .get(&name)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .applies
+            .is_empty(),
+        "the apply did not queue behind the attach"
+    );
+
+    ops.attach_release.store(true, Ordering::SeqCst);
+    let lost = TrustState::untrusted(watcher_lost(WatchError::Backend("lost".into())));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(lost)).answer(&name)
+    );
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop(host);
+}
+
+/// **Case 10, a park: a park answers every queued apply not applied at
+/// once, with the park.** The apply queues behind a reconcile turn, and the
+/// entry is parked while the turn still runs: the apply is answered with the
+/// park's own refusal before the turn ends, since no teardown waits for the
+/// work it moves the entry past. Each park the registry raises is taken in
+/// turn, and so is a maintainer another process holds, which an attach meets.
+#[cfg(unix)]
+#[test]
+fn a_park_answers_every_queued_apply_not_applied_at_once_with_the_park() {
+    for park in [Park::Identity, Park::DuplicateRoot] {
+        let scratch = temp_base("apply-queued-over-a-park");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let root = scratch.root().join("notes");
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            Roots::Created(&[(&name, root.as_path())]),
+            1,
+        );
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        hold_a_reconcile_turn(&ops, &host);
+        let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+        let refused = park_entry(&host, &name, &root, park);
+        let cause = not_applied_cause(answer_of(pending));
+        assert_eq!(cause.detail(), &refused, "{park:?}");
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        assert!(ops.applies_ran.lock().unwrap().is_empty(), "{park:?}");
+        drop((lease, host));
+    }
+
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    ops.contend_attach.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("attach_started", &ops.attach_started);
+    ops.attach_release.store(true, Ordering::SeqCst);
+    let cause = not_applied_cause(answer_of(pending));
+    assert_eq!(
+        cause,
+        ReadRefusal::NotServing(Demand::MaintainerContended(MaintainerIdentity::unknown()))
+            .answer(&name),
+        "a maintainer held elsewhere"
+    );
+    drop(host);
+}
+
+/// **Case 10, the host's destruction: it answers every queued apply not
+/// applied at once, and waits for none.** The apply queues behind a
+/// reconcile turn, and the host is destroyed while the turn still runs,
+/// with a lease outliving it. The apply is answered while the destruction
+/// is still waiting for the turn, with the teardown the entry publishes.
+#[test]
+fn the_hosts_destruction_answers_every_queued_apply_not_applied_at_once() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_reconcile_turn(&ops, &host);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    let destroyed = thread::spawn(move || drop(host));
+    let cause = not_applied_cause(answer_of(pending));
+    assert_eq!(
+        cause,
+        ReadRefusal::NotServing(Demand::State(TrustState::warming(
+            WarmingPhase::ReleasingCoverage,
+            0,
+            None
+        )))
+        .answer(&name)
+    );
+    assert!(
+        !destroyed.is_finished(),
+        "the destruction did not wait for the turn"
+    );
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    destroyed.join().expect("the host was destroyed");
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop(lease);
+}
+
+/// Begin the idle detach of `name`, whose lease has gone, and hold it inside
+/// the fake's detach: the release window stands open over the entry.
+fn hold_an_idle_detach(ops: &FakeOps, host: &Host<Arc<FakeOps>>, name: &VaultName) {
+    ops.block_detach.store(true, Ordering::SeqCst);
+    dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
+    wait_for_flag("detach_started", &ops.detach_started);
+    assert!(
+        host.shared
+            .entries
+            .get(name)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .detach_in_flight,
+        "no idle detach stands open over the entry"
+    );
+}
+
+/// **Case 11: an idle detach in flight at admission re-arms the attach and
+/// keeps the queue.** The vault's last lease went and its idle detach is
+/// giving the coverage back when the apply arrives. The apply is admitted —
+/// a write never refuses because its vault went idle — and its demand is
+/// what the release honors: the release re-attaches, and the apply runs over
+/// the coverage that attach installs.
+#[test]
+fn an_idle_detach_in_flight_at_admission_re_arms_the_attach_and_keeps_the_queue() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    drop(lease);
+    hold_an_idle_detach(&ops, &host, &name);
+
+    let pending = host
+        .admit_apply(&name, a_plan(&name))
+        .expect("an apply over an entry releasing for idleness is admitted");
+    ops.block_detach.store(false, Ordering::SeqCst);
+    ops.detach_release.store(true, Ordering::SeqCst);
+
+    applied(answer_of(pending));
+    assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        ops.attaches.load(Ordering::SeqCst),
+        2,
+        "the apply did not run over a re-attach"
+    );
+    drop(host);
+}
+
+/// **A release that re-arms nothing answers every queued apply not applied,
+/// with what it publishes.** The vault's declaration withholds trust, so the
+/// recovery it owes waits for the vault to change and no demand re-arms it.
+/// An apply admitted while the vault's idle detach gives its coverage back
+/// queues behind a re-attach its demand does not owe, and the release that
+/// ends unattached answers it rather than leaving it waiting on an entry
+/// nothing will serve.
+#[test]
+fn a_release_that_re_arms_nothing_answers_every_queued_apply_not_applied() {
+    let ops = Arc::new(FakeOps::default());
+    ops.withholds_trust.store(true, Ordering::SeqCst);
+    let name = VaultName::new("notes").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+    drop(host.demand(&name, AttachMode::Durable).unwrap());
+    wait_for_state(
+        &host,
+        &name,
+        TrustState::untrusted(UntrustedReason::schema_unreadable(
+            "this fake withholds trust",
+        )),
+    );
+    hold_an_idle_detach(&ops, &host, &name);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    ops.block_detach.store(false, Ordering::SeqCst);
+    ops.detach_release.store(true, Ordering::SeqCst);
+
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(TrustState::Unattached)).answer(&name)
+    );
+    assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+    drop(host);
+}

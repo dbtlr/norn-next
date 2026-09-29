@@ -962,6 +962,7 @@ impl<A: SnapshotSource> Entry<A> {
     /// vault the host has never attached stands at, its claim standing at
     /// `epoch`.
     fn unattached(registration: Registration, epoch: u64) -> Self {
+        let vault = registration.name.clone();
         Self {
             registration,
             gate: EntryGate::new(EntryState {
@@ -979,7 +980,7 @@ impl<A: SnapshotSource> Entry<A> {
                 store_reading: None,
                 delivered_engine: None,
                 plan_ground: None,
-                applies: ApplyQueue::default(),
+                applies: ApplyQueue::for_vault(vault),
                 running_apply: None,
                 recovery_required: false,
                 rebuild_required: false,
@@ -1408,7 +1409,17 @@ impl<A: SnapshotSource> Stanced for EntryState<A> {
     /// parked, out of service or owing a rung. A hold that ends healing
     /// otherwise keeps it, because healing is entered from `Ready` and from
     /// untrusted alike, and the flag is what tells the two apart.
+    ///
+    /// **It is also where every queued apply is answered once the entry
+    /// publishes a cause.** A hold that ends with the entry standing on one —
+    /// out of service, parked, or untrusted, whichever leg or door put it
+    /// there — answers every apply still queued not applied, with that cause,
+    /// so no apply waits on an entry nothing will serve and none runs over a
+    /// verdict published against the store it would plan on.
     fn end_hold(&mut self) {
+        if !self.applies.is_empty() && self.stands_on_a_cause() {
+            self.answer_queued_applies();
+        }
         self.trust_unbroken_since_ready = match &self.trust {
             TrustState::Ready => !self.stands_parked() && self.out_of_service().is_none(),
             TrustState::Warming {
@@ -2048,6 +2059,28 @@ impl<A: SnapshotSource> EntryState<A> {
         !self.applies.is_empty() && self.fit_to_apply()
     }
 
+    /// Whether the entry stands on a cause an apply's admission refuses for:
+    /// out of service, parked, or untrusted — trust withheld or lost, or
+    /// damage published.
+    fn stands_on_a_cause(&self) -> bool {
+        self.out_of_service().is_some()
+            || self.stands_parked()
+            || matches!(self.trust, TrustState::Untrusted { .. })
+    }
+
+    /// Answer every apply queued on the entry not applied, with the cause
+    /// the entry publishes, giving back the demand each one's admission
+    /// recorded.
+    fn answer_queued_applies(&mut self) {
+        let vault = self.applies.vault().clone();
+        let cause = self.apply_cause(&vault);
+        let ended_at = Instant::now();
+        for apply in self.applies.take_all() {
+            give_back_demand(self, apply.recovery_demand, ended_at);
+            apply.answer_unrun(cause.clone());
+        }
+    }
+
     /// Where the apply an entry is running is answered from once its reply
     /// is gone: the cause it publishes, as a read refused over it would carry
     /// it.
@@ -2621,6 +2654,8 @@ fn finish_release<O: EntryOps>(
     state.detach_due = false;
     state.detach_scheduled = false;
     state.trust = TrustState::Unattached;
+    // A leg's unwind publishes the unwind over this release once it returns,
+    // and that publication answers the queue with its own cause.
     if matches!(tail, ReleaseTail::LeaveToTheNextDemand) {
         return;
     }
@@ -2638,6 +2673,10 @@ fn finish_release<O: EntryOps>(
         state.claim.take_slot(next.epoch());
         drop(state);
         dispatch_followup(shared, next);
+    } else {
+        // Nothing re-arms, so nothing will serve an apply still queued: it
+        // is answered with what the release publishes.
+        state.answer_queued_applies();
     }
 }
 
@@ -4142,15 +4181,16 @@ impl<O: EntryOps> Drop for Host<O> {
             state.claim.invalidate();
             state.claim.open();
             state.pending.clear();
-            // No apply runs past the host: each queued one is answered from
-            // its own progress, not applied.
-            state.applies.clear();
             if state.detach_in_flight {
                 // A release is already under way with this entry's resources.
                 // The joins below wait for the leg running it, and whatever it
                 // leaves in the entry is given back after them.
                 begin_release(&mut state);
                 releasing.push((Arc::clone(&entry), None));
+                // No apply runs past the host: each queued one is answered
+                // not applied, with the teardown the entry now publishes, and
+                // none is waited for.
+                state.answer_queued_applies();
                 continue;
             }
             match state.coverage.give_up() {
@@ -4174,6 +4214,7 @@ impl<O: EntryOps> Drop for Host<O> {
                 // say so.
                 None => state.trust = TrustState::Unattached,
             }
+            state.answer_queued_applies();
         }
         self.shared.jobs.lock().expect("job sender poisoned").take();
         if let Some(dispatcher) = dispatcher
@@ -4779,20 +4820,19 @@ impl<O: EntryOps> Host<O> {
             // The cause is read before the demand schedules anything: the
             // work it schedules publishes the warming it runs under, and the
             // entry stood on the cause when the apply arrived.
-            let refusal =
-                if state.stands_parked() || matches!(state.trust, TrustState::Untrusted { .. }) {
-                    Some(state.apply_cause(name))
-                } else if state.damage_met_under_a_claim.is_some() {
-                    Some(
-                        ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                            "the store found its derived data damaged while other work held this \
+            let refusal = if state.stands_on_a_cause() {
+                Some(state.apply_cause(name))
+            } else if state.damage_met_under_a_claim.is_some() {
+                Some(
+                    ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                        "the store found its derived data damaged while other work held this \
                          entry; the entry rebuilds it when that work ends",
-                        ))
-                        .answer(name),
-                    )
-                } else {
-                    None
-                };
+                    ))
+                    .answer(name),
+                )
+            } else {
+                None
+            };
             let awaits_a_change = state.recovery_awaits_a_change();
             let recovery_demand = record_demand(&mut state, !awaits_a_change);
             let scheduled = matches!(
