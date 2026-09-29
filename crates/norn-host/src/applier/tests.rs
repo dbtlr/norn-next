@@ -1681,3 +1681,75 @@ fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
         norn_fs::Batch::rescan(norn_fs::RescanScope::Vault)
     );
 }
+
+impl Fixture {
+    /// Preview `plan` as the apply seam previews a resolved plan: the same
+    /// plan and its forecast, or the envelope the preview answers with.
+    fn preview(
+        &mut self,
+        plan: ResolvedPlan,
+    ) -> Result<(ResolvedPlan, norn_wire::Forecast), norn_wire::ErrorEnvelope> {
+        let declared = crate::production::pinned_declaration(&mut self.store).expect("a pin");
+        super::preview(plan, &self.vault, self.root, &self.exclusions, &declared).map_err(
+            |outcome| {
+                outcome
+                    .into_wire()
+                    .expect("a preview never stands down")
+                    .expect_err("a preview's refusal is no report")
+            },
+        )
+    }
+}
+
+/// Close `closed` in `fixture`'s vault to this account, then preview and
+/// apply the plan editing `sub/a.md`, and hold that the preview answers
+/// exactly what the apply does: `vault/write-failed`, carrying the plan, with
+/// nothing landed. Skipped where this account reads a mode-000 entry.
+#[cfg(unix)]
+fn previews_as_its_apply_answers_with(closed: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = Fixture::new(&[("sub/a.md", "# A\n")]);
+    let plan = fixture.plan(vec![editing("sub/a.md", "# A", "# A2")]);
+    let closed = fixture.vault.join(closed);
+    let reopened = std::fs::metadata(&closed).unwrap().permissions();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&closed).is_ok() || std::fs::read(&closed).is_ok() {
+        eprintln!("skipped: this account reads a mode-000 entry");
+        std::fs::set_permissions(&closed, reopened).unwrap();
+        return;
+    }
+
+    let previewed = fixture.preview(plan.clone());
+    let applied = fixture
+        .apply(plan.clone())
+        .into_wire()
+        .expect("a refusal is answered");
+    std::fs::set_permissions(&closed, reopened).unwrap();
+
+    let applied = applied.expect_err("an apply over an unreadable target is refused");
+    assert_eq!(applied.code(), &norn_wire::ReasonCode::VaultWriteFailed);
+    assert_eq!(
+        previewed.expect_err("a preview over an unreadable target is refused"),
+        applied
+    );
+    assert_eq!(fixture.read("sub/a.md").as_deref(), Some("# A\n"));
+}
+
+/// **A target whose bytes cannot be read while a resolved plan is checked is
+/// answered by its preview as its apply answers it**: `vault/write-failed`
+/// with the plan, since nothing landed and sending it again may apply it.
+#[cfg(unix)]
+#[test]
+fn a_target_unreadable_while_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
+    previews_as_its_apply_answers_with("sub/a.md");
+}
+
+/// **A vault root that cannot be walked when a resolved plan is checked is
+/// answered by its preview as its apply answers it**: both answer
+/// `vault/write-failed` with the plan.
+#[cfg(unix)]
+#[test]
+fn a_root_unwalkable_when_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
+    previews_as_its_apply_answers_with("");
+}

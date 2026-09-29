@@ -2490,12 +2490,14 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   — the root identity, every target at its before- or after-state, every condition, the
   operations recomposed, the schema — reading the vault and staging nothing. Where an apply
   would go on to stage, the preview answers the same plan and its forecast; where it would
-  refuse, the preview answers that refusal. So what a caller previewed is what applies, and a
-  plan an interruption left part-landed previews as itself.
+  not, the preview answers what the apply ends in — a refusal, a fault in the plan's shape, or,
+  where the checks cannot read the vault, `vault/write-failed` with the plan. So what a caller
+  previewed is what applies, and a plan an interruption left part-landed previews as itself.
 - **A failure planning cannot get past answers what a read meeting it carries.** A root that
   no longer stands answers `host/apply-not-run` with the refusal a read carries once the
-  watcher reports the root's coverage lost; a root that stands and cannot be read, with trust
-  withdrawn for the environment's refusal, as the entry's own walk publishes it. A store that
+  watcher reports the root's coverage lost; a root that stands and cannot be read while
+  operations are planned, with trust withdrawn for the environment's refusal, as the entry's
+  own walk publishes it. A store that
   refuses the apply's snapshot answers `host/read-failed`, or, where it is damaged, the job
   publishes the damage with its rebuild and answers not applied with it.
 - **A queued apply holds the demand admission recorded** until the job running it takes it off

@@ -21,19 +21,22 @@
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
 //! the preview answers the same plan where an apply would go on to stage it,
-//! or the refusal an apply would answer. So what a caller previewed is what
-//! applies (ADR 0031), and a plan an interruption left part-landed previews
-//! as itself rather than as its operations resolved afresh.
+//! or what an apply of it would end in otherwise — a vault the checks could
+//! not read included, which answers `vault/write-failed` with the plan, as
+//! the apply does. So what a caller previewed is what applies (ADR 0031),
+//! and a plan an interruption left part-landed previews as itself rather
+//! than as its operations resolved afresh.
 //!
 //! **A refusal is never a report.** An operation that does not resolve
 //! answers `vault/plan-refused` with the plan the rest resolved to, its
 //! forecast and the unresolved operations; a plan whose own shape is wrong
 //! answers `request/plan-invalid`; a root replaced since the coverage was
 //! installed answers `vault/root-changed`. A vault the planner could not read
-//! answers `host/apply-not-run`, nothing planned and nothing written, with the
-//! refusal a read carries once the entry meets the same failure as its cause:
-//! the root's coverage lost where the root no longer stands, and trust
-//! withdrawn for the environment's refusal where it stands and cannot be read.
+//! while resolving operations answers `host/apply-not-run`, nothing planned
+//! and nothing written, with the refusal a read carries once the entry meets
+//! the same failure as its cause: the root's coverage lost where the root no
+//! longer stands, and trust withdrawn for the environment's refusal where it
+//! stands and cannot be read.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +49,7 @@ use norn_wire::{
 };
 
 use crate::address::registered_name;
-use crate::applier::{self, PreviewStop};
+use crate::applier;
 use crate::derivation::Declared;
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, SnapshotSource,
@@ -179,11 +182,11 @@ pub(crate) fn unreadable(name: &VaultName, error: impl std::fmt::Display) -> Err
 }
 
 /// Preview the resolved `plan` on `ground`, as [`applier::preview`] judges
-/// it: the same plan and its forecast, or the refusal an apply would answer.
+/// it: the same plan and its forecast, or the answer an apply of it would
+/// end in.
 fn preview_resolved(
     plan: norn_wire::ResolvedPlan,
     ground: &PlanGround,
-    name: &VaultName,
 ) -> Result<ApplyReport, ErrorEnvelope> {
     match applier::preview(
         plan,
@@ -193,11 +196,10 @@ fn preview_resolved(
         &ground.declared,
     ) {
         Ok((plan, forecast)) => Ok(ApplyReport::previewed(plan, forecast)),
-        Err(PreviewStop::Refused(outcome)) => Err((*outcome)
+        Err(outcome) => Err((*outcome)
             .into_wire()
             .expect("a preview publishes nothing, so it never stands down")
             .expect_err("a preview's refusal is no report")),
-        Err(PreviewStop::Unreadable(detail)) => Err(unreadable(name, detail)),
     }
 }
 
@@ -246,7 +248,7 @@ where
                 let resolution = fully_resolved(resolve_on(authored, &ground, name)?)?;
                 ApplyReport::previewed(resolution.plan, resolution.forecast)
             }
-            PlanDocument::Resolved(resolved) => preview_resolved(resolved, &ground, name)?,
+            PlanDocument::Resolved(resolved) => preview_resolved(resolved, &ground)?,
         };
         drop(hold);
         Ok(VaultAnswer::new(reading, Vec::new(), report))

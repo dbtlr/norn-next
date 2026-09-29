@@ -87,7 +87,7 @@ use norn_wire::{
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
 use crate::planner::forecast::forecast;
-use crate::planner::view::{TreeView, TreeViewError};
+use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};
 use publish::{Progress, Publisher, Stopped};
 use stage::{Stop, Unfit};
@@ -290,15 +290,6 @@ impl Applier<'_> {
     }
 }
 
-/// How the preview of a resolved plan ended short of answering it.
-#[derive(Debug)]
-pub(crate) enum PreviewStop {
-    /// The refusal an apply of the plan over the same files answers.
-    Refused(Box<ApplyOutcome>),
-    /// The vault could not be read, in words.
-    Unreadable(String),
-}
-
 /// Preview the resolved `plan` over the vault at `anchor`: judge it as an
 /// apply would, reading the vault and writing nothing.
 ///
@@ -306,38 +297,40 @@ pub(crate) enum PreviewStop {
 /// [`stage::check`] runs — each target at its before- or after-state, every
 /// condition, the operations recomposed from the before-states, the schema.
 /// Where an apply would go on to stage, the answer is the same plan with its
-/// forecast from what the vault holds; where it would refuse, the answer is
-/// that refusal, a fresh plan included. So what a caller previewed is what
-/// applies, and a plan an interruption left part-landed previews as itself.
+/// forecast from what the vault holds; where it would not, the answer is the
+/// outcome an apply of the plan over the same files ends in — a refusal with
+/// its fresh plan, a fault in the plan's shape, or a vault that could not be
+/// read, which an apply answers as a write that failed before anything
+/// landed. So what a caller previewed is what applies, and a plan an
+/// interruption left part-landed previews as itself.
 pub(crate) fn preview(
     plan: ResolvedPlan,
     anchor: &Path,
     root: norn_fs::Identity,
     exclusions: &[PathBuf],
     declared: &crate::derivation::Declared,
-) -> Result<(ResolvedPlan, Forecast), PreviewStop> {
+) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
-        return Err(PreviewStop::Refused(Box::new(ApplyOutcome::RootChanged {
+        return Err(Box::new(ApplyOutcome::RootChanged {
             expected: plan.root,
             found,
-        })));
+        }));
     }
-    let unreadable = |error: TreeViewError| PreviewStop::Unreadable(error.to_string());
-    let view = TreeView::open(anchor, exclusions).map_err(unreadable)?;
-    match stage::check(&plan, &view, declared) {
-        Ok(_) => {
-            let forecast = forecast(&plan.transitions, &view).map_err(unreadable)?;
-            Ok((plan, forecast))
-        }
-        Err(Unfit::Refused(checks)) => Err(PreviewStop::Refused(Box::new(
-            refresh::refuse_and_refresh(plan, &view, checks),
-        ))),
-        Err(Unfit::Invalid(fault)) => {
-            Err(PreviewStop::Refused(Box::new(ApplyOutcome::Invalid(fault))))
-        }
-        Err(Unfit::Failed(detail)) => Err(PreviewStop::Unreadable(detail)),
-    }
+    let view = match TreeView::open(anchor, exclusions) {
+        Ok(view) => view,
+        Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
+    };
+    let outcome = match stage::check(&plan, &view, declared) {
+        Ok(_) => match forecast(&plan.transitions, &view) {
+            Ok(forecast) => return Ok((plan, forecast)),
+            Err(error) => write_failed(plan, error.to_string()),
+        },
+        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, checks),
+        Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
+        Err(Unfit::Failed(detail)) => write_failed(plan, detail),
+    };
+    Err(Box::new(outcome))
 }
 
 fn write_failed(plan: ResolvedPlan, detail: String) -> ApplyOutcome {
