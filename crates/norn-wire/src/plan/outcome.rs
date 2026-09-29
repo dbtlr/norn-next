@@ -285,9 +285,10 @@ pub enum PlanFault {
     /// touching it, so the file is what disagrees.
     #[non_exhaustive]
     TransitionsDisagree {
-        /// Every file the disagreement touches, sorted and each once: every
-        /// transition's path that disagrees, and every path an operation
-        /// writes or names that no transition or checked condition matches.
+        /// Every file the disagreement touches, sorted and each once as the
+        /// constructor builds it: every transition's path that disagrees,
+        /// and every path an operation writes or names that no transition or
+        /// checked condition matches.
         paths: Vec<DocumentPath>,
     },
 }
@@ -314,8 +315,13 @@ impl PlanFault {
         PlanFault::ContentCycle { positions }
     }
 
-    /// A resolved plan's transitions disagree with its operations at `paths`.
-    pub const fn transitions_disagree(paths: Vec<DocumentPath>) -> Self {
+    /// A resolved plan's transitions disagree with its operations at `paths`,
+    /// named each once and sorted, whatever order and repeats they are given
+    /// in. Reading a fault off the wire keeps its paths as sent, as every
+    /// other fault's positions are kept.
+    pub fn transitions_disagree(mut paths: Vec<DocumentPath>) -> Self {
+        paths.sort();
+        paths.dedup();
         PlanFault::TransitionsDisagree { paths }
     }
 }

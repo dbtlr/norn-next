@@ -7827,6 +7827,15 @@ fn the_apply_reasons_are_tagged_objects() {
         wire(&PlanFault::transitions_disagree(vec![path("notes/a.md")])),
         r#"{"kind":"transitions_disagree","paths":["notes/a.md"]}"#
     );
+    assert_eq!(
+        PlanFault::transitions_disagree(vec![
+            path("notes/b.md"),
+            path("notes/a.md"),
+            path("notes/b.md"),
+        ]),
+        PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
+        "the constructor names each file once, in order"
+    );
 }
 
 /// The outcomes that are not a refusal and not an answer carry the plan they

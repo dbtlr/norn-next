@@ -50,9 +50,8 @@ pub(super) enum Recomposed {
 }
 
 /// The fault of a plan whose transitions disagree with its operations at
-/// `paths`, each named once, in order.
+/// `paths`.
 pub(super) fn disagreement(paths: impl IntoIterator<Item = DocumentPath>) -> PlanFault {
-    let paths: BTreeSet<DocumentPath> = paths.into_iter().collect();
     PlanFault::transitions_disagree(paths.into_iter().collect())
 }
 
