@@ -368,6 +368,7 @@ mod finding;
 mod finding_row;
 mod glob;
 mod name;
+mod plan;
 mod predicate;
 mod product;
 mod read;
@@ -406,6 +407,8 @@ pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, Unkno
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::hash::{ContentHash, IllegalContentHash};
+pub use plan::root::RootIdentity;
 pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};

@@ -13,23 +13,23 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
     Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFileFailure,
-    CountParams, CountReport, Cursor, CursorKey, DescribeParams, DescribeReport, Direction,
-    Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow, Drift,
-    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind,
-    FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, KindTally,
-    LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    Moved, NameSet, NotReady, Page, PagedRows, PathRuleKind, PollBackend, Predicate, Published,
-    ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, Score,
-    SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort,
-    SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TrustState,
-    UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
+    DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
+    DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
+    Facet, FacetKind, FieldType, FieldValue, FindParams, FindReport, FindingKind, FindingRow,
+    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
+    KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, Moved, NameSet, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
+    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
+    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
+    SidecarRevision, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TrustState, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -239,6 +239,8 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<RegistrySanity>(),
         schema_of::<RegistryProblem>(),
         schema_of::<EngineHealth>(),
+        schema_of::<ContentHash>(),
+        schema_of::<RootIdentity>(),
     ]
 }
 
@@ -2726,5 +2728,32 @@ fn a_doctor_registry_report_advertises_the_registry_it_read() {
     assert_eq!(
         property_names(&schema_of::<EngineHealth>()),
         ["name", "section", "engine"].into_iter().collect()
+    );
+}
+
+// ── The plan vocabulary ──────────────────────────────────────────────────
+
+/// A content hash advertises the pattern its reader keeps, so a surface
+/// validating against the schema refuses the strings the reader refuses.
+#[test]
+fn a_content_hash_advertises_the_grammar_it_is_parsed_through() {
+    let schema = schema_of::<ContentHash>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["pattern"].as_str(), Some(ContentHash::PATTERN));
+    assert_eq!(ContentHash::PATTERN, "^sha256:[0-9a-f]{64}$");
+}
+
+/// A root identity advertises the pattern of the strings its constructor
+/// builds, and says it is compared rather than read.
+#[test]
+fn a_root_identity_advertises_an_opaque_string_compared_for_equality() {
+    let schema = schema_of::<RootIdentity>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["pattern"].as_str(), Some("^[0-9a-f]{32}$"));
+    assert!(
+        schema["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("equality")),
+        "the description does not say the identity is compared for equality: {schema}"
     );
 }

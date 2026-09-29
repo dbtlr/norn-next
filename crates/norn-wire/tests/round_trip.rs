@@ -16,25 +16,26 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
     Attention, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, Collection,
-    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ControlFile,
-    ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged, DescribeParams,
-    Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath, DocumentRow,
-    Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind, FindingRow,
-    FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Page, PagedRows, PathRuleKind, PollBackend,
-    Predicate, Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, RollUp, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TotalBelowHead, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer,
-    VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
+    DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
+    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FindParams, FindingKind,
+    FindingRow, FindingScope, Fingerprints, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, IllegalContentHash, KindTally, LadderDeclaration, LinkAddress, LinkFamily,
+    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
+    ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Page,
+    PagedRows, PathRuleKind, PollBackend, Predicate, Published, ReadFailure, ReasonCode,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, RollUp, RootIdentity, Rung,
+    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, Score, SearchParams,
+    SearchReport, SetParams, SetReport, Severity, SidecarRevision, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, TrustState,
+    UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -6510,4 +6511,106 @@ fn a_registry_sanity_is_an_object_tagged_state() {
         ),
         r#"{"state":"problems","problems":[{"problem":"root_missing","name":"notes"}]}"#
     );
+}
+
+// ── The plan grammars ────────────────────────────────────────────────────
+
+/// A hash of some bytes, spelled from a digest this coverage chose.
+fn content_hash(fill: u8) -> ContentHash {
+    ContentHash::from_sha256([fill; 32])
+}
+
+/// The hash of the empty file, as SHA-256 spells it.
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// The digest of the empty file, as the 32 bytes SHA-256 produces.
+fn empty_sha256_digest() -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte =
+            u8::from_str_radix(&EMPTY_SHA256[index * 2..index * 2 + 2], 16).expect("a hex byte");
+    }
+    digest
+}
+
+/// A hash built from the 32 bytes of a digest is the prefixed, lowercase hex
+/// string a hash is on the wire, and reads back as the same hash.
+#[test]
+fn a_content_hash_is_the_prefixed_hex_of_its_digest() {
+    let hash = ContentHash::from_sha256(empty_sha256_digest());
+    assert_eq!(hash.as_str(), format!("sha256:{EMPTY_SHA256}"));
+    assert_eq!(hash.hex(), EMPTY_SHA256);
+    assert_eq!(wire(&hash), format!("\"sha256:{EMPTY_SHA256}\""));
+    assert_eq!(
+        ContentHash::new(format!("sha256:{EMPTY_SHA256}")),
+        Ok(hash.clone())
+    );
+    round_trip(&hash);
+    round_trip(&content_hash(0));
+    round_trip(&content_hash(0xff));
+}
+
+/// The reader refuses what the constructor refuses: another prefix, another
+/// case, another length, and another algorithm's hash of the same width.
+#[test]
+fn a_content_hash_refuses_a_string_outside_its_grammar() {
+    let blake3_looking = format!("blake3:{EMPTY_SHA256}");
+    let refused = [
+        String::new(),
+        EMPTY_SHA256.to_string(),
+        format!("SHA256:{EMPTY_SHA256}"),
+        format!("sha256:{}", EMPTY_SHA256.to_uppercase()),
+        format!("sha256:{}", &EMPTY_SHA256[..63]),
+        format!("sha256:{EMPTY_SHA256}0"),
+        format!("sha256:{}g", &EMPTY_SHA256[..63]),
+        format!("sha256: {}", &EMPTY_SHA256[..63]),
+        blake3_looking,
+    ];
+    for text in refused {
+        assert_eq!(
+            ContentHash::new(&text),
+            Err(IllegalContentHash),
+            "`{text}` was built as a content hash"
+        );
+        assert!(
+            serde_json::from_str::<ContentHash>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a content hash"
+        );
+    }
+}
+
+/// A root identity is one opaque string built from a device and an inode,
+/// the same pair building the same identity and another pair another.
+#[test]
+fn a_root_identity_is_one_opaque_string_per_device_and_inode() {
+    let identity = RootIdentity::from_device_and_inode(66_306, 2);
+    assert_eq!(wire(&identity), r#""00000000000103020000000000000002""#);
+    assert_eq!(identity, RootIdentity::from_device_and_inode(66_306, 2));
+    assert_ne!(identity, RootIdentity::from_device_and_inode(66_306, 3));
+    assert_ne!(identity, RootIdentity::from_device_and_inode(2, 66_306));
+    for (device, inode) in [(0, 0), (u64::MAX, u64::MAX), (66_306, 2)] {
+        round_trip(&RootIdentity::from_device_and_inode(device, inode));
+    }
+}
+
+/// The reader accepts exactly the strings the constructor can build, so an
+/// identity nobody built is refused rather than compared.
+#[test]
+fn a_root_identity_refuses_a_string_nobody_built() {
+    for text in [
+        "",
+        "junk",
+        "0000000000010302000000000000000",
+        "000000000001030200000000000000020",
+        "00000000000103020000000000000002 ",
+        "0000000000010302000000000000000G",
+        "00000000000103020000000000000O02",
+        "0000000000010302:000000000000002",
+        "00000000000103020000000000000A02",
+    ] {
+        assert!(
+            serde_json::from_str::<RootIdentity>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a root identity"
+        );
+    }
 }
