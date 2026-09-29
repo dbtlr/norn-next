@@ -16,7 +16,8 @@ use super::view::{Entry, VaultView};
 /// **Two kinds of requirement.** An operation runs after the operations its
 /// `requires` names. A move or a create whose name a document stands at also
 /// runs after every other operation that vacates that name — a move away from
-/// it, or its removal — because ADR 0031 lets a move's destination be absent
+/// it, or its removal; a case-only rename, whose name is its own source, waits
+/// for none of them — because ADR 0031 lets a move's destination be absent
 /// at planning or vacated by another operation of the same plan, which the
 /// move then requires, and a create over a vacated name is the same act. A
 /// name nothing stands at needs nothing vacated, so an operation vacating it
@@ -153,6 +154,13 @@ fn explicit_requirements(
 
 /// For each move and create whose name a document stands at, every other
 /// operation that vacates that name.
+///
+/// **A move onto its own identity waits for nothing.** On a root that folds
+/// case a case-only rename's destination is its source (ADR 0031): the name
+/// it arrives at is the one it vacates, so the document standing there is the
+/// one it moves, and no other operation has to vacate it first. An operation
+/// vacating that name later in the plan — a removal, a move on, a rename
+/// back — acts on the document at its new spelling, in plan order.
 fn vacating_requirements<V: VaultView>(
     operations: &[Operation],
     view: &V,
@@ -165,13 +173,14 @@ fn vacating_requirements<V: VaultView>(
         }
     }
     let mut after = Vec::with_capacity(operations.len());
-    for (position, operation) in operations.iter().enumerate() {
+    for operation in operations {
         let mut vacated_first = Vec::new();
         if let Some(name) = arrives_at(&operation.kind).and_then(identity)
+            && vacates(&operation.kind).and_then(identity).as_ref() != Some(&name)
             && let Some(vacating) = vacaters.get(&name)
             && matches!(view.entry(&name)?, Entry::Document { .. })
         {
-            vacated_first.extend(vacating.iter().copied().filter(|&at| at != position));
+            vacated_first.extend(vacating.iter().copied());
         }
         after.push(vacated_first);
     }

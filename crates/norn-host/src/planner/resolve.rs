@@ -1011,6 +1011,73 @@ mod tests {
     }
 
     #[test]
+    fn after_a_case_only_rename_the_document_can_be_removed_at_its_new_spelling() {
+        let vault = MemoryVault::with(&[("Notes.md", "N")]).folding_case();
+        let resolution = planned(
+            &vault,
+            vec![moving("Notes.md", "notes.md"), deleting("notes.md")],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("Notes.md", present("N"), FileState::absent()),
+                transition("notes.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn after_a_case_only_rename_the_document_can_be_moved_on() {
+        let vault = MemoryVault::with(&[("Notes.md", "N")]).folding_case();
+        let resolution = planned(
+            &vault,
+            vec![moving("Notes.md", "notes.md"), moving("notes.md", "b.md")],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("Notes.md", present("N"), FileState::absent()),
+                transition("b.md", FileState::absent(), present("N")),
+                transition("notes.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_case_only_rename_and_its_rename_back_resolve_as_a_chain_through_an_absent_name() {
+        let vault = MemoryVault::with(&[("Notes.md", "N")]).folding_case();
+        let resolution = planned(
+            &vault,
+            vec![
+                moving("Notes.md", "notes.md"),
+                moving("notes.md", "Notes.md"),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("Notes.md", present("N"), present("N")),
+                transition("notes.md", FileState::absent(), FileState::absent()),
+            ]
+        );
+    }
+
+    #[test]
     fn on_a_folding_root_two_spellings_of_one_document_compose_as_one_target() {
         let vault = MemoryVault::with(&[("A.md", "one two")]).folding_case();
         let resolution = planned(

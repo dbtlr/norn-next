@@ -15,8 +15,9 @@
 //!   the faults `request/plan-invalid` answers — an identifier carried twice,
 //!   a requirement nothing carries, a cycle of requirements, and a cycle of
 //!   content, such as two documents exchanging places. A move or a create
-//!   waits for what vacates its name only where a document stands there at
-//!   planning, so the vault decides whether a chain of moves is a cycle.
+//!   waits for what vacates its name only where a document other than its
+//!   own source stands there at planning, so the vault decides whether a
+//!   chain of moves is a cycle.
 //! - [`compose`] — each file's after-bytes from its before-bytes and the
 //!   operations touching it, in that order. An operation that cannot act on
 //!   what it meets — an edit whose text does not occur exactly once, a create
@@ -44,9 +45,11 @@
 //! source only in case names the source itself (ADR 0031), so a case-only
 //! rename plans as a move — the old spelling from present to absent and the
 //! new one from absent to present — which the applier publishes as
-//! `norn-fs`'s respell. A folder's change of case is not planned: an
-//! operation naming a folder in a case the tree does not list is left
-//! unresolved.
+//! `norn-fs`'s respell. The name it arrives at is the one it vacates, so it
+//! waits for no other operation vacating that name, and an operation after it
+//! in the plan — a removal, a move on, a rename back — acts on the document at
+//! its new spelling. A folder's change of case is not planned: an operation
+//! naming a folder in a case the tree does not list is left unresolved.
 //!
 //! **Before-states are read from the files, not the store.** A before-state is
 //! the hash of the bytes a target is composed from, so both sides read them
