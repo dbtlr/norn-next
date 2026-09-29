@@ -1543,3 +1543,36 @@ fn an_apply_admitted_during_a_watcher_poll_takes_the_claim_where_the_poll_ends()
     applied(answer_of(pending));
     drop((lease, host));
 }
+
+/// **Damage a read carries to an apply's claim while it runs is published
+/// where the apply ends, with the rebuild as the claim's next work.** A fact
+/// the watcher delivered meanwhile waits for the rebuild's own heal rather
+/// than for a reconcile turn run over the damaged store.
+#[test]
+fn damage_carried_to_a_running_apply_is_published_where_it_ends_ahead_of_its_facts() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+    let reconciled = ops.reconciles.load(Ordering::SeqCst);
+    let _ = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    drop(hold);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.apply_release.store(true, Ordering::SeqCst);
+
+    applied(answer_of(pending));
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    assert_eq!(
+        ops.reconciles.load(Ordering::SeqCst),
+        reconciled,
+        "a reconcile turn ran over the damage the read met"
+    );
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
