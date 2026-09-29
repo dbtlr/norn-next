@@ -7621,6 +7621,18 @@ fn run_apply_job<O: EntryOps>(
         // not stopped at its check before publication, and is answered not
         // applied with the cause the teardown publishes. The coverage goes
         // back where the leg ends.
+        //
+        // The heal the apply owes and the damage its snapshot met are not
+        // recorded here, because every move past a running apply's leg — a
+        // conflict park, an identity refusal, the host's destruction, the
+        // leg's own unwind — gives its coverage to the ops. The own-write
+        // ledger goes with it, and the entry serves again only through an
+        // attach, whose heal walks the whole vault against the store with a
+        // ledger of its own. That teardown has cleared or will clear the
+        // pending set and the rung requirements for the store it gave back,
+        // so a fact recorded here would name coverage the entry no longer
+        // holds. An apply meets damage at its snapshot, before publication,
+        // so a damaged apply published nothing.
         let answer = match answer {
             Some(answer) if progress.began_publishing() => answer,
             _ => Err(progress.unanswered(|| state.apply_cause(&name))),

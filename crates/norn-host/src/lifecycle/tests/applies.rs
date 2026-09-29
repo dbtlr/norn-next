@@ -4,7 +4,9 @@
 //!
 //! Each case is one of the seam's named lifecycle cases, run against the
 //! fake ops: the apply job's own work — planning, the applier, the changeset
-//! — is the ops', and what is pinned here is the choreography around it. The
+//! — is the ops', and what is pinned here is the choreography around it. A
+//! case whose claim is about the store the choreography leaves runs the
+//! production ops under a thin wrapper instead. The
 //! hosts here run no ambient dispatcher tick inside a case, so anything that
 //! ran did so without one.
 
@@ -1637,4 +1639,214 @@ fn an_apply_intake_publishes_healing_while_it_derives_and_ready_after() {
     ops.apply_release.store(true, Ordering::SeqCst);
     applied(answer_of(pending));
     drop((lease, host));
+}
+
+/// Production ops whose apply, once it has published and failed its
+/// changeset, holds its leg until the case releases it, so a teardown can
+/// move the entry past the leg while the apply's heal is still in hand.
+struct HeldAfterItsChangeset {
+    inner: crate::production::ProductionEntryOps,
+    ended: std::sync::atomic::AtomicBool,
+    release: std::sync::atomic::AtomicBool,
+}
+
+impl EntryOps for Arc<HeldAfterItsChangeset> {
+    type Attachment = crate::production::ProductionAttachment;
+    fn attach(
+        &self,
+        registration: &Registration,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
+        self.inner.attach(registration, progress)
+    }
+    fn reconcile(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        work: ReconcileWork,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        self.inner.reconcile(name, attachment, work, progress)
+    }
+    fn recover(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
+        self.inner.recover(name, attachment, progress)
+    }
+    fn rebuild(
+        &self,
+        name: &VaultName,
+        attachment: Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
+        self.inner.rebuild(name, attachment, progress)
+    }
+    fn poll(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+    ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        self.inner.poll(name, attachment)
+    }
+    fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+        self.inner.detach(name, attachment)
+    }
+    fn discard(&self, name: &VaultName) {
+        self.inner.discard(name)
+    }
+    fn count_leg_mint(&self, statements: u64) {
+        self.inner.count_leg_mint(statements);
+    }
+    fn active_fingerprints(&self, attachment: &Self::Attachment) -> Option<ActiveFingerprints> {
+        self.inner.active_fingerprints(attachment)
+    }
+    fn control_root(&self, attachment: &Self::Attachment) -> Option<std::path::PathBuf> {
+        self.inner.control_root(attachment)
+    }
+    fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+        self.inner.active_content_model(attachment)
+    }
+    fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+        self.inner.plan_ground(attachment)
+    }
+    fn apply(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        plan: PlanDocument,
+        progress: &ApplyProgress,
+        reporter: &ProgressReporter<Self::Attachment>,
+    ) -> ApplyEnd {
+        let ended = self.inner.apply(name, attachment, plan, progress, reporter);
+        self.ended.store(true, Ordering::SeqCst);
+        wait_for_flag("the case to release the apply", &self.release);
+        ended
+    }
+}
+
+/// **An apply whose changeset failed after it published, over an entry a
+/// park moved past its leg, leaves the store to the attach that serves the
+/// entry again, and that attach derives what the apply published.** The apply
+/// answers applied with the entry healing, and the paths it owes a heal are
+/// not queued on the parked entry: the park gives the coverage back — and the
+/// own-write ledger with it — so nothing serves the entry until an attach
+/// installs fresh coverage and walks the whole vault against the store. Until
+/// then the store still holds the bytes the apply replaced; after it, every
+/// row holds what the file on disk holds.
+#[cfg(unix)]
+#[test]
+fn an_apply_healing_over_a_park_is_healed_by_the_attach_that_serves_again() {
+    let _watcher = norn_testkit::isolation::Lease::hold(
+        norn_testkit::isolation::REAL_WATCHER,
+        norn_testkit::isolation::acquisition_budget(lifecycle_wait_budget()),
+    );
+    let scratch = temp_base("apply-healing-over-a-park");
+    let name = VaultName::new("notes").unwrap();
+    let root = scratch.root().join("notes");
+    std::fs::create_dir_all(root.join(".norn")).unwrap();
+    std::fs::write(root.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+    std::fs::write(root.join("note.md"), "status draft\n").unwrap();
+    std::fs::write(root.join("other.md"), "other\n").unwrap();
+    let dirs =
+        norn_config::ConfigDirs::new(scratch.root().join("config"), scratch.root().join("data"))
+            .unwrap();
+    let database = dirs.derived_dir(&name).join("store.sqlite3");
+    let order = crate::production::stored_path_order(
+        norn_fs::PathNormalizer::detect(&root)
+            .unwrap()
+            .case_sensitivity(),
+    );
+    let ops = Arc::new(HeldAfterItsChangeset {
+        inner: crate::production::ProductionEntryOps::new(
+            dirs,
+            crate::production::ProductionPolicy::new(2, 2).unwrap(),
+        ),
+        ended: std::sync::atomic::AtomicBool::new(false),
+        release: std::sync::atomic::AtomicBool::new(false),
+    });
+    let host = Host::new(
+        Roots::Created(&[(&name, root.as_path())]).registry(),
+        Arc::clone(&ops),
+        no_ambient_poll_policy(1),
+    )
+    .unwrap();
+    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+
+    let open = || norn_store::Store::open(&database, order, crate::DERIVATION_VERSION).unwrap();
+    let stored_hash = |path: &str| {
+        open()
+            .begin_request()
+            .stored_document(&norn_store::DocumentPath::new(path).unwrap())
+            .unwrap()
+            .map(|row| row.content_hash)
+    };
+    let hash_of = |bytes: &[u8]| Some(norn_fs::ContentHash::of(bytes).to_string());
+    // The trigger goes in and out beside the store rather than through an
+    // open of it, which would judge the foreign schema object damage.
+    let out_of_band = |sql: &str| match norn_db::connect(&database).unwrap() {
+        norn_db::Attempt::Connected(connection) => connection.execute_batch(sql).unwrap(),
+        norn_db::Attempt::Unreadable { detail } => panic!("the store is unreadable: {detail}"),
+    };
+    out_of_band(
+        "CREATE TRIGGER refuse_every_write BEFORE UPDATE ON documents \
+         BEGIN SELECT RAISE(ABORT, 'induced'); END;",
+    );
+
+    let plan = norn_wire::AuthoredPlan::new(
+        VaultAddress::name(name.clone()),
+        vec![norn_wire::Operation::new(
+            norn_wire::OperationKind::str_replace(
+                norn_wire::DocumentPath::new("note.md").unwrap(),
+                "draft",
+                "final",
+            ),
+        )],
+    );
+    let pending = host
+        .admit_apply(&name, PlanDocument::operations(plan))
+        .expect("admitted");
+    wait_for_flag("the apply to end", &ops.ended);
+    out_of_band("DROP TRIGGER refuse_every_write;");
+    refuse_conflict(&host.shared, &conflict_over(&name));
+    ops.release.store(true, Ordering::SeqCst);
+    match applied(answer_of(pending)) {
+        ApplyReport::Applied { changeset, .. } => {
+            assert_eq!(changeset, ChangesetOutcome::Healing);
+        }
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("note.md")).unwrap(),
+        "status final\n"
+    );
+    // The park answers every read, so what says the coverage is back is the
+    // trust beneath it.
+    wait_until(
+        "the leg to give the coverage back",
+        lifecycle_wait_budget(),
+        || {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            match &state.trust {
+                TrustState::Unattached if !state.coverage.in_hand() => Observed::Met(()),
+                trust => Observed::pending(format!("the entry stands at {trust:?}")),
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        stored_hash("note.md"),
+        hash_of(b"status draft\n"),
+        "something healed the store before an attach served the entry again"
+    );
+
+    let again = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(stored_hash("note.md"), hash_of(b"status final\n"));
+    assert_eq!(stored_hash("other.md"), hash_of(b"other\n"));
+    drop((again, lease, host));
 }
