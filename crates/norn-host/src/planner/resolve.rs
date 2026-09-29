@@ -777,6 +777,83 @@ mod tests {
     }
 
     #[test]
+    fn a_move_away_from_a_name_a_move_fills_moves_the_document_that_arrived() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let operations = vec![
+            moving("b.md", "x.md"),
+            moving("a.md", "b.md"),
+            moving("b.md", "y.md"),
+        ];
+        let resolution = planned(&vault, operations.clone());
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(resolution.plan.operations, operations);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("A"), FileState::absent()),
+                transition("b.md", present("B"), FileState::absent()),
+                transition("x.md", FileState::absent(), present("B")),
+                transition("y.md", FileState::absent(), present("A")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_removal_after_a_create_over_a_removed_name_removes_the_created_document() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let operations = vec![deleting("a.md"), creating("a.md", "new"), deleting("a.md")];
+        let resolution = planned(&vault, operations.clone());
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(resolution.plan.operations, operations);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition("a.md", present("A"), FileState::absent())]
+        );
+    }
+
+    #[test]
+    fn each_vacater_of_a_name_vacates_the_occupant_its_place_in_plan_order_pairs_it_with() {
+        let vault = MemoryVault::with(&[("a.md", "old")]);
+        let operations = vec![
+            creating("a.md", "new"),
+            moving("a.md", "b.md"),
+            moving("a.md", "c.md"),
+        ];
+        let resolution = planned(&vault, operations.clone());
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        // The first move vacates the document standing at planning, the
+        // create fills the name, and the second move carries what it made.
+        assert_eq!(
+            resolution.plan.operations,
+            vec![
+                operations[1].clone(),
+                operations[0].clone(),
+                operations[2].clone()
+            ]
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition("a.md", present("old"), FileState::absent()),
+                transition("b.md", FileState::absent(), present("old")),
+                transition("c.md", FileState::absent(), present("new")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_move_onto_itself_is_unresolved_rather_than_a_cycle() {
         let vault = MemoryVault::with(&[("a.md", "A")]);
         let resolution = planned(&vault, vec![moving("a.md", "a.md")]);

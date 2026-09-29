@@ -14,16 +14,16 @@ use super::view::{Entry, VaultView};
 /// Which operations each operation runs after, by position.
 ///
 /// **Two kinds of requirement.** An operation runs after the operations its
-/// `requires` names. A move or a create whose name a document stands at also
-/// runs after every other operation that vacates that name — a move away from
-/// it, or its removal; a case-only rename, whose name is its own source, waits
-/// for none of them — because ADR 0031 lets a move's destination be absent
-/// at planning or vacated by another operation of the same plan, which the
-/// move then requires, and a create over a vacated name is the same act. A
-/// name nothing stands at needs nothing vacated, so an operation vacating it
-/// later in the plan is no requirement. The second kind is read against what
-/// the vault holds at planning, by identity, so it is the vault that decides
-/// whether a chain of moves closes a cycle.
+/// `requires` names. It also runs after whatever must leave a name first:
+/// a move or a create arriving at a name runs after the operation vacating
+/// the document before it there, and a move away from a name or its removal
+/// runs after the arrival of the document it vacates, pairing the name's
+/// occupants and its vacaters in plan order (see `vacating_requirements`).
+/// ADR 0031 lets a move's destination be absent at planning or vacated by
+/// another operation of the same plan, which the move then requires, and a
+/// create over a vacated name is the same act. The second kind is read
+/// against what the vault holds at planning, by identity, so it is the vault
+/// that decides whether a chain of moves closes a cycle.
 pub(crate) struct Dependencies {
     /// For each position, the positions it runs after, ascending.
     after: Vec<Vec<usize>>,
@@ -152,37 +152,71 @@ fn explicit_requirements(
         .collect()
 }
 
-/// For each move and create whose name a document stands at, every other
-/// operation that vacates that name.
+/// For each operation, the operations that must vacate a name before it.
 ///
-/// **A move onto its own identity waits for nothing.** On a root that folds
-/// case a case-only rename's destination is its source (ADR 0031): the name
-/// it arrives at is the one it vacates, so the document standing there is the
-/// one it moves, and no other operation has to vacate it first. An operation
-/// vacating that name later in the plan — a removal, a move on, a rename
-/// back — acts on the document at its new spelling, in plan order.
+/// **Occupants and vacaters pair in plan order.** A name is held in turn by
+/// its occupants: the document standing there at planning, if one does, then
+/// each operation arriving there — a move to it or a create at it — in plan
+/// order. The operations vacating it — a move away from it, or its removal —
+/// pair with those occupants in plan order, the first vacating the first
+/// occupant, the second the second, and so on. Each arrival runs after the
+/// vacater of the occupant before it, and each vacater of an arrived document
+/// runs after that arrival. So `[create a, move a→b, move a→c]` over a vault
+/// holding `a` runs the first move, then the create, then the second move,
+/// which carries the created document. A vacater or an arrival with no partner
+/// orders nothing and composes as it stands.
+///
+/// **A move onto its own identity is no occupant and no vacater.** On a root
+/// that folds case a case-only rename's destination is its source (ADR 0031):
+/// the name it arrives at is the one it vacates, so the document standing
+/// there is the one it moves, and no other operation has to vacate it first.
+/// An operation vacating that name later in the plan — a removal, a move on,
+/// a rename back — acts on the document at its new spelling, in plan order.
 fn vacating_requirements<V: VaultView>(
     operations: &[Operation],
     view: &V,
 ) -> Result<Vec<Vec<usize>>, V::Error> {
+    #[derive(Default)]
+    struct Traffic {
+        arrivals: Vec<usize>,
+        vacaters: Vec<usize>,
+    }
     let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
-    let mut vacaters: BTreeMap<NormalizedPath, Vec<usize>> = BTreeMap::new();
+    let mut traffic: BTreeMap<NormalizedPath, Traffic> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
-        if let Some(vacated) = vacates(&operation.kind).and_then(identity) {
-            vacaters.entry(vacated).or_default().push(position);
+        let arrives = arrives_at(&operation.kind).and_then(identity);
+        let vacated = vacates(&operation.kind).and_then(identity);
+        if arrives.is_some() && arrives == vacated {
+            continue;
+        }
+        if let Some(name) = arrives {
+            traffic.entry(name).or_default().arrivals.push(position);
+        }
+        if let Some(name) = vacated {
+            traffic.entry(name).or_default().vacaters.push(position);
         }
     }
-    let mut after = Vec::with_capacity(operations.len());
-    for operation in operations {
-        let mut vacated_first = Vec::new();
-        if let Some(name) = arrives_at(&operation.kind).and_then(identity)
-            && vacates(&operation.kind).and_then(identity).as_ref() != Some(&name)
-            && let Some(vacating) = vacaters.get(&name)
-            && matches!(view.entry(&name)?, Entry::Document { .. })
-        {
-            vacated_first.extend(vacating.iter().copied());
+    let mut after = vec![Vec::new(); operations.len()];
+    for (name, Traffic { arrivals, vacaters }) in &traffic {
+        if arrivals.is_empty() || vacaters.is_empty() {
+            continue;
         }
-        after.push(vacated_first);
+        // Each occupant in turn: `None` for the document standing at
+        // planning, otherwise the position of the operation arriving.
+        let standing = matches!(view.entry(name)?, Entry::Document { .. });
+        let occupants = standing
+            .then_some(None)
+            .into_iter()
+            .chain(arrivals.iter().copied().map(Some));
+        for (turn, occupant) in occupants.enumerate() {
+            let Some(arrival) = occupant else { continue };
+            if let Some(&previous) = turn.checked_sub(1).and_then(|before| vacaters.get(before)) {
+                after[arrival].push(previous);
+            }
+            if let Some(&vacater) = vacaters.get(turn) {
+                after[vacater].push(arrival);
+            }
+        }
     }
     Ok(after)
 }
