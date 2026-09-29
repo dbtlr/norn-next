@@ -34,7 +34,9 @@
 //!   operations' targets draw on each other's before-states through a name
 //!   nothing stood at, such as two documents exchanging places through a
 //!   temporary name, the plan is refused as `request/plan-invalid`, as a
-//!   direct exchange is by [`order`].
+//!   direct exchange is by [`order`]. The same derivation is the applier's:
+//!   it follows a resolved plan's content through its moves in the recorded
+//!   order, and refuses its content cycles by this one rule.
 //! - [`forecast`](mod@forecast) — the folders the plan makes and removes.
 //!
 //! **Composition is shared with the applier.** A target's after-bytes are a
@@ -84,13 +86,14 @@
 //! Planning itself holds the bytes of every file the plan touches until it
 //! answers.
 //!
-//! **A dormant carrier.** Its consumers are NORN-295's own later layers: the
-//! applier, which recomposes every target and re-resolves operations through
-//! this planner for refuse-and-refresh, and `Host::apply`, which plans an
-//! authored plan inside the entry's claim over a [`view::TreeView`] and plans
-//! a preview on one snapshot. Neither has landed, so nothing outside this
-//! module's own tests reaches it yet, and its contract is held by those tests
-//! alone, one of them over a tree on disk.
+//! **A dormant carrier.** Its consumers are NORN-295's own layers: the
+//! applier ([`crate::applier`]), which recomposes every target through
+//! [`compose::compose`] and re-resolves a refused plan's operations through
+//! [`resolve::resolve`] for refuse-and-refresh; and `Host::apply`, which plans
+//! an authored plan inside the entry's claim over a [`view::TreeView`] and
+//! plans a preview on one snapshot. The applier is itself reached only by
+//! that job, which has not landed, so nothing outside this crate's tests
+//! reaches the planner yet.
 
 pub(crate) mod compose;
 pub(crate) mod forecast;

@@ -145,7 +145,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                     "a folder stands at `{path}`, where a document would be"
                 )));
             }
-            Entry::Blocked { detail } => return Ok(Place::NoFile(detail)),
+            Entry::Blocked { detail, .. } => return Ok(Place::NoFile(detail)),
         };
         if let Some(detail) = unholdable(&spelling) {
             return Ok(Place::NoFile(detail));

@@ -48,3 +48,6 @@ norn-fixtures = { path = "../norn-fixtures" }
 norn-fs = { path = "../norn-fs", features = ["test-support"] }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }
+# The applier's process-death cases hand a resolved plan to a child and read
+# its outcome back, both as the wire's JSON.
+serde_json = { workspace = true }

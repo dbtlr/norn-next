@@ -813,9 +813,12 @@ impl Drop for Subscription {
 /// A cloneable recorder for outcomes produced by Norn's write kernel.
 ///
 /// Recorder handles do not keep the subscription or platform watcher alive.
-/// Layer 4 plan-apply keeps one beside its attachment so writes made through
-/// Norn can be hash-confirmed and suppressed when the watcher reports them
-/// back. It is intentionally live before that layer exists.
+/// A host keeps one beside its attachment, and the one applier (Layer 4
+/// plan-apply, `norn-host`'s `applier`) records every publication through it
+/// the moment it lands, so writes made through Norn can be hash-confirmed and
+/// suppressed when the watcher reports them back. It is live before its
+/// production caller: the applier is reached only by its own cases until
+/// NORN-295's `Host::apply` job lands.
 #[derive(Clone)]
 pub struct OwnWrites {
     ledger: Weak<Mutex<Ledger>>,

@@ -60,7 +60,24 @@ pub(crate) enum Entry {
     /// Something no document can be read from or made at: an entry that is
     /// neither a document nor a folder, a name beneath one that is not a
     /// folder, or a place the vault's walk does not enter.
-    Blocked { detail: String },
+    Blocked { detail: String, barrier: Barrier },
+}
+
+/// What keeps a document from a name.
+///
+/// **The two differ in who can lift them.** Another writer can take away an
+/// entry that stands in the way, so a plan resolved before it arrived meets a
+/// taken name, which the applier judges as it would any; no writer makes a
+/// place the vault does not read into one it does, so a plan naming one is
+/// not what its operations do, whatever it says of the name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Barrier {
+    /// Something that is not a folder stands at the name or above it: a
+    /// document, a link, or any other entry.
+    Occupied,
+    /// The vault reads no documents there: its mechanism folder, the shadow
+    /// home, a root the host excludes, or a spelling that is no document path.
+    Closed,
 }
 
 /// The wire's content hash of `hash`: the filesystem layer's SHA-256, spelled
@@ -221,6 +238,7 @@ fn spelled(at: &Path) -> Entry {
 fn not_a_document_path(at: &Path) -> Entry {
     Entry::Blocked {
         detail: format!("`{}` is not spelled as a document path", at.display()),
+        barrier: Barrier::Closed,
     }
 }
 
@@ -235,23 +253,28 @@ impl VaultView for TreeView {
         let (kind, at) = match self.reach(path.as_path())? {
             Reach::Refused(skip) => {
                 let root = skip.path().as_path().display();
-                let detail = match skip.reason() {
-                    SkipReason::UnderAnEntry => format!(
-                        "`{}` lies beneath an entry that is not a folder",
-                        path.as_path().display()
+                let (detail, barrier) = match skip.reason() {
+                    SkipReason::UnderAnEntry => (
+                        format!(
+                            "`{}` lies beneath an entry that is not a folder",
+                            path.as_path().display()
+                        ),
+                        Barrier::Occupied,
                     ),
-                    SkipReason::SymbolicLink(_) => {
-                        format!("`{root}` is a symbolic link, which the vault does not follow")
-                    }
-                    SkipReason::HostExclusion
-                    | SkipReason::Mechanism
-                    | SkipReason::Shadow
-                    | SkipReason::SpecialFile(_)
-                    | SkipReason::Vanished => {
-                        format!("`{root}` is a place the vault does not read documents at")
-                    }
+                    SkipReason::SymbolicLink(_) => (
+                        format!("`{root}` is a symbolic link, which the vault does not follow"),
+                        Barrier::Occupied,
+                    ),
+                    SkipReason::SpecialFile(_) | SkipReason::Vanished => (
+                        format!("`{root}` is a place the vault does not read documents at"),
+                        Barrier::Occupied,
+                    ),
+                    SkipReason::HostExclusion | SkipReason::Mechanism | SkipReason::Shadow => (
+                        format!("`{root}` is a place the vault does not read documents at"),
+                        Barrier::Closed,
+                    ),
                 };
-                return Ok(Entry::Blocked { detail });
+                return Ok(Entry::Blocked { detail, barrier });
             }
             Reach::Stands { kind, at } => (kind, at),
         };
@@ -263,6 +286,7 @@ impl VaultView for TreeView {
                     "something that is neither a document nor a folder stands at `{}`",
                     at.as_path().display()
                 ),
+                barrier: Barrier::Occupied,
             },
             PathKind::RegularFile => {
                 let Some(spelling) = document_path(at.as_path()) else {
@@ -421,6 +445,7 @@ pub(crate) mod memory {
                             "`{}` lies beneath an entry that is not a folder",
                             asked.display()
                         ),
+                        barrier: super::Barrier::Occupied,
                     });
                 }
             }
@@ -524,11 +549,11 @@ mod tests {
         assert!(
             matches!(entry(&view, "folder/new.md"), Entry::Absent { at } if at.as_str() == "folder/new.md")
         );
-        let Entry::Blocked { detail } = entry(&view, "folder/a.md/under.md") else {
+        let Entry::Blocked { detail, .. } = entry(&view, "folder/a.md/under.md") else {
             panic!("nothing is made beneath a document");
         };
         assert!(detail.contains("beneath"), "{detail}");
-        let Entry::Blocked { detail } = entry(&view, "link/a.md") else {
+        let Entry::Blocked { detail, .. } = entry(&view, "link/a.md") else {
             panic!("nothing is read through a link");
         };
         assert!(detail.contains("symbolic link"), "{detail}");

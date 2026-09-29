@@ -2359,10 +2359,25 @@ A plan is a self-contained value naming its vault by address and carrying the va
 identity: the host holds no plan between requests. A resolved plan carries its operations,
 each target's before- and after-state, and the conditions its planning read, never the
 bytes of a file it did not author. Every template value resolves at planning, so the
-applier recomposes each target as a pure function of the before-states and the operations
-and refuses unless the result hashes to the after-state. A source is not replaced or
-removed until every other target drawing content from it has durably landed, and a plan
-whose content dependencies form a cycle is refused at planning. Each condition is recorded
+applier recomposes each target as a pure function of the before-states and the operations:
+before staging anything it runs the plan's operations again, through the planner's own
+ordering and composition, over the vault with every target at its recorded before-state and
+in the plan's recorded order, and refuses unless that order is the one the operations'
+dependencies give and the result is exactly the plan's transitions — one per file, none
+missing, added, repeated or changed, every operation acting and every author condition the
+operations carry checked. A plan that fails this is not what its operations do, so its own
+shape is wrong: it answers `request/plan-invalid` with a `transitions_disagree` fault
+naming every file it disagrees at, and no fresh plan, since no target drifted and the
+caller's fix is to preview its operations again. Whether the transitions name exactly the
+files the operations touch, each once by the vault's own identity rule, is judged before
+the vault is read, so a transition no operation accounts for is never reported as drift,
+whatever before-state it guesses; a changed before-state on a file an operation touches is
+drift, as a foreign edit is. A source is not
+replaced or removed until every other target drawing content from it has durably landed,
+and a plan whose content dependencies form a cycle is refused at planning; the applier
+refuses one as `request/plan-invalid` too, by the planner's one content-cycle rule over
+the plan's recorded order, a cycle closed through a name the plan makes and removes again
+among them. Each condition is recorded
 and checked as the vault would stand with every target of the plan at its after-state,
 after taking in the facts the watcher has delivered, so a plan's own progress never
 changes one.
@@ -2458,7 +2473,9 @@ Four contracts inside that flow carry weight:
   its staging can stop it part-way, and the apply report names every target that landed. A
   foreign write between a target's final verification and its rename is overwritten, the
   write protocol's stated residual race. A move interrupted between its legs leaves both
-  names holding the document.
+  names holding the document. A folder the removals left empty that cannot be removed is
+  left: the plan is still applied, the report's removed folders omit it — the wire names no
+  failure for it — and a re-send empties it again.
 - **Re-applying finishes a resolved plan.** A target at its after-state, absence included,
   is landed, not drifted, so re-sending a resolved plan a crash or an I/O failure
   interrupted completes it with no journal and no rollback. A move's source found absent
@@ -2468,8 +2485,16 @@ Four contracts inside that flow carry weight:
   uninterrupted apply commits one changeset to its registration's store, so a read there
   sees the whole state before or after it. Re-sending operations is a new change.
 - **Write-through.** The worker composed the post-state, so the increment writes it —
-  database updates scoped to the blast radius, composing supplied facts and re-deriving
-  nothing. The bar is **mark-invariance**: the same changeset reads the same derivation
+  database updates scoped to the blast radius, marked composed. The applier holds no byte of
+  a document between staging and publication, so the memory bar holds for a vault-wide
+  plan; the changeset therefore reads each landed document back through the anchored read
+  and derives it by the one derivation every heal runs, only where its bytes still hash to
+  what was published, which is the composed post-state byte for byte. A path the plan left
+  absent dies unless the tree lists a document at exactly its spelling, so a case-only
+  rename's retired spelling dies on a volume that folds it into the new one. A path another
+  writer changed between publication and the changeset is left out, and the watcher reports
+  it, because the own-write ledger's entry names what was published rather than what the
+  path holds. The bar is **mark-invariance**: the same changeset reads the same derivation
   counters whether it is marked derived or composed. The one counter that names a
   computation is the canonical-JSON projection of supplied frontmatter, which is storage
   encoding rather than recomputation and runs the identical code path under both marks — so
@@ -2478,8 +2503,10 @@ Four contracts inside that flow carry weight:
   forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
   drops operations whose targets all landed and re-resolves only operations none of whose
   targets landed; an operation part-landed, one that no longer resolves (a move whose
-  destination is no longer absent among them), and one requiring an unresolved operation,
-  directly or through others, are listed as unresolved for the caller. Hashes cannot tell whether a drifted
+  destination is no longer absent among them), one requiring an unresolved operation, and
+  one touching a file an unresolved operation touches, since operations on one file stand
+  or fall together — each directly or through others — are listed as unresolved for the
+  caller. Hashes cannot tell whether a drifted
   target already carries the plan's change, so the forecast marks every drifted target and
   applying the fresh plan is the caller's decision. Auto-rebase on drift is deliberately
   rejected: a changed world deserves a re-plan.

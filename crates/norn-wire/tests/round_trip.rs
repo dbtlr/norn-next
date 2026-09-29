@@ -7395,6 +7395,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::unknown_requirement(2, operation_id("make-z")),
         PlanFault::requires_cycle(vec![1, 2]),
         PlanFault::content_cycle(vec![0, 1]),
+        PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
     ]
 }
 
@@ -7821,6 +7822,19 @@ fn the_apply_reasons_are_tagged_objects() {
     assert_eq!(
         wire(&PlanFault::content_cycle(vec![0, 1])),
         r#"{"kind":"content_cycle","positions":[0,1]}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::transitions_disagree(vec![path("notes/a.md")])),
+        r#"{"kind":"transitions_disagree","paths":["notes/a.md"]}"#
+    );
+    assert_eq!(
+        PlanFault::transitions_disagree(vec![
+            path("notes/b.md"),
+            path("notes/a.md"),
+            path("notes/b.md"),
+        ]),
+        PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
+        "the constructor names each file once, in order"
     );
 }
 

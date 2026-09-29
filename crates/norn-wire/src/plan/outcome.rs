@@ -7,10 +7,11 @@
 //! [`UnresolvedOperation`] each operation the fresh plan leaves for the caller
 //! to dispose of. An interruption is a failure that partly landed, not a
 //! refusal: [`InterruptionCause`] names what stopped publication, and sending
-//! the plan again finishes it. A fault is in the plan's own shape, judged
-//! apart from the vault: [`PlanFault`] names it and the operations involved,
-//! by their position in the plan's operation list, because an operation need
-//! not carry an identifier.
+//! the plan again finishes it. A fault is in the plan's own shape:
+//! [`PlanFault`] names it and the operations involved, by their position in
+//! the plan's operation list, because an operation need not carry an
+//! identifier, or, for a resolved plan whose transitions are not what its
+//! operations do, the files involved.
 //!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
@@ -217,11 +218,12 @@ impl InterruptionCause {
 }
 
 /// What is wrong with a plan's own shape. Every fault but a content cycle
-/// is one whatever vault the plan is for; a content cycle is judged against
-/// what the vault holds at planning, since only a name a document stands at
-/// makes an operation wait for what vacates it, and only a document standing
-/// at planning has content another target can draw on. An operation is named
-/// by its position in the plan's operation list, counting from 0.
+/// and a resolved plan's disagreeing transitions is one whatever vault the
+/// plan is for; a content cycle is judged against what the vault holds at
+/// planning, since only a name a document stands at makes an operation wait
+/// for what vacates it, and only a document standing at planning has content
+/// another target can draw on. An operation is named by its position in the
+/// plan's operation list, counting from 0; a file, by its path.
 ///
 /// On the wire a fault is an object tagged `kind`:
 /// `{"kind":"duplicate_id","id":"move-a","positions":[0,3]}`.
@@ -269,6 +271,26 @@ pub enum PlanFault {
         /// in the order they compose, then those of the target it draws on.
         positions: Vec<usize>,
     },
+    /// A resolved plan's transitions are not what its operations do from its
+    /// before-states: a transition is missing, added, repeated or changed, a
+    /// target is at a place the vault reads no documents at or the store
+    /// cannot name, an operation does not act or is recorded out of the order
+    /// its requirements allow, or an author condition its operations carry is
+    /// not one the plan checks. Planning never makes such a plan; one sent
+    /// back altered is refused whole, since none of its transitions can be
+    /// trusted to say what would land. Preview its operations again.
+    ///
+    /// **Named by path, not by operation position**: a transition is one
+    /// file's, and a file's transition is composed from every operation
+    /// touching it, so the file is what disagrees.
+    #[non_exhaustive]
+    TransitionsDisagree {
+        /// Every file the disagreement touches, sorted and each once as the
+        /// constructor builds it: every transition's path that disagrees,
+        /// and every path an operation writes or names that no transition or
+        /// checked condition matches.
+        paths: Vec<DocumentPath>,
+    },
 }
 
 impl PlanFault {
@@ -291,5 +313,15 @@ impl PlanFault {
     /// The operations at `positions` draw content from each other in a cycle.
     pub const fn content_cycle(positions: Vec<usize>) -> Self {
         PlanFault::ContentCycle { positions }
+    }
+
+    /// A resolved plan's transitions disagree with its operations at `paths`,
+    /// named each once and sorted, whatever order and repeats they are given
+    /// in. Reading a fault off the wire keeps its paths as sent, as every
+    /// other fault's positions are kept.
+    pub fn transitions_disagree(mut paths: Vec<DocumentPath>) -> Self {
+        paths.sort();
+        paths.dedup();
+        PlanFault::TransitionsDisagree { paths }
     }
 }
