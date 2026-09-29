@@ -1054,3 +1054,49 @@ fn a_maintenance_scan_yields_the_claim_to_an_apply_queued_before_it_began() {
     );
     drop((lease, host));
 }
+
+/// Whether `host` refuses the registration changes an apply holds off, and
+/// an explicit reload, over `name`: `vault unregister` and `vault set` as
+/// held, and the reload as unavailable.
+fn registration_changes_refuse_as_held(host: &Host<Arc<FakeOps>>, name: &VaultName) {
+    assert_eq!(
+        host.unregister(name, false),
+        Err(RegistrationRefusal::Serving(ServingRefusal::Held)),
+        "vault unregister was not refused as held"
+    );
+    assert_eq!(
+        host.set(&SetParams::new(name.clone())).map(|_| ()),
+        Err(RegistrationRefusal::Serving(ServingRefusal::Held)),
+        "vault set was not refused as held"
+    );
+}
+
+/// **Case 13: `vault unregister` and `vault set` refuse as held while an
+/// apply is queued or running, and an explicit reload refuses while applies
+/// are queued.** The apply first waits in the queue behind a reconcile turn,
+/// then runs held inside the fake; both changes refuse as held at each
+/// point, and the reload refuses while the apply is queued. Once the apply
+/// has answered, the vault still stands registered.
+#[test]
+fn registration_changes_refuse_as_held_while_an_apply_is_queued_or_running() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    hold_a_reconcile_turn(&ops, &host);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    registration_changes_refuse_as_held(&host, &name);
+    assert!(
+        matches!(host.reload(&name), Err(ReloadRefusal::Unavailable(_))),
+        "an explicit reload was not refused while an apply was queued"
+    );
+
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    wait_for_flag("apply_started", &ops.apply_started);
+    registration_changes_refuse_as_held(&host, &name);
+
+    ops.apply_release.store(true, Ordering::SeqCst);
+    applied(answer_of(pending));
+    assert!(host.shared.entries.get(&name).is_some());
+    drop((lease, host));
+}
