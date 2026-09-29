@@ -703,6 +703,29 @@ fn each_publication_is_recorded_as_an_own_write_when_it_lands() {
     );
 }
 
+/// A target whose content is drawn from another target's before-state
+/// publishes before that source is replaced, whatever the plan's own order
+/// says (ADR 0031): moving `a.md` onto `b.md` and creating `a.md` afresh
+/// lands `b.md` first, so a crash between the two leaves the moved content
+/// standing at one of its names.
+#[test]
+fn a_target_drawing_on_another_publishes_before_its_source_is_replaced() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+    let plan = fixture.plan(vec![
+        deleting("b.md"),
+        moving("a.md", "b.md"),
+        creating("a.md", "N\n"),
+    ]);
+    applied(fixture.apply(plan));
+    assert_eq!(
+        *fixture.recorded.calls.borrow(),
+        vec![(PathBuf::from("b.md"), true), (PathBuf::from("a.md"), true)],
+        "the target drawing on a.md lands before a.md is replaced"
+    );
+    assert_eq!(fixture.read("b.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("N\n"));
+}
+
 /// The kernel keeps a staged path as it was given, a leading `./` included,
 /// and a document path's grammar admits one: a plan naming a target so, as a
 /// hand-edited plan can, is refused as a plan that does not describe its
