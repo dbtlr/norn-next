@@ -1605,3 +1605,36 @@ fn an_apply_queued_behind_an_attach_whose_mint_fails_is_answered_with_the_reader
     assert!(ops.applies_ran.lock().unwrap().is_empty());
     drop(host);
 }
+
+/// **An apply's intake publishes the entry healing while it derives the
+/// facts it took in, and `Ready` again once it has.** A read meanwhile meets
+/// an entry taking in a change, as it would under a reconcile turn, rather
+/// than an answer the facts already delivered have overtaken.
+#[test]
+fn an_apply_intake_publishes_healing_while_it_derives_and_ready_after() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.block_reconcile.store(true, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+    assert!(
+        matches!(
+            host.state(&name),
+            Ok(TrustState::Warming {
+                phase: WarmingPhase::Healing,
+                ..
+            })
+        ),
+        "the intake derived under {:?}",
+        host.state(&name)
+    );
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    wait_for_flag("apply_started", &ops.apply_started);
+    assert_eq!(host.state(&name), answered(TrustState::Ready));
+    ops.apply_release.store(true, Ordering::SeqCst);
+    applied(answer_of(pending));
+    drop((lease, host));
+}
