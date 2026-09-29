@@ -899,3 +899,158 @@ fn an_apply_queued_during_a_schema_reload_runs_only_after_it_publishes_ready() {
     );
     drop(lease);
 }
+
+/// Two ready vaults on one worker, `a` and `b`, with an apply queued on
+/// `a` behind a reconcile turn and `b`'s reconcile filling the job queue
+/// when that turn ends: the turn's hand-off meets a full queue, and so does
+/// the send its leg's end tries again. Answers the host, the two names, the
+/// apply's handle and the leases.
+fn an_apply_handed_off_into_a_full_queue(
+    ops: &Arc<FakeOps>,
+    maintenance_due: bool,
+) -> (
+    Host<Arc<FakeOps>>,
+    VaultName,
+    PendingApply,
+    [DemandLease<Arc<FakeOps>>; 2],
+) {
+    let a = VaultName::new("a").unwrap();
+    let b = VaultName::new("b").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(ops), Roots::Absent(&[&a, &b]), 1);
+    let leases = [&a, &b].map(|name| {
+        let lease = host.demand(name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, name, TrustState::Ready);
+        lease
+    });
+    hold_a_reconcile_turn(ops, &host);
+    if maintenance_due {
+        arrange_for(&ops.maintenance_due_at, &a);
+    }
+    let pending = host.admit_apply(&a, a_plan(&a)).expect("admitted");
+    ops.block_reconcile.store(false, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    assert!(
+        host.shared
+            .entries
+            .get(&b)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .claim
+            .slot_taken(),
+        "b's reconcile is not waiting in the queue"
+    );
+
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+    let entry = host.shared.entries.get(&a).unwrap();
+    wait_until(
+        "a's hand-off to stand on its marker once b's reconcile ran",
+        lifecycle_wait_budget(),
+        || {
+            let state = entry.gate.lock().unwrap();
+            if ops.reconciles.load(Ordering::SeqCst) == 2
+                && state.claim.marker().is_some()
+                && !state.claim.slot_taken()
+            {
+                Observed::Met(())
+            } else {
+                Observed::pending("a's hand-off is not yet on its marker")
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    (host, a, pending, leases)
+}
+
+/// **Case 2, the turn's end: a turn in flight hands the claim to the queued
+/// apply itself, ahead of the maintenance it found due.** The hand-off meets
+/// a full queue, so the job it named stands as the entry's marker, which is
+/// read before anything runs it: it is the apply, not the maintenance scan a
+/// yield at the scan's own start would still answer for.
+#[test]
+fn a_turns_end_hands_the_claim_to_the_queued_apply_ahead_of_due_maintenance() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, a, pending, leases) = an_apply_handed_off_into_a_full_queue(&ops, true);
+    assert!(
+        matches!(
+            host.shared
+                .entries
+                .get(&a)
+                .unwrap()
+                .gate
+                .lock()
+                .unwrap()
+                .claim
+                .marker(),
+            Some(Job::Apply(..))
+        ),
+        "the turn's end handed the claim to other work than the queued apply"
+    );
+    retry_pending_dispatches(&host.shared);
+    applied(answer_of(pending));
+    assert_eq!(ops.maintenances.load(Ordering::SeqCst), 0);
+    drop((leases, host));
+}
+
+/// **Case 18: a full job queue on a hand-off to an apply retries through the
+/// marker.** The turn's hand-off to the queued apply meets a full queue, as
+/// does its leg's own retry, so the apply stands as the entry's marker with
+/// no queue slot, and it does not run. The next retry of refused dispatches
+/// sends it, and it runs.
+#[test]
+fn a_full_job_queue_on_a_hand_off_to_an_apply_retries_through_the_marker() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, _a, pending, leases) = an_apply_handed_off_into_a_full_queue(&ops, false);
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply ran with no retry to send it"
+    );
+    retry_pending_dispatches(&host.shared);
+    applied(answer_of(pending));
+    assert_eq!(ops.applies_ran.lock().unwrap().len(), 1);
+    drop((leases, host));
+}
+
+/// **Case 2, the maintenance scan's start: a scan scheduled while an apply
+/// was admitted yields the claim to it before it begins.** The apply
+/// arrives while a watcher poll holds the entry, so it queues; the poll then
+/// finds maintenance due and schedules the scan. The scan's start is the
+/// first point the queue can take the claim, and it does: the apply runs
+/// with no maintenance scan run before it.
+#[test]
+fn a_maintenance_scan_yields_the_claim_to_an_apply_queued_before_it_began() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    *ops.poll_gate.lock().unwrap() = Some(name.clone());
+    arrange_for(&ops.maintenance_due_at, &name);
+    let shared = Arc::clone(&host.shared);
+    let polling = thread::spawn(move || poll_watchers(&shared));
+    wait_for_flag("poll_started", &ops.poll_started);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    assert!(
+        !host
+            .shared
+            .entries
+            .get(&name)
+            .unwrap()
+            .gate
+            .lock()
+            .unwrap()
+            .applies
+            .is_empty(),
+        "the apply did not queue behind the poll"
+    );
+    *ops.poll_gate.lock().unwrap() = None;
+    ops.poll_release.store(true, Ordering::SeqCst);
+    polling.join().expect("the poll");
+    applied(answer_of(pending));
+    assert_eq!(
+        ops.applies_ran.lock().unwrap()[0].maintenances,
+        0,
+        "a maintenance scan ran ahead of the apply queued before it began"
+    );
+    drop((lease, host));
+}
