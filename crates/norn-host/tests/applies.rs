@@ -19,8 +19,8 @@ use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
     DocumentPath, ErrorDetail, Forecast, GetParams, GetReport, Operation, OperationId,
-    OperationKind, PlanDocument, ReasonCode, ResolutionTarget, ResolvedPlan, TargetResult,
-    VaultAddress,
+    OperationKind, PlanDocument, PlanFault, ReasonCode, ResolutionTarget, ResolvedPlan,
+    TargetResult, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -294,6 +294,46 @@ fn a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses() {
     assert_eq!(
         std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
         "# Subject\n\nstatus other\n"
+    );
+}
+
+/// **A resolved plan whose transitions are not what its operations do
+/// previews as its apply answers it.** The subject's transition is carried
+/// twice: the preview answers `request/plan-invalid` naming the subject, with
+/// no plan to send back, and an apply of the same plan answers the same
+/// fault. Neither writes.
+#[test]
+fn a_resolved_plan_whose_transitions_disagree_previews_as_its_apply_answers() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-disagreeing");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let (mut plan, _) = previewed(&host, finalizing(&vault));
+    let repeated = plan.transitions[0].clone();
+    plan.transitions.push(repeated);
+
+    let answer = |mode| {
+        host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone())))
+            .expect("the request is answered")
+            .wait()
+            .expect_err("a disagreeing plan is answered as invalid")
+    };
+    let previewed = answer(ApplyMode::Preview);
+    let applied = answer(ApplyMode::Apply);
+    for refused in [&previewed, &applied] {
+        assert_eq!(refused.code(), &ReasonCode::RequestPlanInvalid);
+        let ErrorDetail::PlanInvalid {
+            fault: PlanFault::TransitionsDisagree { paths, .. },
+            ..
+        } = refused.detail()
+        else {
+            panic!("the answer carries {:?}", refused.detail());
+        };
+        assert_eq!(paths, &vec![DocumentPath::new(SUBJECT).unwrap()]);
+    }
+    assert_eq!(previewed.detail(), applied.detail());
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
     );
 }
 
