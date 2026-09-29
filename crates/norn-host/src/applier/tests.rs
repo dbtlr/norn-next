@@ -201,6 +201,17 @@ impl Fixture {
             .collect()
     }
 
+    /// Every path the store holds a document row at, at its stored spelling.
+    pub(super) fn stored_paths(&mut self) -> Vec<String> {
+        self.store
+            .begin_request()
+            .stored_documents_after_ordered(None, 500, StoredPathOrder::Sensitive)
+            .expect("rows")
+            .into_iter()
+            .map(|row| row.path.as_str().to_owned())
+            .collect()
+    }
+
     /// The store equals a build from zero over the tree as it stands.
     pub(super) fn assert_store_is_a_build_from_zero(&mut self) {
         let oracle = self.data.join(format!(
@@ -876,7 +887,8 @@ pub(super) fn volume_folds(case: &str) -> bool {
 /// On a root that folds case, a case-only rename — with an edit composed
 /// into it — publishes as the kernel's one respell: the document stands at
 /// its new spelling only, the rename is recorded once, at the new spelling,
-/// and the store holds the document there alone.
+/// and the store holds the document there alone: the old spelling's row dies
+/// although the volume resolves that spelling to the renamed file.
 #[test]
 fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
     if !volume_folds("a_case_only_rename_on_a_folding_root_publishes_as_one_respell") {
@@ -901,6 +913,7 @@ fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
         *fixture.recorded.calls.borrow(),
         vec![(PathBuf::from("note.md"), true)]
     );
+    assert_eq!(fixture.stored_paths(), vec!["note.md".to_string()]);
     fixture.assert_store_is_a_build_from_zero();
     let again = applied(fixture.apply(plan));
     assert!(

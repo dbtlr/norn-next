@@ -2485,7 +2485,8 @@ Four contracts inside that flow carry weight:
   plan; the changeset therefore reads each landed document back through the anchored read
   and derives it by the one derivation every heal runs, only where its bytes still hash to
   what was published, which is the composed post-state byte for byte. A path the plan left
-  absent dies only where no document stands at the spelling the tree lists. A path another
+  absent dies unless the tree lists a document at exactly its spelling, so a case-only
+  rename's retired spelling dies on a volume that folds it into the new one. A path another
   writer changed between publication and the changeset is left out, and the watcher reports
   it, because the own-write ledger's entry names what was published rather than what the
   path holds. The bar is **mark-invariance**: the same changeset reads the same derivation

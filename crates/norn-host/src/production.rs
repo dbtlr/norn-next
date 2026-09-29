@@ -2251,10 +2251,12 @@ pub(crate) struct PlanEffect {
 /// path whose bytes no longer hash to the effect was changed by another writer
 /// in the residual window after publication; it is left to the watcher, which
 /// reports that change because it is not the own write the ledger recorded. A
-/// path the plan left absent is looked at again, at the spelling the tree
-/// lists, and dies where a row stands and no document does, as a plan's
-/// delete; a document standing there again was put back by another writer,
-/// and is the watcher's to report, as the ledger's entry expects absence.
+/// path the plan left absent is looked at again and dies where a row stands
+/// and the tree lists no document at exactly its spelling, as a plan's delete:
+/// a case-only rename's retired spelling, which a volume that folds resolves
+/// to the renamed file, dies all the same. A document the tree lists there
+/// again was put back by another writer, and is the watcher's to report, as
+/// the ledger's entry expects absence.
 ///
 /// Every death is entered ahead of every upsert, so a case-only rename's old
 /// spelling dies before its new one is written under a store whose path order
@@ -2280,15 +2282,10 @@ pub(crate) fn commit_plan_changeset(
         Some(norn_fs::Vault::open(root, exclusions).map_err(effect)?)
     };
     for left in deaths {
-        // The spelling the tree lists: a case-only rename's old spelling
-        // reaches its new one on a volume that folds, and dies all the same.
         if let Some(vault) = &vault
-            && matches!(
-                vault.reach(Path::new(left.path.as_str())).map_err(effect)?,
-                norn_fs::Reach::Stands {
-                    kind: norn_fs::PathKind::RegularFile,
-                    ..
-                }
+            && a_document_stands_at(
+                &vault.reach(Path::new(left.path.as_str())).map_err(effect)?,
+                &left.path,
             )
         {
             continue;
@@ -2328,6 +2325,23 @@ pub(crate) fn commit_plan_changeset(
     }
     pending.flush()?;
     Ok(pending.counters.clone())
+}
+
+/// Whether `reach` finds a document standing at exactly `path`, the spelling
+/// the tree lists.
+///
+/// On a volume that folds case, a spelling a case-only rename retired reaches
+/// the entry at its new, listed spelling. That entry is not a document at the
+/// retired spelling, so the retired spelling's row still dies: only a regular
+/// file the tree lists at `path` itself keeps it.
+fn a_document_stands_at(reach: &norn_fs::Reach, path: &DocumentPath) -> bool {
+    matches!(
+        reach,
+        norn_fs::Reach::Stands {
+            kind: norn_fs::PathKind::RegularFile,
+            at,
+        } if at.as_path() == Path::new(path.as_str())
+    )
 }
 
 /// Derive the whole vault at `root` into `store` by the heal a first attach
@@ -3951,6 +3965,27 @@ mod tests {
         if let Some(arranged) = INSIDE_RETIREMENT.with(|slot| slot.borrow_mut().take()) {
             arranged();
         }
+    }
+
+    /// A document the fold resolves at another spelling does not stand at the
+    /// spelling asked: a case-only rename's retired spelling reaches the
+    /// renamed entry on a folding volume, and its row must still die.
+    #[test]
+    fn a_document_stands_only_at_the_spelling_the_tree_lists() {
+        let folding =
+            norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Insensitive);
+        let reached_at = |listed: &str| norn_fs::Reach::Stands {
+            kind: norn_fs::PathKind::RegularFile,
+            at: folding.normalize(Path::new(listed)).expect("a spelling"),
+        };
+        let retired = DocumentPath::new("Note.md").expect("a document path");
+        assert!(!a_document_stands_at(&reached_at("note.md"), &retired));
+        assert!(a_document_stands_at(&reached_at("Note.md"), &retired));
+        let folder = norn_fs::Reach::Stands {
+            kind: norn_fs::PathKind::Directory,
+            at: folding.normalize(Path::new("Note.md")).expect("a spelling"),
+        };
+        assert!(!a_document_stands_at(&folder, &retired));
     }
 
     /// **The read seam's refusal names no file.** The reason a refused mint or
