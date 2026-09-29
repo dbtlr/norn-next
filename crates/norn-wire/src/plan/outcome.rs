@@ -115,7 +115,10 @@ pub enum UnresolvedReason {
     /// One of its targets holds its after-state and another does not.
     PartLanded {},
     /// It no longer resolves against what the vault holds: an edit whose
-    /// text no longer occurs once, or a move whose destination is taken.
+    /// text no longer occurs once, a move whose destination is taken, a
+    /// condition its author observed that the vault no longer meets — or it
+    /// touches a file an unresolved operation touches, since operations on
+    /// one file stand or fall together, and `detail` names that operation.
     #[non_exhaustive]
     NoLongerResolves {
         /// What no longer resolves, in words, for a person reading a report.
@@ -213,9 +216,11 @@ impl InterruptionCause {
     }
 }
 
-/// What is wrong with a plan's own shape, whatever vault it is for. An
-/// operation is named by its position in the plan's operation list, counting
-/// from 0.
+/// What is wrong with a plan's own shape. Every fault but a content cycle
+/// is one whatever vault the plan is for; a content cycle is judged against
+/// what the vault holds at planning, since only a name a document stands at
+/// makes an operation wait for what vacates it. An operation is named by its
+/// position in the plan's operation list, counting from 0.
 ///
 /// On the wire a fault is an object tagged `kind`:
 /// `{"kind":"duplicate_id","id":"move-a","positions":[0,3]}`.
@@ -246,9 +251,11 @@ pub enum PlanFault {
         /// requires the next.
         positions: Vec<usize>,
     },
-    /// Operations draw content from each other in a cycle, such as two
-    /// documents exchanging places. Split the plan into plans that each
-    /// finish.
+    /// Operations cannot run in any order because a cycle among them is
+    /// closed by at least one operation waiting for another to vacate the
+    /// name it puts a document at — alone, such as two documents exchanging
+    /// places, or together with `requires`. A cycle of `requires` alone is a
+    /// requires cycle. Split the plan into plans that each finish.
     #[non_exhaustive]
     ContentCycle {
         /// The positions of the operations in the cycle.
