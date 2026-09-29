@@ -2504,7 +2504,9 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   maintenance scan that is scheduled and has not begun, the apply is scheduled in its place; the
   superseded job, where it is already in the channel, holds the queue slot until it arrives, runs
   nothing, and sends the apply. A leg holding the claim hands it to the queue's head at a turn's
-  end, before a maintenance scan begins, and wherever it ends free.
+  end, before a maintenance scan begins, and wherever it ends free. So under a sustained edit
+  stream a queued apply runs within one turn while the entry stays trusted; a turn that ends
+  over a watcher overflow withdraws trust, and that publication answers the queue instead.
 - **The one snapshot is the store's reading under the claim.** The planner reads the files, so
   the snapshot is the store as the claim holds it — no other writer commits until the apply's
   changeset — and the answer crosses inside a `VaultAnswer` under that reading and `Ready`.
