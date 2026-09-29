@@ -14,30 +14,32 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AttachMode,
-    Attention, AuthorCondition, AuthoredPlan, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
-    CandidateHead, Change, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
-    ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
-    CursorOrderChanged, DescribeParams, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentPath, DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType,
-    FieldValue, FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
+    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
+    ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
+    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, ChangesetOutcome,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
+    DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
+    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FileState, FindParams,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, ForecastTarget,
     Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
-    IllegalOperationId, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
-    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PollBackend, Predicate, Provenance,
-    Published, ReadFailure, ReasonCode, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, Replace, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
-    RungSkipReason, SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport,
-    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TotalBelowHead, Transition, TrustState,
+    IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily,
+    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
+    ModelIdentity, Moved, NameSet, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
+    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
+    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
+    SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport,
+    TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState,
     UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
+    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -134,6 +136,8 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostReaderUnavailable,
         ReasonCode::HostRegistryUnwritable,
         ReasonCode::HostReadFailed,
+        ReasonCode::HostApplyNotRun,
+        ReasonCode::HostApplyOutcomeUnknown,
         ReasonCode::VaultAmbiguousRoot,
         ReasonCode::VaultAmbiguousTarget,
         ReasonCode::VaultUnknownTarget,
@@ -141,9 +145,14 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
         ReasonCode::VaultUnreadableBound,
+        ReasonCode::VaultPlanRefused,
+        ReasonCode::VaultRootChanged,
+        ReasonCode::VaultPlanInterrupted,
+        ReasonCode::VaultWriteFailed,
         ReasonCode::RequestOutOfBound,
         ReasonCode::RequestPartNotTaken,
         ReasonCode::RequestCursorNotTaken,
+        ReasonCode::RequestPlanInvalid,
         ReasonCode::EngineNotEnabled,
         ReasonCode::EngineUnavailable,
         ReasonCode::EngineFailed,
@@ -297,6 +306,7 @@ fn error_details() -> Vec<ErrorDetail> {
             .into_iter()
             .map(ErrorDetail::unsupported_attach_mode),
     );
+    details.extend(apply_details());
     details
 }
 
@@ -7037,5 +7047,578 @@ fn a_plan_refuses_a_variant_it_does_not_know() {
         )
         .is_err(),
         "a document naming no plan read back as one"
+    );
+}
+
+// ── What an apply answers with ───────────────────────────────────────────
+
+fn folder(text: &str) -> FolderPath {
+    FolderPath::new(text).expect("a legal folder path")
+}
+
+/// A forecast naming a drifted target, a target it creates, and a folder it
+/// makes and one it removes.
+fn a_forecast() -> Forecast {
+    Forecast::new(
+        vec![
+            ForecastTarget::new(
+                path("notes/a.md"),
+                FileState::present(content_hash(0xab)),
+                FileState::present(content_hash(0x01)),
+            )
+            .drifted(),
+            ForecastTarget::new(
+                path("archive/new.md"),
+                FileState::absent(),
+                FileState::present(content_hash(0x02)),
+            ),
+        ],
+        vec![folder("archive")],
+        vec![folder("notes/old")],
+    )
+}
+
+/// Every check a refused apply names.
+fn refused_checks() -> Vec<RefusedCheck> {
+    vec![
+        RefusedCheck::drifted(path("notes/a.md"), FileState::present(content_hash(0x0f))),
+        RefusedCheck::drifted(path("notes/b.md"), FileState::absent()),
+        RefusedCheck::condition_failed(PlanCondition::content_hash(
+            path("notes/c.md"),
+            content_hash(0xcd),
+        )),
+        RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::UndeclaredTag,
+            Some("draft".to_string()),
+            "the tag `draft` is not declared",
+        ),
+        RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::FrontmatterUnreadable,
+            None,
+            "the frontmatter does not parse",
+        ),
+        RefusedCheck::name_taken(path("notes/new.md")),
+    ]
+}
+
+/// Every reason an operation is left unresolved.
+fn unresolved_reasons() -> Vec<UnresolvedReason> {
+    vec![
+        UnresolvedReason::part_landed(),
+        UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
+        UnresolvedReason::requires_unresolved(operation_id("make-b")),
+    ]
+}
+
+/// Every cause that stops a publication part-way.
+fn interruption_causes() -> Vec<InterruptionCause> {
+    vec![
+        InterruptionCause::io_failure("the disk is full"),
+        InterruptionCause::name_taken(path("notes/new.md")),
+        InterruptionCause::foreign_edit(path("notes/a.md")),
+    ]
+}
+
+/// Every fault a plan's own shape has.
+fn plan_faults() -> Vec<PlanFault> {
+    vec![
+        PlanFault::duplicate_id(operation_id("edit-a"), vec![0, 3]),
+        PlanFault::unknown_requirement(2, operation_id("make-z")),
+        PlanFault::requires_cycle(vec![1, 2]),
+        PlanFault::content_cycle(vec![0, 1]),
+    ]
+}
+
+fn apply_modes() -> Vec<ApplyMode> {
+    vec![ApplyMode::Preview, ApplyMode::Apply]
+}
+
+fn changeset_outcomes() -> Vec<ChangesetOutcome> {
+    vec![ChangesetOutcome::Committed, ChangesetOutcome::Healing]
+}
+
+fn target_results() -> Vec<TargetResult> {
+    vec![TargetResult::Wrote, TargetResult::Found]
+}
+
+/// Both outcomes an apply answers with.
+fn apply_reports() -> Vec<ApplyReport> {
+    vec![
+        ApplyReport::previewed(a_resolved_plan(), a_forecast()),
+        ApplyReport::applied(
+            a_resolved_plan(),
+            ChangesetOutcome::Committed,
+            vec![
+                AppliedTarget::new(path("notes/a.md"), TargetResult::Wrote),
+                AppliedTarget::new(path("archive/new.md"), TargetResult::Found),
+            ],
+            vec![folder("archive")],
+            vec![folder("notes/old")],
+        ),
+        ApplyReport::applied(
+            a_bare_resolved_plan(),
+            ChangesetOutcome::Healing,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    ]
+}
+
+/// A lifecycle refusal an apply that did not run carries as its cause.
+fn a_park() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        "another process maintains this vault",
+        ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+    )
+}
+
+/// Every detail an apply's outcome carries, over every payload it can carry.
+fn apply_details() -> Vec<ErrorDetail> {
+    let mut details = vec![
+        ErrorDetail::plan_refused(
+            a_bare_resolved_plan(),
+            a_forecast(),
+            refused_checks(),
+            unresolved_reasons()
+                .into_iter()
+                .map(|reason| {
+                    UnresolvedOperation::new(
+                        Operation::new(OperationKind::str_replace(
+                            path("notes/a.md"),
+                            "draft",
+                            "final",
+                        )),
+                        reason,
+                    )
+                })
+                .collect(),
+        ),
+        ErrorDetail::root_changed(a_root(), RootIdentity::from_device_and_inode(66_307, 2)),
+        ErrorDetail::write_failed(a_resolved_plan(), "the disk is full"),
+        ErrorDetail::apply_not_run(a_park(), None),
+        ErrorDetail::apply_not_run(a_park(), Some(a_resolved_plan())),
+        ErrorDetail::apply_outcome_unknown(a_resolved_plan()),
+    ];
+    details.extend(interruption_causes().into_iter().map(|cause| {
+        ErrorDetail::plan_interrupted(a_resolved_plan(), vec![path("notes/a.md")], cause)
+    }));
+    details.extend(plan_faults().into_iter().map(ErrorDetail::plan_invalid));
+    details
+}
+
+/// **Every plan vector here holds the whole vocabulary, and the schema is
+/// what says so**, as the vectors above hold theirs.
+#[test]
+fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
+    fn tags<T: Serialize>(values: &[T], tag: &str) -> BTreeSet<String> {
+        values.iter().map(|value| tag_string(value, tag)).collect()
+    }
+    assert_eq!(
+        tags(&operation_kinds(), "kind"),
+        advertised::<OperationKind>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&author_conditions(), "condition"),
+        advertised::<AuthorCondition>(Some("condition"))
+    );
+    assert_eq!(
+        tags(&plan_conditions(), "condition"),
+        advertised::<PlanCondition>(Some("condition"))
+    );
+    assert_eq!(
+        tags(&file_states(), "state"),
+        advertised::<FileState>(Some("state"))
+    );
+    assert_eq!(
+        tags(&plan_documents(), "plan"),
+        advertised::<PlanDocument>(Some("plan"))
+    );
+    assert_eq!(
+        tags(&refused_checks(), "check"),
+        advertised::<RefusedCheck>(Some("check"))
+    );
+    assert_eq!(
+        tags(&unresolved_reasons(), "kind"),
+        advertised::<UnresolvedReason>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&interruption_causes(), "kind"),
+        advertised::<InterruptionCause>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&plan_faults(), "kind"),
+        advertised::<PlanFault>(Some("kind"))
+    );
+    assert_eq!(
+        tags(&apply_reports(), "outcome"),
+        advertised::<ApplyReport>(Some("outcome"))
+    );
+    assert_eq!(
+        apply_modes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ApplyMode>(None)
+    );
+    assert_eq!(
+        changeset_outcomes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ChangesetOutcome>(None)
+    );
+    assert_eq!(
+        target_results()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<TargetResult>(None)
+    );
+}
+
+#[test]
+fn every_apply_shape_survives_the_round_trip() {
+    round_trip(&a_forecast());
+    for check in refused_checks() {
+        round_trip(&check);
+    }
+    for reason in unresolved_reasons() {
+        round_trip(&reason);
+    }
+    for cause in interruption_causes() {
+        round_trip(&cause);
+    }
+    for fault in plan_faults() {
+        round_trip(&fault);
+    }
+    for mode in apply_modes() {
+        round_trip(&mode);
+    }
+    for report in apply_reports() {
+        round_trip(&report);
+    }
+    for document in plan_documents() {
+        for mode in apply_modes() {
+            round_trip(&ApplyParams::new(mode, document.clone()));
+        }
+    }
+    round_trip(&VaultAnswer::new(
+        AnswerReading::new(TrustState::Ready, "epoch-1", 2),
+        Vec::new(),
+        ApplyReport::previewed(a_resolved_plan(), a_forecast()),
+    ));
+}
+
+/// A folder path is a vault-relative path that names something.
+#[test]
+fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
+    assert_eq!(wire(&folder("notes/old")), r#""notes/old""#);
+    round_trip(&folder("archive"));
+    for text in ["", "/", "/notes"] {
+        assert!(
+            FolderPath::new(text).is_err(),
+            "`{text}` was built as a folder path"
+        );
+        assert!(
+            serde_json::from_str::<FolderPath>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a folder path"
+        );
+    }
+    assert_eq!(
+        FolderPath::new("/notes")
+            .expect_err("a rooted folder path")
+            .what(),
+        "folder path"
+    );
+}
+
+/// A forecast names each target with its two states and whether it drifted,
+/// and the folders the plan makes and removes.
+#[test]
+fn a_forecast_names_its_targets_and_its_folders() {
+    assert_eq!(
+        wire(&a_forecast()),
+        format!(
+            concat!(
+                r#"{{"targets":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
+                r#""after":{{"state":"present","hash":"{one}"}},"drifted":true}},"#,
+                r#"{{"path":"archive/new.md","before":{{"state":"absent"}},"#,
+                r#""after":{{"state":"present","hash":"{two}"}},"drifted":false}}],"#,
+                r#""folders_made":["archive"],"folders_removed":["notes/old"]}}"#
+            ),
+            ab = hash_text(0xab),
+            one = hash_text(0x01),
+            two = hash_text(0x02),
+        )
+    );
+}
+
+/// A forecast is an answer, so it drops a field it does not know where a plan
+/// refuses one.
+#[test]
+fn a_forecast_drops_a_field_it_does_not_know() {
+    let json = serde_json::to_value(a_forecast()).expect("a forecast as JSON");
+    for pointer in ["", "/targets/0"] {
+        let read: Forecast = serde_json::from_str(&with_surprise(&json, pointer))
+            .unwrap_or_else(|error| panic!("a forecast with a field at `{pointer}`: {error}"));
+        assert_eq!(read, a_forecast());
+    }
+}
+
+/// An apply names its mode, and there is no default: a request without one
+/// does not read.
+#[test]
+fn an_apply_request_states_its_mode() {
+    let plan = PlanDocument::resolved(a_bare_resolved_plan());
+    let json = wire(&ApplyParams::new(ApplyMode::Preview, plan.clone()));
+    assert_eq!(
+        json,
+        format!(r#"{{"mode":"preview","plan":{}}}"#, wire(&plan))
+    );
+    assert_eq!(flat_string(&ApplyMode::Apply), "apply");
+    assert!(
+        serde_json::from_str::<ApplyParams>(&format!(r#"{{"plan":{}}}"#, wire(&plan))).is_err(),
+        "an apply naming no mode read back as one"
+    );
+    assert!(
+        serde_json::from_str::<ApplyParams>(&format!(
+            r#"{{"mode":"dry_run","plan":{}}}"#,
+            wire(&plan)
+        ))
+        .is_err(),
+        "a mode nobody minted read back as one"
+    );
+    assert_eq!(
+        ApplyParams::new(ApplyMode::Apply, plan.clone())
+            .plan
+            .vault(),
+        &VaultAddress::name(name("notes"))
+    );
+}
+
+/// A preview answers with the resolved plan and its forecast; an applied plan
+/// answers with the plan, whether its changeset committed, what each target
+/// came to and the folders it made and removed.
+#[test]
+fn an_apply_report_is_an_object_tagged_outcome() {
+    let [previewed, applied, _]: [ApplyReport; 3] =
+        apply_reports().try_into().expect("three reports");
+    assert_eq!(
+        wire(&previewed),
+        format!(
+            r#"{{"outcome":"previewed","plan":{},"forecast":{}}}"#,
+            resolved_plan_json(),
+            wire(&a_forecast())
+        )
+    );
+    assert_eq!(
+        wire(&applied),
+        format!(
+            concat!(
+                r#"{{"outcome":"applied","plan":{},"changeset":"committed","#,
+                r#""targets":[{{"path":"notes/a.md","result":"wrote"}},{{"path":"archive/new.md","result":"found"}}],"#,
+                r#""folders_made":["archive"],"folders_removed":["notes/old"]}}"#
+            ),
+            resolved_plan_json()
+        )
+    );
+    assert_eq!(flat_string(&ChangesetOutcome::Healing), "healing");
+}
+
+/// A report is an answer and drops a field it does not know; the plan inside
+/// it is a plan and still refuses one.
+#[test]
+fn an_apply_report_drops_a_field_it_does_not_know_and_its_plan_does_not() {
+    let previewed = apply_reports().remove(0);
+    let json = serde_json::to_value(&previewed).expect("a report as JSON");
+    let read: ApplyReport =
+        serde_json::from_str(&with_surprise(&json, "")).expect("a report with a field it drops");
+    assert_eq!(read, previewed);
+    assert!(
+        serde_json::from_str::<ApplyReport>(&with_surprise(&json, "/plan")).is_err(),
+        "the plan inside a report dropped a field it does not know"
+    );
+}
+
+#[test]
+fn every_apply_detail_survives_the_round_trip() {
+    for detail in apply_details() {
+        round_trip(&detail);
+        round_trip(&ErrorEnvelope::new("the apply did not finish", detail));
+    }
+}
+
+/// A refused plan carries the fresh plan, its forecast, each check that
+/// refused and each operation the fresh plan could not resolve.
+#[test]
+fn a_refused_plan_carries_the_fresh_plan_and_why() {
+    let detail = ErrorDetail::plan_refused(
+        a_bare_resolved_plan(),
+        Forecast::new(Vec::new(), Vec::new(), Vec::new()),
+        vec![RefusedCheck::drifted(
+            path("notes/a.md"),
+            FileState::present(content_hash(0x0f)),
+        )],
+        vec![UnresolvedOperation::new(
+            Operation::new(OperationKind::str_replace(
+                path("notes/a.md"),
+                "draft",
+                "final",
+            )),
+            UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
+        )],
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new("the plan drifted", detail)),
+        format!(
+            concat!(
+                r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
+                r#""plan":{plan},"forecast":{{"targets":[],"folders_made":[],"folders_removed":[]}},"#,
+                r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
+                r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
+                r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
+            ),
+            plan = wire(&a_bare_resolved_plan()),
+            f = hash_text(0x0f),
+        )
+    );
+}
+
+/// Each check, reason, cause and fault is an object under its own tag.
+#[test]
+fn the_apply_reasons_are_tagged_objects() {
+    assert_eq!(
+        wire(&RefusedCheck::name_taken(path("notes/new.md"))),
+        r#"{"check":"name_taken","path":"notes/new.md"}"#
+    );
+    assert_eq!(
+        wire(&RefusedCheck::condition_failed(
+            PlanCondition::content_hash(path("notes/c.md"), content_hash(0xcd))
+        )),
+        format!(
+            r#"{{"check":"condition_failed","condition":{{"condition":"content_hash","path":"notes/c.md","hash":"{}"}}}}"#,
+            hash_text(0xcd)
+        )
+    );
+    assert_eq!(
+        wire(&RefusedCheck::schema_violation(
+            path("notes/a.md"),
+            FindingKind::UndeclaredTag,
+            Some("draft".to_string()),
+            "the tag `draft` is not declared"
+        )),
+        concat!(
+            r#"{"check":"schema_violation","path":"notes/a.md","kind":"document/undeclared-tag","#,
+            r#""target":"draft","message":"the tag `draft` is not declared"}"#
+        )
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::part_landed()),
+        r#"{"kind":"part_landed"}"#
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::requires_unresolved(operation_id(
+            "make-b"
+        ))),
+        r#"{"kind":"requires_unresolved","requires":"make-b"}"#
+    );
+    assert_eq!(
+        wire(&InterruptionCause::io_failure("the disk is full")),
+        r#"{"kind":"io_failure","detail":"the disk is full"}"#
+    );
+    assert_eq!(
+        wire(&InterruptionCause::foreign_edit(path("notes/a.md"))),
+        r#"{"kind":"foreign_edit","path":"notes/a.md"}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::duplicate_id(operation_id("edit-a"), vec![0, 3])),
+        r#"{"kind":"duplicate_id","id":"edit-a","positions":[0,3]}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::unknown_requirement(2, operation_id("make-z"))),
+        r#"{"kind":"unknown_requirement","position":2,"requires":"make-z"}"#
+    );
+    assert_eq!(
+        wire(&PlanFault::content_cycle(vec![0, 1])),
+        r#"{"kind":"content_cycle","positions":[0,1]}"#
+    );
+}
+
+/// The outcomes that are not a refusal and not an answer carry the plan they
+/// were given, so a caller can finish or retry by sending it again.
+#[test]
+fn the_apply_outcomes_carry_what_a_caller_sends_again() {
+    let plan = wire(&a_bare_resolved_plan());
+    assert_eq!(
+        wire(&ErrorDetail::plan_interrupted(
+            a_bare_resolved_plan(),
+            vec![path("notes/b.md")],
+            InterruptionCause::name_taken(path("notes/new.md")),
+        )),
+        format!(
+            concat!(
+                r#"{{"code":"vault/plan-interrupted","plan":{plan},"landed":["notes/b.md"],"#,
+                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}}}}"#
+            ),
+            plan = plan
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::root_changed(
+            a_root(),
+            RootIdentity::from_device_and_inode(66_307, 2)
+        )),
+        concat!(
+            r#"{"code":"vault/root-changed","expected":"00000000000103020000000000000002","#,
+            r#""found":"00000000000103030000000000000002"}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::write_failed(
+            a_bare_resolved_plan(),
+            "the disk is full"
+        )),
+        format!(r#"{{"code":"vault/write-failed","plan":{plan},"detail":"the disk is full"}}"#)
+    );
+    assert_eq!(
+        wire(&ErrorDetail::apply_outcome_unknown(a_bare_resolved_plan())),
+        format!(r#"{{"code":"host/apply-outcome-unknown","plan":{plan}}}"#)
+    );
+    assert_eq!(
+        wire(&ErrorDetail::apply_not_run(a_park(), None)),
+        format!(
+            r#"{{"code":"host/apply-not-run","cause":{},"plan":null}}"#,
+            wire(&a_park())
+        )
+    );
+    assert_eq!(
+        wire(&ErrorDetail::plan_invalid(PlanFault::requires_cycle(vec![
+            1, 2
+        ]))),
+        r#"{"code":"request/plan-invalid","fault":{"kind":"requires_cycle","positions":[1,2]}}"#
+    );
+}
+
+/// A detail is an answer and drops a field it does not know, and an envelope
+/// whose code is not its detail's refuses the read, as every envelope does.
+#[test]
+fn an_apply_envelope_is_read_as_every_envelope_is() {
+    let envelope = ErrorEnvelope::new(
+        "the root changed",
+        ErrorDetail::root_changed(a_root(), RootIdentity::from_device_and_inode(66_307, 2)),
+    );
+    let json = serde_json::to_value(&envelope).expect("an envelope as JSON");
+    let read: ErrorEnvelope = serde_json::from_str(&with_surprise(&json, "/detail"))
+        .expect("a detail with a field it drops");
+    assert_eq!(read, envelope);
+
+    let mut mismatched = json.clone();
+    mismatched["code"] = serde_json::Value::String("vault/plan-refused".to_string());
+    assert!(
+        serde_json::from_str::<ErrorEnvelope>(&mismatched.to_string()).is_err(),
+        "an envelope whose code is not its detail's read back"
     );
 }

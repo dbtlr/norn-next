@@ -358,6 +358,7 @@
 //! the code the detail belongs to.
 
 mod address;
+mod apply;
 mod base64url;
 mod cursor;
 mod demand;
@@ -385,6 +386,9 @@ pub use address::{
     Directory, IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
     absolute_path,
 };
+pub use apply::{
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, ChangesetOutcome, TargetResult,
+};
 pub use cursor::{
     Cursor, CursorKey, CursorOrderChanged, FacetKind, HitResume, Moved, NonFiniteScore, OrderPair,
     Page, PagedRows, Score, SidecarRevision, Snapshot,
@@ -411,9 +415,13 @@ pub use plan::document::{
     AuthoredPlan, FileState, PlanCondition, PlanDocument, Provenance, ResolvedPlan, SkippedFinding,
     Transition,
 };
+pub use plan::forecast::{FolderPath, Forecast, ForecastTarget};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
     AuthorCondition, IllegalOperationId, Operation, OperationId, OperationKind,
+};
+pub use plan::outcome::{
+    InterruptionCause, PlanFault, RefusedCheck, UnresolvedOperation, UnresolvedReason,
 };
 pub use plan::root::RootIdentity;
 pub use predicate::Predicate;
