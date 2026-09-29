@@ -364,6 +364,12 @@ pub trait EntryOps: Send + Sync + 'static {
     /// between the snapshot and the apply's changeset, and the entry stays
     /// `Ready`: a read meanwhile answers the state before the apply.
     ///
+    /// Like every other leg over the coverage, the apply first asks whether
+    /// its maintainership still stands. A failure there, before the snapshot,
+    /// is a failed turn: the job answers it by the policy a failed turn is
+    /// answered by, and the apply is answered not run with the cause that
+    /// policy publishes.
+    ///
     /// The default applies nothing and answers the apply not run.
     fn apply(
         &self,
@@ -372,8 +378,8 @@ pub trait EntryOps: Send + Sync + 'static {
         _: PlanDocument,
         _: &ApplyProgress,
         _: &ProgressReporter<Self::Attachment>,
-    ) -> ApplyEnd {
-        ApplyEnd::answered(Err(not_run(
+    ) -> Result<ApplyEnd, JobFailure> {
+        Ok(ApplyEnd::answered(Err(not_run(
             ErrorEnvelope::new(
                 "these entry ops apply no plan",
                 ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
@@ -381,7 +387,7 @@ pub trait EntryOps: Send + Sync + 'static {
                 )),
             ),
             None,
-        )))
+        ))))
     }
     /// The content model of the schema this attachment's store pins, which
     /// every read answered over this coverage compiles against.
@@ -7452,7 +7458,9 @@ fn end_turn_on_failure<O: EntryOps>(
 ///    published with the rebuild it owes, in the hold that ends the intake.
 /// 3. The apply itself, through [`EntryOps::apply`]: the one snapshot, the
 ///    plan, the applier, the changeset. The entry stays `Ready` throughout,
-///    so a read meanwhile answers the state before the apply.
+///    so a read meanwhile answers the state before the apply. A leg that
+///    fails before its snapshot — its maintainership lost or unconfirmable —
+///    is answered as a failed intake is.
 /// 4. The end: the facts the watcher delivered meanwhile are taken in, and
 ///    the claim goes to the next queued apply, or to the reconcile those
 ///    facts — and a changeset that did not commit — owe, or back.
@@ -7534,13 +7542,8 @@ fn run_apply_job<O: EntryOps>(
         Err(failure) => Err(failure),
     };
     let mut state = entry.gate.lock().expect("entry gate poisoned");
-    if !state.claim.stands_at(epoch) || state.detach_in_flight {
-        // The entry moved on before the apply planned: it did not run.
-        state.unpin_leg(Leg::Job(epoch));
-        state.running_apply = None;
-        let cause = state.apply_cause(&name);
-        drop(state);
-        let _ = reply.send(Err(not_run(cause, None)));
+    if moved_on_before_planning(&state, epoch) {
+        answer_unplanned_apply(state, &name, epoch, &reply);
         return Some(attachment);
     }
     match intake {
@@ -7569,24 +7572,35 @@ fn run_apply_job<O: EntryOps>(
             }
         }
         Err(failure) => {
-            state.unpin_leg(Leg::Job(epoch));
-            state.running_apply = None;
-            end_turn_on_failure(shared, entry, state, &name, epoch, attachment, failure);
-            let cause = entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .apply_cause(&name);
-            let _ = reply.send(Err(not_run(cause, None)));
+            end_apply_on_failure(
+                shared, entry, state, &name, epoch, attachment, failure, &reply,
+            );
             return None;
         }
     }
     drop(state);
 
     let ApplyEnd { answer, heal } =
-        shared
+        match shared
             .ops
-            .apply(&name, &mut attachment, plan, &progress, &reporter);
+            .apply(&name, &mut attachment, plan, &progress, &reporter)
+        {
+            Ok(ended) => ended,
+            // The leg failed before its snapshot, so nothing was planned,
+            // published or committed. An entry that moved past the leg
+            // meanwhile has published the cause the apply is answered with.
+            Err(failure) => {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if moved_on_before_planning(&state, epoch) {
+                    answer_unplanned_apply(state, &name, epoch, &reply);
+                    return Some(attachment);
+                }
+                end_apply_on_failure(
+                    shared, entry, state, &name, epoch, attachment, failure, &reply,
+                );
+                return None;
+            }
+        };
     // `None` where the apply stood down or met damage: it is answered below
     // with the cause the entry publishes once the teardown that moved it past
     // the apply's leg, or this leg's publication of the damage, has.
@@ -7688,6 +7702,54 @@ fn run_apply_job<O: EntryOps>(
         dispatch_handoff(shared, entry, epoch, job);
     }
     None
+}
+
+/// Whether the entry moved past an apply's leg before the apply planned: a
+/// teardown or a park moved the claim on, or a detach is under way.
+fn moved_on_before_planning<A: SnapshotSource>(state: &EntryState<A>, epoch: u64) -> bool {
+    !state.claim.stands_at(epoch) || state.detach_in_flight
+}
+
+/// Answer an apply the entry moved past before it planned: it did not run,
+/// and its cause is where the entry now stands. The coverage goes back where
+/// the leg ends.
+fn answer_unplanned_apply<A: SnapshotSource>(
+    mut state: GateHold<'_, EntryState<A>>,
+    name: &VaultName,
+    epoch: u64,
+    reply: &apply::ApplyReply,
+) {
+    state.unpin_leg(Leg::Job(epoch));
+    state.running_apply = None;
+    let cause = state.apply_cause(name);
+    drop(state);
+    let _ = reply.send(Err(not_run(cause, None)));
+}
+
+/// End an apply's job on a failed turn before anything was planned — its
+/// intake's, or its own leg's at the start: the entry answers the failure by
+/// [`end_turn_on_failure`], and the apply is answered not run with the cause
+/// that policy publishes.
+#[allow(clippy::too_many_arguments)] // The turn's policy takes seven; the apply adds only its reply.
+fn end_apply_on_failure<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    attachment: O::Attachment,
+    failure: JobFailure,
+    reply: &apply::ApplyReply,
+) {
+    state.unpin_leg(Leg::Job(epoch));
+    state.running_apply = None;
+    end_turn_on_failure(shared, entry, state, name, epoch, attachment, failure);
+    let cause = entry
+        .gate
+        .lock()
+        .expect("entry gate poisoned")
+        .apply_cause(name);
+    let _ = reply.send(Err(not_run(cause, None)));
 }
 
 #[derive(Clone, Copy)]
@@ -8858,6 +8920,9 @@ mod tests {
         panic_in_apply_before_publishing: AtomicBool,
         panic_in_apply_after_publishing: AtomicBool,
         heal_in_apply: AtomicBool,
+        /// Ends the next apply's leg at its start in a lost maintainership,
+        /// as the production apply ends where its lock was replaced.
+        lost_apply: AtomicBool,
         /// Whether an apply's one snapshot meets damage.
         damage_in_apply: AtomicBool,
         /// Applies whose leg no longer stood when they would have begun
@@ -9387,8 +9452,11 @@ mod tests {
             plan: PlanDocument,
             progress: &ApplyProgress,
             reporter: &ProgressReporter<FakeCoverage>,
-        ) -> ApplyEnd {
+        ) -> Result<ApplyEnd, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
+            if self.lost_apply.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
             let reader_stood = reporter
                 .entry
                 .upgrade()
@@ -9412,7 +9480,7 @@ mod tests {
                 ),
             };
             if self.damage_in_apply.load(Ordering::SeqCst) {
-                return ApplyEnd::damaged("the store is damaged");
+                return Ok(ApplyEnd::damaged("the store is damaged"));
             }
             progress.planned(&resolved);
             if self.block_apply.load(Ordering::SeqCst) {
@@ -9424,7 +9492,7 @@ mod tests {
             }
             if !reporter.begin_publishing(progress) {
                 self.applies_stood_down.fetch_add(1, Ordering::SeqCst);
-                return ApplyEnd::stood_down();
+                return Ok(ApplyEnd::stood_down());
             }
             if self.block_apply_publishing.load(Ordering::SeqCst) {
                 self.apply_publishing_started.store(true, Ordering::SeqCst);
@@ -9445,10 +9513,10 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             );
-            ApplyEnd {
+            Ok(ApplyEnd {
                 answer: ApplyEnding::Answered(Ok((fake_reading(1), report))),
                 heal: healing.then(a_fact),
-            }
+            })
         }
 
         fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {

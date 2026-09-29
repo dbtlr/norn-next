@@ -1345,6 +1345,44 @@ fn an_apply_whose_snapshot_meets_damage_publishes_it_and_answers_not_applied() {
     drop((lease, host));
 }
 
+/// **An apply whose leg finds its maintainership lost is answered by the
+/// policy a failed turn is**: the entry releases its coverage, the release
+/// honors the demand that still stands by attaching again, and the apply is
+/// answered not applied, with no plan, with the state that release published.
+/// Nothing was planned.
+#[test]
+fn an_apply_whose_leg_lost_maintainership_releases_and_answers_not_applied() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.lost_apply.store(true, Ordering::SeqCst);
+    ops.block_attach.store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(TrustState::warming(
+            WarmingPhase::InstallingCoverage,
+            0,
+            None
+        )))
+        .answer(&name)
+    );
+    assert_eq!(
+        ops.detaches.load(Ordering::SeqCst),
+        1,
+        "the lost maintainership did not release the coverage"
+    );
+    assert!(
+        ops.applies_ran.lock().unwrap().is_empty(),
+        "the apply planned past its lost maintainership"
+    );
+    wait_for_flag("attach_started", &ops.attach_started);
+    ops.block_attach.store(false, Ordering::SeqCst);
+    ops.attach_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}
+
 /// **Case 10, destruction over an idle detach: the host's destruction
 /// answers an apply queued behind an idle detach at once**, while the detach
 /// still holds the coverage, rather than leaving it to the release that
@@ -1719,7 +1757,7 @@ impl EntryOps for Arc<HeldAfterItsChangeset> {
         plan: PlanDocument,
         progress: &ApplyProgress,
         reporter: &ProgressReporter<Self::Attachment>,
-    ) -> ApplyEnd {
+    ) -> Result<ApplyEnd, JobFailure> {
         let ended = self.inner.apply(name, attachment, plan, progress, reporter);
         self.ended.store(true, Ordering::SeqCst);
         wait_for_flag("the case to release the apply", &self.release);

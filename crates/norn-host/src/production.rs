@@ -1529,6 +1529,10 @@ impl EntryOps for ProductionEntryOps {
     /// store. Lane-1 work the changeset committed — an applied plan's, or
     /// the landed subset of an interrupted one — is relayed to the engines as
     /// every other leg's is.
+    ///
+    /// The maintainership is asked first, as every leg over the coverage asks
+    /// it, so a lock another actor replaced since the job's intake ends the
+    /// leg before its snapshot: nothing is planned, published or committed.
     fn apply(
         &self,
         name: &VaultName,
@@ -1536,8 +1540,15 @@ impl EntryOps for ProductionEntryOps {
         plan: PlanDocument,
         progress: &ApplyProgress,
         reporter: &ProgressReporter<Self::Attachment>,
-    ) -> ApplyEnd {
+    ) -> Result<ApplyEnd, JobFailure> {
         let _job = self.evidence.attributing();
+        if !attachment
+            .maintainership
+            .still_current()
+            .map_err(data_dir_effect)?
+        {
+            return Err(JobFailure::LostMaintainership);
+        }
         let ended = apply_over(name, attachment, plan, progress, reporter);
         // Any answered apply may have committed lane-1 work: an applied one,
         // and an interrupted one whose landed subset committed. A refusal
@@ -1545,7 +1556,7 @@ impl EntryOps for ProductionEntryOps {
         if matches!(ended.answer, ApplyEnding::Answered(_)) {
             self.drain_semantic(name, attachment, reporter);
         }
-        ended
+        Ok(ended)
     }
 
     /// Read off the controls the attachment holds, so the answer is about the
@@ -14826,7 +14837,7 @@ mod tests {
             plan: PlanDocument,
             progress: &ApplyProgress,
             reporter: &ProgressReporter<Self::Attachment>,
-        ) -> ApplyEnd {
+        ) -> Result<ApplyEnd, JobFailure> {
             let ended = self.inner.apply(name, attachment, plan, progress, reporter);
             if let Some(meanwhile) = self.meanwhile.lock().unwrap().take() {
                 meanwhile();
@@ -14834,6 +14845,183 @@ mod tests {
             thread::sleep(norn_fs::OWN_WRITE_TTL + Duration::from_millis(500));
             ended
         }
+    }
+
+    /// Production ops whose maintainer lock file is replaced by another actor
+    /// on the machine just as an apply's leg begins: after the job's intake,
+    /// whose watcher drain found the lock still current, and before the
+    /// apply takes its snapshot. Every leg but the apply is the production
+    /// one, unchanged.
+    struct LockReplacedBeforeApply {
+        inner: ProductionEntryOps,
+        detaches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EntryOps for LockReplacedBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.detaches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            let lock = attachment.maintainership.path().to_path_buf();
+            fs::remove_file(&lock).unwrap();
+            fs::write(&lock, "replacement lock identity").unwrap();
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+    }
+
+    /// **An apply whose maintainer lock is replaced after its intake publishes
+    /// nothing, commits nothing, and is answered not run**: its leg meets the
+    /// lost maintainership before its snapshot, as every leg over the
+    /// coverage does at its start, and the job answers it through the policy
+    /// a failed turn is answered by — the entry releases its coverage, and the
+    /// apply is answered `host/apply-not-run` with the cause that release
+    /// publishes.
+    #[cfg(unix)]
+    #[test]
+    fn an_apply_whose_lock_is_replaced_after_its_intake_publishes_nothing_and_releases() {
+        let f = Fixture::new("host-apply-lost-maintainership");
+        let target = f.vault().join("note.md");
+        fs::write(&target, "status draft\n").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let detaches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = crate::Host::new(
+            registry,
+            LockReplacedBeforeApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                detaches: Arc::clone(&detaches),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        drop(lease);
+
+        let plan = norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        );
+        let answered = host
+            .apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                PlanDocument::operations(plan),
+            ))
+            .expect("an apply over a ready vault is admitted")
+            .wait();
+
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "status draft\n",
+            "the apply published after its maintainership was lost: {answered:?}"
+        );
+        let refused = answered.expect_err("the apply answered as applied");
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::HostApplyNotRun);
+        assert!(
+            matches!(
+                refused.detail(),
+                norn_wire::ErrorDetail::ApplyNotRun { plan: None, .. }
+            ),
+            "the apply answered {:?}",
+            refused.detail()
+        );
+        wait_until(
+            "the entry to release its coverage",
+            lifecycle_budget(),
+            || match detaches.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => Observed::pending("no detach ran"),
+                released => Observed::Met(released),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(host);
+        let mut store = Store::open(
+            derived.join("store.sqlite3"),
+            proven_order(&f),
+            crate::DERIVATION_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .map(|row| row.content_hash),
+            Some(norn_fs::ContentHash::of(b"status draft\n").to_string()),
+            "the apply committed a changeset after its maintainership was lost"
+        );
     }
 
     /// **An apply that outlasts the own-write ledger, with another writer's
@@ -14984,6 +15172,7 @@ mod tests {
             &ApplyProgress::default(),
             &ProgressReporter::disconnected(),
         )
+        .expect("the maintainership stands")
         .answer
     }
 

@@ -2441,7 +2441,11 @@ bound by the applier's lifecycle tests.
   ends with facts waiting hands on to the reconcile they owe unless the next apply takes the
   claim. A preview takes its one snapshot the ordinary way and takes no claim. An intake that
   finds the store damaged, or during which a read met damage and carried it to the claim,
-  answers the apply not applied, with the cause, and leaves the rebuild to run.
+  answers the apply not applied, with the cause, and leaves the rebuild to run. The apply's
+  own leg asks whether the entry's maintainership still stands before its snapshot, as every
+  leg over the coverage asks at its start. A lock found replaced, or one whose standing cannot
+  be read, ends the leg there with nothing planned, published or committed: the entry answers
+  it as it answers a failed turn, and the apply not applied with the cause that publishes.
 - **Every queued apply is answered once.** Every publication of a cause admission refuses
   for — lost trust, damage, an attach that failed, a park — and every release that re-arms
   nothing, a leg's unwind cleanup and the host's destruction among them, answers every queued
