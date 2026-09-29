@@ -36,7 +36,7 @@ mod gate;
 mod serving;
 
 pub(crate) use apply::{ApplyAnswer, not_run};
-pub use apply::{ApplyEnd, ApplyProgress, PendingApply};
+pub use apply::{ApplyEnd, ApplyEnding, ApplyProgress, PendingApply};
 use apply::{ApplyQueue, QueuedApply, RunningApply};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
@@ -7556,17 +7556,22 @@ fn run_apply_job<O: EntryOps>(
         shared
             .ops
             .apply(&name, &mut attachment, plan, &progress, &reporter);
-    let answer = answer.map(|(snapshot, report)| {
-        VaultAnswer::new(
-            AnswerReading::new(
-                TrustState::Ready,
-                snapshot.epoch(),
-                u64::try_from(snapshot.write_generation()).unwrap_or_default(),
-            ),
-            Vec::new(),
-            report,
-        )
-    });
+    // `None` where the apply stood down: it is answered below with the
+    // cause the teardown that moved the entry past its leg publishes.
+    let answer = match answer {
+        ApplyEnding::Answered(answer) => Some(answer.map(|(snapshot, report)| {
+            VaultAnswer::new(
+                AnswerReading::new(
+                    TrustState::Ready,
+                    snapshot.epoch(),
+                    u64::try_from(snapshot.write_generation()).unwrap_or_default(),
+                ),
+                Vec::new(),
+                report,
+            )
+        })),
+        ApplyEnding::StoodDown => None,
+    };
 
     // The end: what the watcher delivered while the apply ran.
     let drained = drain_observed(&shared.ops, &name, &mut attachment);
@@ -7579,15 +7584,15 @@ fn run_apply_job<O: EntryOps>(
         // not stopped at its check before publication, and is answered not
         // applied with the cause the teardown publishes. The coverage goes
         // back where the leg ends.
-        let answer = if progress.began_publishing() {
-            answer
-        } else {
-            Err(progress.unanswered(|| state.apply_cause(&name)))
+        let answer = match answer {
+            Some(answer) if progress.began_publishing() => answer,
+            _ => Err(progress.unanswered(|| state.apply_cause(&name))),
         };
         drop(state);
         let _ = reply.send(answer);
         return Some(attachment);
     }
+    let answer = answer.unwrap_or_else(|| Err(progress.unanswered(|| state.apply_cause(&name))));
     if let Some(heal) = heal {
         state.pending.merge(heal);
     }
@@ -9356,15 +9361,7 @@ mod tests {
             }
             if !reporter.begin_publishing(progress) {
                 self.applies_stood_down.fetch_add(1, Ordering::SeqCst);
-                return ApplyEnd::answered(Err(not_run(
-                    ErrorEnvelope::new(
-                        "the fake apply stood down",
-                        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
-                            "the fake apply stood down",
-                        )),
-                    ),
-                    Some(resolved),
-                )));
+                return ApplyEnd::stood_down();
             }
             if self.block_apply_publishing.load(Ordering::SeqCst) {
                 self.apply_publishing_started.store(true, Ordering::SeqCst);
@@ -9386,7 +9383,7 @@ mod tests {
                 Vec::new(),
             );
             ApplyEnd {
-                answer: Ok((fake_reading(1), report)),
+                answer: ApplyEnding::Answered(Ok((fake_reading(1), report))),
                 heal: healing.then(a_fact),
             }
         }

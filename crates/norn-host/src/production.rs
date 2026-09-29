@@ -31,9 +31,10 @@ use crate::derivation::{
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
-    ApplyEnd, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing, JobFailure,
-    MintedReader, ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork, RecordRefusal,
-    RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal, SnapshotSource,
+    ApplyEnd, ApplyEnding, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing,
+    JobFailure, MintedReader, ProgressReporter, ReadSource, ReaderUnavailable, ReconcileWork,
+    RecordRefusal, RegistryUnwritable, ReloadError, ReloadJudgment, ReloadOutcome, RetireRefusal,
+    SnapshotSource,
 };
 
 /// The derived database's file, inside the vault's derived directory.
@@ -320,7 +321,10 @@ fn apply_over(
         }
     });
     ApplyEnd {
-        answer: outcome.into_wire().map(|report| (snapshot, report)),
+        answer: match outcome.into_wire() {
+            Some(answer) => ApplyEnding::Answered(answer.map(|report| (snapshot, report))),
+            None => ApplyEnding::StoodDown,
+        },
         heal,
     }
 }
@@ -1515,7 +1519,7 @@ impl EntryOps for ProductionEntryOps {
     ) -> ApplyEnd {
         let _job = self.evidence.attributing();
         let ended = apply_over(attachment, plan, progress, reporter);
-        if ended.answer.is_ok() {
+        if matches!(ended.answer, ApplyEnding::Answered(Ok(_))) {
             self.drain_semantic(name, attachment, reporter);
         }
         ended

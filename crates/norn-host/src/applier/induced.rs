@@ -39,7 +39,10 @@ fn applier_child() {
     let plan: ResolvedPlan =
         serde_json::from_slice(&std::fs::read(var(PLAN)).expect("the plan")).expect("a plan");
     let mut fixture = Fixture::over(None, var(VAULT), var(DATA), "child.sqlite3");
-    let outcome = fixture.apply(plan).into_wire();
+    let outcome = fixture
+        .apply(plan)
+        .into_wire()
+        .expect("a child that publishes does not stand down");
     std::fs::write(
         var(OUTCOME),
         serde_json::to_vec(&outcome).expect("an outcome"),

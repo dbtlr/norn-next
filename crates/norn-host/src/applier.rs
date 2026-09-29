@@ -173,7 +173,7 @@ impl Applier<'_> {
         drop(view);
         if !(self.publishing)() {
             stage::discard_all(self.anchor, self.shadows, staged.targets);
-            return ApplyOutcome::StoodDown { plan };
+            return ApplyOutcome::StoodDown;
         }
         let publisher = Publisher {
             anchor: self.anchor,

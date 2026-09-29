@@ -963,12 +963,16 @@ fn each_outcome_crosses_under_its_wire_code() {
         folders_removed: Vec::new(),
     })
     .into_wire()
+    .expect("an applied plan is answered")
     .expect("an applied plan is a report");
     assert!(
         matches!(applied_report, norn_wire::ApplyReport::Applied { plan: carried, .. } if carried == plan)
     );
     let code = |outcome: ApplyOutcome| {
-        let envelope = outcome.into_wire().expect_err("a refusal");
+        let envelope = outcome
+            .into_wire()
+            .expect("a refusal is answered")
+            .expect_err("a refusal");
         let carries_plan = match envelope.detail() {
             ErrorDetail::PlanRefused { .. }
             | ErrorDetail::PlanInterrupted { .. }
@@ -1035,6 +1039,7 @@ impl Fixture {
         let envelope = self
             .apply(plan)
             .into_wire()
+            .expect("a refusal is answered")
             .expect_err("the plan is refused");
         assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
         let paths = match envelope.detail() {
@@ -1117,7 +1122,12 @@ fn a_transition_spelled_in_another_case_is_invalid_where_case_is_told_apart() {
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.transitions[0].path = path("A.md");
     if folds {
-        assert!(fixture.apply(plan).into_wire().is_err());
+        assert!(
+            fixture
+                .apply(plan)
+                .into_wire()
+                .is_some_and(|answer| answer.is_err())
+        );
     } else {
         assert_eq!(
             fixture.refuses_disagreeing(plan),
@@ -1624,7 +1634,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
     };
     let outcome = applier.apply(plan.clone(), &mut fixture.store);
     match outcome {
-        ApplyOutcome::StoodDown { plan: carried } => assert_eq!(carried, plan),
+        ApplyOutcome::StoodDown => {}
         other => panic!("the apply answered {other:?}"),
     }
     assert_eq!(fixture.tree(), before, "nothing was published");

@@ -3,7 +3,6 @@
 use norn_wire::{
     AppliedTarget, ApplyReport, ChangesetOutcome, ErrorDetail, ErrorEnvelope, FolderPath, Forecast,
     InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
-    UntrustedReason,
 };
 
 use norn_fs::Batch;
@@ -42,11 +41,8 @@ pub(crate) enum ApplyOutcome {
     /// The apply's leg stopped standing before publication began — a
     /// teardown moved the entry past it — so every shadow was removed and no
     /// document was written. The apply job answers it with the teardown's
-    /// cause.
-    StoodDown {
-        /// The resolved plan.
-        plan: ResolvedPlan,
-    },
+    /// cause and the plan the apply's progress recorded.
+    StoodDown,
     /// The filesystem refused before any target landed, so no document was
     /// written.
     WriteFailed {
@@ -154,8 +150,12 @@ impl ApplyOutcome {
 
     /// The outcome as the wire answers it: a report, or a refusal under its
     /// code.
-    pub(crate) fn into_wire(self) -> Result<ApplyReport, ErrorEnvelope> {
-        match self {
+    ///
+    /// `None` for an apply that stood down: its answer is not the applier's
+    /// to give, since the cause is the teardown that moved the entry past the
+    /// apply's leg, which the apply job reads off the entry.
+    pub(crate) fn into_wire(self) -> Option<Result<ApplyReport, ErrorEnvelope>> {
+        Some(match self {
             ApplyOutcome::Applied(applied) => Ok(ApplyReport::applied(
                 applied.plan,
                 applied.changeset,
@@ -193,19 +193,11 @@ impl ApplyOutcome {
                     interrupted.cause,
                 ),
             )),
-            ApplyOutcome::StoodDown { plan } => Err(crate::lifecycle::not_run(
-                ErrorEnvelope::new(
-                    "the apply's claim on the entry was taken away before publication began",
-                    ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
-                        "the apply's claim on the entry was taken away before publication began",
-                    )),
-                ),
-                Some(plan),
-            )),
             ApplyOutcome::WriteFailed { plan, detail } => Err(ErrorEnvelope::new(
                 format!("the filesystem refused the plan before anything landed: {detail}"),
                 ErrorDetail::write_failed(plan, detail),
             )),
-        }
+            ApplyOutcome::StoodDown => return None,
+        })
     }
 }

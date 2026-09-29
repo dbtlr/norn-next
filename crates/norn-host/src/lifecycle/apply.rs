@@ -126,20 +126,45 @@ pub(crate) fn not_run(cause: ErrorEnvelope, plan: Option<ResolvedPlan>) -> Error
 /// answers it.
 #[derive(Debug)]
 pub struct ApplyEnd {
-    /// The report, with where the store stood when the apply took its one
-    /// snapshot — the reading the answer is given under — or the code the
-    /// apply ended in.
-    pub answer: Result<(StoreReading, ApplyReport), ErrorEnvelope>,
+    /// The answer the apply ended in, or that it stood down before
+    /// publication.
+    pub answer: ApplyEnding,
     /// What the entry derives because the changeset did not commit: the
     /// paths the apply touched, which the entry heals from what they hold.
     /// `None` where the changeset committed or nothing landed.
     pub heal: Option<Batch>,
 }
 
+/// How an apply's work ended: with an answer of its own, or standing down.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // One per apply, moved once: an answer is the common ending, and boxing it would allocate for the rarer stand-down's sake.
+pub enum ApplyEnding {
+    /// The report, with where the store stood when the apply took its one
+    /// snapshot — the reading the answer is given under — or the code the
+    /// apply ended in.
+    Answered(Result<(StoreReading, ApplyReport), ErrorEnvelope>),
+    /// The apply's leg no longer stood when publication was about to begin,
+    /// so every shadow was removed and nothing was published. The cause is
+    /// the teardown's, which the apply job reads off the entry and answers
+    /// with, beside the plan the apply's progress recorded.
+    StoodDown,
+}
+
 impl ApplyEnd {
     /// An apply that ended in `answer`, owing no heal.
     pub fn answered(answer: Result<(StoreReading, ApplyReport), ErrorEnvelope>) -> Self {
-        ApplyEnd { answer, heal: None }
+        ApplyEnd {
+            answer: ApplyEnding::Answered(answer),
+            heal: None,
+        }
+    }
+
+    /// An apply that stood down before publication, owing no heal.
+    pub fn stood_down() -> Self {
+        ApplyEnd {
+            answer: ApplyEnding::StoodDown,
+            heal: None,
+        }
     }
 }
 
