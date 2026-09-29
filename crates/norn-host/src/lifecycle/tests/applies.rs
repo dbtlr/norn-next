@@ -1473,3 +1473,39 @@ fn an_apply_arriving_over_damage_carried_to_a_turn_is_refused_at_once() {
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, host));
 }
+
+/// **An apply admitted over an idle detach waiting in the channel withdraws
+/// the detach, and the detach that arrives superseded sends the apply.** The
+/// detach holds the queue slot behind the one worker another vault's attach
+/// holds, so the apply's claim cannot be sent beside it; the superseded
+/// detach runs nothing, and where its leg ends it hands the free claim to the
+/// queued apply, which runs with no dispatcher tick.
+#[test]
+fn an_apply_over_an_idle_detach_in_the_channel_is_sent_by_the_superseded_detach() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("a").unwrap();
+    let holding = VaultName::new("b").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
+    drop(host.demand(&name, AttachMode::Durable).unwrap());
+    wait_for_state(&host, &name, TrustState::Ready);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    wait_for_flag("attach_started", &ops.attach_started);
+    dispatcher_tick(&host.shared, Instant::now() + Duration::from_secs(61));
+    let entry = host.shared.entries.get(&name).unwrap();
+    assert!(
+        matches!(
+            entry.gate.lock().unwrap().claim.marker(),
+            Some(Job::Detach(..))
+        ),
+        "no idle detach waits in the channel"
+    );
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    ops.block_attach.store(false, Ordering::SeqCst);
+    ops.attach_release.store(true, Ordering::SeqCst);
+
+    applied(answer_of(pending));
+    assert_eq!(ops.detaches.load(Ordering::SeqCst), 0, "the detach ran");
+    drop((holding_lease, host));
+}
