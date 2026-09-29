@@ -272,6 +272,7 @@ fn apply_over(
     attachment: &mut ProductionAttachment,
     plan: PlanDocument,
     progress: &ApplyProgress,
+    reporter: &ProgressReporter<ProductionAttachment>,
 ) -> ApplyEnd {
     let Some(ground) = attachment.plan_ground() else {
         return ApplyEnd::answered(Err(crate::apply::unreadable(
@@ -306,7 +307,7 @@ fn apply_over(
         exclusions: &ground.exclusions,
         shadows: &attachment.shadows,
         own_writes: &attachment.own_writes,
-        publishing: &|| progress.publishing(),
+        publishing: &|| reporter.begin_publishing(progress),
     }
     .apply(resolved, &mut attachment.store);
     // The heal's paths are spelled as the vault's walk spells them, under
@@ -1513,7 +1514,7 @@ impl EntryOps for ProductionEntryOps {
         reporter: &ProgressReporter<Self::Attachment>,
     ) -> ApplyEnd {
         let _job = self.evidence.attributing();
-        let ended = apply_over(attachment, plan, progress);
+        let ended = apply_over(attachment, plan, progress, reporter);
         if ended.answer.is_ok() {
             self.drain_semantic(name, attachment, reporter);
         }

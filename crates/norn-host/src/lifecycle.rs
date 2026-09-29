@@ -666,6 +666,24 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         }
     }
 
+    /// Answer whether an apply this job runs may begin publishing, and mark
+    /// `progress` publishing where it may: the job's leg still stands at the
+    /// entry's epoch. Both are read and written in one gate hold, so a
+    /// teardown that moves the entry past the leg is either seen here, and the
+    /// apply stops with nothing published, or comes after the mark, and the
+    /// apply finishes its publication and its changeset.
+    pub fn begin_publishing(&self, progress: &ApplyProgress) -> bool {
+        let Some(entry) = self.entry.upgrade() else {
+            return false;
+        };
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        if !state.claim.stands_at(self.epoch) {
+            return false;
+        }
+        progress.publishing();
+        true
+    }
+
     /// Enter Lane 1 warming after a reload candidate passes core validation.
     ///
     /// This transition replaces the current trust label at the reporter's
@@ -7490,8 +7508,16 @@ fn run_apply_job<O: EntryOps>(
     state.unpin_leg(Leg::Job(epoch));
     state.running_apply = None;
     if !state.claim.stands_at(epoch) {
-        // The entry moved on while the apply ran; the apply's answer is
-        // still what it did, and the coverage goes back where the leg ends.
+        // The entry moved on while the apply ran. One that had begun
+        // publishing finished, and its answer is what it did; one that had
+        // not stopped at its check before publication, and is answered not
+        // applied with the cause the teardown publishes. The coverage goes
+        // back where the leg ends.
+        let answer = if progress.began_publishing() {
+            answer
+        } else {
+            Err(progress.unanswered(|| state.apply_cause(&name)))
+        };
         drop(state);
         let _ = reply.send(answer);
         return Some(attachment);
@@ -8703,6 +8729,13 @@ mod tests {
         panic_in_apply_before_publishing: AtomicBool,
         panic_in_apply_after_publishing: AtomicBool,
         heal_in_apply: AtomicBool,
+        /// Applies whose leg no longer stood when they would have begun
+        /// publishing.
+        applies_stood_down: AtomicUsize,
+        /// Whether an apply holds once it has begun publishing.
+        block_apply_publishing: AtomicBool,
+        apply_publishing_started: AtomicBool,
+        apply_publishing_release: AtomicBool,
         /// Facts the watcher delivers to the next polls, whichever thread
         /// polls: a case sets them where only the leg it drives can poll.
         facts_on_next_polls: AtomicUsize,
@@ -9255,7 +9288,22 @@ mod tests {
             if self.panic_in_apply_before_publishing.load(Ordering::SeqCst) {
                 panic!("{APPLY_PANIC}");
             }
-            progress.publishing();
+            if !reporter.begin_publishing(progress) {
+                self.applies_stood_down.fetch_add(1, Ordering::SeqCst);
+                return ApplyEnd::answered(Err(not_run(
+                    ErrorEnvelope::new(
+                        "the fake apply stood down",
+                        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
+                            "the fake apply stood down",
+                        )),
+                    ),
+                    Some(resolved),
+                )));
+            }
+            if self.block_apply_publishing.load(Ordering::SeqCst) {
+                self.apply_publishing_started.store(true, Ordering::SeqCst);
+                wait_for_release("apply_publishing_release", &self.apply_publishing_release);
+            }
             if self.panic_in_apply_after_publishing.load(Ordering::SeqCst) {
                 panic!("{APPLY_PANIC}");
             }

@@ -1100,3 +1100,101 @@ fn registration_changes_refuse_as_held_while_an_apply_is_queued_or_running() {
     assert!(host.shared.entries.get(&name).is_some());
     drop((lease, host));
 }
+
+/// A ready vault over a root on disk, which a park can be raised over.
+#[cfg(unix)]
+fn a_ready_vault_on_disk(
+    ops: &Arc<FakeOps>,
+    scratch: &Scratch,
+) -> (
+    Host<Arc<FakeOps>>,
+    VaultName,
+    std::path::PathBuf,
+    DemandLease<Arc<FakeOps>>,
+) {
+    let name = VaultName::new("notes").unwrap();
+    let root = scratch.root().join("notes");
+    let host = host_without_ambient_polling(
+        Arc::clone(ops),
+        Roots::Created(&[(&name, root.as_path())]),
+        1,
+    );
+    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+    (host, name, root, lease)
+}
+
+/// **Case 17, before publication: a running apply that has not begun
+/// publishing stops at a teardown, and answers not applied with the
+/// teardown's cause.** The apply has planned and is about to publish when a
+/// park moves the entry past its leg. Its check before the first publication
+/// finds the leg no longer standing, so it publishes nothing, and its caller
+/// is answered with the park and the plan it resolved.
+#[cfg(unix)]
+#[test]
+fn a_running_apply_that_has_not_begun_publishing_stops_at_a_teardown() {
+    let scratch = temp_base("apply-stopped-at-a-teardown");
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, root, lease) = a_ready_vault_on_disk(&ops, &scratch);
+    ops.block_apply.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+
+    let parked = park_entry(&host, &name, &root, Park::DuplicateRoot);
+    ops.apply_release.store(true, Ordering::SeqCst);
+    let refused = answer_of(pending).expect_err("the apply published over a teardown");
+    match refused.detail() {
+        ErrorDetail::ApplyNotRun {
+            cause,
+            plan: Some(plan),
+            ..
+        } => {
+            assert_eq!(cause.detail(), &parked);
+            assert_eq!(plan, &the_plan(&name));
+        }
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(ops.applies_stood_down.load(Ordering::SeqCst), 1);
+    drop((lease, host));
+}
+
+/// **Case 17, after publication began: a publishing apply finishes its
+/// publication and its changeset before its leg ends.** A park moves the
+/// entry past the apply's leg once the apply has begun publishing. The apply
+/// is not stopped: it finishes and answers applied, and the coverage its leg
+/// holds goes back only once it has.
+#[cfg(unix)]
+#[test]
+fn a_publishing_apply_finishes_its_publication_and_changeset_before_its_leg_ends() {
+    let scratch = temp_base("apply-finishing-over-a-teardown");
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, root, lease) = a_ready_vault_on_disk(&ops, &scratch);
+    ops.block_apply_publishing.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_publishing_started", &ops.apply_publishing_started);
+
+    park_entry(&host, &name, &root, Park::DuplicateRoot);
+    assert_eq!(
+        ops.detaches.load(Ordering::SeqCst),
+        0,
+        "the park gave the coverage back under a publishing apply"
+    );
+    ops.apply_publishing_release.store(true, Ordering::SeqCst);
+    match applied(answer_of(pending)) {
+        ApplyReport::Applied { changeset, .. } => {
+            assert_eq!(changeset, ChangesetOutcome::Committed);
+        }
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(ops.applies_stood_down.load(Ordering::SeqCst), 0);
+    wait_until(
+        "the leg to give the coverage back",
+        lifecycle_wait_budget(),
+        || match ops.detaches.load(Ordering::SeqCst) {
+            1 => Observed::Met(()),
+            detaches => Observed::pending(format!("{detaches} detaches")),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    drop((lease, host));
+}

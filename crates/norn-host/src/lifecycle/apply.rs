@@ -41,7 +41,8 @@ pub(super) type ApplyReply = mpsc::SyncSender<ApplyAnswer>;
 /// The job the apply runs in holds one and hands it to
 /// [`EntryOps::apply`](super::EntryOps::apply), which records the two moments
 /// the caller's answer turns on: the resolved plan, once planning finishes,
-/// and publication, just before the first target is published.
+/// and publication, just before the first target is published, through the
+/// leg's check that it still stands.
 #[derive(Clone, Default)]
 pub struct ApplyProgress {
     record: Arc<Mutex<ProgressRecord>>,
@@ -61,9 +62,16 @@ impl ApplyProgress {
     }
 
     /// Record that publication is about to begin: an apply dropped from here
-    /// may have landed some of its targets.
-    pub fn publishing(&self) {
+    /// may have landed some of its targets. Recorded through
+    /// [`ProgressReporter::begin_publishing`](super::ProgressReporter::begin_publishing),
+    /// which asks first whether the apply's leg still stands.
+    pub(super) fn publishing(&self) {
         self.lock().publishing = true;
+    }
+
+    /// Whether publication began.
+    pub(super) fn began_publishing(&self) -> bool {
+        self.lock().publishing
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ProgressRecord> {
@@ -74,7 +82,7 @@ impl ApplyProgress {
 
     /// The answer a dropped reply is given: unknown once publication began,
     /// and not applied, for `cause`, before it.
-    fn unanswered(&self, cause: impl FnOnce() -> ErrorEnvelope) -> ErrorEnvelope {
+    pub(super) fn unanswered(&self, cause: impl FnOnce() -> ErrorEnvelope) -> ErrorEnvelope {
         let record = self.lock();
         match (&record.plan, record.publishing) {
             (Some(plan), true) => ErrorEnvelope::new(

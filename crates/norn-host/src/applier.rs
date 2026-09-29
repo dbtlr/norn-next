@@ -57,9 +57,11 @@
 //! **Who applies here.** The apply job, which takes the entry's claim,
 //! derives the facts delivered by then, plans an authored plan through the
 //! planner, and hands the resolved plan here with the entry's vault root,
-//! root identity, shadow home, own-write ledger and store, and a mark it
-//! records just before the first publication — the moment from which an
-//! apply dropped unanswered may have landed targets.
+//! root identity, shadow home, own-write ledger and store, and a question it
+//! asks just before the first publication: whether its leg still stands. Yes
+//! records the mark from which an apply dropped unanswered may have landed
+//! targets; no is a teardown, and the applier removes every shadow and
+//! publishes nothing.
 //!
 //! [ADR 0031]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md
 
@@ -127,10 +129,13 @@ pub(crate) struct Applier<'a> {
     pub(crate) shadows: &'a ShadowHome,
     /// Where each publication is recorded.
     pub(crate) own_writes: &'a dyn OwnWriteLedger,
-    /// Called once, after every target is staged and just before the first
-    /// is published: the apply job's progress mark, from which an apply
-    /// dropped unanswered may have landed targets.
-    pub(crate) publishing: &'a dyn Fn(),
+    /// Asked once, after every target is staged and just before the first
+    /// is published, whether publication may begin: the apply job's check
+    /// that its leg still stands, which records the progress mark — from
+    /// which an apply dropped unanswered may have landed targets — where it
+    /// does. An answer of no is a teardown the apply stops at: every shadow
+    /// is removed and nothing is published.
+    pub(crate) publishing: &'a dyn Fn() -> bool,
 }
 
 impl Applier<'_> {
@@ -166,7 +171,10 @@ impl Applier<'_> {
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
         };
         drop(view);
-        (self.publishing)();
+        if !(self.publishing)() {
+            stage::discard_all(self.anchor, self.shadows, staged.targets);
+            return ApplyOutcome::StoodDown { plan };
+        }
         let publisher = Publisher {
             anchor: self.anchor,
             root: self.root,

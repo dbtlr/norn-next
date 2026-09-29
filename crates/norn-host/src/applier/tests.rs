@@ -160,7 +160,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &self.recorded,
-            publishing: &|| {},
+            publishing: &|| true,
         };
         applier.apply(plan, &mut self.store)
     }
@@ -1469,7 +1469,7 @@ impl Fixture {
             exclusions: &self.exclusions,
             shadows: &self.shadows,
             own_writes: &meddling,
-            publishing: &|| {},
+            publishing: &|| true,
         };
         applier.apply(plan, &mut self.store)
     }
@@ -1597,4 +1597,42 @@ fn a_plan_carrying_a_hash_of_another_algorithm_does_not_read() {
     json["transitions"][0]["before"]["hash"] =
         serde_json::Value::String(format!("sha256:{}", "A".repeat(64)));
     assert!(serde_json::from_value::<ResolvedPlan>(json).is_err());
+}
+
+/// **An apply whose leg no longer stands when it would begin publishing
+/// stops there, removes every shadow it staged and publishes nothing.** The
+/// plan stages a create, an edit and a removal; the question publication
+/// asks before its first target is answered no, as a teardown answers it.
+/// No target is written, no shadow is left, no publication is recorded, and
+/// the outcome carries the resolved plan.
+#[test]
+fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_nothing() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("c.md", "# C\n")]);
+    let plan = fixture.plan(vec![
+        creating("b.md", "# B\n"),
+        editing("a.md", "# A", "# A2"),
+        deleting("c.md"),
+    ]);
+    let before = fixture.tree();
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &|| false,
+    };
+    let outcome = applier.apply(plan.clone(), &mut fixture.store);
+    match outcome {
+        ApplyOutcome::StoodDown { plan: carried } => assert_eq!(carried, plan),
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(fixture.tree(), before, "nothing was published");
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+    assert!(
+        fixture.shadows_left().is_empty(),
+        "{:?}",
+        fixture.shadows_left()
+    );
+    assert!(fixture.recorded.calls.borrow().is_empty());
 }

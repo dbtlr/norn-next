@@ -3,6 +3,7 @@
 use norn_wire::{
     AppliedTarget, ApplyReport, ChangesetOutcome, ErrorDetail, ErrorEnvelope, FolderPath, Forecast,
     InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
+    UntrustedReason,
 };
 
 use norn_fs::Batch;
@@ -38,6 +39,14 @@ pub(crate) enum ApplyOutcome {
     },
     /// Publication stopped after something landed.
     Interrupted(Box<Interrupted>),
+    /// The apply's leg stopped standing before publication began — a
+    /// teardown moved the entry past it — so every shadow was removed and no
+    /// document was written. The apply job answers it with the teardown's
+    /// cause.
+    StoodDown {
+        /// The resolved plan.
+        plan: ResolvedPlan,
+    },
     /// The filesystem refused before any target landed, so no document was
     /// written.
     WriteFailed {
@@ -183,6 +192,15 @@ impl ApplyOutcome {
                     interrupted.landed,
                     interrupted.cause,
                 ),
+            )),
+            ApplyOutcome::StoodDown { plan } => Err(crate::lifecycle::not_run(
+                ErrorEnvelope::new(
+                    "the apply's claim on the entry was taken away before publication began",
+                    ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal(
+                        "the apply's claim on the entry was taken away before publication began",
+                    )),
+                ),
+                Some(plan),
             )),
             ApplyOutcome::WriteFailed { plan, detail } => Err(ErrorEnvelope::new(
                 format!("the filesystem refused the plan before anything landed: {detail}"),
