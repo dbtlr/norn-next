@@ -14888,6 +14888,180 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
     }
 
+    /// A production attachment over a vault holding `note.md`, and the plan
+    /// that edits it: what the production apply's cases below run.
+    fn attached_for_an_apply(
+        f: &Fixture,
+    ) -> (
+        ProductionEntryOps,
+        VaultName,
+        ProductionAttachment,
+        PlanDocument,
+    ) {
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+        let (ops, name) = f.ops(64);
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("the vault attaches");
+        let plan = PlanDocument::operations(norn_wire::AuthoredPlan::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            vec![norn_wire::Operation::new(
+                norn_wire::OperationKind::str_replace(
+                    norn_wire::DocumentPath::new("note.md").unwrap(),
+                    "draft",
+                    "final",
+                ),
+            )],
+        ));
+        (ops, name, attachment, plan)
+    }
+
+    /// The production apply of `plan` over `attachment`, with no entry to
+    /// report to.
+    fn apply_directly(
+        ops: &ProductionEntryOps,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        plan: PlanDocument,
+    ) -> ApplyEnding {
+        ops.apply(
+            name,
+            attachment,
+            plan,
+            &ApplyProgress::default(),
+            &ProgressReporter::disconnected(),
+        )
+        .answer
+    }
+
+    /// **A production apply whose one snapshot meets a damaged store ends
+    /// damaged**, so its job publishes the damage with the rebuild it owes,
+    /// rather than answering it as a store that refused a statement. The
+    /// store records no write generation, which no reading can be taken
+    /// without; nothing is planned and the note is untouched.
+    #[test]
+    fn a_production_apply_over_a_damaged_store_ends_damaged() {
+        let f = Fixture::new("host-apply-damaged-snapshot");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DELETE FROM meta WHERE key = 'write_generation'",
+        )
+        .unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        assert!(
+            matches!(ended, ApplyEnding::Damaged(_)),
+            "the apply ended {ended:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root replaced since its coverage was
+    /// installed answers `vault/root-changed`**, asked of the filesystem
+    /// before anything is planned, never planning on the directory that now
+    /// stands at the root's path.
+    #[test]
+    fn a_production_apply_over_a_replaced_root_answers_root_changed() {
+        let f = Fixture::new("host-apply-replaced-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        fs::rename(f.vault(), f.root.join("aside")).unwrap();
+        fs::create_dir_all(f.vault().join(".norn")).unwrap();
+        fs::write(f.vault().join("note.md"), "status draft\n").unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::VaultRootChanged);
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root that no longer stands answers not
+    /// run, with the coverage loss a read carries once the entry's watcher
+    /// reports it**, asked of the filesystem before anything is planned
+    /// rather than met as a walk the environment refused.
+    #[test]
+    fn a_production_apply_over_a_vanished_root_answers_not_run_with_the_coverage_loss() {
+        let f = Fixture::new("host-apply-vanished-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        let root = attachment.covered_root.clone();
+        fs::remove_dir_all(f.vault()).unwrap();
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        let lost = norn_wire::TrustState::untrusted(crate::lifecycle::watcher_lost(
+            WatchError::CoverageLost(root),
+        ));
+        assert_eq!(
+            refused,
+            crate::lifecycle::not_run(
+                crate::lifecycle::ReadRefusal::NotServing(crate::lifecycle::Demand::State(lost))
+                    .answer(&name),
+                None
+            )
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A production apply over a root that stands but cannot be walked
+    /// answers not run, with trust withdrawn for the environment's refusal**
+    /// — the refusal a read carries once the entry's own walk meets the same
+    /// failure — and writes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_production_apply_over_an_unwalkable_root_answers_not_run_with_the_environments_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("host-apply-unwalkable-root");
+        let (ops, name, mut attachment, plan) = attached_for_an_apply(&f);
+        fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(f.vault()).is_ok() {
+            eprintln!("skipped: this account walks a mode-000 directory");
+            fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o755)).unwrap();
+            ops.detach(&name, attachment);
+            return;
+        }
+
+        let ended = apply_directly(&ops, &name, &mut attachment, plan);
+        fs::set_permissions(f.vault(), fs::Permissions::from_mode(0o755)).unwrap();
+        let ApplyEnding::Answered(Err(refused)) = ended else {
+            panic!("the apply ended {ended:?}");
+        };
+        assert_eq!(refused.code(), &norn_wire::ReasonCode::HostApplyNotRun);
+        let norn_wire::ErrorDetail::ApplyNotRun {
+            cause, plan: None, ..
+        } = refused.detail()
+        else {
+            panic!("the apply answered {:?}", refused.detail());
+        };
+        assert!(
+            matches!(
+                cause.detail(),
+                norn_wire::ErrorDetail::EntryUntrusted {
+                    reason: UntrustedReason::EnvironmentalRefusal { .. },
+                    ..
+                }
+            ),
+            "the cause is not the environment's refusal: {cause:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(f.vault().join("note.md")).unwrap(),
+            "status draft\n"
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn external_edit_is_autonomously_pumped_through_warming_to_ready() {
         let f = Fixture::new("host-watch-edit");
