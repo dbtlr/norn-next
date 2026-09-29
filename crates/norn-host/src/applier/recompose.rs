@@ -57,6 +57,12 @@ pub(super) enum Recomposed {
 /// stand-in reaches nothing published; such a landed target's after-state is
 /// the one the vault already holds, and is not recomposed. An edit the
 /// stand-in does not let act is one whose target already holds its change.
+///
+/// **A target already holding its after-state is landed, whoever wrote it**
+/// (ADR 0031's landed rule). So a plan whose after-states were edited by hand
+/// to what the vault already holds is not caught here: every target is
+/// judged landed, nothing is recomposed against those after-states, and the
+/// plan answers applied with every target found, writing nothing.
 pub(super) fn recompose<V: VaultView>(
     plan: &ResolvedPlan,
     states: &[TargetState],
