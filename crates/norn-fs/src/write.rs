@@ -480,10 +480,8 @@ pub struct RemovedFolders {
 /// names another directory refuses. `path` is relative to it and names a file
 /// below it, never a parent, a root or a prefix.
 ///
-/// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
+/// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which stages every target of a plan before it publishes any.
-/// Nothing outside `norn-fs` calls it until that applier lands, so its
-/// contract is held by this crate's suites alone.
 pub fn stage(
     anchor: &Path,
     root: Identity,
@@ -504,9 +502,9 @@ pub fn stage(
 /// the target was staged under; the root is held to the one staging recorded,
 /// and a different home holds no such shadow.
 ///
-/// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
+/// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which publishes creates, then replaces, then removes, once
-/// every target staged. Nothing outside `norn-fs` calls it until then.
+/// every target staged.
 pub fn publish(
     anchor: &Path,
     staged: Staged,
@@ -526,9 +524,8 @@ pub fn publish(
 /// longer holds the after-state refuses — drift where a content hash was
 /// expected, a taken name where absence was.
 ///
-/// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
-/// plan-apply), on a re-sent resolved plan. Nothing outside `norn-fs` calls it
-/// until then.
+/// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
+/// plan-apply), on a target a re-sent resolved plan finds landed.
 pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refusal> {
     confirm_landed_where(anchor, landed, Faults::entry())
 }
@@ -542,8 +539,8 @@ pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refus
 /// [`crate::shadow`]). A fallback home under a vault root that no longer is
 /// the staged one is not reached, and its shadow is left to that sweep too.
 ///
-/// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
-/// plan-apply). Nothing outside `norn-fs` calls it until then.
+/// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
+/// plan-apply).
 pub fn discard(anchor: &Path, staged: Staged, shadows: &ShadowHome) {
     let Some(shadow) = staged.pending.shadow() else {
         return;
@@ -573,8 +570,8 @@ pub fn discard(anchor: &Path, staged: Staged, shadows: &ShadowHome) {
 /// not empty ends the call as that refusal; the folders removed before it are
 /// removed, and their holders were synced.
 ///
-/// **A dormant carrier.** Its consumer is the one applier (NORN-295, Layer 4
-/// plan-apply). Nothing outside `norn-fs` calls it until then.
+/// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
+/// plan-apply).
 pub fn remove_empty_folders(
     anchor: &Path,
     root: Identity,

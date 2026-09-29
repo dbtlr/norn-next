@@ -14,7 +14,7 @@ mod applier;
 mod derivation;
 mod evidence;
 mod lifecycle;
-// A dormant carrier until NORN-295's applier and `Host::apply` land: see the
+// A dormant carrier until NORN-295's `Host::apply` lands: see the
 // module's own documentation for who calls it and why nothing does yet.
 #[cfg_attr(not(test), allow(dead_code))]
 mod planner;

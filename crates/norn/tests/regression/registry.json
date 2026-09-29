@@ -1111,9 +1111,9 @@
       "sources": ["NRN-139", "NRN-162", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the write kernel takes one document at a time and rewrites no links, so nothing in the tree composes a cascade to order. The cascade is composed and run by the host's single applier, and that applier is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier, the crate root being where norn-host publishes every type it owns.",
+        "reason": "the ordering has its carrier and the cascade does not. The host's single applier publishes every replacement ahead of every removal, content-dependency order within them, as crates/norn-host/src/applier/stage.rs orders them, so a cascade's rewrites would land before its destructive step. Nothing composes a cascade yet: the operation vocabulary carries no link rewrite and no verb plans one, which waits on the link-cascading move and delete verbs, and a verb nobody has written is no subject a path or a declaration names.",
         "grounds": [
-          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+          { "present": "crates/norn-host/src/applier/stage.rs" }
         ]
       }
     },
@@ -1164,11 +1164,12 @@
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
         "status": "dormant",
-        "reason": "the shape this forbids is refused by construction on the write side: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another. What has no subject on the write side is the contention this property is stated against: the long apply that would hold the surface is the host's single applier, which is not built, so there is no write path to test a read's wait against. The read side is carried inside crates/norn-host/src/lifecycle.rs::Host::begin_read: every wait it takes — its first take of the entry gate, the wait for a change it settles over, the wait for a held connection, and the retake of the gate after either wait — runs to the one read deadline, as a_reads_first_take_of_a_gate_held_past_its_bound_refuses_within_the_bound, a_read_past_its_settle_bound_refuses_as_still_indexing, a_read_waiting_for_the_connection_refuses_at_its_bound, a_reads_retake_of_a_gate_held_past_its_bound_refuses_within_the_bound and a_reads_retake_after_the_connection_wait_refuses_within_the_bound state. Three takes of the entry gate on a read's path remain ordinary locks: ReadHold's drop through lock_in_a_drop, withdraw_for_read_damage, and the dispatch_pending lock in begin_read's schedule-and-refuse branch — so a read's wait is not yet bounded end to end. The name the applier takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "reason": "the shape this forbids is refused by construction on the write side: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — so no session mutex is held across anything and no read borrows the writer; crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle rather than opening another. What has no subject on the write side is the contention this property is stated against: the long apply that would hold the surface runs as a job no request can start yet, so there is no write path to test a read's wait against. The read side is carried inside crates/norn-host/src/lifecycle.rs::Host::begin_read: every wait it takes — its first take of the entry gate, the wait for a change it settles over, the wait for a held connection, and the retake of the gate after either wait — runs to the one read deadline, as a_reads_first_take_of_a_gate_held_past_its_bound_refuses_within_the_bound, a_read_past_its_settle_bound_refuses_as_still_indexing, a_read_waiting_for_the_connection_refuses_at_its_bound, a_reads_retake_of_a_gate_held_past_its_bound_refuses_within_the_bound and a_reads_retake_after_the_connection_wait_refuses_within_the_bound state. Three takes of the entry gate on a read's path remain ordinary locks: ReadHold's drop through lock_in_a_drop, withdraw_for_read_damage, and the dispatch_pending lock in begin_read's schedule-and-refuse branch — so a read's wait is not yet bounded end to end. The applier is built, in crates/norn-host/src/applier.rs, and reached by no request yet: the apply job that runs it under the entry's claim and answers its caller through the handle the apply seam names is not, and that name is pre-committed as crates/norn-host/src/lifecycle.rs::PendingApply.",
         "grounds": [
           { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "symbol-absent": "crates/norn-host/src/lifecycle.rs::PendingApply" }
         ]
       }
     },
@@ -1180,10 +1181,11 @@
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "dormant",
-        "reason": "the check is the kernel's own: crates/norn-fs/src/open.rs descends into the vault root one component at a time and refuses what leaves it, once per operation the kernel runs. No layer above it holds one check for every verb, because that layer is the host's single applier and it is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "reason": "the check is the kernel's own: crates/norn-fs/src/open.rs descends into the vault root one component at a time and refuses what leaves it, once per operation the kernel runs. The layer above it every verb applies through is the host's single applier, crates/norn-host/src/applier.rs, which stages and publishes every target through that kernel; no verb reaches it yet, because the apply job every verb runs as is not built: its handle's name is pre-committed as crates/norn-host/src/lifecycle.rs::PendingApply.",
         "grounds": [
           { "present": "crates/norn-fs/src/open.rs" },
-          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "symbol-absent": "crates/norn-host/src/lifecycle.rs::PendingApply" }
         ]
       }
     },
@@ -1542,10 +1544,11 @@
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "half of this property has a subject and half waits for the applier. A request acquires exactly one substrate snapshot: crates/norn-store/src/store.rs::SnapshotReader establishes one per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. The other half does not ask a commit to share a reader's connection, which readers living beside the writer structurally refuse: the apply seam holds the changeset to the apply's snapshot by the entry's claim, under which nothing else commits to the registration's store. The applier that takes that snapshot inside the claim is not built: the name it takes is pre-committed as crates/norn-host/src/lib.rs::Applier.",
+        "reason": "half of this property has a subject and half waits for the applier. A request acquires exactly one substrate snapshot: crates/norn-store/src/store.rs::SnapshotReader establishes one per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. The other half does not ask a commit to share a reader's connection, which readers living beside the writer structurally refuse: the apply seam holds the changeset to the apply's snapshot by the entry's claim, under which nothing else commits to the registration's store. The applier is built, in crates/norn-host/src/applier.rs, and checks a resolved plan's states and conditions against the files; the apply job that takes the snapshot inside the claim and hands the applier its plan is not built: its handle's name is pre-committed as crates/norn-host/src/lifecycle.rs::PendingApply.",
         "grounds": [
           { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
-          { "symbol-absent": "crates/norn-host/src/lib.rs::Applier" }
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "symbol-absent": "crates/norn-host/src/lifecycle.rs::PendingApply" }
         ]
       }
     },

@@ -84,13 +84,14 @@
 //! Planning itself holds the bytes of every file the plan touches until it
 //! answers.
 //!
-//! **A dormant carrier.** Its consumers are NORN-295's own later layers: the
-//! applier, which recomposes every target and re-resolves operations through
-//! this planner for refuse-and-refresh, and `Host::apply`, which plans an
-//! authored plan inside the entry's claim over a [`view::TreeView`] and plans
-//! a preview on one snapshot. Neither has landed, so nothing outside this
-//! module's own tests reaches it yet, and its contract is held by those tests
-//! alone, one of them over a tree on disk.
+//! **A dormant carrier.** Its consumers are NORN-295's own layers: the
+//! applier ([`crate::applier`]), which recomposes every target through
+//! [`compose::compose`] and re-resolves a refused plan's operations through
+//! [`resolve::resolve`] for refuse-and-refresh; and `Host::apply`, which plans
+//! an authored plan inside the entry's claim over a [`view::TreeView`] and
+//! plans a preview on one snapshot. The applier is itself reached only by
+//! that job, which has not landed, so nothing outside this crate's tests
+//! reaches the planner yet.
 
 pub(crate) mod compose;
 pub(crate) mod forecast;
