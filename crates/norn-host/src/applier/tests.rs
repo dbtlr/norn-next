@@ -118,6 +118,13 @@ impl Fixture {
         write_at(&self.vault, at, content);
     }
 
+    /// Another writer writes `content` at `at`, and the store takes it in as
+    /// the watcher would deliver it before an apply's intake.
+    pub(super) fn foreign(&mut self, at: &str, content: &str) {
+        self.write(at, content);
+        heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
+    }
+
     pub(super) fn read(&self, at: &str) -> Option<String> {
         std::fs::read_to_string(self.vault.join(at)).ok()
     }
@@ -317,4 +324,200 @@ fn a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds() {
     assert_eq!(folders(&applied.folders_removed), vec!["inbox"]);
     assert_eq!(applied.changeset, norn_wire::ChangesetOutcome::Committed);
     fixture.assert_store_is_a_build_from_zero();
+}
+
+impl Fixture {
+    /// The names in the shadow home: every shadow a stage left behind.
+    pub(super) fn shadows_left(&self) -> Vec<String> {
+        match std::fs::read_dir(self.shadows.directory()) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+pub(super) fn refused(outcome: ApplyOutcome) -> super::Refused {
+    match outcome {
+        ApplyOutcome::Refused(refused) => *refused,
+        other => panic!("the plan is refused: {other:?}"),
+    }
+}
+
+/// A refusal met while staging a later target discards what was staged
+/// before it: the create staged ahead of it and the removal beside it publish
+/// nothing, no folder is made, no shadow is left and no write is recorded.
+#[test]
+fn a_staging_refusal_publishes_nothing_creates_and_removals_included() {
+    let mut fixture = Fixture::new(&[("c.md", "# C\n"), ("keep.md", "# Keep\n")]);
+    let plan = fixture.plan(vec![
+        creating("b.md", "# B\n"),
+        deleting("c.md"),
+        creating("x/c.md", "# X\n"),
+    ]);
+    // Another writer puts a document where the plan needs a folder, after the
+    // plan was resolved.
+    fixture.write("x", "a file where a folder goes\n");
+    let before = fixture.tree();
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::name_taken(path("x/c.md"))]
+    );
+    assert_eq!(fixture.tree(), before, "nothing was published");
+    assert!(
+        fixture.shadows_left().is_empty(),
+        "{:?}",
+        fixture.shadows_left()
+    );
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+fn present(content: &str) -> norn_wire::FileState {
+    norn_wire::FileState::present(crate::planner::compose::content_hash(content.as_bytes()))
+}
+
+/// A foreign edit refuses the plan with a fresh one resolved against what the
+/// vault holds now: an operation whose target already landed is dropped, the
+/// drifted one is resolved again and marked, and applying the fresh plan lands
+/// it over the foreign edit.
+#[test]
+fn a_refused_plan_answers_a_fresh_plan_that_applies() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "status draft\n"),
+        ("b.md", "# B\nold\n"),
+        ("c.md", "# C\ndraft\n"),
+    ]);
+    let plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        editing("b.md", "old", "new"),
+        editing("c.md", "draft", "done"),
+    ]);
+    // `a.md` already carries the plan's change; `b.md` is edited by another
+    // writer.
+    fixture.foreign("a.md", "status final\n");
+    fixture.foreign("b.md", "# B\nold\nforeign\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("b.md"),
+            present("# B\nold\nforeign\n")
+        )]
+    );
+    assert_eq!(refused.forecast.drifted, vec![path("b.md")]);
+    assert!(refused.unresolved.is_empty(), "{:?}", refused.unresolved);
+    assert_eq!(
+        refused.plan.operations,
+        vec![
+            editing("b.md", "old", "new"),
+            editing("c.md", "draft", "done")
+        ],
+        "the landed operation is dropped and the rest resolved again"
+    );
+    assert_eq!(
+        refused.plan.transitions[0],
+        norn_wire::Transition::new(
+            path("b.md"),
+            present("# B\nold\nforeign\n"),
+            present("# B\nnew\nforeign\n")
+        )
+    );
+    assert_eq!(
+        fixture.read("c.md").as_deref(),
+        Some("# C\ndraft\n"),
+        "nothing was published"
+    );
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("b.md").as_deref(), Some("# B\nnew\nforeign\n"));
+    assert_eq!(fixture.read("c.md").as_deref(), Some("# C\ndone\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// A resolved plan applied to another root is refused with no plan.
+#[test]
+fn a_plan_for_another_root_is_refused_with_no_plan() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.root = RootIdentity::from_device_and_inode(0, 0);
+    match fixture.apply(plan) {
+        ApplyOutcome::RootChanged { expected, found } => {
+            assert_eq!(expected, RootIdentity::from_device_and_inode(0, 0));
+            assert_eq!(found, fixture.root_identity());
+        }
+        other => panic!("the root refuses: {other:?}"),
+    }
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+}
+
+/// Re-sending a resolved plan whose publication a crash cut short finishes
+/// it: the targets that landed are found, the rest are written, and the
+/// store equals a build from zero. Re-sending it once more changes nothing.
+#[test]
+fn re_sending_a_resolved_plan_finishes_it() {
+    let mut fixture = Fixture::new(&[("inbox/a.md", "# A\n"), ("b.md", "old\n")]);
+    let plan = fixture.plan(vec![
+        moving("inbox/a.md", "archive/a.md"),
+        editing("b.md", "old", "new"),
+    ]);
+    // What a crash after the move's first leg leaves: the destination landed,
+    // the source still standing, the edit not made.
+    fixture.write("archive/a.md", "# A\n");
+    let finished = applied(fixture.apply(plan.clone()));
+    assert_eq!(
+        results(&finished),
+        vec![
+            ("archive/a.md".to_string(), TargetResult::Found),
+            ("b.md".to_string(), TargetResult::Wrote),
+            ("inbox/a.md".to_string(), TargetResult::Wrote),
+        ]
+    );
+    assert_eq!(fixture.tree(), vec!["archive", "archive/a.md", "b.md"]);
+    fixture.assert_store_is_a_build_from_zero();
+    let again = applied(fixture.apply(plan));
+    assert!(
+        again
+            .targets
+            .iter()
+            .all(|target| target.result == TargetResult::Found),
+        "{:?}",
+        again.targets
+    );
+    assert!(
+        fixture.recorded.calls.borrow().len() == 2,
+        "a confirmed landing records nothing"
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// Operations carry no confirmation beyond their own conditions: re-sent,
+/// they are planned again as a new change, and an operation conditioned on
+/// what its author saw no longer resolves once it applied.
+#[test]
+fn re_sending_conditioned_operations_is_refused_rather_than_repeated() {
+    let mut fixture = Fixture::new(&[("a.md", "count 1\n")]);
+    let seen = crate::planner::compose::content_hash(b"count 1\n");
+    let operations = vec![editing("a.md", "1", "11").with_conditions(vec![
+        norn_wire::AuthorCondition::content_hash(path("a.md"), seen),
+    ])];
+    applied(fixture.apply(fixture.plan(operations.clone())));
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let name = VaultName::new("notes").expect("a legal vault name");
+    let again = resolve(
+        AuthoredPlan::new(VaultAddress::name(name), operations),
+        fixture.root_identity(),
+        &BTreeSet::new(),
+        &view,
+    )
+    .expect("the operations plan");
+    assert!(again.plan.operations.is_empty());
+    assert_eq!(again.unresolved.len(), 1);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("count 11\n"));
 }
