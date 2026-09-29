@@ -2474,10 +2474,24 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
 
 - **One entry point, one handle.** `Host::apply` answers both modes with a `PendingApply`. A
   preview's handle holds its answer already: the preview takes an ordinary read hold, plans on
-  the ground the entry's coverage recorded — the covered root, its identity and the roots the
-  walk skips — and writes nothing. A resolved plan previews as its operations resolved afresh,
-  refused as `vault/root-changed` where it was resolved against another root. A vault the
-  planner cannot read answers `host/apply-not-run` with the environment's refusal as the cause.
+  the ground the entry's coverage recorded — the covered root, the identity it proved at
+  installation, the roots the walk skips and the declaration the store pins — and writes
+  nothing. The ground is recorded with the entry's declaration and read without I/O under the
+  gate; a preview and an apply each ask the filesystem whether the root still stands there
+  before planning, outside any gate hold, and a root replaced since answers
+  `vault/root-changed`.
+- **A resolved plan previews as the applier judges it.** The applier's own checks run over it
+  — the root identity, every target at its before- or after-state, every condition, the
+  operations recomposed, the schema — reading the vault and staging nothing. Where an apply
+  would go on to stage, the preview answers the same plan and its forecast; where it would
+  refuse, the preview answers that refusal. So what a caller previewed is what applies, and a
+  plan an interruption left part-landed previews as itself.
+- **A failure planning cannot get past answers what a read meeting it carries.** A root that
+  no longer stands answers `host/apply-not-run` with the refusal a read carries once the
+  watcher reports the root's coverage lost; a root that stands and cannot be read, with trust
+  withdrawn for the environment's refusal, as the entry's own walk publishes it. A store that
+  refuses the apply's snapshot answers `host/read-failed`, or, where it is damaged, the job
+  publishes the damage with its rebuild and answers not applied with it.
 - **A queued apply holds the demand admission recorded** until the job running it takes it off
   the queue, which is what makes it demand to the idle reaper and to a release's re-arm.
 - **Admission takes the claim from routine derivation not yet running.** Over a reconcile turn or

@@ -1318,3 +1318,27 @@ fn damage_a_read_meets_during_an_apply_intake_answers_the_apply_not_applied() {
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, host));
 }
+
+/// **An apply whose one snapshot meets damage is answered as a read meeting
+/// it is**: the damage is published with the rebuild it owes, and the apply
+/// is answered not applied with it, before anything was planned.
+#[test]
+fn an_apply_whose_snapshot_meets_damage_publishes_it_and_answers_not_applied() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.damage_in_apply.store(true, Ordering::SeqCst);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the store is damaged",
+    ));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(damaged)).answer(&name)
+    );
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, host));
+}

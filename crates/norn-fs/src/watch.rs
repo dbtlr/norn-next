@@ -548,6 +548,12 @@ impl Subscription {
         &self.root_anchor.covered
     }
 
+    /// The identity of the root this coverage was installed over, which its
+    /// anchor checks the registered path against on every poll.
+    pub fn root_identity(&self) -> Identity {
+        self.root_anchor.identity
+    }
+
     /// The case behaviour this coverage proved for its root when it was
     /// installed, which is the behaviour every path it reports is normalized
     /// under. A consumer retains it rather than detecting it again.

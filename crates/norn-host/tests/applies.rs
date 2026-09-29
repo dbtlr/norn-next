@@ -18,8 +18,9 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
-    DocumentPath, ErrorDetail, GetParams, GetReport, Operation, OperationId, OperationKind,
-    PlanDocument, ReasonCode, ResolutionTarget, TargetResult, VaultAddress,
+    DocumentPath, ErrorDetail, Forecast, GetParams, GetReport, Operation, OperationId,
+    OperationKind, PlanDocument, ReasonCode, ResolutionTarget, ResolvedPlan, TargetResult,
+    VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -202,4 +203,135 @@ fn a_preview_of_operations_requiring_each_other_is_refused_as_an_invalid_plan() 
         .wait()
         .expect_err("a preview of a cycle was reported");
     assert_eq!(refused.code(), &ReasonCode::RequestPlanInvalid);
+}
+
+/// The plan that moves the subject to `moved.md`.
+fn moving_the_subject(vault: &attach::Vault) -> PlanDocument {
+    PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new(SUBJECT).expect("a document path"),
+            DocumentPath::new(MOVED).expect("a document path"),
+        ))],
+    ))
+}
+
+/// Where [`moving_the_subject`] moves it.
+const MOVED: &str = "moved.md";
+
+/// Preview `plan` over `vault`, answering the plan and the forecast.
+fn previewed(host: &attach::ServingHost, plan: PlanDocument) -> (ResolvedPlan, Forecast) {
+    let answered = host
+        .apply(ApplyParams::new(ApplyMode::Preview, plan))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = answered.report else {
+        panic!("a preview answered {:?}", answered.report);
+    };
+    (plan, forecast)
+}
+
+/// **A resolved plan previews as itself: what the caller previewed is what
+/// applies.** A move interrupted after its destination landed and its source
+/// was removed is previewed by sending its resolved plan: the preview judges
+/// it as an apply would — every target at its before- or after-state — and
+/// answers the same plan, where resolving its operations afresh would find
+/// no source to move. Sending it back applies it, writing nothing.
+#[test]
+fn an_interrupted_plan_previews_as_the_same_plan_and_then_applies() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-interrupted");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let (plan, _) = previewed(&host, moving_the_subject(&vault));
+    std::fs::rename(vault.path().join(SUBJECT), vault.path().join(MOVED))
+        .expect("the move lands by hand");
+
+    let (again, forecast) = previewed(&host, PlanDocument::resolved(plan.clone()));
+    assert_eq!(again, plan, "the preview answered another plan");
+    assert!(forecast.drifted.is_empty());
+
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the previewed plan applies");
+    let ApplyReport::Applied { plan: carried, .. } = applied.report else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(carried, plan);
+}
+
+/// **A resolved plan's preview refuses as its apply would.** A target that
+/// holds neither of its states is drift: the preview answers
+/// `vault/plan-refused` with the target marked drifted, as an apply of the
+/// same plan does, and writes nothing.
+#[test]
+fn a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-drifted");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let (plan, _) = previewed(&host, finalizing(&vault));
+    std::fs::write(vault.path().join(SUBJECT), "# Subject\n\nstatus other\n")
+        .expect("another writer edits the subject");
+
+    let refused = host
+        .apply(ApplyParams::new(
+            ApplyMode::Preview,
+            PlanDocument::resolved(plan),
+        ))
+        .expect("a preview is answered")
+        .wait()
+        .expect_err("a drifted plan previewed");
+    assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused { forecast, .. } = refused.detail() else {
+        panic!("the refusal carries {:?}", refused.detail());
+    };
+    assert_eq!(forecast.drifted, vec![DocumentPath::new(SUBJECT).unwrap()]);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        "# Subject\n\nstatus other\n"
+    );
+}
+
+/// Every entry under `root`, with its inode and modification time.
+fn tree_state(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a listing") {
+            let path = entry.expect("an entry").path();
+            let metadata = std::fs::symlink_metadata(&path).expect("metadata");
+            if metadata.is_dir() {
+                pending.push(path.clone());
+            }
+            found.push((path, metadata.ino(), metadata.modified().expect("an mtime")));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// **A preview writes nothing.** Previewing operations and previewing the
+/// resolved plan they give leave every file and folder of the vault at the
+/// inode and modification time it had.
+#[test]
+fn a_preview_leaves_every_entry_of_the_vault_as_it_was() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-writes-nothing");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = tree_state(vault.path());
+
+    let (plan, _) = previewed(&host, moving_the_subject(&vault));
+    previewed(&host, PlanDocument::resolved(plan));
+
+    assert_eq!(
+        tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
 }

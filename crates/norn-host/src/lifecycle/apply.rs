@@ -148,6 +148,11 @@ pub enum ApplyEnding {
     /// the teardown's, which the apply job reads off the entry and answers
     /// with, beside the plan the apply's progress recorded.
     StoodDown,
+    /// The store refused the apply's one snapshot as damaged, in the store's
+    /// words, before anything was planned. The apply job publishes the
+    /// damage with the rebuild it owes, as it publishes damage a read carried
+    /// to its claim, and answers the apply not applied with it.
+    Damaged(String),
 }
 
 impl ApplyEnd {
@@ -155,6 +160,14 @@ impl ApplyEnd {
     pub fn answered(answer: Result<(StoreReading, ApplyReport), ErrorEnvelope>) -> Self {
         ApplyEnd {
             answer: ApplyEnding::Answered(answer),
+            heal: None,
+        }
+    }
+
+    /// An apply whose one snapshot met damage, described by `detail`.
+    pub fn damaged(detail: impl Into<String>) -> Self {
+        ApplyEnd {
+            answer: ApplyEnding::Damaged(detail.into()),
             heal: None,
         }
     }

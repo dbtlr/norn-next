@@ -80,16 +80,17 @@ use std::path::{Path, PathBuf};
 use norn_fs::{OwnWrites, Published, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
-    AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, InterruptionCause, RefusedCheck,
-    ResolvedPlan, RootIdentity, TargetResult,
+    AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, Forecast, InterruptionCause,
+    RefusedCheck, ResolvedPlan, RootIdentity, TargetResult,
 };
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
-use crate::planner::view::TreeView;
+use crate::planner::forecast::forecast;
+use crate::planner::view::{TreeView, TreeViewError};
 use crate::production::{commit_plan_changeset, pinned_declaration};
 use publish::{Progress, Publisher, Stopped};
-use stage::Stop;
+use stage::{Stop, Unfit};
 
 /// Where a publication is recorded so the watcher's echo of it is known as
 /// the applier's own.
@@ -286,6 +287,56 @@ impl Applier<'_> {
     /// The vault's root identity, as the wire spells it.
     fn root_identity(&self) -> RootIdentity {
         RootIdentity::from_device_and_inode(self.root.dev, self.root.ino)
+    }
+}
+
+/// How the preview of a resolved plan ended short of answering it.
+#[derive(Debug)]
+pub(crate) enum PreviewStop {
+    /// The refusal an apply of the plan over the same files answers.
+    Refused(Box<ApplyOutcome>),
+    /// The vault could not be read, in words.
+    Unreadable(String),
+}
+
+/// Preview the resolved `plan` over the vault at `anchor`: judge it as an
+/// apply would, reading the vault and writing nothing.
+///
+/// **The judgment is the apply's own**: the root identity, then every check
+/// [`stage::check`] runs — each target at its before- or after-state, every
+/// condition, the operations recomposed from the before-states, the schema.
+/// Where an apply would go on to stage, the answer is the same plan with its
+/// forecast from what the vault holds; where it would refuse, the answer is
+/// that refusal, a fresh plan included. So what a caller previewed is what
+/// applies, and a plan an interruption left part-landed previews as itself.
+pub(crate) fn preview(
+    plan: ResolvedPlan,
+    anchor: &Path,
+    root: norn_fs::Identity,
+    exclusions: &[PathBuf],
+    declared: &crate::derivation::Declared,
+) -> Result<(ResolvedPlan, Forecast), PreviewStop> {
+    let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
+    if plan.root != found {
+        return Err(PreviewStop::Refused(Box::new(ApplyOutcome::RootChanged {
+            expected: plan.root,
+            found,
+        })));
+    }
+    let unreadable = |error: TreeViewError| PreviewStop::Unreadable(error.to_string());
+    let view = TreeView::open(anchor, exclusions).map_err(unreadable)?;
+    match stage::check(&plan, &view, declared) {
+        Ok(_) => {
+            let forecast = forecast(&plan.transitions, &view).map_err(unreadable)?;
+            Ok((plan, forecast))
+        }
+        Err(Unfit::Refused(checks)) => Err(PreviewStop::Refused(Box::new(
+            refresh::refuse_and_refresh(plan, &view, checks),
+        ))),
+        Err(Unfit::Invalid(fault)) => {
+            Err(PreviewStop::Refused(Box::new(ApplyOutcome::Invalid(fault))))
+        }
+        Err(Unfit::Failed(detail)) => Err(PreviewStop::Unreadable(detail)),
     }
 }
 

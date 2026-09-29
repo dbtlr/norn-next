@@ -181,6 +181,9 @@ pub struct ProductionAttachment {
     /// The canonical directory shared by this attachment's watcher, walks,
     /// control reads, write normalization, and shadow placement.
     covered_root: PathBuf,
+    /// The identity `covered_root` proved when this coverage was installed,
+    /// as the watcher's root anchor holds it.
+    root_identity: norn_fs::Identity,
     /// The control files this attachment acts under, and, through
     /// `undeclarable`, why this build cannot act on the vault's schema
     /// declaration where it cannot.
@@ -203,14 +206,15 @@ pub struct ProductionAttachment {
     /// [`ProductionAttachment::drop_controls_held_for_rung_three`]
     /// asserts.
     held_for_rung_three: Option<ReloadCandidate>,
-    /// The content model of the schema the store pins, built off the pin by
+    /// The declaration of the schema the store pins, built off the pin by
     /// the one construction every deriving act builds its declaration by, so
     /// a read compiles against the bytes its store pins rather than against
-    /// the controls a leg holds beside them.
+    /// the controls a leg holds beside them, and a preview judges a composed
+    /// result under the declaration an apply judges it under.
     ///
     /// Taken again wherever the store's pin can have moved: where the store
     /// is opened or reopened, and after every pin.
-    pinned_model: Arc<ContentModel>,
+    pinned: Arc<Declared>,
     /// Whether the engines are owed the config `controls` carries.
     ///
     /// It is set only where a leg holds controls it could not pin because
@@ -268,33 +272,47 @@ type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), Wat
 /// it, so the reading taken here names exactly the state the changeset builds
 /// on, and it is the reading the answer is given under. The planner reads the
 /// files for its before-states, never the store, so nothing else is read off
-/// it before the applier commits.
+/// it before the applier commits. A store that refuses that reading answers
+/// as a read meeting the same refusal does: `host/read-failed`, or damage the
+/// job publishes with the rebuild it owes.
+///
+/// **The ground is the coverage's**, as a preview's is, and the root is asked
+/// whether it still stands there before anything is planned.
 fn apply_over(
+    name: &VaultName,
     attachment: &mut ProductionAttachment,
     plan: PlanDocument,
     progress: &ApplyProgress,
     reporter: &ProgressReporter<ProductionAttachment>,
 ) -> ApplyEnd {
-    let Some(ground) = attachment.plan_ground() else {
-        return ApplyEnd::answered(Err(crate::apply::unreadable(
-            "the vault root no longer stands where the coverage was installed",
-        )));
-    };
+    let ground = attachment.plan_ground();
     let snapshot = {
         let mut feed = attachment.store.feed_read();
         match feed.write_generation() {
             Ok(generation) => StoreReading::of(feed.epoch(), generation),
             Err(error) => {
-                return ApplyEnd::answered(Err(crate::apply::unreadable(format!(
-                    "the store could not be read: {error}"
-                ))));
+                let told = crate::refusal::store_refusal_told(&error);
+                return match error.damage() {
+                    Some(_) => ApplyEnd::damaged(told),
+                    None => ApplyEnd::answered(Err(norn_wire::ErrorEnvelope::new(
+                        "the store refused a statement this apply ran",
+                        norn_wire::ErrorDetail::read_failed(
+                            norn_wire::ReadFailure::statement(),
+                            told,
+                        ),
+                    ))),
+                };
             }
         }
     };
+    if let Err(refused) = ground.standing(name) {
+        return ApplyEnd::answered(Err(refused));
+    }
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
-            match crate::apply::resolve_on(authored, &ground).and_then(crate::apply::fully_resolved)
+            match crate::apply::resolve_on(authored, &ground, name)
+                .and_then(crate::apply::fully_resolved)
             {
                 Ok(resolution) => resolution.plan,
                 Err(refused) => return ApplyEnd::answered(Err(refused)),
@@ -331,16 +349,17 @@ fn apply_over(
 
 impl ProductionAttachment {
     /// What a plan over this coverage is resolved against: the covered root,
-    /// the identity it stands at now, and the roots its walk does not enter —
-    /// the fallback shadow home and the schema file. `None` where the root no
-    /// longer stands.
-    fn plan_ground(&self) -> Option<PlanGround> {
-        let identity = norn_fs::path_identity(&self.covered_root).ok()??;
-        Some(PlanGround {
+    /// the identity it proved when the coverage was installed, the roots its
+    /// walk does not enter — the fallback shadow home and the schema file —
+    /// and the declaration the store pins. Read off the attachment alone, so
+    /// it does no I/O.
+    fn plan_ground(&self) -> PlanGround {
+        PlanGround {
             root: self.covered_root.clone(),
-            identity,
+            identity: self.root_identity,
             exclusions: exclusions_at(&self.registration, &self.shadows, &self.covered_root),
-        })
+            declared: Arc::clone(&self.pinned),
+        }
     }
 
     /// Pin `candidate`'s schema into the store and take the content model
@@ -353,11 +372,7 @@ impl ProductionAttachment {
     /// Take the content model of the schema the store pins, as a deriving
     /// act reads it.
     fn read_pinned_model(&mut self) -> Result<(), JobFailure> {
-        self.pinned_model = Arc::clone(
-            Declaration::read(&mut self.store)?
-                .model
-                .shared_content_model(),
-        );
+        self.pinned = Arc::new(Declaration::read(&mut self.store)?.model);
         Ok(())
     }
 
@@ -635,6 +650,7 @@ impl ProductionEntryOps {
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let root_identity = subscription.root_identity();
         let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
             .map_err(JobFailure::Reload)?;
         let derived = self.derived(&attachment.registration.name);
@@ -647,6 +663,7 @@ impl ProductionEntryOps {
         attachment.shadow_advisory = fallback_advisory(&shadows, &covered_root);
         attachment.shadows = shadows;
         attachment.covered_root = covered_root;
+        attachment.root_identity = root_identity;
         // The first point a recovery holds both the order its new coverage
         // proved and the store it will derive into, and the judgment is taken
         // whatever the declaration says. A store derived under the other order
@@ -1356,6 +1373,7 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, own_writes) =
             Self::start_watch(registration, &schema).map_err(watcher)?;
         let covered_root = subscription.covered_root().to_owned();
+        let root_identity = subscription.root_identity();
         let path_order = stored_path_order(subscription.case_sensitivity());
         let root = covered_root.as_path();
         let shadows =
@@ -1393,9 +1411,10 @@ impl EntryOps for ProductionEntryOps {
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             covered_root,
+            root_identity,
             controls: candidate.clone(),
             held_for_rung_three: None,
-            pinned_model: Arc::new(ContentModel::none()),
+            pinned: Arc::new(Declared::unpinned()),
             config_delivery_owed: false,
             maintainership,
             store,
@@ -1492,7 +1511,7 @@ impl EntryOps for ProductionEntryOps {
     /// builds the declaration it judges under, so a read and a derivation
     /// read one declaration out of one set of bytes.
     fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
-        Arc::clone(&attachment.pinned_model)
+        Arc::clone(attachment.pinned.shared_content_model())
     }
 
     fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
@@ -1500,7 +1519,7 @@ impl EntryOps for ProductionEntryOps {
     }
 
     fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
-        attachment.plan_ground()
+        Some(attachment.plan_ground())
     }
 
     /// The apply over this coverage: the store's reading as its one
@@ -1518,7 +1537,7 @@ impl EntryOps for ProductionEntryOps {
         reporter: &ProgressReporter<Self::Attachment>,
     ) -> ApplyEnd {
         let _job = self.evidence.attributing();
-        let ended = apply_over(attachment, plan, progress, reporter);
+        let ended = apply_over(name, attachment, plan, progress, reporter);
         if matches!(ended.answer, ApplyEnding::Answered(Ok(_))) {
             self.drain_semantic(name, attachment, reporter);
         }

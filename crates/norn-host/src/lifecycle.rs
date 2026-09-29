@@ -341,13 +341,15 @@ pub trait EntryOps: Send + Sync + 'static {
         None
     }
     /// What a plan is resolved against over this attachment: the vault root
-    /// as the coverage spells it, the identity it proved, and the roots its
-    /// walk does not enter.
+    /// as the coverage spells it, the identity it proved when it was
+    /// installed, the roots its walk does not enter, and the declaration its
+    /// store pins.
     ///
-    /// Recorded where [`EntryOps::control_root`] is, so a preview, which takes
-    /// no claim and holds no coverage, plans against the ground the entry's
-    /// coverage stands on. The default holds none, and a preview over it is
-    /// not run.
+    /// Read under the gate hold that records the entry's declaration, beside
+    /// [`EntryOps::active_content_model`], so it does no I/O: a preview, which
+    /// takes no claim and holds no coverage, plans against the ground the
+    /// entry's coverage stands on and asks whether the root still stands there
+    /// itself. The default holds none, and a preview over it is not run.
     fn plan_ground(&self, _: &Self::Attachment) -> Option<PlanGround> {
         None
     }
@@ -1129,9 +1131,9 @@ struct EntryState<A: SnapshotSource> {
     /// goes back.
     delivered_engine: Option<DeliveredEngine>,
     /// What a plan is resolved against over the coverage the entry holds, as
-    /// [`EntryOps::plan_ground`] read it where the coverage was installed;
-    /// `None` until then, and once the coverage goes back. A preview, which
-    /// holds no coverage, plans against it.
+    /// [`EntryOps::plan_ground`] read it in the gate hold that last recorded
+    /// the entry's declaration; `None` until then, and once the coverage goes
+    /// back. A preview, which holds no coverage, plans against it.
     plan_ground: Option<PlanGround>,
     /// The applies admitted against the entry and not yet run, in the order
     /// they were admitted. Each is demand on the entry while it waits.
@@ -2246,7 +2248,7 @@ impl Job {
 ///
 /// The detail is the watch error's own rendering, so the prose a person reads
 /// is a sentence about the failure rather than a bare value inviting a parse.
-fn watcher_lost(error: WatchError) -> UntrustedReason {
+pub(crate) fn watcher_lost(error: WatchError) -> UntrustedReason {
     let detail = error.to_string();
     let cause = match error {
         WatchError::Backend(_) => WatcherLossCause::Backend,
@@ -2569,8 +2571,9 @@ fn record_demand<A: SnapshotSource>(
 }
 
 /// Record the declaration `attachment` serves under — its active control-file
-/// fingerprints and the content model its store pins — as the entry's own,
-/// with the advisories the attachment carries.
+/// fingerprints, the content model its store pins, and the ground a plan over
+/// it is resolved on — as the entry's own, with the advisories the attachment
+/// carries.
 ///
 /// Called under the gate hold that publishes a leg's outcome, so the entry's
 /// account of its declaration moves with the publication that puts the
@@ -2585,6 +2588,7 @@ fn record_active_declaration<O: EntryOps>(
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
+    state.plan_ground = ops.plan_ground(attachment);
     state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
     record_advisories(state, ops, attachment);
 }
@@ -6533,7 +6537,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.pending.merge(observed);
                     record_active_declaration(&mut state, &*shared.ops, &name, &attachment);
                     state.control_root = shared.ops.control_root(&attachment);
-                    state.plan_ground = shared.ops.plan_ground(&attachment);
                     state.last_reload_error = None;
                     let withheld = shared.ops.withheld_trust(&attachment);
                     state.install_coverage(&*shared.ops, attachment);
@@ -6732,7 +6735,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return Some(attachment);
             }
             state.control_root = shared.ops.control_root(&attachment);
-            state.plan_ground = shared.ops.plan_ground(&attachment);
             state.claim.release();
             let mut next = None;
             let mut reclassify = false;
@@ -7556,8 +7558,10 @@ fn run_apply_job<O: EntryOps>(
         shared
             .ops
             .apply(&name, &mut attachment, plan, &progress, &reporter);
-    // `None` where the apply stood down: it is answered below with the
-    // cause the teardown that moved the entry past its leg publishes.
+    // `None` where the apply stood down or met damage: it is answered below
+    // with the cause the entry publishes once the teardown that moved it past
+    // the apply's leg, or this leg's publication of the damage, has.
+    let mut damaged = None;
     let answer = match answer {
         ApplyEnding::Answered(answer) => Some(answer.map(|(snapshot, report)| {
             VaultAnswer::new(
@@ -7571,6 +7575,10 @@ fn run_apply_job<O: EntryOps>(
             )
         })),
         ApplyEnding::StoodDown => None,
+        ApplyEnding::Damaged(detail) => {
+            damaged = Some(detail);
+            None
+        }
     };
 
     // The end: what the watcher delivered while the apply ran.
@@ -7592,9 +7600,13 @@ fn run_apply_job<O: EntryOps>(
         let _ = reply.send(answer);
         return Some(attachment);
     }
-    let answer = answer.unwrap_or_else(|| Err(progress.unanswered(|| state.apply_cause(&name))));
     if let Some(heal) = heal {
         state.pending.merge(heal);
+    }
+    if let Some(detail) = damaged
+        && state.damage_met_under_a_claim.is_none()
+    {
+        state.damage_met_under_a_claim = Some(detail);
     }
     let saturated = match drained {
         Ok((observed, saturated)) => {
@@ -7603,6 +7615,10 @@ fn run_apply_job<O: EntryOps>(
         }
         Err(failure) => {
             end_turn_on_failure(shared, entry, state, &name, epoch, attachment, failure);
+            let answer = answer.unwrap_or_else(|| {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                Err(progress.unanswered(|| state.apply_cause(&name)))
+            });
             let _ = reply.send(answer);
             return None;
         }
@@ -7624,6 +7640,7 @@ fn run_apply_job<O: EntryOps>(
         state.claim.release();
         schedule_due_detach(&mut state, &name)
     };
+    let answer = answer.unwrap_or_else(|| Err(progress.unanswered(|| state.apply_cause(&name))));
     drop(state);
     let _ = reply.send(answer);
     if let Some(job) = next {
@@ -8800,6 +8817,8 @@ mod tests {
         panic_in_apply_before_publishing: AtomicBool,
         panic_in_apply_after_publishing: AtomicBool,
         heal_in_apply: AtomicBool,
+        /// Whether an apply's one snapshot meets damage.
+        damage_in_apply: AtomicBool,
         /// Applies whose leg no longer stood when they would have begun
         /// publishing.
         applies_stood_down: AtomicUsize,
@@ -9351,6 +9370,9 @@ mod tests {
                     Vec::new(),
                 ),
             };
+            if self.damage_in_apply.load(Ordering::SeqCst) {
+                return ApplyEnd::damaged("the store is damaged");
+            }
             progress.planned(&resolved);
             if self.block_apply.load(Ordering::SeqCst) {
                 self.apply_started.store(true, Ordering::SeqCst);
