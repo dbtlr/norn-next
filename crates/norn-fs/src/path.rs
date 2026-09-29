@@ -237,10 +237,15 @@ impl PathNormalizer {
         crate::shadow::is_shadow_name_under(self.sensitivity, name)
     }
 
-    /// A normalizer for a root whose case behavior a case states outright,
-    /// so identity rules are judged on both behaviors from any host.
-    #[cfg(test)]
-    pub(crate) fn for_sensitivity(sensitivity: CaseSensitivity) -> Self {
+    /// A normalizer under a case behavior the caller already holds.
+    ///
+    /// **The behavior is still proven, just not here.** A caller holding an
+    /// opened [`Vault`](crate::Vault) holds the behavior its root proved, and
+    /// this is how it produces that root's identities without proving it
+    /// again. A test stating a behavior outright uses it to judge identity
+    /// rules on both behaviors from any host. What it is not is a guess: a
+    /// behavior nobody proved for a root names no identity on it.
+    pub fn for_sensitivity(sensitivity: CaseSensitivity) -> Self {
         Self { sensitivity }
     }
 
