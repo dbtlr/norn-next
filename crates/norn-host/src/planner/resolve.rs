@@ -4,12 +4,12 @@
 use std::collections::BTreeMap;
 
 use norn_wire::{
-    AuthorCondition, AuthoredPlan, DocumentPath, FileState, Forecast, Operation, OperationKind,
-    OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition,
-    UnresolvedOperation, UnresolvedReason,
+    AuthorCondition, AuthoredPlan, DocumentPath, FileState, Forecast, Operation, OperationsTag,
+    PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition, UnresolvedOperation,
+    UnresolvedReason,
 };
 
-use super::compose::{Composition, compose, content_hash};
+use super::compose::{Composition, compose, content_hash, touches};
 use super::forecast::forecast;
 use super::order::dependencies;
 use super::view::VaultView;
@@ -173,17 +173,6 @@ fn leave_out_what_falls_with(
         }
         left_out.extend(falling);
     }
-}
-
-/// The files an operation touches.
-fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
-    let (first, second) = match kind {
-        OperationKind::CreateDocument { path, .. }
-        | OperationKind::StrReplace { path, .. }
-        | OperationKind::DeleteDocument { path } => (path, None),
-        OperationKind::MoveDocument { from, to } => (from, Some(to)),
-    };
-    std::iter::once(first).chain(second)
 }
 
 /// The author conditions of the operations that resolved on files the plan

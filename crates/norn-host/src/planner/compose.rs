@@ -92,6 +92,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 
     /// Act on `kind`, or say why it cannot act, leaving the state as it was.
     fn apply(&mut self, kind: &OperationKind) -> Result<Result<(), Unresolved>, V::Error> {
+        if let Some(path) = touches(kind).find(|path| !in_its_one_spelling(path)) {
+            return Ok(Err(format!(
+                "`{path}` is not a document path in its one spelling: a name is empty, `.` or `..`"
+            )));
+        }
         Ok(match kind {
             OperationKind::CreateDocument { path, content } => {
                 let file = self.file(path)?;
@@ -146,6 +151,31 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     fn into_targets(self) -> BTreeMap<DocumentPath, ComposedTarget> {
         self.files
     }
+}
+
+/// The files an operation touches: a move touches its source and its
+/// destination, every other kind the one file it names.
+pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
+    let (first, second) = match kind {
+        OperationKind::CreateDocument { path, .. }
+        | OperationKind::StrReplace { path, .. }
+        | OperationKind::DeleteDocument { path } => (path, None),
+        OperationKind::MoveDocument { from, to } => (from, Some(to)),
+    };
+    std::iter::once(first).chain(second)
+}
+
+/// Whether `path` is spelled the one way its file is: every name in it
+/// non-empty and neither `.` nor `..`.
+///
+/// A file is one entry in the composition, keyed by its path, so two
+/// spellings of one file would compose as two files. The wire's grammar takes
+/// any relative spelling, so the planner is where a second one is turned
+/// away.
+fn in_its_one_spelling(path: &DocumentPath) -> bool {
+    path.as_str()
+        .split('/')
+        .all(|name| !name.is_empty() && name != "." && name != "..")
 }
 
 /// `bytes` with the one occurrence of `old` replaced by `new`.
@@ -431,5 +461,25 @@ mod tests {
             compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
         assert_eq!(composition.unresolvable.len(), 1);
         assert_eq!(after_text(&composition, "a.md").as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn a_path_in_any_but_its_one_spelling_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a/b.md", "b")]);
+        for spelling in ["a//b.md", "./a/b.md", "a/./b.md", "x/../a/b.md", "a/b.md/"] {
+            let detail = unresolvable_detail(
+                &vault,
+                Operation::new(OperationKind::delete_document(path(spelling))),
+            );
+            assert!(detail.contains("one spelling"), "{spelling}: {detail}");
+        }
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::move_document(
+                path("a/b.md"),
+                path("c//d.md"),
+            )),
+        );
+        assert!(detail.contains("one spelling"), "{detail}");
     }
 }
