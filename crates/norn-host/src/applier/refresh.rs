@@ -58,7 +58,9 @@ pub(super) fn refuse_and_refresh(
             };
         }
     };
-    let named: BTreeSet<DocumentPath> = checks.iter().filter_map(drifted_path).cloned().collect();
+    // A target a check already names — drifted, or a create whose name was
+    // taken — is not named twice.
+    let named: BTreeSet<DocumentPath> = checks.iter().filter_map(named_path).cloned().collect();
     for check in drifted_checks(&plan, &states) {
         if drifted_path(&check).is_some_and(|path| !named.contains(path)) {
             checks.push(check);
@@ -154,6 +156,14 @@ pub(super) fn refuse_and_refresh(
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
     }))
+}
+
+/// The target a drifted or a taken-name check names.
+fn named_path(check: &RefusedCheck) -> Option<&DocumentPath> {
+    match check {
+        RefusedCheck::Drifted { path, .. } | RefusedCheck::NameTaken { path, .. } => Some(path),
+        _ => None,
+    }
 }
 
 /// The target a drifted check names.

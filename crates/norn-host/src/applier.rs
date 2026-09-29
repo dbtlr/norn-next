@@ -265,5 +265,7 @@ fn folder_paths(folders: &BTreeSet<PathBuf>) -> Vec<FolderPath> {
         .collect()
 }
 
+#[cfg(all(test, feature = "induced-failure"))]
+mod induced;
 #[cfg(test)]
 mod tests;

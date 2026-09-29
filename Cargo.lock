@@ -464,6 +464,7 @@ dependencies = [
  "norn-testkit",
  "norn-text",
  "norn-wire",
+ "serde_json",
 ]
 
 [[package]]

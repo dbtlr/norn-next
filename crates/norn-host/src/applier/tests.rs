@@ -59,9 +59,9 @@ impl OwnWriteLedger for Recorded {
 
 /// A vault on disk, its shadow home and a store derived from it.
 pub(super) struct Fixture {
-    _scratch: Scratch,
+    _scratch: Option<Scratch>,
     pub(super) vault: PathBuf,
-    data: PathBuf,
+    pub(super) data: PathBuf,
     pub(super) shadows: ShadowHome,
     pub(super) root: norn_fs::Identity,
     pub(super) exclusions: Vec<PathBuf>,
@@ -80,12 +80,17 @@ impl Fixture {
         for (at, content) in files {
             write_at(&vault, at, content);
         }
-        Fixture::over(scratch, vault, data)
+        Fixture::over(Some(scratch), vault, data, "store.sqlite3")
     }
 
-    /// The fixture over a vault and data directory already on disk, with a
-    /// store opened there and built from zero where it is new.
-    pub(super) fn over(scratch: Scratch, vault: PathBuf, data: PathBuf) -> Fixture {
+    /// The fixture over a vault and data directory already on disk, with the
+    /// store `database` opened there and built from zero where it is new.
+    pub(super) fn over(
+        scratch: Option<Scratch>,
+        vault: PathBuf,
+        data: PathBuf,
+        database: &str,
+    ) -> Fixture {
         let key = MaintainershipKey::new("test", "vault", "data").expect("a key");
         let shadows = ShadowHome::resolve(&vault, &data.join("tmp"), &key).expect("a shadow home");
         let exclusions = shadow_exclusions(&shadows, &vault);
@@ -93,7 +98,7 @@ impl Fixture {
             .expect("the root reads")
             .expect("the root stands");
         let order = order_of(&vault);
-        let database = data.join("store.sqlite3");
+        let database = data.join(database);
         let fresh = !database.exists();
         let mut store = Store::open(&database, order, crate::DERIVATION_VERSION).expect("a store");
         if fresh {
