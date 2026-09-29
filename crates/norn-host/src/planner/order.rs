@@ -158,13 +158,18 @@ fn explicit_requirements(
 /// its occupants: the document standing there at planning, if one does, then
 /// each operation arriving there — a move to it or a create at it — in plan
 /// order. The operations vacating it — a move away from it, or its removal —
-/// pair with those occupants in plan order, the first vacating the first
-/// occupant, the second the second, and so on. Each arrival runs after the
-/// vacater of the occupant before it, and each vacater of an arrived document
-/// runs after that arrival. So `[create a, move a→b, move a→c]` over a vault
-/// holding `a` runs the first move, then the create, then the second move,
-/// which carries the created document. A vacater or an arrival with no partner
-/// orders nothing and composes as it stands.
+/// pair with those occupants in plan order. The document standing at planning
+/// pairs with the first vacater wherever it sits in the plan; an arrived
+/// document pairs with the first unpaired vacater after its arrival, and a
+/// vacater authored before that arrival stays unpaired, so a removal
+/// authored ahead of a create is never carried past it. Each arrival runs
+/// after the vacater of the occupant before it, and each vacater of an
+/// arrived document runs after that arrival. So `[create a, move a→b, move
+/// a→c]` over a vault holding `a` runs the first move, then the create, then
+/// the second move, which carries the created document; `[delete e, create
+/// e]` over a vault without `e` pairs nothing and composes in plan order. A
+/// vacater or an arrival with no partner orders nothing and composes as it
+/// stands.
 ///
 /// **A move onto its own identity is no occupant and no vacater.** On a root
 /// that folds case a case-only rename's destination is its source (ADR 0031):
@@ -201,19 +206,18 @@ fn vacating_requirements<V: VaultView>(
         if arrivals.is_empty() || vacaters.is_empty() {
             continue;
         }
-        // Each occupant in turn: `None` for the document standing at
-        // planning, otherwise the position of the operation arriving.
         let standing = matches!(view.entry(name)?, Entry::Document { .. });
-        let occupants = standing
-            .then_some(None)
-            .into_iter()
-            .chain(arrivals.iter().copied().map(Some));
-        for (turn, occupant) in occupants.enumerate() {
-            let Some(arrival) = occupant else { continue };
-            if let Some(&previous) = turn.checked_sub(1).and_then(|before| vacaters.get(before)) {
+        // Vacaters not yet paired, in plan order. The document standing at
+        // planning takes the first wherever it sits; each arrival takes the
+        // first after it, and one it passes over stays unpaired.
+        let mut unpaired = vacaters.iter().copied();
+        let mut vacating_previous = if standing { unpaired.next() } else { None };
+        for &arrival in arrivals {
+            if let Some(previous) = vacating_previous {
                 after[arrival].push(previous);
             }
-            if let Some(&vacater) = vacaters.get(turn) {
+            vacating_previous = unpaired.find(|&vacater| vacater > arrival);
+            if let Some(vacater) = vacating_previous {
                 after[vacater].push(arrival);
             }
         }

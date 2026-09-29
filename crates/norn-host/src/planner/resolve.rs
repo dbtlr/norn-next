@@ -854,6 +854,14 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_authored_before_a_create_at_an_empty_name_does_not_resolve() {
+        let operations = vec![deleting("e.md"), creating("e.md", "new")];
+        let resolution = planned(&MemoryVault::default(), operations.clone());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![0, 1]);
+        assert!(resolution.plan.transitions.is_empty());
+    }
+
+    #[test]
     fn a_move_onto_itself_is_unresolved_rather_than_a_cycle() {
         let vault = MemoryVault::with(&[("a.md", "A")]);
         let resolution = planned(&vault, vec![moving("a.md", "a.md")]);
