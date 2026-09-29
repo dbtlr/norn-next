@@ -1342,3 +1342,36 @@ fn an_apply_whose_snapshot_meets_damage_publishes_it_and_answers_not_applied() {
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, host));
 }
+
+/// **Case 10, destruction over an idle detach: the host's destruction
+/// answers an apply queued behind an idle detach at once**, while the detach
+/// still holds the coverage, rather than leaving it to the release that
+/// destruction waits for.
+#[test]
+fn the_hosts_destruction_over_an_idle_detach_answers_the_queue_at_once() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    drop(lease);
+    hold_an_idle_detach(&ops, &host, &name);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+
+    let destroyed = thread::spawn(move || drop(host));
+    let cause = not_applied_cause(answer_of(pending));
+    assert_eq!(
+        cause,
+        ReadRefusal::NotServing(Demand::State(TrustState::warming(
+            WarmingPhase::ReleasingCoverage,
+            0,
+            None
+        )))
+        .answer(&name)
+    );
+    assert!(
+        !destroyed.is_finished(),
+        "the destruction did not wait for the detach"
+    );
+    ops.block_detach.store(false, Ordering::SeqCst);
+    ops.detach_release.store(true, Ordering::SeqCst);
+    destroyed.join().expect("the host was destroyed");
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+}
