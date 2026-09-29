@@ -13,6 +13,7 @@ use norn_wire::{
 
 use super::compose::{Composition, compose, content_hash, touches};
 use super::forecast::forecast;
+use super::lineage::content_cycle;
 use super::order::dependencies;
 use super::view::{self, Remembered, VaultView};
 
@@ -72,6 +73,9 @@ pub(crate) fn resolve<V: VaultView>(
         left_out.extend(failed);
         leave_out_what_falls_with(&operations, &mut left_out, view);
     };
+    if let Some(cycle) = content_cycle(&operations, &order, view.normalizer()) {
+        return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
+    }
     let conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     let transitions = composition
@@ -738,15 +742,70 @@ mod tests {
         );
     }
 
+    fn refused(vault: &MemoryVault, operations: Vec<Operation>) -> PlanFault {
+        match resolve(authored(operations), root(), &BTreeSet::new(), vault) {
+            Err(PlanningFailure::Fault(fault)) => fault,
+            other => panic!("the plan is refused for its shape: {other:?}"),
+        }
+    }
+
     #[test]
-    fn two_documents_exchange_places_through_an_absent_name() {
+    fn two_documents_exchanging_places_through_an_absent_name_are_a_content_cycle() {
+        // Each target's content is the other's before-state, so neither
+        // source can be replaced before the other target lands.
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let operations = vec![
+            moving("a.md", "t.md"),
+            moving("b.md", "a.md"),
+            moving("t.md", "b.md"),
+        ];
+        assert_eq!(
+            refused(&vault, operations),
+            PlanFault::content_cycle(vec![0, 2, 1])
+        );
+    }
+
+    #[test]
+    fn three_documents_rotating_through_an_absent_name_are_a_content_cycle() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B"), ("c.md", "C")]);
+        let operations = vec![
+            moving("a.md", "t.md"),
+            moving("c.md", "a.md"),
+            moving("b.md", "c.md"),
+            moving("t.md", "b.md"),
+        ];
+        assert_eq!(
+            refused(&vault, operations),
+            PlanFault::content_cycle(vec![0, 3, 1, 2])
+        );
+    }
+
+    #[test]
+    fn an_edit_on_the_way_does_not_break_a_content_cycle() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
+        let operations = vec![
+            moving("a.md", "t.md"),
+            Operation::new(OperationKind::str_replace(path("t.md"), "A", "A2")),
+            moving("b.md", "a.md"),
+            moving("t.md", "b.md"),
+        ];
+        assert_eq!(
+            refused(&vault, operations),
+            PlanFault::content_cycle(vec![0, 3, 2])
+        );
+    }
+
+    #[test]
+    fn a_document_moved_away_and_replaced_by_a_create_is_no_content_cycle() {
+        // `b` draws on `a`, and `a` is written from its operation's own
+        // content, which no publication destroys.
         let vault = MemoryVault::with(&[("a.md", "A"), ("b.md", "B")]);
         let resolution = planned(
             &vault,
             vec![
-                moving("a.md", "t.md"),
-                moving("b.md", "a.md"),
-                moving("t.md", "b.md"),
+                deleting("b.md"),
+                moving("a.md", "b.md"),
+                creating("a.md", "new"),
             ],
         );
         assert!(
@@ -757,9 +816,8 @@ mod tests {
         assert_eq!(
             resolution.plan.transitions,
             vec![
-                transition("a.md", present("A"), present("B")),
+                transition("a.md", present("A"), present("new")),
                 transition("b.md", present("B"), present("A")),
-                transition("t.md", FileState::absent(), FileState::absent()),
             ]
         );
     }

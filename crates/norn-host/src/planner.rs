@@ -8,7 +8,7 @@
 //! plan here, through [`resolve::resolve`], so an operation means the same
 //! thing wherever it arrives from. A refresh names the operations an earlier
 //! apply already landed, which it drops, so a remaining operation's
-//! requirement on one of them is met rather than a fault. Planning is four
+//! requirement on one of them is met rather than a fault. Planning is five
 //! steps, one module each:
 //!
 //! - [`order`] — the plan's shape: the order its operations compose in, and
@@ -30,6 +30,11 @@
 //!   every operation that touches one of its files or requires it, and what
 //!   remains is one transition per file, the author conditions on files the
 //!   plan does not write, and the root's identity.
+//! - [`lineage`] — the content cycle the order cannot see: where the resolved
+//!   operations' targets draw on each other's before-states through a name
+//!   nothing stood at, such as two documents exchanging places through a
+//!   temporary name, the plan is refused as `request/plan-invalid`, as a
+//!   direct exchange is by [`order`].
 //! - [`forecast`](mod@forecast) — the folders the plan makes and removes.
 //!
 //! **Composition is shared with the applier.** A target's after-bytes are a
@@ -89,6 +94,7 @@
 
 pub(crate) mod compose;
 pub(crate) mod forecast;
+pub(crate) mod lineage;
 pub(crate) mod order;
 pub(crate) mod resolve;
 pub(crate) mod view;
