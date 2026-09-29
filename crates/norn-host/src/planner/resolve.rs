@@ -199,10 +199,15 @@ fn unmet_condition<V: VaultView>(
     }
     let holds = match composition.before(&identity) {
         Some(before) => *before == FileState::present(hash.clone()),
-        None => matches!(
-            view.entry(&identity)?,
-            view::Entry::Document { hash: held, .. } if held == *hash
-        ),
+        None => match view.entry(&identity)? {
+            // The plan records the condition at the spelling the tree lists,
+            // so that spelling is the one the index must be able to hold.
+            view::Entry::Document { at, .. } if let Some(detail) = view::unholdable(&at) => {
+                return Ok(Some(detail));
+            }
+            view::Entry::Document { hash: held, .. } => held == *hash,
+            _ => false,
+        },
     };
     Ok((!holds).then(|| format!("`{path}` no longer holds the content its author observed")))
 }
@@ -1442,6 +1447,25 @@ mod tests {
             is_unholdable_detail(&resolution, 0, at);
             assert!(resolution.plan.conditions.is_empty(), "{at}");
         }
+    }
+
+    /// A condition is recorded at the spelling the tree lists, so that
+    /// spelling, not the one the author asked with, is the one judged.
+    #[test]
+    fn a_condition_on_a_document_listed_at_a_spelling_the_index_cannot_hold_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "draft"), ("c/./d.md", "context")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final"))
+                    .with_conditions(vec![AuthorCondition::content_hash(
+                        path("c/d.md"),
+                        content_hash(b"context"),
+                    )]),
+            ],
+        );
+        assert_eq!(resolution.unresolved.len(), 1, "{:?}", resolution.plan);
+        assert!(resolution.plan.conditions.is_empty());
     }
 
     /// The index keys a document by its normalized spelling, so a spelling

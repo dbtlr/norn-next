@@ -345,10 +345,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                     "`{to}` differs from `{source}` in the case of a folder, and a folder's change of case is not planned"
                 )));
             }
+            // The source already passed the index's grammar, and a change of
+            // ASCII case alone never changes that grammar's verdict.
             let respelled = DocumentPath::new(&respelled).expect("a normalized document path");
-            if let Some(detail) = unholdable(&respelled) {
-                return Ok(Err(detail));
-            }
             self.targets
                 .entry(respelled.clone())
                 .or_insert(ComposedTarget {
