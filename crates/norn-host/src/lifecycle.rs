@@ -8713,6 +8713,8 @@ mod tests {
     struct AppliedWhen {
         reconciles: usize,
         maintenances: usize,
+        /// Whether the entry held a reader when the apply ran.
+        reader_stood: bool,
     }
 
     /// A rendezvous two registry writes meet at, where both reach the write.
@@ -9220,15 +9222,20 @@ mod tests {
             _: &mut FakeCoverage,
             plan: PlanDocument,
             progress: &ApplyProgress,
-            _: &ProgressReporter<FakeCoverage>,
+            reporter: &ProgressReporter<FakeCoverage>,
         ) -> ApplyEnd {
             ON_JOB_THREAD.with(|flag| flag.set(true));
+            let reader_stood = reporter
+                .entry
+                .upgrade()
+                .is_some_and(|entry| entry.gate.lock().expect("gate").reader.is_some());
             self.applies_ran
                 .lock()
                 .expect("applies poisoned")
                 .push(AppliedWhen {
                     reconciles: self.reconciles.load(Ordering::SeqCst),
                     maintenances: self.maintenances.load(Ordering::SeqCst),
+                    reader_stood,
                 });
             let resolved = match plan {
                 PlanDocument::Resolved(resolved) => resolved,

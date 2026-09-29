@@ -164,7 +164,8 @@ fn an_apply_arriving_during_a_reconcile_takes_the_claim_before_the_next_turn_and
         ops.applies_ran.lock().unwrap().first().copied(),
         Some(AppliedWhen {
             reconciles: 2,
-            maintenances: 0
+            maintenances: 0,
+            reader_stood: true,
         }),
         "the apply ran after another turn or a maintenance scan"
     );
@@ -765,4 +766,136 @@ fn read_damage_carried_to_a_hand_on_is_published_with_its_rebuild_and_answers_th
     ops.rebuild_release.store(true, Ordering::SeqCst);
     wait_for_state(&host, &name, TrustState::Ready);
     drop((lease, host));
+}
+
+/// Hold reconcile `turn` inside the fake, and answer whether the apply
+/// queued on `name` is still queued while it runs — that turn is not the
+/// apply's own intake — then let it go.
+fn the_turn_runs_ahead_of_the_queue(
+    ops: &FakeOps,
+    host: &Host<Arc<FakeOps>>,
+    name: &VaultName,
+    turn: usize,
+) {
+    wait_for_reconciles_begun(ops, turn);
+    wait_for_flag("reconcile_started", &ops.reconcile_started);
+    {
+        let entry = host.shared.entries.get(name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            !state.applies.is_empty() && state.running_apply.is_none(),
+            "the apply took the claim at the turn its entry owed before trust was held"
+        );
+    }
+    ops.reconcile_release.store(true, Ordering::SeqCst);
+}
+
+/// **Case 5: an apply queued during an attach, a recovery or a rebuild runs
+/// only once a reader stands and trust is held.** An attach and a recovery
+/// each end with a fact their drain delivered still to derive, so each hands
+/// the claim on to a reconcile before the entry publishes `Ready`. That
+/// reconcile is the entry's own work, not the apply's intake: the apply waits
+/// through it, and takes the claim only once the entry stands `Ready` over a
+/// reader. A rebuild publishes the damage it resolves until it ends, so an
+/// apply arriving during one is refused with it rather than queued.
+#[test]
+fn an_apply_queued_during_an_attach_recovery_or_rebuild_runs_once_trust_is_held() {
+    // An attach from nothing, which the apply's own demand schedules.
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("notes").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+    ops.block_attach.store(true, Ordering::SeqCst);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("attach_started", &ops.attach_started);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.block_reconcile_at.store(1, Ordering::SeqCst);
+    ops.attach_release.store(true, Ordering::SeqCst);
+    the_turn_runs_ahead_of_the_queue(&ops, &host, &name, 1);
+    applied(answer_of(pending));
+    assert_eq!(ops.applies_ran.lock().unwrap()[0].reconciles, 1, "attach");
+    drop(host);
+
+    // A recovery a demand asks for once a turn lost the watcher.
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.terminal_reconcile.store(true, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    wait_for_state(
+        &host,
+        &name,
+        TrustState::untrusted(watcher_lost(WatchError::Backend("lost".into()))),
+    );
+    ops.block_recover.store(true, Ordering::SeqCst);
+    let recovering = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_flag("recover_started", &ops.recover_started);
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    ops.block_reconcile_at.store(2, Ordering::SeqCst);
+    ops.recover_release.store(true, Ordering::SeqCst);
+    the_turn_runs_ahead_of_the_queue(&ops, &host, &name, 2);
+    applied(answer_of(pending));
+    assert_eq!(ops.applies_ran.lock().unwrap()[0].reconciles, 2, "recovery");
+    drop((recovering, lease, host));
+
+    // A rebuild a turn that met damage hands on to. It publishes the damage
+    // throughout, so no apply queues behind it: admission refuses with the
+    // damage, and an apply admitted once the rebuild publishes `Ready` runs.
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    arrange_for(&ops.damaged_reconcile_at, &name);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the database disk image is malformed",
+    ));
+    assert_eq!(
+        host.admit_apply(&name, a_plan(&name))
+            .expect_err("an apply was admitted over a rebuild"),
+        ReadRefusal::NotServing(Demand::State(damaged)).answer(&name)
+    );
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    applied(answer_of(
+        host.admit_apply(&name, a_plan(&name)).expect("admitted"),
+    ));
+    drop((lease, host));
+}
+
+/// **Case 4: an apply queued during a schema reload runs only after the
+/// reload publishes `Ready`.** The reload closed the entry's reader when it
+/// began, and its drain delivers a fact, so it hands the claim on to its own
+/// next turn before it mints a reader again. The apply queued meanwhile does
+/// not take the claim at that hand-on: the reload's turn runs first, and the
+/// apply runs over the reader the reload minted.
+#[test]
+fn an_apply_queued_during_a_schema_reload_runs_only_after_it_publishes_ready() {
+    let ops = Arc::new(FakeOps::default());
+    ops.reload_supported.store(true, Ordering::SeqCst);
+    ops.reload_schema_changed.store(true, Ordering::SeqCst);
+    let (host, name, lease) = a_ready_vault(&ops);
+    let host = Arc::new(host);
+    ops.block_schema_reload.store(true, Ordering::SeqCst);
+    let reload = reload_on_a_thread(&host, &name, false);
+    wait_for_flag("reload_started", &ops.reload_started);
+    let pending = host
+        .admit_apply(&name, a_plan(&name))
+        .expect("an apply over a reloading entry is admitted");
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+
+    ops.reload_release.store(true, Ordering::SeqCst);
+    applied(answer_of(pending));
+    reload
+        .join()
+        .unwrap()
+        .expect("the host is running")
+        .expect("the reload applied");
+    let when = ops.applies_ran.lock().unwrap()[0];
+    assert!(when.reader_stood, "the apply ran with no reader standing");
+    assert_eq!(
+        when.reconciles, 1,
+        "the reload's own turn did not run ahead of the apply"
+    );
+    drop(lease);
 }
