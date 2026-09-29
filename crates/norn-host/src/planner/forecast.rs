@@ -1,6 +1,7 @@
 //! The forecast: what a plan does beyond its transitions, which is the
 //! folders it makes and removes.
 
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
 use norn_wire::{DocumentPath, FileState, FolderPath, Forecast, Transition};
@@ -18,50 +19,75 @@ pub(crate) fn forecast<V: VaultView>(
         .filter(|transition| is_create(transition))
         .map(|transition| &transition.path)
         .collect();
-    let removals: BTreeSet<&str> = transitions
+    let removals: Vec<&DocumentPath> = transitions
         .iter()
         .filter(|transition| is_removal(transition))
-        .map(|transition| transition.path.as_str())
+        .map(|transition| &transition.path)
         .collect();
-    let removed_paths = transitions
-        .iter()
-        .filter(|transition| is_removal(transition))
-        .map(|transition| &transition.path);
+    Ok(Forecast::new(
+        Vec::new(),
+        folders_made(&creates, view)?,
+        folders_removed(&removals, &creates, view)?,
+    ))
+}
+
+/// Every folder above a created document that does not stand: the folders
+/// publication makes just before the create it makes them for.
+fn folders_made<V: VaultView>(
+    creates: &[&DocumentPath],
+    view: &V,
+) -> Result<Vec<FolderPath>, V::Error> {
     let mut made = BTreeSet::new();
-    for path in &creates {
+    for path in creates {
         for folder in folders_above(path) {
             if !made.contains(&folder) && !view.folder_stands(&folder)? {
                 made.insert(folder);
             }
         }
     }
+    Ok(made.into_iter().collect())
+}
+
+/// Every folder above a removed document that the plan leaves empty: every
+/// entry it lists is a document the plan removes or a folder it empties, and
+/// no create lands inside it. This is what the applier's emptying after the
+/// removals takes, deepest first and upward until a folder is not empty.
+fn folders_removed<V: VaultView>(
+    removals: &[&DocumentPath],
+    creates: &[&DocumentPath],
+    view: &V,
+) -> Result<Vec<FolderPath>, V::Error> {
     let receiving: BTreeSet<FolderPath> = creates
         .iter()
         .flat_map(|path| folders_above(path))
         .collect();
-    let mut candidates: Vec<FolderPath> = removed_paths
-        .flat_map(folders_above)
+    let mut candidates: Vec<FolderPath> = removals
+        .iter()
+        .flat_map(|path| folders_above(path))
         .filter(|folder| !receiving.contains(folder))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     // Deepest first, so a folder is judged after every folder inside it.
-    candidates.sort_by_key(|folder| std::cmp::Reverse(folder.as_str().matches('/').count()));
-    let mut removed: BTreeSet<FolderPath> = BTreeSet::new();
+    candidates.sort_by_key(|folder| Reverse(folder.as_str().matches('/').count()));
+    // Every path the plan leaves nothing at: its removals, then each folder
+    // it empties as that folder is judged.
+    let mut gone: BTreeSet<String> = removals
+        .iter()
+        .map(|path| path.as_str().to_string())
+        .collect();
+    let mut removed = BTreeSet::new();
     for folder in candidates {
-        let emptied = view.folder_entries(&folder)?.iter().all(|name| {
-            let inside = format!("{}/{name}", folder.as_str());
-            removals.contains(inside.as_str()) || removed.iter().any(|gone| gone.as_str() == inside)
-        });
+        let emptied = view
+            .folder_entries(&folder)?
+            .iter()
+            .all(|name| gone.contains(&format!("{}/{name}", folder.as_str())));
         if emptied {
+            gone.insert(folder.as_str().to_string());
             removed.insert(folder);
         }
     }
-    Ok(Forecast::new(
-        Vec::new(),
-        made.into_iter().collect(),
-        removed.into_iter().collect(),
-    ))
+    Ok(removed.into_iter().collect())
 }
 
 /// Whether a transition puts a document where none stood.
