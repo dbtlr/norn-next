@@ -74,7 +74,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// first time the plan touches it.
     fn file(&mut self, path: &DocumentPath) -> Result<&mut ComposedTarget, V::Error> {
         if !self.files.contains_key(path) {
-            let bytes: Option<Arc<[u8]>> = self.view.file(path)?.map(Arc::from);
+            let bytes = self.view.file(path)?;
             let before = match &bytes {
                 Some(bytes) => FileState::present(content_hash(bytes)),
                 None => FileState::absent(),

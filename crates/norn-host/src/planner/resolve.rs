@@ -2,17 +2,18 @@
 //! refused for a fault in their shape.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use norn_wire::{
-    AuthorCondition, AuthoredPlan, DocumentPath, FileState, Forecast, Operation, OperationsTag,
-    PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition, UnresolvedOperation,
-    UnresolvedReason,
+    AuthorCondition, AuthoredPlan, DocumentPath, FileState, Forecast, Operation, OperationId,
+    OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition,
+    UnresolvedOperation, UnresolvedReason,
 };
 
 use super::compose::{Composition, compose, content_hash, touches};
 use super::forecast::forecast;
 use super::order::dependencies;
-use super::view::VaultView;
+use super::view::{Remembered, VaultView};
 
 /// What planning a plan came to.
 #[derive(Debug)]
@@ -48,6 +49,7 @@ pub(crate) fn resolve<V: VaultView>(
         footnote,
     } = authored;
     let dependencies = dependencies(&operations).map_err(PlanningFailure::Fault)?;
+    let view = &Remembered::over(view);
     let mut left_out: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     let (order, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
@@ -138,50 +140,53 @@ fn failures(
 }
 
 /// Leave out, with the operations already left out, every operation that
-/// falls with one of them: one touching a file a left-out operation touches,
-/// since operations on one file stand or fall together, and one requiring a
-/// left-out operation, directly or through others.
+/// falls with one of them: one requiring a left-out operation, and one
+/// touching a file a left-out operation touches, since operations on one file
+/// stand or fall together — each directly or through others.
 fn leave_out_what_falls_with(
     operations: &[Operation],
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
 ) {
-    loop {
-        let fallen_files: BTreeMap<&DocumentPath, usize> = left_out
-            .keys()
-            .flat_map(|&position| {
-                touches(&operations[position].kind).map(move |path| (path, position))
-            })
-            .collect();
-        let mut falling = BTreeMap::new();
-        for (position, operation) in operations.iter().enumerate() {
-            if left_out.contains_key(&position) {
-                continue;
-            }
-            let required = operation.requires.iter().find(|required| {
-                left_out
-                    .keys()
-                    .any(|&fallen| operations[fallen].id.as_ref() == Some(*required))
+    let mut touching: BTreeMap<&DocumentPath, Vec<usize>> = BTreeMap::new();
+    let mut requiring: BTreeMap<&OperationId, Vec<usize>> = BTreeMap::new();
+    for (position, operation) in operations.iter().enumerate() {
+        for path in touches(&operation.kind) {
+            touching.entry(path).or_default().push(position);
+        }
+        for required in &operation.requires {
+            requiring.entry(required).or_default().push(position);
+        }
+    }
+    let mut fallen: Vec<usize> = left_out.keys().copied().collect();
+    while let Some(position) = fallen.pop() {
+        let operation = &operations[position];
+        let by_requirement = operation
+            .id
+            .iter()
+            .flat_map(|id| requiring.get(id).into_iter().flatten())
+            .map(|&requirer| {
+                let id = operation
+                    .id
+                    .clone()
+                    .expect("a requirement names an identifier");
+                (requirer, UnresolvedReason::requires_unresolved(id))
             });
-            if let Some(required) = required {
-                falling.insert(
-                    position,
-                    UnresolvedReason::requires_unresolved((*required).clone()),
-                );
-            } else if let Some((path, fallen)) = touches(&operation.kind)
-                .find_map(|path| fallen_files.get(path).map(|&fallen| (path, fallen)))
-            {
-                falling.insert(
-                    position,
+        let by_file = touches(&operation.kind).flat_map(|path| {
+            touching.get(path).into_iter().flatten().map(move |&sharer| {
+                (
+                    sharer,
                     UnresolvedReason::no_longer_resolves(format!(
-                        "it touches `{path}`, as the unresolved operation at position {fallen} does, and operations on one file stand or fall together"
+                        "it touches `{path}`, as the unresolved operation at position {position} does, and operations on one file stand or fall together"
                     )),
-                );
+                )
+            })
+        });
+        for (falling, reason) in by_requirement.chain(by_file).collect::<Vec<_>>() {
+            if let Entry::Vacant(entry) = left_out.entry(falling) {
+                entry.insert(reason);
+                fallen.push(falling);
             }
         }
-        if falling.is_empty() {
-            return;
-        }
-        left_out.extend(falling);
     }
 }
 
@@ -556,5 +561,18 @@ mod tests {
         let first = planned(&vault, operations);
         let again = planned(&vault, first.plan.operations.clone());
         assert_eq!(again.plan, first.plan);
+    }
+
+    #[test]
+    fn each_file_is_read_once_however_many_passes_planning_takes() {
+        let vault = MemoryVault::with(&[("a.md", "A"), ("x.md", "X")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("x.md"), "missing", "y")),
+            Operation::new(OperationKind::str_replace(path("a.md"), "A", "a")),
+        ];
+        let resolution = planned(&vault, operations);
+        assert_eq!(resolution.unresolved.len(), 1);
+        let reads = vault.reads.borrow();
+        assert!(reads.values().all(|&count| count == 1), "{reads:?}");
     }
 }

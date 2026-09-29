@@ -1,6 +1,10 @@
 //! What the planner reads of a vault: a file's bytes, and whether a folder
 //! stands and what it lists.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use norn_wire::{DocumentPath, FolderPath};
 
 /// The vault as the planner reads it.
@@ -15,7 +19,7 @@ pub(crate) trait VaultView {
 
     /// The bytes of the document at `path`, or `None` where no document
     /// stands there.
-    fn file(&self, path: &DocumentPath) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn file(&self, path: &DocumentPath) -> Result<Option<Arc<[u8]>>, Self::Error>;
 
     /// Whether a folder stands at `folder`.
     fn folder_stands(&self, folder: &FolderPath) -> Result<bool, Self::Error>;
@@ -26,12 +30,55 @@ pub(crate) trait VaultView {
     fn folder_entries(&self, folder: &FolderPath) -> Result<Vec<String>, Self::Error>;
 }
 
+/// A view that reads each file once and answers every later read of it with
+/// what the first read found.
+///
+/// Planning composes again after leaving an operation out, and one planning
+/// is one observation of each file: every pass then composes from the same
+/// before-states, and a file is read once however many passes it takes.
+pub(crate) struct Remembered<'view, V> {
+    view: &'view V,
+    files: RefCell<BTreeMap<DocumentPath, Option<Arc<[u8]>>>>,
+}
+
+impl<'view, V> Remembered<'view, V> {
+    pub(crate) fn over(view: &'view V) -> Self {
+        Remembered {
+            view,
+            files: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<V: VaultView> VaultView for Remembered<'_, V> {
+    type Error = V::Error;
+
+    fn file(&self, path: &DocumentPath) -> Result<Option<Arc<[u8]>>, V::Error> {
+        if let Some(read) = self.files.borrow().get(path) {
+            return Ok(read.clone());
+        }
+        let read = self.view.file(path)?;
+        self.files.borrow_mut().insert(path.clone(), read.clone());
+        Ok(read)
+    }
+
+    fn folder_stands(&self, folder: &FolderPath) -> Result<bool, V::Error> {
+        self.view.folder_stands(folder)
+    }
+
+    fn folder_entries(&self, folder: &FolderPath) -> Result<Vec<String>, V::Error> {
+        self.view.folder_entries(folder)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod memory {
     //! A vault held in memory, for the planner's own tests.
 
+    use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
+    use std::sync::Arc;
 
     use norn_wire::{DocumentPath, FolderPath};
 
@@ -41,8 +88,10 @@ pub(crate) mod memory {
     /// was made empty or where anything stands below it.
     #[derive(Default)]
     pub(crate) struct MemoryVault {
-        files: BTreeMap<String, Vec<u8>>,
+        files: BTreeMap<String, Arc<[u8]>>,
         empty_folders: BTreeSet<String>,
+        /// How many times each file was read.
+        pub(crate) reads: RefCell<BTreeMap<String, usize>>,
     }
 
     impl MemoryVault {
@@ -51,7 +100,7 @@ pub(crate) mod memory {
             for (path, content) in files {
                 vault
                     .files
-                    .insert((*path).to_string(), content.as_bytes().to_vec());
+                    .insert((*path).to_string(), Arc::from(content.as_bytes()));
             }
             vault
         }
@@ -69,7 +118,12 @@ pub(crate) mod memory {
     impl VaultView for MemoryVault {
         type Error = Infallible;
 
-        fn file(&self, path: &DocumentPath) -> Result<Option<Vec<u8>>, Infallible> {
+        fn file(&self, path: &DocumentPath) -> Result<Option<Arc<[u8]>>, Infallible> {
+            *self
+                .reads
+                .borrow_mut()
+                .entry(path.as_str().to_string())
+                .or_default() += 1;
             Ok(self.files.get(path.as_str()).cloned())
         }
 
