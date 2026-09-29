@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{FileState, OperationKind, PlanCondition, ResolvedPlan, Transition};
+use norn_wire::{DocumentPath, FileState, OperationKind, PlanCondition, ResolvedPlan, Transition};
 
 use crate::planner::view::{Entry, VaultView};
 
@@ -155,7 +155,7 @@ pub(super) fn observe<V: VaultView>(
 
 /// What one transition's target holds.
 fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V::Error> {
-    let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
+    let Some(identity) = canonical(view.normalizer(), &transition.path) else {
         return Ok(TargetState::Drifted(FileState::absent()));
     };
     let (holds, bytes) = match view.entry(&identity)? {
@@ -197,7 +197,9 @@ fn respell<V: VaultView>(
     new: &Transition,
     view: &V,
 ) -> Result<(TargetState, TargetState), V::Error> {
-    let entry = match identity(view.normalizer(), old.path.as_str()) {
+    let entry = match canonical(view.normalizer(), &old.path)
+        .filter(|_| canonical(view.normalizer(), &new.path).is_some())
+    {
         Some(identity) => view.entry(&identity)?,
         None => Entry::Blocked {
             detail: String::new(),
@@ -320,6 +322,20 @@ pub(super) fn failed_conditions<V: VaultView>(
 /// `path`'s identity under the vault's one rule, where it names a file.
 pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<NormalizedPath> {
     normalizer.normalize(Path::new(path)).ok()
+}
+
+/// `path`'s identity, where `path` is spelled as the vault's one rule spells
+/// it.
+///
+/// **A plan names each target at one spelling.** The planner writes every
+/// transition at a normalized spelling, and the kernel keeps a path as it is
+/// given — a `./` component included — so a target spelled otherwise, as a
+/// plan edited by hand can be, would be published, recorded and derived at a
+/// second spelling of one file. It is judged as drift instead, holding
+/// nothing, and the fresh plan the refusal answers spells it once.
+fn canonical(normalizer: &PathNormalizer, path: &DocumentPath) -> Option<NormalizedPath> {
+    identity(normalizer, path.as_str())
+        .filter(|identity| identity.as_path() == Path::new(path.as_str()))
 }
 
 /// Whether a transition puts a document where none stood.

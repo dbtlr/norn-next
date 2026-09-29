@@ -204,6 +204,17 @@ impl Fixture {
         ));
         let mut built = Store::open(&oracle, order_of(&self.vault), crate::DERIVATION_VERSION)
             .expect("a store");
+        if let Some(pin) = self
+            .store
+            .begin_request()
+            .vault_schema_pin()
+            .expect("a pin read")
+        {
+            built
+                .begin_request()
+                .pin_vault_schema(&pin.bytes, &pin.fingerprint)
+                .expect("the schema pins");
+        }
         heal_from_zero(&mut built, &self.vault, &self.exclusions).expect("a heal");
         assert_eq!(
             Fixture::derived(&mut self.store),
@@ -520,4 +531,237 @@ fn re_sending_conditioned_operations_is_refused_rather_than_repeated() {
     assert!(again.plan.operations.is_empty());
     assert_eq!(again.unresolved.len(), 1);
     assert_eq!(fixture.read("a.md").as_deref(), Some("count 11\n"));
+}
+
+impl Fixture {
+    /// A vault holding `files` whose store pins the schema `schema`.
+    pub(super) fn with_schema(schema: &str, files: &[(&str, &str)]) -> Fixture {
+        let mut fixture = Fixture::new(files);
+        fixture
+            .store
+            .begin_request()
+            .pin_vault_schema(schema.as_bytes(), "applier-test-schema")
+            .expect("the schema pins");
+        heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+        fixture
+    }
+}
+
+const TAG_SCHEMA: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
+
+/// A plan refuses a violation of the vault schema it introduces, and one on
+/// what it writes, and not one that already stood in a target and that it
+/// leaves as it was — a moved document's included.
+#[test]
+fn a_plan_refuses_the_schema_violations_it_introduces() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[
+            ("a.md", "# A\n#project\n"),
+            ("b.md", "# B\n#legacy\nold\n"),
+            ("inbox/c.md", "# C\n#legacy\n"),
+        ],
+    );
+    let violation = |at: &str, tag: &str| {
+        norn_wire::RefusedCheck::schema_violation(
+            path(at),
+            norn_wire::FindingKind::UndeclaredTag,
+            Some(tag.to_string()),
+            String::new(),
+        )
+    };
+    let without_message = |checks: Vec<norn_wire::RefusedCheck>| -> Vec<norn_wire::RefusedCheck> {
+        checks
+            .into_iter()
+            .map(|check| match check {
+                norn_wire::RefusedCheck::SchemaViolation {
+                    path, kind, target, ..
+                } => norn_wire::RefusedCheck::schema_violation(path, kind, target, String::new()),
+                other => other,
+            })
+            .collect()
+    };
+    let introduced = refused(fixture.apply(fixture.plan(vec![
+        editing("a.md", "#project", "#project #stray"),
+        creating("d.md", "# D\n#other\n"),
+        editing("b.md", "#legacy", "#legacy #legacy"),
+    ])));
+    assert_eq!(
+        without_message(introduced.checks),
+        vec![
+            violation("a.md", "stray"),
+            violation("b.md", "legacy"),
+            violation("d.md", "other"),
+        ]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n#project\n"));
+    let standing = applied(fixture.apply(fixture.plan(vec![
+        editing("b.md", "old", "new"),
+        moving("inbox/c.md", "archive/c.md"),
+    ])));
+    assert_eq!(standing.targets.len(), 3);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// A move's source found gone while its destination is not at its after-state
+/// was taken by another writer, since the applier removes a source only after
+/// its destination durably landed: the source is drift, and the move is left
+/// unresolved rather than resolved again.
+#[test]
+fn a_move_whose_source_another_writer_removed_is_unresolved() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n"), ("e.md", "e\n")]);
+    let plan = fixture.plan(vec![
+        moving("b.md", "c.md"),
+        moving("a.md", "b.md"),
+        editing("e.md", "e", "E"),
+    ]);
+    // The chain's middle carries its new content while the document it held
+    // never reached its destination: another writer's doing.
+    fixture.foreign("b.md", "# A\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("b.md"),
+            present("# A\n")
+        )]
+    );
+    let unresolved: Vec<&Operation> = refused
+        .unresolved
+        .iter()
+        .map(|left| &left.operation)
+        .collect();
+    assert_eq!(
+        unresolved,
+        vec![&moving("b.md", "c.md"), &moving("a.md", "b.md")]
+    );
+    assert_eq!(refused.plan.operations, vec![editing("e.md", "e", "E")]);
+    assert_eq!(
+        fixture.tree(),
+        vec!["a.md", "b.md", "e.md"],
+        "nothing foreign is removed"
+    );
+}
+
+#[test]
+fn a_move_whose_source_is_gone_before_its_destination_landed_is_drift() {
+    let mut fixture = Fixture::new(&[("x.md", "# X\n")]);
+    let plan = fixture.plan(vec![moving("x.md", "y.md")]);
+    std::fs::remove_file(fixture.vault.join("x.md")).expect("another writer removes it");
+    heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("x.md"),
+            norn_wire::FileState::absent()
+        )]
+    );
+    assert_eq!(refused.forecast.drifted, vec![path("x.md")]);
+    assert_eq!(refused.unresolved.len(), 1);
+    assert!(refused.plan.operations.is_empty());
+    assert!(fixture.tree().is_empty());
+}
+
+/// Every publication is recorded as an own write the moment it lands, at the
+/// plan's path, and only a publication: a move is two, and a target found
+/// already landed is none.
+#[test]
+fn each_publication_is_recorded_as_an_own_write_when_it_lands() {
+    let mut fixture = Fixture::new(&[("a.md", "a\n"), ("inbox/b.md", "b\n")]);
+    let plan = fixture.plan(vec![
+        editing("a.md", "a", "A"),
+        moving("inbox/b.md", "b.md"),
+        creating("c.md", "c\n"),
+    ]);
+    fixture.write("c.md", "c\n");
+    applied(fixture.apply(plan));
+    assert_eq!(
+        *fixture.recorded.calls.borrow(),
+        vec![
+            (PathBuf::from("b.md"), true),
+            (PathBuf::from("a.md"), true),
+            (PathBuf::from("inbox/b.md"), true),
+        ],
+        "creates, then replaces, then removals; the found create is not recorded"
+    );
+}
+
+/// The kernel keeps a staged path as it was given, a leading `./` included,
+/// and a document path's grammar admits one: a plan naming a target so, as a
+/// hand-edited plan can, is refused before anything is staged, and the fresh
+/// plan spells the target once. So nothing is published, recorded or derived
+/// at a second spelling of one file.
+#[test]
+fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
+    let mut fixture = Fixture::new(&[("a.md", "a\n")]);
+    let staged = norn_fs::stage(
+        &fixture.vault,
+        fixture.root,
+        Path::new("./a.md"),
+        norn_fs::Transition::Remove {
+            before: norn_fs::ContentHash::of(b"a\n"),
+        },
+        &fixture.shadows,
+    )
+    .expect("the removal stages");
+    let norn_fs::Staging::Staged(staged) = staged else {
+        panic!("the removal is waiting");
+    };
+    assert_eq!(staged.path(), Path::new("./a.md"));
+    norn_fs::discard(&fixture.vault, staged, &fixture.shadows);
+
+    let mut plan = fixture.plan(vec![creating("new.md", "n\n")]);
+    plan.transitions[0].path = path("./new.md");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(refused.plan.transitions[0].path, path("new.md"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert_eq!(fixture.tree(), vec!["a.md"]);
+}
+
+/// **Mark invariance.** The same changes committed marked composed and marked
+/// derived read the same derivation counters: the mark changes no statement
+/// the store runs.
+#[test]
+fn a_changeset_reads_the_same_counters_marked_composed_or_derived() {
+    use crate::production::{PlanEffect, commit_plan_changeset};
+    use norn_store::IncrementProvenance;
+
+    let reading = |provenance: IncrementProvenance| {
+        let mut fixture = Fixture::with_schema(
+            TAG_SCHEMA,
+            &[
+                ("a.md", "# A\n[[b]]\n"),
+                ("b.md", "# B\n"),
+                ("c.md", "# C\n"),
+            ],
+        );
+        fixture.write("a.md", "# A\n[[c]] #stray\n");
+        fixture.write("d.md", "---\ntitle: D\n---\n# D\n[[a]]\n");
+        std::fs::remove_file(fixture.vault.join("c.md")).expect("a removal");
+        let effect = |at: &str, content: Option<&str>| PlanEffect {
+            path: norn_store::DocumentPath::new(at).expect("a path"),
+            holds: content.map(|content| norn_fs::ContentHash::of(content.as_bytes())),
+        };
+        let effects = [
+            effect("a.md", Some("# A\n[[c]] #stray\n")),
+            effect("c.md", None),
+            effect("d.md", Some("---\ntitle: D\n---\n# D\n[[a]]\n")),
+        ];
+        commit_plan_changeset(
+            &mut fixture.store,
+            &fixture.vault,
+            &fixture.exclusions,
+            &effects,
+            provenance,
+        )
+        .expect("the changeset commits")
+    };
+    let composed = reading(IncrementProvenance::Composed);
+    let derived = reading(IncrementProvenance::Derived);
+    assert!(
+        composed.readings().any(|(_, value)| value > 0),
+        "the changeset moved something"
+    );
+    assert_eq!(composed, derived);
 }
