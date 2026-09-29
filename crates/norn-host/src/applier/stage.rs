@@ -15,6 +15,7 @@ use super::observe::{
 };
 use super::recompose::{Recomposed, disagreement, recompose};
 use super::schema;
+use super::shape::shape_disagrees;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
 use crate::planner::lineage::Lineage;
@@ -128,13 +129,15 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
 
 /// Check every target of `plan` and stage every written one.
 ///
-/// **The checks run in this order**: the plan names every target once, at the
-/// spelling the vault gives it, at a place the vault reads documents at and
-/// the store can name; no target drifted and every condition holds; the
+/// **The checks run in this order**: the store can name every target; before
+/// any vault read, the transitions name exactly the files the operations
+/// touch, each once ([`shape_disagrees`]); every target stands at the spelling
+/// the vault gives it, at a place the vault reads documents at; no target
+/// drifted and every condition holds; the
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); every result passes the vault schema; and the
-/// publication order exists. A plan that fails the first or the third is not
-/// what its operations do: its own shape is wrong, and it stops as
+/// publication order exists. A plan that fails any check but drift, a
+/// condition or the schema is not what its operations do: its own shape is wrong, and it stops as
 /// [`PlanFault::TransitionsDisagree`] naming the files it disagrees at, never
 /// as drift.
 ///
@@ -152,6 +155,10 @@ pub(super) fn check_and_stage(
 ) -> Result<StagedPlan, Stop> {
     let normalizer = view.normalizer();
     let stored = stored_paths(plan).map_err(|paths| Stop::Invalid(disagreement(paths)))?;
+    let misshapen = shape_disagrees(plan, normalizer);
+    if !misshapen.is_empty() {
+        return Err(Stop::Invalid(disagreement(misshapen)));
+    }
     let units = units(plan, normalizer);
     let (states, _) =
         observe(plan, &units, view).map_err(|error| Stop::Failed(error.to_string()))?;

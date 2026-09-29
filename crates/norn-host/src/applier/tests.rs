@@ -1083,6 +1083,70 @@ fn an_extra_removal_no_operation_makes_is_refused() {
     assert_eq!(fixture.refuses_disagreeing(plan), vec![path("c.md")]);
 }
 
+/// A transition for a file no operation touches is the plan's shape, not
+/// the vault's: it is invalid whatever before-state it names, so a wrong
+/// guess at the file's hash is never reported as drift.
+#[test]
+fn an_extra_transition_with_a_wrong_before_state_is_invalid_not_drift() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("c.md", "# C\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions.push(norn_wire::Transition::new(
+        path("c.md"),
+        present("not what c holds\n"),
+        norn_wire::FileState::absent(),
+    ));
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("c.md")]);
+    assert_eq!(fixture.read("c.md").as_deref(), Some("# C\n"));
+}
+
+/// A transition spelled in another case than the file its operation edits
+/// names another file where the root tells case apart: invalid, naming the
+/// spelling no operation touches and the file left without a transition,
+/// never drift holding absence. Where the root folds case the two spellings
+/// are one file, and a document standing at the other spelling is what a
+/// foreign case-only rename leaves, which only the vault can tell.
+#[test]
+fn a_transition_spelled_in_another_case_is_invalid_where_case_is_told_apart() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let folds = TreeView::open(&fixture.vault, &[])
+        .expect("a vault")
+        .normalizer()
+        .case_sensitivity()
+        == norn_fs::CaseSensitivity::Insensitive;
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions[0].path = path("A.md");
+    if folds {
+        assert!(fixture.apply(plan).into_wire().is_err());
+    } else {
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            vec![path("A.md"), path("a.md")]
+        );
+    }
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// A transition whose before-state was changed on a file its operation does
+/// touch is drift, as a foreign edit is: the two cannot be told apart, so it
+/// answers a fresh plan with the target marked.
+#[test]
+fn a_changed_before_state_on_a_touched_file_is_drift() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions[0].before = present("something else\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("a.md"),
+            present("draft\n")
+        )]
+    );
+    assert_eq!(refused.forecast.drifted, vec![path("a.md")]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+}
+
 /// An edit whose after-state is changed to absence would remove its
 /// document: refused.
 #[test]
@@ -1094,7 +1158,10 @@ fn an_edit_whose_after_state_is_made_absent_is_refused() {
 }
 
 /// A plan disagreeing with its operations at more than one file names every
-/// one of them, sorted, however they disagree.
+/// one its first failing check finds, sorted. The shape check runs before
+/// any vault read and stops the plan there, so a transition no operation
+/// accounts for and one the operations would compose otherwise are found by
+/// two checks, each naming all of its own.
 #[test]
 fn a_plan_disagreeing_at_several_files_names_every_one() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("c.md", "# C\n")]);
@@ -1104,7 +1171,6 @@ fn a_plan_disagreeing_at_several_files_names_every_one() {
     ]);
     plan.transitions
         .retain(|transition| transition.path != path("n.md"));
-    plan.transitions[0].after = norn_wire::FileState::absent();
     plan.transitions.push(norn_wire::Transition::new(
         path("c.md"),
         present("# C\n"),
@@ -1112,7 +1178,19 @@ fn a_plan_disagreeing_at_several_files_names_every_one() {
     ));
     assert_eq!(
         fixture.refuses_disagreeing(plan),
-        vec![path("a.md"), path("c.md"), path("n.md")]
+        vec![path("c.md"), path("n.md")]
+    );
+
+    let mut plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        creating("n.md", "# N\n"),
+    ]);
+    for transition in &mut plan.transitions {
+        transition.after = norn_wire::FileState::absent();
+    }
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("a.md"), path("n.md")]
     );
 }
 

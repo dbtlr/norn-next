@@ -69,6 +69,7 @@ mod publish;
 mod recompose;
 mod refresh;
 mod schema;
+mod shape;
 mod stage;
 
 use std::collections::BTreeSet;
