@@ -1434,3 +1434,26 @@ fn a_plan_dropping_its_operations_condition_is_refused() {
     plan.conditions.clear();
     fixture.refuses_unsound(plan);
 }
+
+/// A hash of another algorithm never reaches the applier: a resolved plan
+/// carrying one is refused as it is read, so no hash is mapped to a stand-in
+/// the kernel would compare a file against.
+#[test]
+fn a_plan_carrying_a_hash_of_another_algorithm_does_not_read() {
+    let fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let plan = fixture.plan(vec![deleting("a.md")]);
+    let mut json = serde_json::to_value(&plan).expect("a plan");
+    let spelled = json["transitions"][0]["before"]["hash"].clone();
+    assert!(
+        spelled
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:"))
+    );
+    assert!(serde_json::from_value::<ResolvedPlan>(json.clone()).is_ok());
+    json["transitions"][0]["before"]["hash"] =
+        serde_json::Value::String(format!("md5:{}", "0".repeat(32)));
+    assert!(serde_json::from_value::<ResolvedPlan>(json.clone()).is_err());
+    json["transitions"][0]["before"]["hash"] =
+        serde_json::Value::String(format!("sha256:{}", "A".repeat(64)));
+    assert!(serde_json::from_value::<ResolvedPlan>(json).is_err());
+}

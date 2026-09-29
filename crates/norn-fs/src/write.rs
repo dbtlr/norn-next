@@ -482,6 +482,11 @@ pub struct RemovedFolders {
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which stages every target of a plan before it publishes any.
+///
+/// **A dormant carrier until `Host::apply` lands.** The applier is itself
+/// reached only by its own cases until NORN-295's `Host::apply` job takes an
+/// entry's claim and hands it a resolved plan, so no production path calls
+/// this yet.
 pub fn stage(
     anchor: &Path,
     root: Identity,
@@ -505,6 +510,11 @@ pub fn stage(
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which publishes creates, then replaces, then removes, once
 /// every target staged.
+///
+/// **A dormant carrier until `Host::apply` lands.** The applier is itself
+/// reached only by its own cases until NORN-295's `Host::apply` job takes an
+/// entry's claim and hands it a resolved plan, so no production path calls
+/// this yet.
 pub fn publish(
     anchor: &Path,
     staged: Staged,
@@ -526,6 +536,11 @@ pub fn publish(
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), on a target a re-sent resolved plan finds landed.
+///
+/// **A dormant carrier until `Host::apply` lands.** The applier is itself
+/// reached only by its own cases until NORN-295's `Host::apply` job takes an
+/// entry's claim and hands it a resolved plan, so no production path calls
+/// this yet.
 pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refusal> {
     confirm_landed_where(anchor, landed, Faults::entry())
 }
@@ -541,6 +556,11 @@ pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refus
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply).
+///
+/// **A dormant carrier until `Host::apply` lands.** The applier is itself
+/// reached only by its own cases until NORN-295's `Host::apply` job takes an
+/// entry's claim and hands it a resolved plan, so no production path calls
+/// this yet.
 pub fn discard(anchor: &Path, staged: Staged, shadows: &ShadowHome) {
     let Some(shadow) = staged.pending.shadow() else {
         return;
@@ -572,6 +592,11 @@ pub fn discard(anchor: &Path, staged: Staged, shadows: &ShadowHome) {
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply).
+///
+/// **A dormant carrier until `Host::apply` lands.** The applier is itself
+/// reached only by its own cases until NORN-295's `Host::apply` job takes an
+/// entry's claim and hands it a resolved plan, so no production path calls
+/// this yet.
 pub fn remove_empty_folders(
     anchor: &Path,
     root: Identity,

@@ -12,12 +12,14 @@
 //!   it there), or neither (drift). A case-only rename's two transitions are
 //!   one unit, published as the kernel's respell.
 //! - [`stage`] — the check-and-stage phase. The root identity, every target's
-//!   state, every condition, every composed result against the vault schema
-//!   ([`schema`]), and a shadow for every written target, a create included.
-//!   Every target is recomposed from the before-states and the operations in
-//!   the plan's recorded order ([`recompose`]) and staged only where the
-//!   result hashes to its after-state. A refusal here discards every shadow
-//!   and publishes nothing.
+//!   path and state, every condition, the plan's operations run again from its
+//!   before-states through the planner's own ordering and composition
+//!   ([`recompose`]) — which must give back exactly the plan's transitions, so
+//!   a plan whose transitions say anything its operations do not is refused
+//!   before anything is staged — every composed result against the vault
+//!   schema ([`schema`]), judged against the document its content came from
+//!   ([`lineage`]), and a shadow for every written target, a create included.
+//!   A refusal here discards every shadow and publishes nothing.
 //! - [`publish`] — creates, then replaces, then removals, each verified again
 //!   by the kernel, with every folder a removal left empty removed after
 //!   them; a source is never replaced or removed until every target drawing
@@ -28,8 +30,10 @@
 //!   ([`crate::production::commit_plan_changeset`]); exactly the landed
 //!   subset when publication stopped part-way.
 //!
-//! A refusal answers with a fresh plan ([`refresh`]); a root that is not the
-//! plan's answers with no plan; an interruption names what landed; an I/O
+//! A refusal answers with a fresh plan ([`refresh`]); so does a plan that is
+//! not what its operations do, with every operation resolved afresh and no
+//! check; operations whose own shape is wrong, and a root that is not the
+//! plan's, answer with no plan; an interruption names what landed; an I/O
 //! failure before anything landed wrote nothing ([`outcome`]).
 //!
 //! **Memory.** From staging to publication the applier holds the plan — its

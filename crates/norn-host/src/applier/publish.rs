@@ -161,8 +161,13 @@ impl Publisher<'_> {
     }
 
     /// Empty the folders the removals left, from each removed target's own
-    /// folder upward. A folder that cannot be removed is left: folders are not
-    /// transitions, and every target has landed by now.
+    /// folder upward.
+    ///
+    /// **A folder that cannot be removed is left, and not reported.** Folders
+    /// are not transitions and every target has landed by now, so the plan is
+    /// applied; the report names the folders removed, and the wire has no
+    /// place for one that was not, so a failure here reaches the caller only
+    /// as a folder missing from that list. A re-send empties it again.
     fn empty_folders(&self, removed: &[DocumentPath], progress: &mut Progress) {
         let mut folders: Vec<PathBuf> = removed
             .iter()
