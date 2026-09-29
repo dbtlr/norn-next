@@ -85,6 +85,10 @@ struct Simulated<'view, V> {
     /// The spelling each identity stands at now: where it was read, or where a
     /// case-only rename moved it.
     spelled: BTreeMap<NormalizedPath, DocumentPath>,
+    /// How many documents stand so far beneath each folder identity, so
+    /// whether a name is a folder the plan makes is one lookup however large
+    /// the plan.
+    standing_below: BTreeMap<NormalizedPath, usize>,
 }
 
 /// Why one operation cannot act on the state it met.
@@ -105,6 +109,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             targets: BTreeMap::new(),
             read_at: BTreeMap::new(),
             spelled: BTreeMap::new(),
+            standing_below: BTreeMap::new(),
         }
     }
 
@@ -132,8 +137,14 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             }
             Entry::Blocked { detail } => return Ok(Place::NoFile(detail)),
         };
-        self.targets
-            .insert(spelling.clone(), ComposedTarget { before, after });
+        self.targets.insert(
+            spelling.clone(),
+            ComposedTarget {
+                before,
+                after: None,
+            },
+        );
+        self.set_after(&spelling, after);
         self.read_at.insert(identity.clone(), spelling.clone());
         self.spelled.insert(identity.clone(), spelling.clone());
         Ok(Place::File(identity, spelling))
@@ -171,9 +182,13 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 "`{path}` lies beneath the document the plan puts at `{above}`"
             )));
         }
-        if let Some(below) = self.document_below(&identity) {
+        if self
+            .standing_below
+            .get(&identity)
+            .is_some_and(|&count| count > 0)
+        {
             return Ok(Err(format!(
-                "a folder stands at `{path}`, where the plan puts `{below}`"
+                "a folder stands at `{path}`, where the plan puts a document beneath it"
             )));
         }
         if spelling.as_str() != spelled_as_asked(&identity) {
@@ -196,24 +211,40 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             .find(|spelling| self.targets[*spelling].after.is_some())
     }
 
-    /// A document standing so far beneath `identity`.
-    fn document_below(&self, identity: &NormalizedPath) -> Option<&DocumentPath> {
-        self.spelled.iter().find_map(|(other, spelling)| {
-            let beneath = other
-                .as_path()
-                .ancestors()
-                .skip(1)
-                .filter_map(|above| self.view.normalizer().normalize(above).ok())
-                .any(|above| above == *identity);
-            (beneath && self.targets[spelling].after.is_some()).then_some(spelling)
-        })
+    /// Set what the file at `spelling` holds so far, counting it beneath
+    /// every folder above it while a document stands there.
+    fn set_after(&mut self, spelling: &DocumentPath, after: Option<Arc<[u8]>>) {
+        let target = self.target(spelling);
+        let change = match (target.after.is_some(), after.is_some()) {
+            (false, true) => Some(true),
+            (true, false) => Some(false),
+            _ => None,
+        };
+        target.after = after;
+        let Some(arrives) = change else {
+            return;
+        };
+        for above in Path::new(spelling.as_str()).ancestors().skip(1) {
+            if above.as_os_str().is_empty() {
+                break;
+            }
+            let Ok(folder) = self.view.normalizer().normalize(above) else {
+                continue;
+            };
+            let count = self.standing_below.entry(folder).or_default();
+            if arrives {
+                *count += 1;
+            } else {
+                *count -= 1;
+            }
+        }
     }
 
     /// Act on `kind`, or say why it cannot act, leaving the state as it was.
     fn apply(&mut self, kind: &OperationKind) -> Result<Result<(), Unresolved>, V::Error> {
         Ok(match kind {
             OperationKind::CreateDocument { path, content } => self.vacant(path)?.map(|spelling| {
-                self.target(&spelling).after = Some(Arc::from(content.as_bytes()));
+                self.set_after(&spelling, Some(Arc::from(content.as_bytes())));
             }),
             OperationKind::StrReplace {
                 path,
@@ -231,7 +262,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             },
             OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
             OperationKind::DeleteDocument { path } => self.standing(path)?.map(|spelling| {
-                self.target(&spelling).after = None;
+                self.set_after(&spelling, None);
             }),
         })
     }
@@ -288,8 +319,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 Err(detail) => return Ok(Err(detail)),
             }
         };
-        let moved = self.target(&source).after.take();
-        self.target(&destination).after = moved;
+        let moved = self.target(&source).after.clone();
+        self.set_after(&source, None);
+        self.set_after(&destination, moved);
         Ok(Ok(()))
     }
 
