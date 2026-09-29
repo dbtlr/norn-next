@@ -22,5 +22,7 @@
 //! reaches it yet, and its contract is held by those tests alone.
 
 mod compose;
+mod forecast;
 mod order;
+mod resolve;
 mod view;
