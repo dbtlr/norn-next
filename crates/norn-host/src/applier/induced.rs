@@ -401,3 +401,30 @@ fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
         );
     }
 }
+
+/// **A target another writer lands inside its own publication, whose folder
+/// is then not synced, stops publication** as one this apply wrote would: the
+/// removal the foreign writer made is found, its folder sync fails, and the
+/// apply is interrupted naming it, with the later removal left unpublished.
+#[test]
+fn a_target_found_inside_its_publication_whose_folder_is_not_synced_interrupts_the_apply() {
+    let (fixture, _) = every_position();
+    let plan = fixture.plan(vec![deleting("e.md"), deleting("gone.md")]);
+    let child = run_child(&fixture, &plan, "foreign@1=remove,parent-sync@1=fails");
+    assert!(child.lived);
+    assert!(child.hits.contains("stage=foreign"), "{}", child.hits);
+    assert!(child.hits.contains("stage=parent-sync"), "{}", child.hits);
+    let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail() else {
+        panic!("the apply is interrupted: {:?}", child.outcome);
+    };
+    assert_eq!(*landed, vec![path("e.md")]);
+    assert!(
+        matches!(cause, InterruptionCause::IoFailure { .. }),
+        "{cause:?}"
+    );
+    assert_eq!(
+        fixture.read("gone.md").as_deref(),
+        Some("# Gone\n"),
+        "nothing after it published"
+    );
+}
