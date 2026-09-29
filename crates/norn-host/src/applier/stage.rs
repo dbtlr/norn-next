@@ -7,13 +7,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
-use norn_wire::{FileState, PlanFault, RefusedCheck, ResolvedPlan, Transition};
+use norn_wire::{DocumentPath, FileState, PlanFault, RefusedCheck, ResolvedPlan, Transition};
 
 use super::observe::{
     TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
     recorded_lineage, transition_index, units,
 };
-use super::recompose::{Recomposed, recompose};
+use super::recompose::{Recomposed, disagreement, recompose};
 use super::schema;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
@@ -69,9 +69,8 @@ pub(super) enum Phase {
 pub(super) enum Stop {
     /// A check refused: drift, a condition, a schema violation, a taken name.
     Refused(Vec<RefusedCheck>),
-    /// The plan is not what its operations do, in words.
-    Unsound(String),
-    /// The operations' own shape is wrong.
+    /// The plan's own shape is wrong: its operations', or its transitions
+    /// are not what its operations do.
     Invalid(PlanFault),
     /// The vault root is not the directory the plan's identity names.
     RootReplaced,
@@ -135,7 +134,9 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); every result passes the vault schema; and the
 /// publication order exists. A plan that fails the first or the third is not
-/// what its operations do, and is refused as that rather than as drift.
+/// what its operations do: its own shape is wrong, and it stops as
+/// [`PlanFault::TransitionsDisagree`] naming the files it disagrees at, never
+/// as drift.
 ///
 /// Nothing is published here, and a refusal discards every shadow staged
 /// before it, so a plan stopped in this phase leaves the vault as it found
@@ -150,15 +151,18 @@ pub(super) fn check_and_stage(
     declared: &Declared,
 ) -> Result<StagedPlan, Stop> {
     let normalizer = view.normalizer();
-    let stored = stored_paths(plan).map_err(Stop::Unsound)?;
+    let stored = stored_paths(plan).map_err(|paths| Stop::Invalid(disagreement(paths)))?;
     let units = units(plan, normalizer);
     let (states, _) =
         observe(plan, &units, view).map_err(|error| Stop::Failed(error.to_string()))?;
-    if let Some(detail) = states.iter().find_map(|state| match state {
-        TargetState::Unplaced(detail) => Some(detail.clone()),
-        _ => None,
-    }) {
-        return Err(Stop::Unsound(detail));
+    let unplaced: Vec<DocumentPath> = states
+        .iter()
+        .zip(&plan.transitions)
+        .filter(|(state, _)| matches!(state, TargetState::Unplaced))
+        .map(|(_, transition)| transition.path.clone())
+        .collect();
+    if !unplaced.is_empty() {
+        return Err(Stop::Invalid(disagreement(unplaced)));
     }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
@@ -175,14 +179,13 @@ pub(super) fn check_and_stage(
         .map_err(|error| Stop::Failed(error.to_string()))?
     {
         Recomposed::Sound(composition) => composition,
-        Recomposed::Unsound(detail) => return Err(Stop::Unsound(detail)),
         Recomposed::Invalid(fault) => return Err(Stop::Invalid(fault)),
     };
     let contents: Vec<Option<Arc<[u8]>>> = units
         .iter()
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
-        .map_err(Stop::Unsound)?;
+        .map_err(|path| Stop::Invalid(disagreement([path])))?;
     drop(composition);
     let schema = Judging {
         plan,
@@ -230,16 +233,22 @@ pub(super) fn check_and_stage(
 /// plan edited by hand can be, would be published, recorded and derived at a
 /// second spelling of one file. Normalizing a path drops only its `.` and
 /// empty components, and the store's grammar refuses both, so a path the store
-/// names is already the one spelling of its file.
-fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, String> {
-    plan.transitions
-        .iter()
-        .map(|transition| {
-            let path = &transition.path;
-            norn_store::DocumentPath::new(path.as_str())
-                .map_err(|error| format!("`{path}` is no path the store can name: {error}"))
-        })
-        .collect()
+/// names is already the one spelling of its file. Where the store cannot
+/// name a target, every such target's path is returned.
+fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, Vec<DocumentPath>> {
+    let mut stored = Vec::with_capacity(plan.transitions.len());
+    let mut unnamed = Vec::new();
+    for transition in &plan.transitions {
+        match norn_store::DocumentPath::new(transition.path.as_str()) {
+            Ok(path) => stored.push(path),
+            Err(_) => unnamed.push(transition.path.clone()),
+        }
+    }
+    if unnamed.is_empty() {
+        Ok(stored)
+    } else {
+        Err(unnamed)
+    }
 }
 
 /// Remove every shadow `staged` holds, publishing nothing.
@@ -275,12 +284,14 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// A target already holding its after-state, and a respell halfway, hold the
 /// after-state's bytes, and those are its content; every other written target
 /// takes the recomposed bytes, which [`recompose`] held to its after-state.
+/// A written target the operations leave nothing at is returned as the path
+/// its transition disagrees at.
 fn content(
     plan: &ResolvedPlan,
     unit: Unit,
     states: &[TargetState],
     composition: &Composition,
-) -> Result<Option<Arc<[u8]>>, String> {
+) -> Result<Option<Arc<[u8]>>, DocumentPath> {
     let written = match unit {
         Unit::One(index) => index,
         Unit::Respell { new, .. } => new,
@@ -309,7 +320,7 @@ fn content(
         .get(&transition.path)
         .and_then(|target| target.after.clone())
         .map(Some)
-        .ok_or_else(|| format!("its operations leave nothing at `{}`", transition.path))
+        .ok_or_else(|| transition.path.clone())
 }
 
 /// What the schema check reads: the plan, what its targets hold, where each

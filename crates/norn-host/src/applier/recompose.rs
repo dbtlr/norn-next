@@ -13,7 +13,10 @@
 //! dropped, added, repeated or changed, an order the operations' requirements
 //! do not allow — describes something the operations do not do, and publishing
 //! it could write content no operation produced or remove a document no
-//! operation removes.
+//! operation removes. Such a plan's own shape is wrong: it is
+//! `request/plan-invalid` with [`PlanFault::TransitionsDisagree`], naming every
+//! file it disagrees at, never a refusal answered with a fresh plan, since no
+//! target drifted and the caller's fix is to preview the operations again.
 //!
 //! **The order is the plan's recorded one, and it must be one the
 //! dependencies allow.** Planning records its operations in the order they
@@ -27,11 +30,11 @@ use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{
-    AuthorCondition, FileState, OperationKind, PlanCondition, PlanFault, ResolvedPlan,
+    AuthorCondition, DocumentPath, FileState, OperationKind, PlanCondition, PlanFault, ResolvedPlan,
 };
 
 use super::observe::{TargetState, identity};
-use crate::planner::compose::{Composition, compose, content_hash};
+use crate::planner::compose::{Composition, compose, content_hash, touches};
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
@@ -41,10 +44,16 @@ use crate::planner::view::{Entry, VaultView};
 pub(super) enum Recomposed {
     /// The operations do what the plan says, and this is what they compose.
     Sound(Composition),
-    /// The plan says something its operations do not do, in words.
-    Unsound(String),
-    /// The operations' own shape is wrong.
+    /// The plan's own shape is wrong: its operations', or its transitions
+    /// disagree with them.
     Invalid(PlanFault),
+}
+
+/// The fault of a plan whose transitions disagree with its operations at
+/// `paths`, each named once, in order.
+pub(super) fn disagreement(paths: impl IntoIterator<Item = DocumentPath>) -> PlanFault {
+    let paths: BTreeSet<DocumentPath> = paths.into_iter().collect();
+    PlanFault::transitions_disagree(paths.into_iter().collect())
 }
 
 /// Run `plan`'s operations again over the before-state of every target, as
@@ -80,74 +89,81 @@ pub(super) fn recompose<V: VaultView>(
         Err(PlanningFailure::View(error)) => return Err(error),
     };
     let recorded: Vec<usize> = (0..count).collect();
-    if dependencies.order(|_| true) != recorded {
-        return Ok(Recomposed::Unsound(
-            "its operations are not recorded in an order their requirements allow".to_string(),
-        ));
+    let allowed = dependencies.order(|_| true);
+    if allowed != recorded {
+        // Composing in an order the operations cannot run in says nothing
+        // about them, so the files the misplaced operations touch are named
+        // and nothing is composed.
+        let misplaced = recorded
+            .iter()
+            .zip(&allowed)
+            .filter(|(recorded, allowed)| recorded != allowed)
+            .flat_map(|(&recorded, &allowed)| [recorded, allowed])
+            .flat_map(|position| touches(&plan.operations[position].kind).cloned());
+        return Ok(Recomposed::Invalid(disagreement(misplaced)));
     }
     if let Some(cycle) = lineage.content_cycle() {
         return Ok(Recomposed::Invalid(PlanFault::content_cycle(cycle)));
     }
     let composition = compose(&plan.operations, &recorded, &before)?;
     let unseen = |file: &NormalizedPath| before.unseen.contains(file);
+    let mut disagreeing: Vec<DocumentPath> = Vec::new();
     for unresolvable in &composition.unresolvable {
-        let stood_in = matches!(
-            plan.operations[unresolvable.position].kind,
-            OperationKind::StrReplace { .. }
-        ) && lineage.edited(unresolvable.position).is_some_and(unseen);
+        let operation = &plan.operations[unresolvable.position];
+        let stood_in = matches!(operation.kind, OperationKind::StrReplace { .. })
+            && lineage.edited(unresolvable.position).is_some_and(unseen);
         if !stood_in {
-            return Ok(Recomposed::Unsound(format!(
-                "the operation at position {} does not act on the plan's before-states: {}",
-                unresolvable.position, unresolvable.detail
-            )));
+            disagreeing.extend(touches(&operation.kind).cloned());
         }
     }
-    if let Some(detail) = transitions_differ(plan, states, lineage, &composition, &before) {
-        return Ok(Recomposed::Unsound(detail));
-    }
-    if let Some(detail) = conditions_differ(plan, &composition, view.normalizer()) {
-        return Ok(Recomposed::Unsound(detail));
+    disagreeing.extend(transitions_differ(
+        plan,
+        states,
+        lineage,
+        &composition,
+        &before,
+    ));
+    disagreeing.extend(conditions_differ(plan, &composition, view.normalizer()));
+    if !disagreeing.is_empty() {
+        return Ok(Recomposed::Invalid(disagreement(disagreeing)));
     }
     Ok(Recomposed::Sound(composition))
 }
 
-/// Where the plan's transitions are not the composed ones, why.
+/// Every file whose transition is not the composed one: named by more than
+/// one transition, written by the operations with no transition, carried
+/// with none of the operations writing it, or at another before- or
+/// after-state than the operations give it.
 fn transitions_differ<V>(
     plan: &ResolvedPlan,
     states: &[TargetState],
     lineage: &Lineage,
     composition: &Composition,
     before: &BeforeStates<'_, V>,
-) -> Option<String> {
+) -> Vec<DocumentPath> {
+    let mut differing = Vec::new();
     let mut carried = BTreeMap::new();
     for (index, transition) in plan.transitions.iter().enumerate() {
         if carried.insert(&transition.path, index).is_some() {
-            return Some(format!(
-                "`{}` is named by more than one transition",
-                transition.path
-            ));
+            differing.push(transition.path.clone());
         }
     }
-    if let Some(missing) = composition
-        .targets
-        .keys()
-        .find(|path| !carried.contains_key(path))
-    {
-        return Some(format!(
-            "its operations write `{missing}`, which it carries no transition for"
-        ));
-    }
+    differing.extend(
+        composition
+            .targets
+            .keys()
+            .filter(|path| !carried.contains_key(path))
+            .cloned(),
+    );
     for (path, &index) in &carried {
         let transition = &plan.transitions[index];
         let Some(composed) = composition.targets.get(*path) else {
-            return Some(format!(
-                "it carries a transition for `{path}`, which none of its operations writes"
-            ));
+            differing.push((*path).clone());
+            continue;
         };
         if composed.before != transition.before {
-            return Some(format!(
-                "its operations read `{path}` at another before-state than its transition names"
-            ));
+            differing.push((*path).clone());
+            continue;
         }
         let after = match &composed.after {
             Some(bytes) => FileState::present(content_hash(bytes)),
@@ -161,22 +177,21 @@ fn transitions_differ<V>(
             .and_then(|file| lineage.source(file))
             .is_some_and(|source| before.unseen.contains(&source.from));
         if !(states[index].partly_landed() && drawn_from_unseen) {
-            return Some(format!(
-                "its operations leave `{path}` at another after-state than its transition names"
-            ));
+            differing.push((*path).clone());
         }
     }
-    None
+    differing
 }
 
-/// Where an author condition the operations carry is not one the plan
-/// checks, why: a condition on a file the plan writes is that file's
-/// before-state, and one on any other file travels as a plan condition.
+/// Every file an author condition the operations carry names that the plan
+/// does not check it at: a condition on a file the plan writes is that
+/// file's before-state, and one on any other file travels as a plan
+/// condition.
 fn conditions_differ(
     plan: &ResolvedPlan,
     composition: &Composition,
     normalizer: &PathNormalizer,
-) -> Option<String> {
+) -> Vec<DocumentPath> {
     let carried: Vec<(NormalizedPath, &norn_wire::ContentHash)> = plan
         .conditions
         .iter()
@@ -184,25 +199,23 @@ fn conditions_differ(
             Some((identity(normalizer, path.as_str())?, hash))
         })
         .collect();
+    let mut differing = Vec::new();
     for operation in &plan.operations {
         for AuthorCondition::ContentHash { path, hash } in &operation.conditions {
-            let Some(file) = identity(normalizer, path.as_str()) else {
-                return Some(format!("a condition names `{path}`, which is no document"));
-            };
-            let held = match composition.before(&file) {
-                Some(before) => *before == FileState::present(hash.clone()),
-                None => carried
-                    .iter()
-                    .any(|(condition, carried)| *condition == file && *carried == hash),
-            };
+            let held = identity(normalizer, path.as_str()).is_some_and(|file| {
+                match composition.before(&file) {
+                    Some(before) => *before == FileState::present(hash.clone()),
+                    None => carried
+                        .iter()
+                        .any(|(condition, carried)| *condition == file && *carried == hash),
+                }
+            });
             if !held {
-                return Some(format!(
-                    "an operation's condition on `{path}` is not one the plan checks"
-                ));
+                differing.push(path.clone());
             }
         }
     }
-    None
+    differing
 }
 
 /// The vault as it stood before the plan, where the plan touches it, and the
@@ -315,6 +328,8 @@ mod tests {
         RootIdentity, Transition, VaultAddress, VaultName,
     };
 
+    use norn_wire::PlanFault;
+
     use super::super::observe::{observe, recorded_lineage, units};
     use super::{Recomposed, recompose};
     use crate::planner::compose::content_hash;
@@ -361,7 +376,12 @@ mod tests {
             ],
             Vec::new(),
         );
-        assert!(matches!(recomposed(&plan, &vault), Recomposed::Unsound(_)));
+        match recomposed(&plan, &vault) {
+            Recomposed::Invalid(PlanFault::TransitionsDisagree { paths, .. }) => {
+                assert_eq!(paths, vec![path("note.md")]);
+            }
+            _ => panic!("the plan's transitions disagree with its operations"),
+        }
     }
 
     /// The case-only rename the planner resolves recomposes as itself.

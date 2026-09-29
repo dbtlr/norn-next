@@ -728,11 +728,11 @@ fn a_target_drawing_on_another_publishes_before_its_source_is_replaced() {
 
 /// The kernel keeps a staged path as it was given, a leading `./` included,
 /// and a document path's grammar admits one: a plan naming a target so, as a
-/// hand-edited plan can, is refused as a plan that does not describe its
-/// operations, never as drift, and the fresh plan spells the target once. So nothing is published, recorded or derived
-/// at a second spelling of one file.
+/// hand-edited plan can, is invalid as a plan that does not describe its
+/// operations, never drift, and names the target as spelled. So nothing is
+/// published, recorded or derived at a second spelling of one file.
 #[test]
-fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
+fn a_target_spelled_with_a_dot_component_is_invalid() {
     let mut fixture = Fixture::new(&[("a.md", "a\n")]);
     let staged = norn_fs::stage(
         &fixture.vault,
@@ -752,8 +752,7 @@ fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
 
     let mut plan = fixture.plan(vec![creating("new.md", "n\n")]);
     plan.transitions[0].path = path("./new.md");
-    let refused = fixture.refuses_unsound(plan);
-    assert_eq!(refused.refused.plan.transitions[0].path, path("new.md"));
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("./new.md")]);
     assert_eq!(fixture.tree(), vec!["a.md"]);
 
     // A removal spelled so is refused the same way, and not as drift: the
@@ -761,7 +760,7 @@ fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
     let mut plan = fixture.plan(vec![deleting("a.md")]);
     plan.transitions[0].path = path("./a.md");
     plan.operations[0] = deleting("./a.md");
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("./a.md")]);
     assert_eq!(fixture.read("a.md").as_deref(), Some("a\n"));
 }
 
@@ -973,7 +972,7 @@ fn each_outcome_crosses_under_its_wire_code() {
             ErrorDetail::PlanRefused { .. }
             | ErrorDetail::PlanInterrupted { .. }
             | ErrorDetail::WriteFailed { .. } => true,
-            ErrorDetail::RootChanged { .. } => false,
+            ErrorDetail::RootChanged { .. } | ErrorDetail::PlanInvalid { .. } => false,
             other => panic!("an apply's own detail: {other:?}"),
         };
         (envelope.code().clone(), carries_plan)
@@ -995,6 +994,12 @@ fn each_outcome_crosses_under_its_wire_code() {
         (ReasonCode::VaultRootChanged, false)
     );
     assert_eq!(
+        code(ApplyOutcome::Invalid(
+            norn_wire::PlanFault::transitions_disagree(vec![path("a.md")])
+        )),
+        (ReasonCode::RequestPlanInvalid, false)
+    );
+    assert_eq!(
         code(ApplyOutcome::Interrupted(Box::new(super::Interrupted {
             plan: plan.clone(),
             landed: vec![path("a.md")],
@@ -1012,19 +1017,12 @@ fn each_outcome_crosses_under_its_wire_code() {
     );
 }
 
-pub(super) fn unsound(outcome: ApplyOutcome) -> super::outcome::Unsound {
-    match outcome {
-        ApplyOutcome::Unsound(unsound) => *unsound,
-        other => panic!("the plan is refused as unsound: {other:?}"),
-    }
-}
-
 impl Fixture {
     /// Apply `plan`, which does not describe its operations, and hold that it
-    /// is refused as unsound with nothing published: no name changed, no
-    /// content changed, no write recorded, no shadow left, and no target
-    /// marked drifted.
-    fn refuses_unsound(&mut self, plan: ResolvedPlan) -> super::outcome::Unsound {
+    /// answers `request/plan-invalid` with nothing published: no name
+    /// changed, no content changed, no write recorded and no shadow left.
+    /// The files it disagrees at are returned.
+    fn refuses_disagreeing(&mut self, plan: ResolvedPlan) -> Vec<DocumentPath> {
         let before: Vec<(String, Option<String>)> = self
             .tree()
             .into_iter()
@@ -1033,7 +1031,18 @@ impl Fixture {
                 (name, content)
             })
             .collect();
-        let refused = unsound(self.apply(plan));
+        let envelope = self
+            .apply(plan)
+            .into_wire()
+            .expect_err("the plan is refused");
+        assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
+        let paths = match envelope.detail() {
+            norn_wire::ErrorDetail::PlanInvalid {
+                fault: norn_wire::PlanFault::TransitionsDisagree { paths, .. },
+                ..
+            } => paths.clone(),
+            other => panic!("the plan's transitions disagree with its operations: {other:?}"),
+        };
         let after: Vec<(String, Option<String>)> = self
             .tree()
             .into_iter()
@@ -1045,17 +1054,7 @@ impl Fixture {
         assert_eq!(after, before, "nothing was published");
         assert!(self.recorded.calls.borrow().is_empty(), "no write recorded");
         assert!(self.shadows_left().is_empty(), "{:?}", self.shadows_left());
-        assert!(
-            refused.refused.checks.is_empty(),
-            "{:?}",
-            refused.refused.checks
-        );
-        assert!(
-            refused.refused.forecast.drifted.is_empty(),
-            "no target drifted: {:?}",
-            refused.refused.forecast.drifted
-        );
-        refused
+        paths
     }
 }
 
@@ -1067,11 +1066,7 @@ fn a_move_whose_destination_transition_is_dropped_is_refused() {
     let mut plan = fixture.plan(vec![moving("a.md", "b.md")]);
     plan.transitions
         .retain(|transition| transition.path != path("b.md"));
-    let refused = fixture.refuses_unsound(plan);
-    assert_eq!(
-        refused.refused.plan.operations,
-        vec![moving("a.md", "b.md")]
-    );
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("b.md")]);
     assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
 }
 
@@ -1085,7 +1080,7 @@ fn an_extra_removal_no_operation_makes_is_refused() {
         present("# C\n"),
         norn_wire::FileState::absent(),
     ));
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("c.md")]);
 }
 
 /// An edit whose after-state is changed to absence would remove its
@@ -1095,7 +1090,30 @@ fn an_edit_whose_after_state_is_made_absent_is_refused() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.transitions[0].after = norn_wire::FileState::absent();
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("a.md")]);
+}
+
+/// A plan disagreeing with its operations at more than one file names every
+/// one of them, sorted, however they disagree.
+#[test]
+fn a_plan_disagreeing_at_several_files_names_every_one() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("c.md", "# C\n")]);
+    let mut plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        creating("n.md", "# N\n"),
+    ]);
+    plan.transitions
+        .retain(|transition| transition.path != path("n.md"));
+    plan.transitions[0].after = norn_wire::FileState::absent();
+    plan.transitions.push(norn_wire::Transition::new(
+        path("c.md"),
+        present("# C\n"),
+        norn_wire::FileState::absent(),
+    ));
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("a.md"), path("c.md"), path("n.md")]
+    );
 }
 
 /// A target named by two transitions is refused, whatever they say.
@@ -1104,7 +1122,7 @@ fn a_target_named_twice_is_refused() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.transitions.push(plan.transitions[0].clone());
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("a.md")]);
 }
 
 /// A plan missing the transition of a file an operation writes is refused:
@@ -1118,7 +1136,7 @@ fn a_plan_missing_a_transition_is_refused() {
     ]);
     plan.transitions
         .retain(|transition| transition.path != path("n.md"));
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
 }
 
 /// An edit whose after-state is changed to its before-state would answer
@@ -1128,16 +1146,7 @@ fn an_edit_whose_after_state_is_its_before_state_is_refused() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.transitions[0].after = plan.transitions[0].before.clone();
-    let refused = fixture.refuses_unsound(plan);
-    assert_eq!(
-        refused.refused.plan.transitions,
-        vec![norn_wire::Transition::new(
-            path("a.md"),
-            present("draft\n"),
-            present("final\n")
-        )],
-        "the fresh plan is what the edit does"
-    );
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("a.md")]);
 }
 
 impl Fixture {
@@ -1176,8 +1185,7 @@ fn a_target_where_the_vault_reads_no_documents_is_refused() {
                 present("# X\n"),
             )],
         );
-        let refused = fixture.refuses_unsound(plan);
-        assert_eq!(refused.refused.unresolved.len(), 1, "{at}");
+        assert_eq!(fixture.refuses_disagreeing(plan), vec![path(at)], "{at}");
         assert!(fixture.read(at).is_none(), "{at}: nothing is made there");
     }
     let plan = fixture.by_hand(
@@ -1188,7 +1196,10 @@ fn a_target_where_the_vault_reads_no_documents_is_refused() {
             norn_wire::FileState::absent(),
         )],
     );
-    fixture.refuses_unsound(plan);
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("private/p.md")]
+    );
     assert_eq!(fixture.read("private/p.md").as_deref(), Some("# P\n"));
 }
 
@@ -1272,7 +1283,10 @@ fn a_plan_recorded_out_of_its_requirements_order_is_refused() {
     // Planned as `b → c` then `a → b`; recorded the other way round, the
     // move onto `b.md` meets its document still standing.
     plan.operations.reverse();
-    fixture.refuses_unsound(plan);
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("a.md"), path("b.md"), path("c.md")]
+    );
 }
 
 /// A target at a path the store cannot name — a leaf whose stem is `.`, a
@@ -1292,7 +1306,7 @@ fn a_target_the_store_cannot_name_is_refused() {
                 norn_wire::FileState::absent(),
             )],
         );
-        fixture.refuses_unsound(plan);
+        assert_eq!(fixture.refuses_disagreeing(plan), vec![path(at)], "{at}");
         assert_eq!(fixture.read(at).as_deref(), Some("gone\n"), "{at}");
     }
 }
@@ -1479,7 +1493,7 @@ fn a_plan_dropping_its_operations_condition_is_refused() {
         vec![norn_wire::AuthorCondition::content_hash(path("b.md"), seen)],
     )]);
     plan.conditions.clear();
-    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("b.md")]);
 }
 
 /// A hash of another algorithm never reaches the applier: a resolved plan

@@ -10,7 +10,7 @@ use norn_wire::{
 };
 
 use super::observe::{TargetState, identity, observe, units};
-use super::outcome::{ApplyOutcome, Refused, Unsound};
+use super::outcome::{ApplyOutcome, Refused};
 use super::stage::drifted_checks;
 use crate::planner::compose::touches;
 use crate::planner::resolve::{PlanningFailure, resolve};
@@ -156,35 +156,6 @@ pub(super) fn refuse_and_refresh(
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
     }))
-}
-
-/// Refuse `plan`, whose transitions are not what its operations do,
-/// answering with every one of its operations resolved afresh through `view`.
-///
-/// **Nothing the plan says of its targets is read**: its transitions are what
-/// is wrong with it, so no operation is dropped as landed and no target is
-/// marked drifted. The fresh plan is what the operations do against the vault
-/// as it stands, through the one planner, with each operation that does not
-/// resolve listed for the caller.
-pub(super) fn refuse_unsound(plan: ResolvedPlan, view: &TreeView, detail: String) -> ApplyOutcome {
-    let mut authored = AuthoredPlan::new(plan.vault.clone(), plan.operations.clone());
-    authored.footnote = plan.footnote.clone();
-    match resolve(authored, plan.root.clone(), &BTreeSet::new(), view) {
-        Ok(resolution) => ApplyOutcome::Unsound(Box::new(Unsound {
-            refused: Refused {
-                plan: resolution.plan,
-                forecast: resolution.forecast,
-                checks: Vec::new(),
-                unresolved: resolution.unresolved,
-            },
-            detail,
-        })),
-        Err(PlanningFailure::Fault(fault)) => ApplyOutcome::Invalid(fault),
-        Err(PlanningFailure::View(error)) => ApplyOutcome::WriteFailed {
-            plan,
-            detail: error.to_string(),
-        },
-    }
 }
 
 /// The target a drifted or a taken-name check names.

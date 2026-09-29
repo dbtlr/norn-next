@@ -40,11 +40,13 @@
 //! after-state equals its before-state: it is recomposed from the bytes it
 //! holds, so an edit made to change nothing there is refused.
 //!
-//! A refusal answers with a fresh plan ([`refresh`]); so does a plan that is
-//! not what its operations do, with every operation resolved afresh and no
-//! check; operations whose own shape is wrong, and a root that is not the
-//! plan's, answer with no plan; an interruption names what landed; an I/O
-//! failure before anything landed wrote nothing ([`outcome`]).
+//! A refusal answers with a fresh plan ([`refresh`]); a plan whose own shape
+//! is wrong answers `request/plan-invalid` with no plan — operations in a
+//! cycle or with a broken identifier, or transitions that are not what the
+//! operations do, which name every file they disagree at ([`recompose`]) and
+//! are a client's fault to fix by previewing again, never vault drift; a root
+//! that is not the plan's answers with no plan; an interruption names what
+//! landed; an I/O failure before anything landed wrote nothing ([`outcome`]).
 //!
 //! **Memory.** From staging to publication the applier holds the plan — its
 //! operations and one fixed-size transition per target — and one fixed-size
@@ -154,7 +156,6 @@ impl Applier<'_> {
         ) {
             Ok(staged) => staged,
             Err(Stop::Refused(checks)) => return self.refuse(plan, checks),
-            Err(Stop::Unsound(detail)) => return self.refuse_unsound(plan, detail),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
@@ -247,15 +248,6 @@ impl Applier<'_> {
     fn refuse(&self, plan: ResolvedPlan, checks: Vec<RefusedCheck>) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions) {
             Ok(view) => refresh::refuse_and_refresh(plan, &view, checks),
-            Err(error) => write_failed(plan, error.to_string()),
-        }
-    }
-
-    /// Refuse `plan`, which is not what its operations do, answering with
-    /// its operations resolved afresh.
-    fn refuse_unsound(&self, plan: ResolvedPlan, detail: String) -> ApplyOutcome {
-        match TreeView::open(self.anchor, self.exclusions) {
-            Ok(view) => refresh::refuse_unsound(plan, &view, detail),
             Err(error) => write_failed(plan, error.to_string()),
         }
     }

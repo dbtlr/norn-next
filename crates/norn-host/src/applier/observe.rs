@@ -48,9 +48,9 @@ pub(super) enum TargetState {
     /// It holds neither: drift, and what it holds, where absence stands for
     /// anything that is not a document.
     Drifted(FileState),
-    /// It names a place the vault reads no documents at, and why: the plan
-    /// is not what its operations do, whatever the place holds.
-    Unplaced(String),
+    /// It names a place the vault reads no documents at: the plan is not
+    /// what its operations do, whatever the place holds.
+    Unplaced,
 }
 
 impl TargetState {
@@ -74,9 +74,7 @@ impl TargetState {
             && match self {
                 TargetState::Landed(_) => transition.before != transition.after,
                 TargetState::Halfway(_) => true,
-                TargetState::AtBefore(_) | TargetState::Drifted(_) | TargetState::Unplaced(_) => {
-                    false
-                }
+                TargetState::AtBefore(_) | TargetState::Drifted(_) | TargetState::Unplaced => false,
             }
     }
 }
@@ -178,10 +176,7 @@ pub(super) fn observe<V: VaultView>(
 /// What one transition's target holds.
 fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V::Error> {
     let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
-        return Ok(TargetState::Unplaced(format!(
-            "`{}` names no document in the vault",
-            transition.path
-        )));
+        return Ok(TargetState::Unplaced);
     };
     let (holds, bytes) = match view.entry(&identity)? {
         Entry::Document { at, bytes, hash } if at == transition.path => {
@@ -189,9 +184,9 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
         }
         Entry::Document { .. } | Entry::Absent { .. } => (FileState::absent(), None),
         Entry::Blocked {
-            detail,
             barrier: Barrier::Closed,
-        } => return Ok(TargetState::Unplaced(detail)),
+            ..
+        } => return Ok(TargetState::Unplaced),
         // Something that is no document stands in the way — a folder, or an
         // entry at or above the name that is not a folder — which another
         // writer can take away: a create's name is left for staging to judge,
@@ -232,19 +227,15 @@ fn respell<V: VaultView>(
     view: &V,
 ) -> Result<(TargetState, TargetState), V::Error> {
     let Some(identity) = identity(view.normalizer(), old.path.as_str()) else {
-        let unplaced = TargetState::Unplaced(format!("`{}` names no document", old.path));
-        return Ok((unplaced.clone(), unplaced));
+        return Ok((TargetState::Unplaced, TargetState::Unplaced));
     };
     let entry = view.entry(&identity)?;
     let untouched = TargetState::AtBefore(None);
     Ok(match entry {
         Entry::Blocked {
-            detail,
             barrier: Barrier::Closed,
-        } => (
-            TargetState::Unplaced(detail.clone()),
-            TargetState::Unplaced(detail),
-        ),
+            ..
+        } => (TargetState::Unplaced, TargetState::Unplaced),
         Entry::Document { at, bytes, hash } if at == old.path => {
             let holds = FileState::present(hash);
             if holds == old.before {
