@@ -2489,7 +2489,8 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   the snapshot is the store as the claim holds it — no other writer commits until the apply's
   changeset — and the answer crosses inside a `VaultAnswer` under that reading and `Ready`.
 - **An unanswered apply's cause is the entry's published demand**, rendered as a read refused
-  over it carries it, read once the unwind's cleanup has published over the entry.
+  over it carries it. The unwind's cleanup reads it once it has published over the entry and
+  answers the apply there, so a caller that asks later is answered with that cause.
 - **The heal is the paths the plan touched**, taken in as facts — a landed removal as a removal,
   every other path as a change — which the job hands on to the reconcile.
 - **A queued apply is answered where the cause is published: at the end of the gate hold

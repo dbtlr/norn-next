@@ -287,6 +287,34 @@ fn an_unwind_before_the_publishing_mark_answers_not_applied_with_the_cause_and_t
     drop((lease, host));
 }
 
+/// **Case 14, answered late: the cause is the one the unwind published,
+/// however long after it the caller asks.** The apply's caller asks only once
+/// the entry has attached again and stands `Ready`, and is still answered with
+/// the unwind: the answer was fixed where the leg's unwind cleanup published,
+/// not read off the entry when the caller came to wait.
+#[test]
+fn an_unwound_apply_asked_late_is_answered_with_the_cause_its_unwind_published() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.panic_in_apply_before_publishing
+        .store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_state(&host, &name, unwound(APPLY_PANIC));
+    ops.panic_in_apply_before_publishing
+        .store(false, Ordering::SeqCst);
+    let again = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+
+    let refused = answer_of(pending).expect_err("an unwound apply answered applied");
+    let expected_cause = ReadRefusal::NotServing(Demand::State(unwound(APPLY_PANIC))).answer(&name);
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::apply_not_run(expected_cause, Some(the_plan(&name)))
+    );
+    drop((again, lease, host));
+}
+
 /// **Case 14, after the mark: an unwind after the publishing mark answers
 /// the outcome unknown, with the resolved plan.** Some targets may have
 /// landed, so the caller is told so and handed the plan that finishes them.

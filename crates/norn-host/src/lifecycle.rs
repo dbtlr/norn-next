@@ -37,7 +37,7 @@ mod serving;
 
 pub(crate) use apply::{ApplyAnswer, not_run};
 pub use apply::{ApplyEnd, ApplyProgress, PendingApply};
-use apply::{ApplyQueue, ApplyReply, QueuedApply};
+use apply::{ApplyQueue, QueuedApply, RunningApply};
 use claim::{Claim, Coverage, Leg};
 use gate::{EntryGate, GateHold, Stanced};
 pub(crate) use serving::ServingRefusal;
@@ -1139,12 +1139,12 @@ struct EntryState<A: SnapshotSource> {
     /// A second sender to the caller of the apply a job is running, held
     /// until that job answers it.
     ///
-    /// **It is what orders an unwound apply's answer after the unwind's
+    /// **It is what answers an unwound apply after the unwind's
     /// publication.** A leg that unwinds drops its own sender with the stack;
-    /// this one is taken by [`reclaim_unwound_leg`] and dropped once the
-    /// unwind has published over the entry, so the caller answered from the
-    /// apply's progress reads where the entry stands after the unwind.
-    running_apply: Option<ApplyReply>,
+    /// this one is taken by [`reclaim_unwound_leg`], which answers it from the
+    /// apply's progress once the unwind has published over the entry, with
+    /// the cause the entry then publishes.
+    running_apply: Option<RunningApply>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -3049,18 +3049,10 @@ fn reclaim_unwound_leg<O: EntryOps>(
         return;
     };
     let epoch = leg.epoch();
-    // The reply of an apply the leg was running goes last, once the unwind
-    // has published over the entry: its caller is answered from the apply's
-    // progress, with the cause the entry then publishes.
-    let _asker = {
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if state.claim.leg() == Some(leg) {
-            state.running_apply.take()
-        } else {
-            None
-        }
-    };
-    let attachment = {
+    // The apply the leg was running is answered last, once the unwind has
+    // published over the entry: from its progress, with the cause the entry
+    // then publishes, fixed there however late its caller asks.
+    let (running, attachment) = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.claim.leg() != Some(leg) {
             // The pin is the one thing a moved-on entry does not answer for.
@@ -3072,13 +3064,14 @@ fn reclaim_unwound_leg<O: EntryOps>(
             return;
         }
         state.unpin_leg(leg);
+        let running = state.running_apply.take();
         // Every leg carrying an earlier epoch answers for itself alone from
         // here, so the gate the release below puts back is put back over an
         // entry nothing else can write a verdict into.
         state.claim.invalidate();
         let attachment = state.coverage.give_up();
         begin_release(&mut state);
-        attachment
+        (running, attachment)
     };
     release_identity_claims(shared, name);
     if attachment.is_none() {
@@ -3099,6 +3092,11 @@ fn reclaim_unwound_leg<O: EntryOps>(
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.trust == TrustState::Unattached && state.parked().is_none() {
         state.withdraw_trust(UntrustedReason::leg_unwound(detail));
+    }
+    if let Some(running) = running {
+        let cause = state.apply_cause(name);
+        drop(state);
+        running.answer_unanswered(cause);
     }
 }
 
@@ -7462,7 +7460,7 @@ fn run_apply_job<O: EntryOps>(
             .take(epoch)
             .expect("the entry holds its coverage");
         give_back_demand(&mut state, apply.recovery_demand, Instant::now());
-        state.running_apply = Some(apply.reply.clone());
+        state.running_apply = Some(RunningApply::of(&apply));
         state.pin_for_leg(Leg::Job(epoch));
         let (work, _) = state.pending.take();
         (attachment, apply, work)

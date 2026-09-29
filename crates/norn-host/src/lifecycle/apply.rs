@@ -10,13 +10,16 @@
 //! vocabulary it runs with and the one place a caller is answered from when the
 //! job could not answer it.
 //!
-//! **The progress record is what answers a reply that was dropped.** The job
+//! **The progress record is what answers an apply its job did not.** The job
 //! sets the resolved plan in it once planning finishes and marks it publishing
 //! before the first publication, both through [`ApplyProgress`], which the ops
-//! are handed. A reply dropped with no answer — a worker that unwound, a queue
-//! dropped with its entry — is answered from it by [`PendingApply::wait`]: not
-//! applied before the mark, with the cause the entry publishes and the plan
-//! where planning had finished; unknown after it, with the plan.
+//! are handed. An apply whose worker unwound is answered from it by the
+//! unwind's cleanup, once that has published over the entry: not applied
+//! before the mark, with the cause the entry then publishes and the plan where
+//! planning had finished; unknown after it, with the plan. A reply dropped
+//! with no answer at all — a queue dropped with its host — is answered the
+//! same way by [`PendingApply::wait`], with the cause the entry publishes when
+//! the caller asks.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -152,6 +155,31 @@ pub(super) struct QueuedApply {
     pub(super) recovery_demand: Option<u64>,
 }
 
+/// The apply a job is running, as the entry holds it: a second sender to
+/// its caller and its progress, so an unwound job's apply is answered where
+/// the unwind is published.
+pub(super) struct RunningApply {
+    reply: ApplyReply,
+    progress: ApplyProgress,
+}
+
+impl RunningApply {
+    /// The entry's hold on `apply`, which a job is about to run.
+    pub(super) fn of(apply: &QueuedApply) -> Self {
+        RunningApply {
+            reply: apply.reply.clone(),
+            progress: apply.progress.clone(),
+        }
+    }
+
+    /// Answer the apply its job left unanswered, from its progress: not
+    /// applied, for `cause`, before publication began, and unknown after. A
+    /// caller that stopped waiting is not an error.
+    pub(super) fn answer_unanswered(self, cause: ErrorEnvelope) {
+        let _ = self.reply.send(Err(self.progress.unanswered(|| cause)));
+    }
+}
+
 /// The applies an entry admitted and has not yet run, first in, first out.
 ///
 /// **Each one is demand on the entry** while it waits: its admission
@@ -262,7 +290,7 @@ impl PendingApply {
     ///
     /// **There is no host-level bound**: an apply runs as long as its plan
     /// takes, and a timeout a client wants is the serving layer's. A reply
-    /// the job dropped without an answer is answered from the apply's
+    /// dropped with no answer sent on it is answered from the apply's
     /// progress record.
     pub fn wait(self) -> ApplyAnswer {
         match self.waiting {
