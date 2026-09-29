@@ -64,7 +64,10 @@ pub(super) fn shape_disagrees(
         }
     }
     for (file, spellings) in &carried {
-        if spellings.len() > 1 && !respelled.contains(file) {
+        // A case-only rename carries its file at the two spellings it moves
+        // between; no plan carries one file at more.
+        let allowed = if respelled.contains(file) { 2 } else { 1 };
+        if spellings.len() > allowed {
             disagreeing.extend(spellings.iter().map(|path| (*path).clone()));
         }
     }
@@ -118,6 +121,24 @@ mod tests {
             ],
         );
         assert!(shape_disagrees(&plan, VaultView::normalizer(&vault)).is_empty());
+    }
+
+    /// A case-only rename carries its file at two spellings, never three.
+    #[test]
+    fn a_third_spelling_of_a_renamed_file_disagrees() {
+        let vault = MemoryVault::with(&[]).folding_case();
+        let plan = plan(
+            vec![moving("Note.md", "note.md")],
+            vec![
+                Transition::new(path("Note.md"), FileState::absent(), FileState::absent()),
+                Transition::new(path("note.md"), FileState::absent(), FileState::absent()),
+                Transition::new(path("NOTE.md"), FileState::absent(), FileState::absent()),
+            ],
+        );
+        assert_eq!(
+            shape_disagrees(&plan, VaultView::normalizer(&vault)),
+            vec![path("NOTE.md"), path("Note.md"), path("note.md")]
+        );
     }
 
     /// Two spellings of one file no operation renames to itself disagree at

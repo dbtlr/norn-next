@@ -137,10 +137,12 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
 /// drifted and every condition holds; the
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); every result passes the vault schema; and the
-/// publication order exists. A plan that fails any check but drift, a
-/// condition or the schema is not what its operations do: its own shape is wrong, and it stops as
-/// [`PlanFault::TransitionsDisagree`] naming the files it disagrees at, never
-/// as drift.
+/// publication order exists. A plan whose store paths, shape, target places
+/// or recomposition fail is not what its operations do: its own shape is
+/// wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming the files
+/// it disagrees at, never as drift. Drift, a failed condition, a schema
+/// violation, a taken name, a replaced root and an I/O failure each answer as
+/// themselves.
 ///
 /// Nothing is published here, and a refusal discards every shadow staged
 /// before it, so a plan stopped in this phase leaves the vault as it found
