@@ -11,11 +11,13 @@
 //! fields as an enum flattened into the operation, and a flattened enum drops
 //! a key it does not know where the operation must refuse one, while
 //! `deny_unknown_fields` does not compose with flattening at all. So the
-//! object is read into a private shape that refuses unknown keys and holds
-//! `fields` as buffered JSON, and the fields are then read as the kind names
-//! them — which also reads an object whose `fields` precedes its `kind`. The
-//! buffer is the second runtime use of `serde_json` in this crate, and it
-//! appears in no signature.
+//! object is read by the derive into a private shape that refuses unknown
+//! keys, whose `fields` is one private shape holding every field any kind
+//! names; the kind then takes the fields it names, and refuses one it lacks
+//! and one it does not take. Nothing is buffered: the derive reads every key
+//! once, in whatever order it is written, so an object whose `fields` precedes
+//! its `kind` reads, a key written twice is refused at every level, and a plan
+//! read in any format reads the same inside a request as alone.
 //!
 //! **An edit's anchor is not a condition.** The text a `str_replace` replaces
 //! is part of the operation: an operation whose anchor is gone no longer
@@ -24,6 +26,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use schemars::transform::transform_subschemas;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -285,13 +288,144 @@ impl Operation {
     }
 }
 
-/// The operation as it arrives: every key it may carry and no other, with its
-/// fields held until the kind they belong to is known.
+/// The name under an operation's `kind`: one member per [`OperationKind`]
+/// variant, read before or after the fields it names.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum KindName {
+    CreateDocument,
+    StrReplace,
+    MoveDocument,
+    DeleteDocument,
+}
+
+impl KindName {
+    /// The name as the wire writes it, for a refusal that names the kind.
+    const fn as_str(self) -> &'static str {
+        match self {
+            KindName::CreateDocument => "create_document",
+            KindName::StrReplace => "str_replace",
+            KindName::MoveDocument => "move_document",
+            KindName::DeleteDocument => "delete_document",
+        }
+    }
+}
+
+/// Every field any kind names, each held as whether it was written. A key no
+/// kind names is refused here, a key written twice is refused here, and which
+/// of them the kind takes is decided once the kind is known.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KindFields {
+    #[serde(default, deserialize_with = "written")]
+    path: Option<DocumentPath>,
+    #[serde(default, deserialize_with = "written")]
+    content: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    old_str: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    new_str: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    from: Option<DocumentPath>,
+    #[serde(default, deserialize_with = "written")]
+    to: Option<DocumentPath>,
+}
+
+/// A field that was written, read as its own type: `null` is a value the
+/// type refuses rather than a field left out.
+pub(crate) fn written<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The field `name` of a `kind` operation, which the kind requires.
+fn required<T, E: serde::de::Error>(kind: KindName, name: &str, value: Option<T>) -> Result<T, E> {
+    value.ok_or_else(|| {
+        E::custom(format_args!(
+            "a `{}` operation's fields name `{name}`",
+            kind.as_str()
+        ))
+    })
+}
+
+/// The field `name` of a `kind` operation, which the kind does not take.
+fn refused<E: serde::de::Error>(kind: KindName, name: &str, written: bool) -> Result<(), E> {
+    if written {
+        return Err(E::custom(format_args!(
+            "a `{}` operation's fields do not take `{name}`",
+            kind.as_str()
+        )));
+    }
+    Ok(())
+}
+
+impl KindFields {
+    /// The kind `kind` names, built from exactly the fields it takes: each of
+    /// them written, and no field of another kind written.
+    fn into_kind<E: serde::de::Error>(self, kind: KindName) -> Result<OperationKind, E> {
+        let KindFields {
+            path,
+            content,
+            old_str,
+            new_str,
+            from,
+            to,
+        } = self;
+        match kind {
+            KindName::CreateDocument => {
+                refused(kind, "old_str", old_str.is_some())?;
+                refused(kind, "new_str", new_str.is_some())?;
+                refused(kind, "from", from.is_some())?;
+                refused(kind, "to", to.is_some())?;
+                Ok(OperationKind::CreateDocument {
+                    path: required(kind, "path", path)?,
+                    content: required(kind, "content", content)?,
+                })
+            }
+            KindName::StrReplace => {
+                refused(kind, "content", content.is_some())?;
+                refused(kind, "from", from.is_some())?;
+                refused(kind, "to", to.is_some())?;
+                Ok(OperationKind::StrReplace {
+                    path: required(kind, "path", path)?,
+                    old_str: required(kind, "old_str", old_str)?,
+                    new_str: required(kind, "new_str", new_str)?,
+                })
+            }
+            KindName::MoveDocument => {
+                refused(kind, "path", path.is_some())?;
+                refused(kind, "content", content.is_some())?;
+                refused(kind, "old_str", old_str.is_some())?;
+                refused(kind, "new_str", new_str.is_some())?;
+                Ok(OperationKind::MoveDocument {
+                    from: required(kind, "from", from)?,
+                    to: required(kind, "to", to)?,
+                })
+            }
+            KindName::DeleteDocument => {
+                refused(kind, "content", content.is_some())?;
+                refused(kind, "old_str", old_str.is_some())?;
+                refused(kind, "new_str", new_str.is_some())?;
+                refused(kind, "from", from.is_some())?;
+                refused(kind, "to", to.is_some())?;
+                Ok(OperationKind::DeleteDocument {
+                    path: required(kind, "path", path)?,
+                })
+            }
+        }
+    }
+}
+
+/// The operation as it arrives: every key it may carry and no other, read by
+/// the derive in whatever order they are written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OperationFields {
-    kind: String,
-    fields: serde_json::Value,
+    kind: KindName,
+    fields: KindFields,
     #[serde(default)]
     id: Option<OperationId>,
     #[serde(default)]
@@ -303,25 +437,28 @@ struct OperationFields {
 }
 
 impl<'de> Deserialize<'de> for Operation {
-    /// The keys are read first, refusing any the operation does not name, and
-    /// the fields are then read as the kind names them, refusing any the kind
-    /// does not name.
+    /// The keys are read by the derive, refusing any the operation does not
+    /// name and any written twice, at its own level and inside its fields;
+    /// the fields are then taken as the kind names them, refusing a field the
+    /// kind lacks or does not take.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let arrived = OperationFields::deserialize(deserializer)?;
-        let kind = OperationKind::deserialize(serde_json::json!({
-            "kind": arrived.kind,
-            "fields": arrived.fields,
-        }))
-        .map_err(D::Error::custom)?;
-        Ok(Operation {
+        let OperationFields {
             kind,
-            id: arrived.id,
-            requires: arrived.requires,
-            footnote: arrived.footnote,
-            conditions: arrived.conditions,
+            fields,
+            id,
+            requires,
+            footnote,
+            conditions,
+        } = OperationFields::deserialize(deserializer)?;
+        Ok(Operation {
+            kind: fields.into_kind(kind)?,
+            id,
+            requires,
+            footnote,
+            conditions,
         })
     }
 }
@@ -363,21 +500,20 @@ impl JsonSchema for Operation {
             ),
         ];
         let mut schema = OperationKind::json_schema(generator);
-        let branches = schema
-            .get_mut("oneOf")
-            .and_then(serde_json::Value::as_array_mut)
-            .expect("an operation kind is described as one branch per kind");
-        for branch in branches {
-            let properties = branch
-                .get_mut("properties")
-                .and_then(serde_json::Value::as_object_mut)
-                .expect("a kind's branch describes its properties");
-            for (name, part, description) in &optional_parts {
-                let mut part = part.clone();
-                part.insert("description".to_string(), (*description).into());
-                properties.insert((*name).to_string(), part.into());
-            }
-        }
+        transform_subschemas(
+            &mut |branch: &mut Schema| {
+                let properties: &mut Schema = branch
+                    .get_mut("properties")
+                    .and_then(|properties| properties.try_into().ok())
+                    .expect("a kind's branch describes its properties");
+                for (name, part, description) in &optional_parts {
+                    let mut part = part.clone();
+                    part.insert("description".to_string(), (*description).into());
+                    properties.insert((*name).to_string(), part.into());
+                }
+            },
+            &mut schema,
+        );
         schema.insert(
             "description".to_string(),
             "One change a plan is authored in: a kind and its fields, and optionally an identifier, the operations it requires, a footnote and the conditions its author observed. The optional parts are left out where they are not written, and a key the operation does not name is refused."

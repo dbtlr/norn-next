@@ -145,15 +145,19 @@
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
 //!   read. [`Operation`]'s read path is written by hand because the derive
-//!   cannot refuse what it must: it reads its keys into a private shape that
-//!   refuses any it does not name, buffers `fields` as JSON, and reads them as
-//!   the kind names them — the second runtime use of `serde_json` here, in no
-//!   signature. [`Cursor`] and [`PlanDocument`] are written by hand on both
-//!   sides: a cursor's wire shape is one opaque string rather than the fields
-//!   a derive would emit, and a document is written as the plan it holds and
-//!   read by buffering it as JSON, reading its `plan` tag and handing it whole
-//!   to the plan the tag names — the third runtime use of `serde_json`, in no
-//!   signature.
+//!   cannot refuse what it must: the derive reads it into a private shape
+//!   that refuses any key it does not name and holds every field any kind
+//!   names, and the kind then takes the fields it names, refusing one it lacks
+//!   and one it does not take. [`Cursor`] and [`PlanDocument`] are written by
+//!   hand on both sides: a cursor's wire shape is one opaque string rather
+//!   than the fields a derive would emit, and a document is written as the
+//!   plan it holds and read by the derive into one private shape holding its
+//!   `plan` tag and every field either plan names, from which the plan the
+//!   tag names is built. Neither plan read holds what it reads in a buffer: a
+//!   buffer keeps the last of two values written for one key where the derive
+//!   refuses the second, so a plan read inside a request would read otherwise
+//!   than the plan alone. The cursor's rendering is the one runtime use of
+//!   `serde_json` here, and it is in no signature.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description. It too is
 //!   written by hand where a derive would advertise a shape the reader does

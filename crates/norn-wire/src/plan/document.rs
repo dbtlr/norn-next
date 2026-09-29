@@ -35,13 +35,15 @@
 //!
 //! **A document reads its plan by that tag.** [`PlanDocument`] is not a
 //! serde-tagged enum, because an internally tagged enum consumes the tag
-//! before its variant reads the rest, and each plan must see its own. Its read
-//! path buffers the object as JSON, reads the `plan` tag, and hands the object
-//! whole to the plan the tag names, which reads it — tag, fields and all —
-//! exactly as it reads a plan written alone. This is the third runtime use of
-//! `serde_json` in this crate, and it appears in no signature. A document is
-//! written as the plan it holds, so a plan and the document holding it are one
-//! set of bytes.
+//! before its variant reads the rest, and each plan must see its own; nor
+//! does it hold the object in a buffer until its tag is known, because a
+//! buffer keeps the last of two values written for one key where the plan
+//! alone refuses the second, and reads a format's own values otherwise than
+//! the plan alone does. Its read path is one private shape the derive reads
+//! directly — the tag and every field either plan names, no other — and the
+//! plan the tag names is then built from the fields it takes, refusing a
+//! field only the other plan names. A document is written as the plan it
+//! holds, so a plan and the document holding it are one set of bytes.
 
 use std::borrow::Cow;
 
@@ -51,7 +53,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use crate::address::VaultAddress;
 use crate::document::DocumentPath;
 use crate::plan::hash::ContentHash;
-use crate::plan::operation::Operation;
+use crate::plan::operation::{Operation, written};
 use crate::plan::root::RootIdentity;
 
 /// What a file holds on one side of a transition: nothing, or exactly the
@@ -359,9 +361,6 @@ impl PlanDocument {
     }
 }
 
-/// The tag each plan is written under, as a refusal of any other names them.
-const PLAN_TAGS: &[&str] = &["operations", "resolved"];
-
 impl Serialize for PlanDocument {
     /// A document is written as the plan it holds, which carries its own tag.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -375,28 +374,88 @@ impl Serialize for PlanDocument {
     }
 }
 
+/// The name under a document's `plan`: which of the two plans it is.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlanName {
+    Operations,
+    Resolved,
+}
+
+/// A document as it arrives: its `plan` tag and every field either plan
+/// names, and no other. A field only one plan names is held as whether it was
+/// written, so the plan the tag names can refuse one that belongs to the
+/// other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentFields {
+    plan: PlanName,
+    vault: VaultAddress,
+    operations: Vec<Operation>,
+    #[serde(default, deserialize_with = "written")]
+    root: Option<RootIdentity>,
+    #[serde(default, deserialize_with = "written")]
+    transitions: Option<Vec<Transition>>,
+    #[serde(default, deserialize_with = "written")]
+    conditions: Option<Vec<PlanCondition>>,
+    #[serde(default, deserialize_with = "written")]
+    provenance: Option<Option<Provenance>>,
+    #[serde(default)]
+    footnote: Option<String>,
+}
+
+/// A field an operation list does not take, refused where it was written.
+fn not_an_operations_field<E: serde::de::Error>(name: &str, written: bool) -> Result<(), E> {
+    if written {
+        return Err(E::custom(format_args!(
+            "an `operations` plan does not take `{name}`: it is a field of a `resolved` plan"
+        )));
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for PlanDocument {
-    /// The object is held as JSON until its `plan` tag is read, then read
-    /// whole by the plan the tag names, which checks the tag again and
-    /// refuses any key it does not name.
+    /// Every key is read by the derive — refusing any neither plan names and
+    /// any written twice, in whatever order they are written — and the plan
+    /// the `plan` tag names is then built from the fields it takes, refusing
+    /// a field only the other plan names and requiring each it names.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let document = serde_json::Value::deserialize(deserializer)?;
-        let tag = match document.get("plan") {
-            None => return Err(D::Error::missing_field("plan")),
-            Some(serde_json::Value::String(tag)) => tag.clone(),
-            Some(_) => return Err(D::Error::custom("the `plan` tag is a string")),
-        };
-        match tag.as_str() {
-            "operations" => AuthoredPlan::deserialize(document)
-                .map(PlanDocument::Operations)
-                .map_err(D::Error::custom),
-            "resolved" => ResolvedPlan::deserialize(document)
-                .map(PlanDocument::Resolved)
-                .map_err(D::Error::custom),
-            other => Err(D::Error::unknown_variant(other, PLAN_TAGS)),
+        let DocumentFields {
+            plan,
+            vault,
+            operations,
+            root,
+            transitions,
+            conditions,
+            provenance,
+            footnote,
+        } = DocumentFields::deserialize(deserializer)?;
+        match plan {
+            PlanName::Operations => {
+                not_an_operations_field("root", root.is_some())?;
+                not_an_operations_field("transitions", transitions.is_some())?;
+                not_an_operations_field("conditions", conditions.is_some())?;
+                not_an_operations_field("provenance", provenance.is_some())?;
+                Ok(PlanDocument::Operations(AuthoredPlan {
+                    plan: OperationsTag::Operations,
+                    vault,
+                    operations,
+                    footnote,
+                }))
+            }
+            PlanName::Resolved => Ok(PlanDocument::Resolved(ResolvedPlan {
+                plan: ResolvedTag::Resolved,
+                vault,
+                root: root.ok_or_else(|| D::Error::missing_field("root"))?,
+                operations,
+                transitions: transitions.ok_or_else(|| D::Error::missing_field("transitions"))?,
+                conditions: conditions.ok_or_else(|| D::Error::missing_field("conditions"))?,
+                provenance: provenance.flatten(),
+                footnote,
+            })),
         }
     }
 }

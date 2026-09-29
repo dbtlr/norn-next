@@ -7053,6 +7053,282 @@ fn a_plan_refuses_a_variant_it_does_not_know() {
     );
 }
 
+/// `json` with its one occurrence of `find` replaced by `with`.
+fn spliced(json: &str, find: &str, with: &str) -> String {
+    assert_eq!(
+        json.matches(find).count(),
+        1,
+        "`{find}` does not occur exactly once in {json}"
+    );
+    json.replacen(find, with, 1)
+}
+
+/// Every place a resolved plan is read: alone, as a document, as a request's
+/// plan, inside a report and inside a refusal's detail. Each reading's
+/// refusal, or `None` where it read.
+fn every_reading_of_a_resolved_plan(plan: &str) -> Vec<(&'static str, Option<String>)> {
+    fn refusal<T: DeserializeOwned>(json: &str) -> Option<String> {
+        serde_json::from_str::<T>(json)
+            .err()
+            .map(|error| error.to_string())
+    }
+    vec![
+        ("the plan alone", refusal::<ResolvedPlan>(plan)),
+        ("a document", refusal::<PlanDocument>(plan)),
+        (
+            "a request",
+            refusal::<ApplyParams>(&format!(r#"{{"mode":"apply","plan":{plan}}}"#)),
+        ),
+        (
+            "a report",
+            refusal::<ApplyReport>(&format!(
+                r#"{{"outcome":"previewed","plan":{plan},"forecast":{}}}"#,
+                wire(&a_forecast())
+            )),
+        ),
+        (
+            "a detail",
+            refusal::<ErrorDetail>(&format!(
+                r#"{{"code":"host/apply-outcome-unknown","plan":{plan}}}"#
+            )),
+        ),
+    ]
+}
+
+/// **A key written twice is refused wherever a plan is read.** A plan read
+/// inside a request, a report or a refusal is read by the same derive as the
+/// plan alone, so a duplicate the plan alone refuses — at its own level or
+/// inside an operation, its fields, a condition, a transition, a file state or
+/// its provenance — is refused everywhere, rather than one reading keeping the
+/// last value where another refuses.
+#[test]
+fn a_plan_refuses_a_key_written_twice_wherever_it_is_read() {
+    let bare = wire(&a_bare_resolved_plan());
+    let full = resolved_plan_json();
+    let constructions = [
+        (
+            "the plan's conditions",
+            spliced(
+                &bare,
+                r#""conditions":[]"#,
+                r#""conditions":[],"conditions":[]"#,
+            ),
+        ),
+        (
+            "the plan's tag",
+            spliced(
+                &bare,
+                r#"{"plan":"resolved","#,
+                r#"{"plan":"resolved","plan":"resolved","#,
+            ),
+        ),
+        (
+            "an operation",
+            spliced(
+                &bare,
+                r#"{"kind":"delete_document","#,
+                r#"{"kind":"delete_document","id":"a","id":"b","#,
+            ),
+        ),
+        (
+            "an operation's fields",
+            spliced(
+                &bare,
+                r#""fields":{"path":"notes/b.md"}"#,
+                r#""fields":{"path":"notes/b.md","path":"notes/z.md"}"#,
+            ),
+        ),
+        (
+            "a condition",
+            spliced(
+                &full,
+                r#""path":"notes/c.md","#,
+                r#""path":"notes/c.md","path":"notes/z.md","#,
+            ),
+        ),
+        (
+            "a transition",
+            spliced(
+                &bare,
+                r#"{"path":"notes/b.md","before""#,
+                r#"{"path":"notes/b.md","path":"notes/z.md","before""#,
+            ),
+        ),
+        (
+            "a file state",
+            spliced(
+                &bare,
+                r#""after":{"state":"absent"}"#,
+                r#""after":{"state":"absent","state":"absent"}"#,
+            ),
+        ),
+        (
+            "the provenance",
+            spliced(
+                &full,
+                r#""finding_generation":7"#,
+                r#""finding_generation":7,"finding_generation":8"#,
+            ),
+        ),
+    ];
+    for (place, json) in constructions {
+        for (reading, refusal) in every_reading_of_a_resolved_plan(&json) {
+            let refusal = refusal.unwrap_or_else(|| {
+                panic!("{reading} kept one of two values written for a key of {place}: {json}")
+            });
+            assert!(
+                refusal.contains("duplicate field"),
+                "{reading} refused a key of {place} written twice for another reason: {refusal}"
+            );
+        }
+    }
+
+    let authored = spliced(
+        &wire(&an_authored_plan()),
+        r#"{"plan":"operations","#,
+        r#"{"plan":"operations","footnote":"a","footnote":"b","#,
+    );
+    for refusal in [
+        serde_json::from_str::<AuthoredPlan>(&authored).err(),
+        serde_json::from_str::<PlanDocument>(&authored).err(),
+        serde_json::from_str::<ApplyParams>(&format!(r#"{{"mode":"apply","plan":{authored}}}"#))
+            .err(),
+    ] {
+        let refusal = refusal.expect("an authored plan writing its footnote twice read back");
+        assert!(refusal.to_string().contains("duplicate field"), "{refusal}");
+    }
+}
+
+/// **An operation's fields are read by the derive, not kept last-wins.** A
+/// move naming where it stands twice is refused alone, inside either plan and
+/// inside a report, rather than moving whichever it named last.
+#[test]
+fn an_operation_refuses_a_field_written_twice_wherever_it_is_read() {
+    let doubled = r#"{"kind":"move_document","fields":{"from":"a.md","from":"z.md","to":"b.md"}}"#;
+    let refusal = serde_json::from_str::<Operation>(doubled)
+        .expect_err("an operation naming where it moves from twice");
+    assert!(refusal.to_string().contains("duplicate field"), "{refusal}");
+
+    let authored = spliced(
+        &wire(&an_authored_plan()),
+        r#""operations":["#,
+        &format!(r#""operations":[{doubled},"#),
+    );
+    assert!(
+        serde_json::from_str::<PlanDocument>(&authored).is_err(),
+        "an authored plan kept the last of two sources for a move"
+    );
+    let resolved = spliced(
+        &wire(&a_bare_resolved_plan()),
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+        doubled,
+    );
+    for (reading, refusal) in every_reading_of_a_resolved_plan(&resolved) {
+        assert!(
+            refusal.is_some_and(|refusal| refusal.contains("duplicate field")),
+            "{reading} kept the last of two sources for a move"
+        );
+    }
+}
+
+/// A document reads the tag wherever it is written, and a field only the
+/// other plan names is refused as the plan alone refuses it.
+#[test]
+fn a_plan_document_reads_as_the_plan_it_holds_reads_alone() {
+    let resolved = wire(&a_bare_resolved_plan());
+    let tag_last = format!(
+        r#"{},"plan":"resolved"}}"#,
+        spliced(&resolved, r#"{"plan":"resolved","#, "{").trim_end_matches('}')
+    );
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&tag_last).expect("a document tagged last"),
+        PlanDocument::resolved(a_bare_resolved_plan())
+    );
+    let without_provenance = spliced(
+        &resolved,
+        r#""conditions":[]"#,
+        r#""conditions":[],"provenance":null"#,
+    );
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&without_provenance).expect("a null provenance"),
+        PlanDocument::resolved(
+            serde_json::from_str::<ResolvedPlan>(&without_provenance).expect("a null provenance")
+        )
+    );
+
+    let authored = wire(&an_authored_plan());
+    for foreign in [
+        r#""root":"00000000000103020000000000000002""#,
+        r#""transitions":[]"#,
+        r#""conditions":[]"#,
+        r#""provenance":null"#,
+    ] {
+        let json = spliced(
+            &authored,
+            r#"{"plan":"operations","#,
+            &format!(r#"{{"plan":"operations",{foreign},"#),
+        );
+        assert!(
+            serde_json::from_str::<AuthoredPlan>(&json).is_err(),
+            "an authored plan carrying {foreign} read back"
+        );
+        assert!(
+            serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a document holding an authored plan carrying {foreign} read back"
+        );
+    }
+    for missing in [
+        r#""root":"00000000000103020000000000000002","#,
+        r#""conditions":[]"#,
+    ] {
+        let json = spliced(&resolved, missing, "").replace(",}", "}");
+        assert!(
+            serde_json::from_str::<ResolvedPlan>(&json).is_err()
+                && serde_json::from_str::<PlanDocument>(&json).is_err(),
+            "a resolved plan without {missing} read back"
+        );
+    }
+}
+
+/// **A plan reads the same in any format, alone or inside a request.** Read
+/// outside JSON, a plan inside a request is read by the same derive as the
+/// plan alone, so a value that format reads one way alone — a tagged scalar in
+/// YAML — is read that way inside a request too, rather than passing through a
+/// JSON buffer the format cannot fill.
+#[test]
+fn a_plan_reads_the_same_in_any_format_alone_and_inside_a_request() {
+    fn readings(plan: &str) -> [Option<PlanDocument>; 3] {
+        let request = format!(
+            "mode: apply\nplan:\n{}",
+            plan.lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        );
+        [
+            serde_yaml::from_str::<ResolvedPlan>(plan)
+                .ok()
+                .map(PlanDocument::resolved),
+            serde_yaml::from_str::<PlanDocument>(plan).ok(),
+            serde_yaml::from_str::<ApplyParams>(&request)
+                .ok()
+                .map(|params| params.plan),
+        ]
+    }
+    let plan = serde_yaml::to_string(&a_bare_resolved_plan()).expect("a plan as YAML");
+    let [alone, document, request] = readings(&plan);
+    assert_eq!(alone, Some(PlanDocument::resolved(a_bare_resolved_plan())));
+    assert_eq!(document, alone);
+    assert_eq!(request, alone);
+
+    let tagged = format!("{plan}footnote: !x f\n");
+    let [alone, document, request] = readings(&tagged);
+    assert_eq!(
+        document, alone,
+        "a document read a tagged footnote otherwise"
+    );
+    assert_eq!(request, alone, "a request read a tagged footnote otherwise");
+}
+
 // ── What an apply answers with ───────────────────────────────────────────
 
 fn folder(text: &str) -> FolderPath {

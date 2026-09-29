@@ -14,17 +14,17 @@ publish.workspace = true
 # serialization every type here carries, and `schemars` is the schema every
 # surface derives its rendering from.
 #
-# `serde_json` is here for three things. The cursor's opaque rendering is
-# base64 of the canonical JSON of the cursor's own fields. An operation's read
-# path buffers its `fields` as a JSON value until its `kind` is known, then
-# reads them as that kind names them, so an unknown key refuses at every level
-# where a flattened derive would drop it. And a plan document's read path
-# buffers the document until its `plan` tag is known, then hands it whole to
-# the plan the tag names, which reads its own tag again. It appears in no
-# signature — nothing crossing this seam is an untyped JSON value — and its
-# three runtime uses are inside those three reads. It is a registry dependency and not a workspace one,
-# so the zero-workspace-dependency invariant stands.
+# `serde_json` is here for one thing: the cursor's opaque rendering, which is
+# base64 of the canonical JSON of the cursor's own fields. It appears in no
+# signature — nothing crossing this seam is an untyped JSON value — and its one
+# runtime use is inside that wrapping. It is a registry dependency and not a
+# workspace one, so the zero-workspace-dependency invariant stands.
 [dependencies]
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# A second format to read plans in, so a test can hold a plan read alone and
+# the same plan read inside a request to one reading outside JSON too.
+[dev-dependencies]
+serde_yaml = { workspace = true }
