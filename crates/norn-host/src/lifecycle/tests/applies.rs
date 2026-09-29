@@ -9,7 +9,9 @@
 //! ran did so without one.
 
 use super::*;
-use norn_wire::{ApplyReport, ChangesetOutcome, ResolvedPlan, RootIdentity, VaultAddress};
+use norn_wire::{
+    ApplyReport, ChangesetOutcome, ReasonCode, ResolvedPlan, RootIdentity, VaultAddress,
+};
 
 /// A resolved plan of no transitions for `name`: the fake applies it as it
 /// stands.
@@ -198,5 +200,180 @@ fn under_a_sustained_edit_stream_a_queued_apply_runs_within_one_turn() {
         "the apply waited more than the turn in flight and its own intake"
     );
     applied(pending.wait());
+    drop((lease, host));
+}
+
+/// **Case 12: the intake cutoff.** The apply takes in the fact the watcher
+/// delivered before it, as its own reconcile ahead of the apply. A fact
+/// delivered while the apply runs is not taken in before its changeset: the
+/// claim the apply holds keeps a watcher poll off the entry, so the fact
+/// stays with the watcher. A read meanwhile answers at once, from the entry
+/// still `Ready` — the state before the apply. And the apply that ends with
+/// that fact waiting hands the claim on to the reconcile that derives it.
+#[test]
+fn a_fact_delivered_during_an_apply_waits_for_its_changeset_and_hands_on_to_the_reconcile() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    ops.block_apply.store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    wait_for_flag("apply_started", &ops.apply_started);
+    assert_eq!(
+        ops.applies_ran
+            .lock()
+            .unwrap()
+            .first()
+            .map(|when| when.reconciles),
+        Some(1),
+        "the apply did not derive the fact delivered before it first"
+    );
+    assert_eq!(*ops.reconciled_batches.lock().unwrap(), vec![a_fact()]);
+
+    ops.facts_on_next_polls.store(1, Ordering::SeqCst);
+    poll_watchers(&host.shared);
+    assert_eq!(
+        ops.facts_on_next_polls.load(Ordering::SeqCst),
+        1,
+        "a fact delivered during the apply was taken in before its changeset"
+    );
+    let hold = host
+        .begin_read(&name)
+        .expect("a read during an apply answers at once");
+    assert_eq!(
+        hold.reading().published(),
+        &Demand::State(TrustState::Ready),
+        "a read during the apply did not answer the state before it"
+    );
+    drop(hold);
+
+    ops.apply_release.store(true, Ordering::SeqCst);
+    applied(pending.wait());
+    wait_for_reconciles_begun(&ops, 2);
+    wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(
+        *ops.reconciled_batches.lock().unwrap(),
+        vec![a_fact(), a_fact()],
+        "the fact that waited through the apply was not derived after it"
+    );
+    drop((lease, host));
+}
+
+/// **Case 14, before the mark: an unwind before the publishing mark answers
+/// the apply not applied.** The worker unwinds after planning and before
+/// publication, so the reply is dropped unanswered; its caller is answered
+/// from the progress record with the cause the unwind published over the
+/// entry — the one an unanswered reload's asker reads — and the plan
+/// planning resolved.
+#[test]
+fn an_unwind_before_the_publishing_mark_answers_not_applied_with_the_cause_and_the_plan() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.panic_in_apply_before_publishing
+        .store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let refused = pending
+        .wait()
+        .expect_err("an unwound apply answered applied");
+
+    assert_eq!(refused.code(), &ReasonCode::HostApplyNotRun);
+    let expected_cause = ReadRefusal::NotServing(Demand::State(unwound(APPLY_PANIC))).answer(&name);
+    assert_eq!(
+        refused.detail(),
+        &ErrorDetail::apply_not_run(expected_cause, Some(the_plan(&name)))
+    );
+    drop((lease, host));
+}
+
+/// **Case 14, after the mark: an unwind after the publishing mark answers
+/// the outcome unknown, with the resolved plan.** Some targets may have
+/// landed, so the caller is told so and handed the plan that finishes them.
+#[test]
+fn an_unwind_after_the_publishing_mark_answers_unknown_with_the_resolved_plan() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.panic_in_apply_after_publishing
+        .store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let unknown = pending
+        .wait()
+        .expect_err("an unwound apply answered applied");
+
+    assert_eq!(unknown.code(), &ReasonCode::HostApplyOutcomeUnknown);
+    assert_eq!(
+        unknown.detail(),
+        &ErrorDetail::apply_outcome_unknown(the_plan(&name))
+    );
+    drop((lease, host));
+}
+
+/// **Case 15: a changeset that cannot commit after every target landed
+/// answers applied with the entry healing, and the entry heals.** The answer
+/// carries the resolved plan, as every outcome given after planning does,
+/// and the paths the apply touched are taken in as facts the reconcile the
+/// apply hands on to derives.
+#[test]
+fn a_changeset_that_cannot_commit_answers_applied_healing_and_the_entry_heals() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.heal_in_apply.store(true, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    match applied(pending.wait()) {
+        ApplyReport::Applied {
+            plan, changeset, ..
+        } => {
+            assert_eq!(plan, the_plan(&name));
+            assert_eq!(changeset, ChangesetOutcome::Healing);
+        }
+        other => panic!("the apply answered {other:?}"),
+    }
+    wait_for_reconciles_begun(&ops, 1);
+    wait_for_state(&host, &name, TrustState::Ready);
+    assert_eq!(
+        *ops.reconciled_batches.lock().unwrap(),
+        vec![a_fact()],
+        "the heal the changeset owes was not derived"
+    );
+    drop((lease, host));
+}
+
+/// **Case 16: a dropped `PendingApply` does not stop the apply.** The caller
+/// stops waiting while the apply runs; the apply finishes, gives the claim
+/// back, and the entry takes the next apply as it would have.
+#[test]
+fn a_dropped_pending_apply_does_not_stop_the_apply() {
+    let ops = Arc::new(FakeOps::default());
+    let (host, name, lease) = a_ready_vault(&ops);
+    let entry = host.shared.entries.get(&name).unwrap();
+    ops.block_apply.store(true, Ordering::SeqCst);
+
+    drop(host.admit_apply(&name, a_plan(&name)).expect("admitted"));
+    wait_for_flag("apply_started", &ops.apply_started);
+    ops.apply_release.store(true, Ordering::SeqCst);
+    wait_until(
+        "the apply nobody waits for to give the claim back",
+        lifecycle_wait_budget(),
+        || {
+            let held = entry.gate.lock().unwrap().claim.is_held();
+            if held {
+                Observed::pending("the claim is held")
+            } else {
+                Observed::Met(())
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(ops.applies_ran.lock().unwrap().len(), 1);
+
+    ops.block_apply.store(false, Ordering::SeqCst);
+    applied(
+        host.admit_apply(&name, a_plan(&name))
+            .expect("admitted")
+            .wait(),
+    );
+    assert_eq!(ops.applies_ran.lock().unwrap().len(), 2);
     drop((lease, host));
 }
