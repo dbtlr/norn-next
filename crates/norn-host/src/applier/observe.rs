@@ -6,9 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{DocumentPath, FileState, OperationKind, PlanCondition, ResolvedPlan, Transition};
+use norn_wire::{DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
 
-use crate::planner::view::{Entry, VaultView};
+use super::lineage::Lineage;
+use crate::planner::view::{Barrier, Entry, VaultView};
 
 /// One publication the kernel makes: a transition on its own, or the two
 /// transitions of a case-only rename on a root that folds case, which publish
@@ -47,6 +48,9 @@ pub(super) enum TargetState {
     /// It holds neither: drift, and what it holds, where absence stands for
     /// anything that is not a document.
     Drifted(FileState),
+    /// It names a place the vault reads no documents at, and why: the plan
+    /// is not what its operations do, whatever the place holds.
+    Unplaced(String),
 }
 
 impl TargetState {
@@ -59,6 +63,21 @@ impl TargetState {
     /// respell's content under the old spelling.
     pub(super) fn partly_landed(&self) -> bool {
         matches!(self, TargetState::Landed(_) | TargetState::Halfway(_))
+    }
+
+    /// Whether the document `transition` found before the plan is gone from
+    /// view: the target holds its change, whole or halfway, and so no longer
+    /// the before-state's bytes. Where the two states agree, the bytes it
+    /// holds are the before-state's.
+    pub(super) fn before_unseen(&self, transition: &Transition) -> bool {
+        matches!(transition.before, FileState::Present { .. })
+            && match self {
+                TargetState::Landed(_) => transition.before != transition.after,
+                TargetState::Halfway(_) => true,
+                TargetState::AtBefore(_) | TargetState::Drifted(_) | TargetState::Unplaced(_) => {
+                    false
+                }
+            }
     }
 }
 
@@ -121,11 +140,13 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
 /// name: a case-only rename that landed leaves its old spelling absent, not
 /// drifted.
 ///
-/// **A move's source is drift once its destination is not at its
+/// **A source is drift once a target drawing on it is not at its
 /// after-state.** The applier replaces or removes a source only after every
-/// target drawing on it durably landed, so a source at its after-state beside
-/// a destination that is not was changed by another writer (ADR 0031): the
-/// source is marked drifted, holding what it holds, and the move is named.
+/// target drawing on it durably landed, so a source whose before-state is gone
+/// while a target whose content the plan's moves carry from it has not landed
+/// was changed by another writer (ADR 0031): the source is marked drifted,
+/// holding what it holds, and the moves that carry it are named. A chain is
+/// followed whole, through names the plan makes and takes away again.
 pub(super) fn observe<V: VaultView>(
     plan: &ResolvedPlan,
     units: &[Unit],
@@ -149,24 +170,37 @@ pub(super) fn observe<V: VaultView>(
         .into_iter()
         .map(|state| state.expect("every transition is in one unit"))
         .collect();
-    let sources = drifted_sources(plan, &mut states, view.normalizer());
+    let lineage = Lineage::of(plan, view.normalizer());
+    let sources = drifted_sources(plan, &mut states, &lineage, view.normalizer());
     Ok((states, sources))
 }
 
 /// What one transition's target holds.
 fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V::Error> {
-    let Some(identity) = canonical(view.normalizer(), &transition.path) else {
-        return Ok(TargetState::Drifted(FileState::absent()));
+    let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
+        return Ok(TargetState::Unplaced(format!(
+            "`{}` names no document in the vault",
+            transition.path
+        )));
     };
     let (holds, bytes) = match view.entry(&identity)? {
         Entry::Document { at, bytes, hash } if at == transition.path => {
             (FileState::present(hash), Some(bytes))
         }
         Entry::Document { .. } | Entry::Absent { .. } => (FileState::absent(), None),
-        // Nothing a document can be read from stands there: a create's name is
-        // left for staging to judge, which refuses it as taken; for any other
-        // transition it is drift.
-        Entry::Folder | Entry::Blocked { .. } => {
+        Entry::Blocked {
+            detail,
+            barrier: Barrier::Closed,
+        } => return Ok(TargetState::Unplaced(detail)),
+        // Something that is no document stands in the way — a folder, or an
+        // entry at or above the name that is not a folder — which another
+        // writer can take away: a create's name is left for staging to judge,
+        // which refuses it as taken; for any other transition it is drift.
+        Entry::Folder
+        | Entry::Blocked {
+            barrier: Barrier::Occupied,
+            ..
+        } => {
             return Ok(if transition.before == FileState::absent() {
                 TargetState::AtBefore(None)
             } else {
@@ -197,16 +231,20 @@ fn respell<V: VaultView>(
     new: &Transition,
     view: &V,
 ) -> Result<(TargetState, TargetState), V::Error> {
-    let entry = match canonical(view.normalizer(), &old.path)
-        .filter(|_| canonical(view.normalizer(), &new.path).is_some())
-    {
-        Some(identity) => view.entry(&identity)?,
-        None => Entry::Blocked {
-            detail: String::new(),
-        },
+    let Some(identity) = identity(view.normalizer(), old.path.as_str()) else {
+        let unplaced = TargetState::Unplaced(format!("`{}` names no document", old.path));
+        return Ok((unplaced.clone(), unplaced));
     };
+    let entry = view.entry(&identity)?;
     let untouched = TargetState::AtBefore(None);
     Ok(match entry {
+        Entry::Blocked {
+            detail,
+            barrier: Barrier::Closed,
+        } => (
+            TargetState::Unplaced(detail.clone()),
+            TargetState::Unplaced(detail),
+        ),
         Entry::Document { at, bytes, hash } if at == old.path => {
             let holds = FileState::present(hash);
             if holds == old.before {
@@ -234,43 +272,42 @@ fn respell<V: VaultView>(
     })
 }
 
-/// Mark each move's source drifted where it holds its after-state and its
-/// destination does not, and answer those moves' positions.
+/// Mark drifted each source whose before-state is gone while a target drawing
+/// on it has not landed, and answer the positions of the moves that carry it.
 fn drifted_sources(
     plan: &ResolvedPlan,
     states: &mut [TargetState],
+    lineage: &Lineage,
     normalizer: &PathNormalizer,
 ) -> Vec<usize> {
     let index_of = transition_index(plan, normalizer);
+    let mut drifted: BTreeMap<usize, FileState> = BTreeMap::new();
     let mut moves = Vec::new();
-    for (position, operation) in plan.operations.iter().enumerate() {
-        let OperationKind::MoveDocument { from, to } = &operation.kind else {
-            continue;
-        };
-        let (Some(from_identity), Some(to_identity)) = (
-            identity(normalizer, from.as_str()),
-            identity(normalizer, to.as_str()),
-        ) else {
-            continue;
-        };
-        // A case-only rename is its own source, published as one respell.
-        if from_identity == to_identity {
+    for (index, transition) in plan.transitions.iter().enumerate() {
+        if !matches!(states[index], TargetState::AtBefore(_))
+            || !matches!(transition.after, FileState::Present { .. })
+        {
             continue;
         }
-        let (Some(&source), Some(&destination)) =
-            (index_of.get(&from_identity), index_of.get(&to_identity))
-        else {
+        let Some(file) = identity(normalizer, transition.path.as_str()) else {
             continue;
         };
-        let transition = &plan.transitions[source];
-        if transition.before != transition.after
-            && states[source].landed()
-            && !states[destination].landed()
-        {
-            states[source] = TargetState::Drifted(transition.after.clone());
-            moves.push(position);
+        let Some(source) = lineage.source(&file) else {
+            continue;
+        };
+        let Some(&from) = index_of.get(&source.from) else {
+            continue;
+        };
+        if source.from != file && states[from].before_unseen(&plan.transitions[from]) {
+            drifted.insert(from, plan.transitions[from].after.clone());
+            moves.extend(source.moves);
         }
     }
+    for (index, holds) in drifted {
+        states[index] = TargetState::Drifted(holds);
+    }
+    moves.sort_unstable();
+    moves.dedup();
     moves
 }
 
@@ -324,18 +361,17 @@ pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<Normal
     normalizer.normalize(Path::new(path)).ok()
 }
 
-/// `path`'s identity, where `path` is spelled as the vault's one rule spells
-/// it.
+/// Whether `path` is spelled as the vault's one rule spells it.
 ///
 /// **A plan names each target at one spelling.** The planner writes every
 /// transition at a normalized spelling, and the kernel keeps a path as it is
 /// given — a `./` component included — so a target spelled otherwise, as a
 /// plan edited by hand can be, would be published, recorded and derived at a
-/// second spelling of one file. It is judged as drift instead, holding
-/// nothing, and the fresh plan the refusal answers spells it once.
-fn canonical(normalizer: &PathNormalizer, path: &DocumentPath) -> Option<NormalizedPath> {
+/// second spelling of one file. Such a plan is not what its operations do,
+/// and is refused before anything is read.
+pub(super) fn spelled_once(normalizer: &PathNormalizer, path: &DocumentPath) -> bool {
     identity(normalizer, path.as_str())
-        .filter(|identity| identity.as_path() == Path::new(path.as_str()))
+        .is_some_and(|identity| identity.as_path() == Path::new(path.as_str()))
 }
 
 /// Whether a transition puts a document where none stood.

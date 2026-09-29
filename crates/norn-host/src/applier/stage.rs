@@ -7,13 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
-use norn_wire::{FileState, OperationKind, RefusedCheck, ResolvedPlan, Transition};
+use norn_wire::{FileState, OperationKind, PlanFault, RefusedCheck, ResolvedPlan, Transition};
 
+use super::lineage::Lineage;
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
+    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe, spelled_once,
     transition_index, units,
 };
-use super::recompose::recompose;
+use super::recompose::{Recomposed, recompose};
 use super::schema;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
@@ -25,6 +26,8 @@ use crate::planner::view::{TreeView, VaultView, wire_hash};
 #[derive(Debug)]
 pub(super) struct StagedPlan {
     pub(super) targets: Vec<StagedTarget>,
+    /// Each transition's path as the store names it, by index.
+    pub(super) stored: Vec<norn_store::DocumentPath>,
 }
 
 /// One publication waiting for its turn.
@@ -66,6 +69,10 @@ pub(super) enum Phase {
 pub(super) enum Stop {
     /// A check refused: drift, a condition, a schema violation, a taken name.
     Refused(Vec<RefusedCheck>),
+    /// The plan is not what its operations do, in words.
+    Unsound(String),
+    /// The operations' own shape is wrong.
+    Invalid(PlanFault),
     /// The vault root is not the directory the plan's identity names.
     RootReplaced,
     /// The machine failed, in words.
@@ -122,6 +129,14 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
 
 /// Check every target of `plan` and stage every written one.
 ///
+/// **The checks run in this order**: the plan names every target once, at the
+/// spelling the vault gives it, at a place the vault reads documents at and
+/// the store can name; no target drifted and every condition holds; the
+/// operations, run again from the before-states, are exactly the plan's
+/// transitions ([`recompose`]); every result passes the vault schema; and the
+/// publication order exists. A plan that fails the first or the third is not
+/// what its operations do, and is refused as that rather than as drift.
+///
 /// Nothing is published here, and a refusal discards every shadow staged
 /// before it, so a plan stopped in this phase leaves the vault as it found
 /// it. What is returned holds no bytes: the observed and composed contents
@@ -135,9 +150,16 @@ pub(super) fn check_and_stage(
     declared: &Declared,
 ) -> Result<StagedPlan, Stop> {
     let normalizer = view.normalizer();
+    let stored = stored_paths(plan, normalizer).map_err(Stop::Unsound)?;
     let units = units(plan, normalizer);
     let (states, _) =
         observe(plan, &units, view).map_err(|error| Stop::Failed(error.to_string()))?;
+    if let Some(detail) = states.iter().find_map(|state| match state {
+        TargetState::Unplaced(detail) => Some(detail.clone()),
+        _ => None,
+    }) {
+        return Err(Stop::Unsound(detail));
+    }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
         failed_conditions(plan, view)
@@ -148,26 +170,38 @@ pub(super) fn check_and_stage(
     if !checks.is_empty() {
         return Err(Stop::Refused(checks));
     }
-    let composition =
-        recompose(plan, &states, view).map_err(|error| Stop::Failed(error.to_string()))?;
-    let mut contents: Vec<Option<Arc<[u8]>>> = Vec::with_capacity(units.len());
-    for unit in &units {
-        match content(plan, *unit, &states, &composition) {
-            Ok(bytes) => contents.push(bytes),
-            Err(check) => checks.push(check),
-        }
-    }
-    if !checks.is_empty() {
-        return Err(Stop::Refused(checks));
-    }
-    checks.extend(schema_checks(plan, &units, &states, &contents, declared));
-    if !checks.is_empty() {
-        return Err(Stop::Refused(checks));
-    }
+    let lineage = Lineage::of(plan, normalizer);
+    let composition = match recompose(plan, &states, &lineage, view)
+        .map_err(|error| Stop::Failed(error.to_string()))?
+    {
+        Recomposed::Sound(composition) => composition,
+        Recomposed::Unsound(detail) => return Err(Stop::Unsound(detail)),
+        Recomposed::Invalid(fault) => return Err(Stop::Invalid(fault)),
+    };
+    let contents: Vec<Option<Arc<[u8]>>> = units
+        .iter()
+        .map(|unit| content(plan, *unit, &states, &composition))
+        .collect::<Result<_, _>>()
+        .map_err(Stop::Unsound)?;
     drop(composition);
+    let schema = Judging {
+        plan,
+        states: &states,
+        lineage: &lineage,
+        normalizer,
+        declared,
+    };
+    checks.extend(schema.checks(&units, &contents));
+    if !checks.is_empty() {
+        return Err(Stop::Refused(checks));
+    }
+    let phases: Vec<Phase> = units.iter().map(|unit| phase(plan, *unit)).collect();
+    let order = publication_order(plan, &units, &phases, normalizer).map_err(Stop::Invalid)?;
     let mut staged: Vec<StagedTarget> = Vec::with_capacity(units.len());
-    for (unit, content) in units.iter().zip(&contents) {
-        let held = match stage_one(anchor, root, shadows, plan, *unit, content.as_deref()) {
+    for position in order {
+        let unit = units[position];
+        let content = contents[position].as_deref();
+        let held = match stage_one(anchor, root, shadows, plan, unit, content) {
             Ok(held) => held,
             Err(stop) => {
                 discard_all(anchor, shadows, staged);
@@ -175,14 +209,37 @@ pub(super) fn check_and_stage(
             }
         };
         staged.push(StagedTarget {
-            unit: *unit,
-            phase: phase(plan, *unit),
+            unit,
+            phase: phases[position],
             held,
         });
     }
     Ok(StagedPlan {
-        targets: in_publication_order(plan, staged, normalizer),
+        targets: staged,
+        stored,
     })
+}
+
+/// Every transition's path as the store names it, or why the plan names a
+/// target no other way: at a second spelling of its file, or at a path the
+/// store cannot name, which would be published and never recorded.
+fn stored_paths(
+    plan: &ResolvedPlan,
+    normalizer: &PathNormalizer,
+) -> Result<Vec<norn_store::DocumentPath>, String> {
+    plan.transitions
+        .iter()
+        .map(|transition| {
+            let path = &transition.path;
+            if !spelled_once(normalizer, path) {
+                return Err(format!(
+                    "`{path}` is not spelled the one way the vault spells its file"
+                ));
+            }
+            norn_store::DocumentPath::new(path.as_str())
+                .map_err(|error| format!("`{path}` is no path the store can name: {error}"))
+        })
+        .collect()
 }
 
 /// Remove every shadow `staged` holds, publishing nothing.
@@ -217,23 +274,21 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 ///
 /// A target already holding its after-state, and a respell halfway, hold the
 /// after-state's bytes, and those are its content; every other written target
-/// takes the recomposed bytes, which must hash to the after-state. A target
-/// whose recomposition does not is refused as drift: the before-states it is
-/// composed from are not what the plan was resolved from.
+/// takes the recomposed bytes, which [`recompose`] held to its after-state.
 fn content(
     plan: &ResolvedPlan,
     unit: Unit,
     states: &[TargetState],
     composition: &Composition,
-) -> Result<Option<Arc<[u8]>>, RefusedCheck> {
+) -> Result<Option<Arc<[u8]>>, String> {
     let written = match unit {
         Unit::One(index) => index,
         Unit::Respell { new, .. } => new,
     };
     let transition = &plan.transitions[written];
-    let FileState::Present { hash } = &transition.after else {
+    if !matches!(transition.after, FileState::Present { .. }) {
         return Ok(None);
-    };
+    }
     let held = match unit {
         Unit::Respell { old, .. } => match (&states[old], &states[written]) {
             (TargetState::Halfway(bytes), _) | (_, TargetState::Landed(Some(bytes))) => {
@@ -249,63 +304,63 @@ fn content(
     if let Some(bytes) = held {
         return Ok(Some(bytes));
     }
-    let composed = composition
+    composition
         .targets
         .get(&transition.path)
-        .and_then(|target| target.after.clone());
-    match composed {
-        Some(bytes) if wire_hash(norn_fs::ContentHash::of(&bytes)) == *hash => Ok(Some(bytes)),
-        _ => Err(RefusedCheck::drifted(
-            transition.path.clone(),
-            transition.before.clone(),
-        )),
-    }
+        .and_then(|target| target.after.clone())
+        .map(Some)
+        .ok_or_else(|| format!("its operations leave nothing at `{}`", transition.path))
 }
 
-/// The schema checks refusing any composed result a target at its
-/// before-state would publish.
-fn schema_checks(
-    plan: &ResolvedPlan,
-    units: &[Unit],
-    states: &[TargetState],
-    contents: &[Option<Arc<[u8]>>],
-    declared: &Declared,
-) -> Vec<RefusedCheck> {
-    // Where a written document's content came from when it stood nowhere
-    // before: a document the plan takes away.
-    let taken_away: Vec<(usize, &Arc<[u8]>)> = states
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| is_removal(&plan.transitions[*index]))
-        .filter_map(|(index, state)| match state {
-            TargetState::AtBefore(Some(bytes)) => Some((index, bytes)),
-            _ => None,
-        })
-        .collect();
-    let mut checks = Vec::new();
-    for (unit, content) in units.iter().zip(contents) {
-        let Some(after) = content else { continue };
-        let (source, written) = match *unit {
-            Unit::One(index) => (index, index),
-            Unit::Respell { old, new } => (old, new),
-        };
-        let TargetState::AtBefore(own) = &states[source] else {
-            continue;
-        };
-        let path = &plan.transitions[written].path;
-        let before: Vec<schema::Judged> = match own {
-            Some(bytes) => vec![schema::judge(path, bytes, declared)],
-            None => taken_away
-                .iter()
-                .map(|(index, bytes)| {
-                    schema::judge(&plan.transitions[*index].path, bytes, declared)
+/// What the schema check reads: the plan, what its targets hold, where each
+/// target's content came from, and the declaration.
+struct Judging<'a> {
+    plan: &'a ResolvedPlan,
+    states: &'a [TargetState],
+    lineage: &'a Lineage,
+    normalizer: &'a PathNormalizer,
+    declared: &'a Declared,
+}
+
+impl Judging<'_> {
+    /// The schema checks refusing any composed result a target at its
+    /// before-state would publish.
+    ///
+    /// **Each result is judged against the document its content came from**:
+    /// its own before-state where it is edited in place, the moved document's
+    /// where a move carried it, and nothing where an operation wrote it.
+    fn checks(&self, units: &[Unit], contents: &[Option<Arc<[u8]>>]) -> Vec<RefusedCheck> {
+        let index_of = transition_index(self.plan, self.normalizer);
+        let mut checks = Vec::new();
+        for (unit, content) in units.iter().zip(contents) {
+            let Some(after) = content else { continue };
+            let (source, written) = match *unit {
+                Unit::One(index) => (index, index),
+                Unit::Respell { old, new } => (old, new),
+            };
+            if !matches!(self.states[source], TargetState::AtBefore(_)) {
+                continue;
+            }
+            let path = &self.plan.transitions[written].path;
+            let drawn_from = identity(self.normalizer, path.as_str())
+                .and_then(|file| self.lineage.source(&file))
+                .and_then(|source| index_of.get(&source.from).copied());
+            let before: Vec<schema::Judged> = drawn_from
+                .and_then(|index| match &self.states[index] {
+                    TargetState::AtBefore(Some(bytes)) => Some(schema::judge(
+                        &self.plan.transitions[index].path,
+                        bytes,
+                        self.declared,
+                    )),
+                    _ => None,
                 })
-                .collect(),
-        };
-        let after = schema::judge(path, after, declared);
-        checks.extend(schema::refused(path, &after, &before));
+                .into_iter()
+                .collect();
+            let after = schema::judge(path, after, self.declared);
+            checks.extend(schema::refused(path, &after, &before));
+        }
+        checks
     }
-    checks
 }
 
 /// Stage `unit` with `content`, or say why the plan stops.
@@ -373,10 +428,14 @@ fn stage_one(
     }
 }
 
-/// The filesystem layer's hash of a wire hash. Every wire hash a resolved plan
-/// carries names a SHA-256 digest, so a hash that does not is no document's.
+/// The filesystem layer's hash of a wire hash.
+///
+/// **Total over the wire's type**: a wire hash is read through its grammar —
+/// `sha256:` and 64 lowercase hexadecimal digits — whether it is built or
+/// deserialized, and those digits are what the layer parses, so a hash of
+/// another algorithm never reaches a plan to be mapped to anything.
 pub(super) fn kernel_hash(hash: &norn_wire::ContentHash) -> norn_fs::ContentHash {
-    norn_fs::ContentHash::from_hex(hash.hex()).unwrap_or_else(|| norn_fs::ContentHash::of(b""))
+    norn_fs::ContentHash::from_hex(hash.hex()).expect("a wire hash spells a SHA-256 digest")
 }
 
 /// Which phase `unit` publishes in.
@@ -398,31 +457,35 @@ fn phase(plan: &ResolvedPlan, unit: Unit) -> Phase {
     }
 }
 
-/// `staged` in the order it publishes: creates, then replaces, then
+/// The order `units` publish in, by position: creates, then replaces, then
 /// removals; and among the replaces, every target a move draws its content
 /// from after the target it moves to, so no source is replaced before what
-/// draws on it landed. The planner refuses a cycle of content, so the order
-/// exists; within one phase the plan's own order breaks ties.
-fn in_publication_order(
+/// draws on it landed. Within one phase the plan's own order breaks ties.
+///
+/// **A cycle is refused**, as a content cycle: each of its sources would be
+/// replaced before a target drawing on it landed, so a crash between two of
+/// its publications would leave a content no re-send can recompose.
+/// [`recompose`] refuses the cycles planning refuses; this one closes through
+/// a name the plan makes and takes away again, such as two documents
+/// exchanging places through a third.
+fn publication_order(
     plan: &ResolvedPlan,
-    mut staged: Vec<StagedTarget>,
+    units: &[Unit],
+    phases: &[Phase],
     normalizer: &PathNormalizer,
-) -> Vec<StagedTarget> {
-    staged.sort_by_key(|target| target.phase);
+) -> Result<Vec<usize>, PlanFault> {
+    let mut by_phase: Vec<usize> = (0..units.len()).collect();
+    by_phase.sort_by_key(|&position| phases[position]);
     let index_of = transition_index(plan, normalizer);
-    let unit_of: BTreeMap<usize, usize> = staged
+    let unit_of: BTreeMap<usize, usize> = units
         .iter()
         .enumerate()
-        .flat_map(|(position, target)| {
-            target
-                .unit
-                .transitions()
-                .map(move |index| (index, position))
-        })
+        .flat_map(|(position, unit)| unit.transitions().map(move |index| (index, position)))
         .collect();
-    // Each staged position waits for the positions it must follow.
-    let mut waits: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for operation in &plan.operations {
+    // Each unit waits for the units it must follow, and the moves that make
+    // it wait.
+    let mut waits: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for (position, operation) in plan.operations.iter().enumerate() {
         let OperationKind::MoveDocument { from, to } = &operation.kind else {
             continue;
         };
@@ -434,32 +497,32 @@ fn in_publication_order(
         };
         let (source, destination) = (unit_of[from], unit_of[to]);
         if source != destination {
-            waits.entry(source).or_default().insert(destination);
+            waits
+                .entry(source)
+                .or_default()
+                .insert(destination, position);
         }
     }
     let mut placed: BTreeSet<usize> = BTreeSet::new();
-    let mut order: Vec<usize> = Vec::with_capacity(staged.len());
-    while order.len() < staged.len() {
-        let next = (0..staged.len())
-            .find(|position| {
-                !placed.contains(position)
-                    && waits
-                        .get(position)
-                        .is_none_or(|before| before.iter().all(|wait| placed.contains(wait)))
-            })
-            // A cycle the planner let through: publish in phase order rather
-            // than never.
-            .unwrap_or_else(|| {
-                (0..staged.len())
-                    .find(|position| !placed.contains(position))
-                    .expect("a position is left")
-            });
+    let mut order: Vec<usize> = Vec::with_capacity(units.len());
+    while order.len() < units.len() {
+        let Some(next) = by_phase.iter().copied().find(|position| {
+            !placed.contains(position)
+                && waits
+                    .get(position)
+                    .is_none_or(|before| before.keys().all(|wait| placed.contains(wait)))
+        }) else {
+            let mut cycle: Vec<usize> = waits
+                .iter()
+                .filter(|(waiting, _)| !placed.contains(waiting))
+                .flat_map(|(_, on)| on.values().copied())
+                .collect();
+            cycle.sort_unstable();
+            cycle.dedup();
+            return Err(PlanFault::content_cycle(cycle));
+        };
         placed.insert(next);
         order.push(next);
     }
-    let mut slots: Vec<Option<StagedTarget>> = staged.into_iter().map(Some).collect();
-    order
-        .into_iter()
-        .map(|position| slots[position].take().expect("each position is taken once"))
-        .collect()
+    Ok(order)
 }

@@ -2,7 +2,7 @@
 
 use norn_wire::{
     AppliedTarget, ApplyReport, ChangesetOutcome, ErrorDetail, ErrorEnvelope, FolderPath, Forecast,
-    InterruptionCause, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
+    InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
 };
 
 use norn_wire::DocumentPath;
@@ -12,14 +12,23 @@ use norn_wire::DocumentPath;
 /// **One variant per outcome the wire names, and every variant given after
 /// the plan was checked carries a resolved plan**, so a caller can always
 /// finish or retry by sending it back: the plan applied or interrupted, or
-/// the fresh plan a refusal resolved. Only a root-identity refusal carries
-/// none, because no plan resolved against another root applies here.
+/// the fresh plan a refusal resolved. Only a root-identity refusal and a plan
+/// whose own shape is wrong carry none: no plan resolved against another root
+/// applies here, and operations in a cycle are no plan at all.
 #[derive(Debug)]
 pub(crate) enum ApplyOutcome {
     /// Every target stands at its after-state.
     Applied(Applied),
     /// A check refused before anything was published.
     Refused(Box<Refused>),
+    /// The plan's transitions are not what its operations do from its
+    /// before-states, so nothing was published: answered with the operations
+    /// resolved afresh, which is what they do now.
+    Unsound(Box<Unsound>),
+    /// The operations' own shape is wrong: they draw content from each other
+    /// or require each other in a cycle, or an identifier is carried twice or
+    /// names no operation. Nothing was published.
+    Invalid(PlanFault),
     /// The plan was resolved against another root.
     RootChanged {
         /// The root identity the plan carries.
@@ -67,6 +76,22 @@ pub(crate) struct Refused {
     pub(crate) unresolved: Vec<UnresolvedOperation>,
 }
 
+/// A plan refused because its transitions are not what its operations do.
+///
+/// **The wire has no check naming this**, so it crosses as a refusal with no
+/// check and a message saying why, rather than as drift: no target drifted,
+/// and a drift mark would tell the caller a target may already carry the
+/// plan's change. The fresh plan resolves every operation afresh, since none
+/// of the plan's transitions can be trusted to say what landed.
+#[derive(Debug)]
+pub(crate) struct Unsound {
+    /// The operations resolved afresh, with nothing marked drifted and no
+    /// check.
+    pub(crate) refused: Refused,
+    /// What the plan claims that its operations do not do, in words.
+    pub(crate) detail: String,
+}
+
 /// An apply whose publication stopped after something landed.
 #[derive(Debug)]
 pub(crate) struct Interrupted {
@@ -104,6 +129,22 @@ impl ApplyOutcome {
                     refused.checks,
                     refused.unresolved,
                 ),
+            )),
+            ApplyOutcome::Unsound(unsound) => Err(ErrorEnvelope::new(
+                format!(
+                    "the plan's transitions are not what its operations do from its before-states, so nothing was published; the fresh plan is what they do now: {}",
+                    unsound.detail
+                ),
+                ErrorDetail::plan_refused(
+                    unsound.refused.plan,
+                    unsound.refused.forecast,
+                    unsound.refused.checks,
+                    unsound.refused.unresolved,
+                ),
+            )),
+            ApplyOutcome::Invalid(fault) => Err(ErrorEnvelope::new(
+                "the plan's operations are no plan: nothing was published",
+                ErrorDetail::plan_invalid(fault),
             )),
             ApplyOutcome::RootChanged { expected, found } => Err(ErrorEnvelope::new(
                 "the plan was resolved against another vault root",

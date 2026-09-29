@@ -47,6 +47,7 @@
 //!
 //! [ADR 0031]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md
 
+mod lineage;
 mod observe;
 mod outcome;
 mod publish;
@@ -140,6 +141,8 @@ impl Applier<'_> {
         ) {
             Ok(staged) => staged,
             Err(Stop::Refused(checks)) => return self.refuse(plan, checks),
+            Err(Stop::Unsound(detail)) => return self.refuse_unsound(plan, detail),
+            Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
         };
@@ -231,6 +234,15 @@ impl Applier<'_> {
     fn refuse(&self, plan: ResolvedPlan, checks: Vec<RefusedCheck>) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions) {
             Ok(view) => refresh::refuse_and_refresh(plan, &view, checks),
+            Err(error) => write_failed(plan, error.to_string()),
+        }
+    }
+
+    /// Refuse `plan`, which is not what its operations do, answering with
+    /// its operations resolved afresh.
+    fn refuse_unsound(&self, plan: ResolvedPlan, detail: String) -> ApplyOutcome {
+        match TreeView::open(self.anchor, self.exclusions) {
+            Ok(view) => refresh::refuse_unsound(plan, &view, detail),
             Err(error) => write_failed(plan, error.to_string()),
         }
     }

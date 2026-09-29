@@ -66,11 +66,17 @@ impl Publisher<'_> {
     ) -> (Progress, Option<Stopped>) {
         let mut progress = Progress::default();
         let mut removed: Vec<DocumentPath> = Vec::new();
-        let mut remaining = staged.targets.into_iter();
+        let StagedPlan { targets, stored } = staged;
+        let mut remaining = targets.into_iter();
         while let Some(target) = remaining.next() {
             let unit = target.unit;
             let phase = target.phase;
-            if let Err(stopped) = self.publish_one(plan, unit, target.held, &mut progress) {
+            let publishing = Publishing {
+                plan,
+                stored: &stored,
+                unit,
+            };
+            if let Err(stopped) = self.publish_one(&publishing, target.held, &mut progress) {
                 discard_all(self.anchor, self.shadows, remaining);
                 return (progress, Some(stopped));
             }
@@ -88,11 +94,11 @@ impl Publisher<'_> {
     /// Publish or confirm one unit.
     fn publish_one(
         &self,
-        plan: &ResolvedPlan,
-        unit: Unit,
+        publishing: &Publishing<'_>,
         held: Held,
         progress: &mut Progress,
     ) -> Result<(), Stopped> {
+        let Publishing { plan, unit, .. } = *publishing;
         let written = match unit {
             Unit::One(index) => index,
             Unit::Respell { new, .. } => new,
@@ -106,7 +112,7 @@ impl Publisher<'_> {
             Held::Landed(landed) => {
                 let confirmed = norn_fs::confirm_landed(self.anchor, &landed)
                     .map_err(|refusal| stopped(&refusal, written_path))?;
-                landed_whole(plan, unit, TargetResult::Found, progress);
+                publishing.landed_whole(TargetResult::Found, progress);
                 return durable(confirmed.durability, written_path);
             }
             Held::Staged(staged) => staged,
@@ -120,17 +126,20 @@ impl Publisher<'_> {
                 progress
                     .folders_made
                     .extend(published.made_folders.iter().cloned());
-                landed_whole(plan, unit, TargetResult::Wrote, progress);
+                publishing.landed_whole(TargetResult::Wrote, progress);
                 durable(published.durability, written_path)
             }
             Publication::Found(confirmed) => {
-                landed_whole(plan, unit, TargetResult::Found, progress);
+                publishing.landed_whole(TargetResult::Found, progress);
                 durable(confirmed.durability, written_path)
             }
             Publication::Interrupted(interrupted) => {
                 // The content landed under the old spelling and the rename did
                 // not: the ledger records the first step there, and the
-                // changeset carries it, or the store goes stale.
+                // changeset carries it, or the store goes stale. Only the
+                // kernel's respell publishes in two steps, and staging asks
+                // for one only for a respell unit, which the recomposition
+                // proved is a case-only rename its operations make.
                 let Unit::Respell { old, new } = unit else {
                     unreachable!("only a respell publishes in two steps");
                 };
@@ -139,7 +148,7 @@ impl Publisher<'_> {
                     .published(Path::new(old_path.as_str()), &interrupted.published);
                 if let FileState::Present { hash } = &plan.transitions[new].after {
                     progress.effects.push(PlanEffect {
-                        path: store_path(old_path),
+                        path: publishing.stored[old].clone(),
                         holds: Some(kernel_hash(hash)),
                     });
                 }
@@ -172,19 +181,29 @@ impl Publisher<'_> {
     }
 }
 
-/// Record every transition of `unit` as landed, with `result`, and what each
-/// path now holds.
-fn landed_whole(plan: &ResolvedPlan, unit: Unit, result: TargetResult, progress: &mut Progress) {
-    for index in unit.transitions() {
-        let transition = &plan.transitions[index];
-        progress.results.push((index, result));
-        progress.effects.push(PlanEffect {
-            path: store_path(&transition.path),
-            holds: match &transition.after {
-                FileState::Present { hash } => Some(kernel_hash(hash)),
-                FileState::Absent {} => None,
-            },
-        });
+/// One unit being published, with what it needs of the staged plan.
+struct Publishing<'a> {
+    plan: &'a ResolvedPlan,
+    /// Each transition's path as the store names it, by index.
+    stored: &'a [norn_store::DocumentPath],
+    unit: Unit,
+}
+
+impl Publishing<'_> {
+    /// Record every transition of the unit as landed, with `result`, and
+    /// what each path now holds.
+    fn landed_whole(&self, result: TargetResult, progress: &mut Progress) {
+        for index in self.unit.transitions() {
+            let transition = &self.plan.transitions[index];
+            progress.results.push((index, result));
+            progress.effects.push(PlanEffect {
+                path: self.stored[index].clone(),
+                holds: match &transition.after {
+                    FileState::Present { hash } => Some(kernel_hash(hash)),
+                    FileState::Absent {} => None,
+                },
+            });
+        }
     }
 }
 
@@ -209,9 +228,4 @@ fn stopped(refusal: &norn_fs::Refusal, path: &DocumentPath) -> Stopped {
         Classified::RootReplaced => Stopped::RootReplaced,
         Classified::Io(detail) => Stopped::Io(detail),
     }
-}
-
-/// A plan's path as the store spells it: the same grammar, read again.
-fn store_path(path: &DocumentPath) -> norn_store::DocumentPath {
-    norn_store::DocumentPath::new(path.as_str()).expect("a plan's path is a document path")
 }

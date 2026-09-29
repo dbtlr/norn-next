@@ -694,8 +694,8 @@ fn each_publication_is_recorded_as_an_own_write_when_it_lands() {
 
 /// The kernel keeps a staged path as it was given, a leading `./` included,
 /// and a document path's grammar admits one: a plan naming a target so, as a
-/// hand-edited plan can, is refused before anything is staged, and the fresh
-/// plan spells the target once. So nothing is published, recorded or derived
+/// hand-edited plan can, is refused as a plan that does not describe its
+/// operations, never as drift, and the fresh plan spells the target once. So nothing is published, recorded or derived
 /// at a second spelling of one file.
 #[test]
 fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
@@ -718,10 +718,17 @@ fn a_target_spelled_with_a_dot_component_is_refused_and_spelled_once_afresh() {
 
     let mut plan = fixture.plan(vec![creating("new.md", "n\n")]);
     plan.transitions[0].path = path("./new.md");
-    let refused = refused(fixture.apply(plan));
-    assert_eq!(refused.plan.transitions[0].path, path("new.md"));
-    assert!(fixture.recorded.calls.borrow().is_empty());
+    let refused = fixture.refuses_unsound(plan);
+    assert_eq!(refused.refused.plan.transitions[0].path, path("new.md"));
     assert_eq!(fixture.tree(), vec!["a.md"]);
+
+    // A removal spelled so is refused the same way, and not as drift: the
+    // document stands, holding its before-state.
+    let mut plan = fixture.plan(vec![deleting("a.md")]);
+    plan.transitions[0].path = path("./a.md");
+    plan.operations[0] = deleting("./a.md");
+    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("a\n"));
 }
 
 /// **Mark invariance.** The same changes committed marked composed and marked
@@ -967,4 +974,320 @@ fn each_outcome_crosses_under_its_wire_code() {
         }),
         (ReasonCode::VaultWriteFailed, true)
     );
+}
+
+pub(super) fn unsound(outcome: ApplyOutcome) -> super::outcome::Unsound {
+    match outcome {
+        ApplyOutcome::Unsound(unsound) => *unsound,
+        other => panic!("the plan is refused as unsound: {other:?}"),
+    }
+}
+
+impl Fixture {
+    /// Apply `plan`, which does not describe its operations, and hold that it
+    /// is refused as unsound with nothing published: no name changed, no
+    /// content changed, no write recorded, no shadow left, and no target
+    /// marked drifted.
+    fn refuses_unsound(&mut self, plan: ResolvedPlan) -> super::outcome::Unsound {
+        let before: Vec<(String, Option<String>)> = self
+            .tree()
+            .into_iter()
+            .map(|name| {
+                let content = self.read(&name);
+                (name, content)
+            })
+            .collect();
+        let refused = unsound(self.apply(plan));
+        let after: Vec<(String, Option<String>)> = self
+            .tree()
+            .into_iter()
+            .map(|name| {
+                let content = self.read(&name);
+                (name, content)
+            })
+            .collect();
+        assert_eq!(after, before, "nothing was published");
+        assert!(self.recorded.calls.borrow().is_empty(), "no write recorded");
+        assert!(self.shadows_left().is_empty(), "{:?}", self.shadows_left());
+        assert!(
+            refused.refused.checks.is_empty(),
+            "{:?}",
+            refused.refused.checks
+        );
+        assert!(
+            refused.refused.forecast.drifted.is_empty(),
+            "no target drifted: {:?}",
+            refused.refused.forecast.drifted
+        );
+        refused
+    }
+}
+
+/// A move whose destination's transition is taken out of the plan would
+/// only remove its document: refused, and the document stays.
+#[test]
+fn a_move_whose_destination_transition_is_dropped_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let mut plan = fixture.plan(vec![moving("a.md", "b.md")]);
+    plan.transitions
+        .retain(|transition| transition.path != path("b.md"));
+    let refused = fixture.refuses_unsound(plan);
+    assert_eq!(
+        refused.refused.plan.operations,
+        vec![moving("a.md", "b.md")]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+}
+
+/// A removal no operation makes, added to a plan, is refused.
+#[test]
+fn an_extra_removal_no_operation_makes_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("c.md", "# C\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions.push(norn_wire::Transition::new(
+        path("c.md"),
+        present("# C\n"),
+        norn_wire::FileState::absent(),
+    ));
+    fixture.refuses_unsound(plan);
+}
+
+/// An edit whose after-state is changed to absence would remove its
+/// document: refused.
+#[test]
+fn an_edit_whose_after_state_is_made_absent_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions[0].after = norn_wire::FileState::absent();
+    fixture.refuses_unsound(plan);
+}
+
+/// A target named by two transitions is refused, whatever they say.
+#[test]
+fn a_target_named_twice_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions.push(plan.transitions[0].clone());
+    fixture.refuses_unsound(plan);
+}
+
+/// A plan missing the transition of a file an operation writes is refused:
+/// here a create whose target was taken out.
+#[test]
+fn a_plan_missing_a_transition_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        creating("n.md", "# N\n"),
+    ]);
+    plan.transitions
+        .retain(|transition| transition.path != path("n.md"));
+    fixture.refuses_unsound(plan);
+}
+
+/// An edit whose after-state is changed to its before-state would answer
+/// found and write nothing, as if the edit had landed: refused.
+#[test]
+fn an_edit_whose_after_state_is_its_before_state_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.transitions[0].after = plan.transitions[0].before.clone();
+    let refused = fixture.refuses_unsound(plan);
+    assert_eq!(
+        refused.refused.plan.transitions,
+        vec![norn_wire::Transition::new(
+            path("a.md"),
+            present("draft\n"),
+            present("final\n")
+        )],
+        "the fresh plan is what the edit does"
+    );
+}
+
+impl Fixture {
+    /// A resolved plan written by hand: `operations` and `transitions` as
+    /// given, under this vault's root, with no condition.
+    pub(super) fn by_hand(
+        &self,
+        operations: Vec<Operation>,
+        transitions: Vec<norn_wire::Transition>,
+    ) -> ResolvedPlan {
+        let name = VaultName::new("notes").expect("a legal vault name");
+        ResolvedPlan::new(
+            VaultAddress::name(name),
+            self.root_identity(),
+            operations,
+            transitions,
+            Vec::new(),
+        )
+    }
+}
+
+/// A create at a place the vault does not read documents at — the shadow
+/// fallback beneath `.norn`, or a root the host excludes — is refused whatever
+/// its before-state says, and nothing is made there; so is a removal there.
+#[test]
+fn a_target_where_the_vault_reads_no_documents_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "a\n")]);
+    fixture.write("private/p.md", "# P\n");
+    fixture.exclusions.push(PathBuf::from("private"));
+    for at in [".norn/tmp/x.md", "private/x.md"] {
+        let plan = fixture.by_hand(
+            vec![creating(at, "# X\n")],
+            vec![norn_wire::Transition::new(
+                path(at),
+                norn_wire::FileState::absent(),
+                present("# X\n"),
+            )],
+        );
+        let refused = fixture.refuses_unsound(plan);
+        assert_eq!(refused.refused.unresolved.len(), 1, "{at}");
+        assert!(fixture.read(at).is_none(), "{at}: nothing is made there");
+    }
+    let plan = fixture.by_hand(
+        vec![deleting("private/p.md")],
+        vec![norn_wire::Transition::new(
+            path("private/p.md"),
+            present("# P\n"),
+            norn_wire::FileState::absent(),
+        )],
+    );
+    fixture.refuses_unsound(plan);
+    assert_eq!(fixture.read("private/p.md").as_deref(), Some("# P\n"));
+}
+
+/// Two documents exchanging places is a content cycle: a plan carrying one
+/// is no plan, and nothing is published.
+#[test]
+fn a_plan_whose_moves_exchange_two_documents_is_invalid() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
+    let plan = fixture.by_hand(
+        vec![moving("a.md", "b.md"), moving("b.md", "a.md")],
+        vec![
+            norn_wire::Transition::new(path("a.md"), present("# A\n"), present("# B\n")),
+            norn_wire::Transition::new(path("b.md"), present("# B\n"), present("# A\n")),
+        ],
+    );
+    match fixture.apply(plan) {
+        ApplyOutcome::Invalid(norn_wire::PlanFault::ContentCycle { .. }) => {}
+        other => panic!("the plan is invalid as a content cycle: {other:?}"),
+    }
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+    assert_eq!(fixture.read("b.md").as_deref(), Some("# B\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert!(fixture.shadows_left().is_empty());
+}
+
+/// Two documents exchanging places through a third name the plan makes and
+/// takes away is the same content cycle: each draws on the other's
+/// before-state, so neither can publish first without destroying what the
+/// other needs. The planner orders these moves without finding the cycle, so
+/// the applier is where it is refused.
+#[test]
+fn a_plan_exchanging_two_documents_through_a_third_name_is_invalid() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
+    let plan = fixture.plan(vec![
+        moving("a.md", "t.md"),
+        moving("b.md", "a.md"),
+        moving("t.md", "b.md"),
+    ]);
+    assert_eq!(
+        plan.transitions,
+        vec![
+            norn_wire::Transition::new(path("a.md"), present("# A\n"), present("# B\n")),
+            norn_wire::Transition::new(path("b.md"), present("# B\n"), present("# A\n")),
+            norn_wire::Transition::new(
+                path("t.md"),
+                norn_wire::FileState::absent(),
+                norn_wire::FileState::absent(),
+            ),
+        ]
+    );
+    match fixture.apply(plan) {
+        ApplyOutcome::Invalid(norn_wire::PlanFault::ContentCycle { positions, .. }) => {
+            assert_eq!(positions, vec![0, 1, 2]);
+        }
+        other => panic!("the plan is invalid as a content cycle: {other:?}"),
+    }
+    assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+    assert_eq!(fixture.read("b.md").as_deref(), Some("# B\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert!(fixture.shadows_left().is_empty());
+}
+
+/// A plan whose recorded operation order is not one its requirements allow
+/// is refused: the order it composes in is the recorded one, and it must be
+/// an order the operations can run in.
+#[test]
+fn a_plan_recorded_out_of_its_requirements_order_is_refused() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
+    let mut plan = fixture.plan(vec![moving("a.md", "b.md"), moving("b.md", "c.md")]);
+    // Planned as `b → c` then `a → b`; recorded the other way round, the
+    // move onto `b.md` meets its document still standing.
+    plan.operations.reverse();
+    fixture.refuses_unsound(plan);
+}
+
+/// A target at a path the store cannot name — a leaf whose stem is `.`, a
+/// name carrying a backslash — is refused before anything is staged. A
+/// removal there was published and then, with no path to record it at,
+/// panicked the apply.
+#[test]
+fn a_target_the_store_cannot_name_is_refused() {
+    for at in ["..md", "x\\y.md"] {
+        let mut fixture = Fixture::new(&[("a.md", "a\n")]);
+        fixture.write(at, "gone\n");
+        let plan = fixture.by_hand(
+            vec![deleting(at)],
+            vec![norn_wire::Transition::new(
+                path(at),
+                present("gone\n"),
+                norn_wire::FileState::absent(),
+            )],
+        );
+        fixture.refuses_unsound(plan);
+        assert_eq!(fixture.read(at).as_deref(), Some("gone\n"), "{at}");
+    }
+}
+
+/// A written document's schema is judged against the document its content
+/// came from: a create writes content no document had, so a violation it
+/// writes refuses even where a document the plan removes carried the same
+/// one; a move's destination is judged against the moved document alone.
+#[test]
+fn a_result_is_judged_against_the_document_its_content_came_from() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[
+            ("old.md", "# Old\n#legacy\n"),
+            ("inbox/c.md", "# C\n#project\n"),
+        ],
+    );
+    let refused = refused(fixture.apply(fixture.plan(vec![
+        deleting("old.md"),
+        creating("new.md", "# New\n#legacy\n"),
+    ])));
+    assert_eq!(
+        refused
+            .checks
+            .iter()
+            .map(|check| match check {
+                norn_wire::RefusedCheck::SchemaViolation { path, target, .. } =>
+                    (path.as_str().to_string(), target.clone()),
+                other => panic!("a schema check: {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![("new.md".to_string(), Some("legacy".to_string()))]
+    );
+    let refused = refused_for(fixture.apply(fixture.plan(vec![
+        deleting("old.md"),
+        moving("inbox/c.md", "archive/c.md"),
+        editing("archive/c.md", "#project", "#project #legacy"),
+    ])));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(fixture.read("old.md").as_deref(), Some("# Old\n#legacy\n"));
+}
+
+fn refused_for(outcome: ApplyOutcome) -> Vec<norn_wire::RefusedCheck> {
+    refused(outcome).checks
 }
