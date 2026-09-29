@@ -770,3 +770,136 @@ fn a_changeset_reads_the_same_counters_marked_composed_or_derived() {
     );
     assert_eq!(composed, derived);
 }
+
+const BETWEEN_PHASES_CHILD: &str = "NORN_APPLIER_BETWEEN_PHASES_CHILD";
+
+/// **Plan memory.** Between staging and publication the applier holds the
+/// plan and one fixed-size record per target: no open handle, and none of the
+/// bytes of a document it rewrites, however large. The descriptor count is
+/// read in a child of its own, where no other case opens a file beside it.
+#[test]
+fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() {
+    if std::env::var_os(BETWEEN_PHASES_CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args([
+                "--exact",
+                "applier::tests::between_staging_and_publication_the_applier_holds_no_handle_and_no_content",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(BETWEEN_PHASES_CHILD, "1")
+            .output()
+            .expect("the child runs");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let large = format!("# Large\nstatus draft\n{}", "x".repeat(4 << 20));
+    let mut fixture = Fixture::new(&[("large.md", &large), ("b.md", "b\n")]);
+    let plan = fixture.plan(vec![
+        editing("large.md", "draft", "final"),
+        creating("new/c.md", "c\n"),
+        deleting("b.md"),
+    ]);
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
+    let before = norn_testkit::process::open_fd_count().expect("a count");
+    let staged = super::stage::check_and_stage(
+        &fixture.vault,
+        fixture.root,
+        &fixture.shadows,
+        &plan,
+        &view,
+        &declared,
+    )
+    .expect("the plan stages");
+    let between = norn_testkit::process::open_fd_count().expect("a count");
+    assert_eq!(between, before, "staging leaves no handle open");
+    assert_eq!(staged.targets.len(), 3);
+    let held = format!("{staged:?}");
+    assert!(
+        held.len() < 3 * 1024,
+        "the staged records hold no content: {} bytes of record",
+        held.len()
+    );
+    let publisher = super::publish::Publisher {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+    };
+    let (_, stopped) = publisher.publish(&plan, staged);
+    assert!(stopped.is_none(), "{stopped:?}");
+    assert!(
+        fixture
+            .read("large.md")
+            .expect("landed")
+            .contains("status final")
+    );
+}
+
+/// A changeset that cannot commit after every target landed answers applied,
+/// with the entry left to heal from what the paths hold.
+#[test]
+fn a_changeset_that_cannot_commit_after_every_target_landed_answers_applied_healing() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    norn_store::induced_failure::execute_out_of_band(
+        &mut fixture.store,
+        "CREATE TRIGGER refuse_every_write BEFORE UPDATE ON documents \
+         BEGIN SELECT RAISE(ABORT, 'induced'); END;",
+    )
+    .expect("the trigger lands");
+    let applied = applied(fixture.apply(plan));
+    assert_eq!(applied.changeset, norn_wire::ChangesetOutcome::Healing);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
+}
+
+/// Whether the scratch volume folds case, standing the case down where it
+/// does not (and failing it on macOS, whose volume folds).
+pub(super) fn volume_folds(case: &str) -> bool {
+    let scratch = Scratch::new("applier-folding");
+    let folding = norn_testkit::churn::folding(scratch.root()).expect("the volume answers");
+    norn_testkit::churn::runs_where_the_volume_folds(folding, case)
+}
+
+/// On a root that folds case, a case-only rename — with an edit composed
+/// into it — publishes as the kernel's one respell: the document stands at
+/// its new spelling only, the rename is recorded once, at the new spelling,
+/// and the store holds the document there alone.
+#[test]
+fn a_case_only_rename_on_a_folding_root_publishes_as_one_respell() {
+    if !volume_folds("a_case_only_rename_on_a_folding_root_publishes_as_one_respell") {
+        return;
+    }
+    let mut fixture = Fixture::new(&[("Note.md", "# Note\ndraft\n")]);
+    let plan = fixture.plan(vec![
+        editing("Note.md", "draft", "final"),
+        moving("Note.md", "note.md"),
+    ]);
+    let respelled = applied(fixture.apply(plan.clone()));
+    assert_eq!(
+        results(&respelled),
+        vec![
+            ("Note.md".to_string(), TargetResult::Wrote),
+            ("note.md".to_string(), TargetResult::Wrote),
+        ]
+    );
+    assert_eq!(fixture.tree(), vec!["note.md"]);
+    assert_eq!(fixture.read("note.md").as_deref(), Some("# Note\nfinal\n"));
+    assert_eq!(
+        *fixture.recorded.calls.borrow(),
+        vec![(PathBuf::from("note.md"), true)]
+    );
+    fixture.assert_store_is_a_build_from_zero();
+    let again = applied(fixture.apply(plan));
+    assert!(
+        again
+            .targets
+            .iter()
+            .all(|target| target.result == TargetResult::Found)
+    );
+}

@@ -300,3 +300,58 @@ fn a_staging_failure_writes_nothing_and_answers_write_failed() {
         fixture.shadows_left()
     );
 }
+
+/// On a root that folds case, a respell that dies at either of its steps is
+/// finished by a re-send; one whose rename fails after its content landed is
+/// interrupted, and the changeset carries that first step at the old
+/// spelling, which is where the own-write ledger recorded it.
+#[test]
+fn a_respell_cut_short_at_either_step_is_finished_and_its_first_step_is_committed() {
+    if !super::tests::volume_folds(
+        "a_respell_cut_short_at_either_step_is_finished_and_its_first_step_is_committed",
+    ) {
+        return;
+    }
+    let respelled = || {
+        let fixture = Fixture::new(&[("Note.md", "# Note\ndraft\n")]);
+        let plan = fixture.plan(vec![
+            editing("Note.md", "draft", "final"),
+            moving("Note.md", "note.md"),
+        ]);
+        (fixture, plan)
+    };
+    for armed in ["swap@1=ends", "respell@1=ends", "parent-sync@1=ends"] {
+        let (mut fixture, plan) = respelled();
+        let child = run_child(&fixture, &plan, armed);
+        assert!(!child.hits.is_empty(), "{armed}: the arm fired");
+        assert!(!child.lived, "{armed}");
+        applied(fixture.apply(plan));
+        assert_eq!(fixture.tree(), vec!["note.md"], "{armed}");
+        assert_eq!(fixture.read("note.md").as_deref(), Some("# Note\nfinal\n"));
+        fixture.assert_store_is_a_build_from_zero();
+    }
+
+    let (fixture, plan) = respelled();
+    let child = run_child(&fixture, &plan, "respell@1=fails");
+    assert!(child.lived);
+    let ErrorDetail::PlanInterrupted { landed, .. } = envelope(&child).detail() else {
+        panic!("the respell is interrupted: {:?}", child.outcome);
+    };
+    assert!(landed.is_empty(), "neither spelling is at its after-state");
+    let mut store = norn_store::Store::open(
+        fixture.data.join("child.sqlite3"),
+        norn_store::StoredPathOrder::AsciiCaseInsensitive,
+        crate::DERIVATION_VERSION,
+    )
+    .expect("the child's store");
+    let row = store
+        .begin_request()
+        .stored_document(&norn_store::DocumentPath::new("Note.md").expect("a path"))
+        .expect("a read")
+        .expect("the old spelling's row");
+    assert_eq!(
+        row.content_hash,
+        norn_fs::ContentHash::of(b"# Note\nfinal\n").to_string(),
+        "the changeset carries the first step"
+    );
+}
