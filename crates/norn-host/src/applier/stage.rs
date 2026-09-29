@@ -2,7 +2,8 @@
 //! composed result's schema, and a shadow for every written target, before
 //! anything is published.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -484,6 +485,12 @@ fn phase(plan: &ResolvedPlan, unit: Unit) -> Phase {
 /// **Always an order.** Each file draws on at most one other, and
 /// [`recompose`] refuses a plan whose drawing closes a cycle through the
 /// planner's one content-cycle rule, so what is left to order has no cycle.
+///
+/// **`O(n log n)` in units.** The units whose waits are all placed stand in
+/// one queue ranked by phase, then position; each is placed once, and each
+/// wait is released once, when the target it waits for is placed. So the
+/// next unit placed is always the first ready one in phase order, the same
+/// order a scan from the start would find.
 fn publication_order(
     plan: &ResolvedPlan,
     units: &[Unit],
@@ -493,6 +500,10 @@ fn publication_order(
 ) -> Vec<usize> {
     let mut by_phase: Vec<usize> = (0..units.len()).collect();
     by_phase.sort_by_key(|&position| phases[position]);
+    let mut rank = vec![0; units.len()];
+    for (ranked, &position) in by_phase.iter().enumerate() {
+        rank[position] = ranked;
+    }
     let index_of = transition_index(plan, normalizer);
     let unit_of: BTreeMap<usize, usize> = units
         .iter()
@@ -500,31 +511,128 @@ fn publication_order(
         .flat_map(|(position, unit)| unit.transitions().map(move |index| (index, position)))
         .collect();
     // Each source's unit waits for the units of the targets drawing on it.
-    let mut waits: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    let mut waits: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (file, drawn) in lineage.drawing() {
         let (Some(target), Some(source)) = (index_of.get(file), index_of.get(&drawn.from)) else {
             continue;
         };
         let (target, source) = (unit_of[target], unit_of[source]);
         if source != target {
-            waits.entry(source).or_default().insert(target);
+            waits.insert((source, target));
         }
     }
-    let mut placed: BTreeSet<usize> = BTreeSet::new();
-    let mut order: Vec<usize> = Vec::with_capacity(units.len());
-    while order.len() < units.len() {
-        let next = by_phase
-            .iter()
-            .copied()
-            .find(|position| {
-                !placed.contains(position)
-                    && waits
-                        .get(position)
-                        .is_none_or(|before| before.iter().all(|wait| placed.contains(wait)))
-            })
-            .expect("recomposition refused every content cycle");
-        placed.insert(next);
-        order.push(next);
+    let mut waiting = vec![0usize; units.len()];
+    let mut released: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
+    for &(source, target) in &waits {
+        waiting[source] += 1;
+        released[target].push(source);
     }
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..units.len())
+        .filter(|&position| waiting[position] == 0)
+        .map(|position| Reverse(rank[position]))
+        .collect();
+    let mut order: Vec<usize> = Vec::with_capacity(units.len());
+    while let Some(Reverse(ranked)) = ready.pop() {
+        count_order_step();
+        let next = by_phase[ranked];
+        order.push(next);
+        for &source in &released[next] {
+            count_order_step();
+            waiting[source] -= 1;
+            if waiting[source] == 0 {
+                ready.push(Reverse(rank[source]));
+            }
+        }
+    }
+    assert_eq!(
+        order.len(),
+        units.len(),
+        "recomposition refused every content cycle"
+    );
     order
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many steps ordering publication has taken on this thread: each
+    /// unit placed and each wait released. The count, not the clock, is what
+    /// shows a plan's order costs a bounded amount of work per target.
+    static ORDER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_order_step() {
+    ORDER_STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_order_step() {}
+
+#[cfg(test)]
+mod tests {
+    use norn_wire::{
+        DocumentPath, FileState, Operation, OperationKind, ResolvedPlan, RootIdentity, Transition,
+        VaultAddress, VaultName,
+    };
+
+    use super::super::observe::{recorded_lineage, units};
+    use super::{ORDER_STEPS, phase, publication_order};
+    use crate::planner::compose::content_hash;
+    use crate::planner::view::VaultView;
+    use crate::planner::view::memory::MemoryVault;
+
+    fn path(text: &str) -> DocumentPath {
+        DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// Ordering a plan's publication costs a bounded number of steps per
+    /// target, however many targets it has: a vault-wide plan reaches its
+    /// first publication without a pass over every target per target placed.
+    /// Here every move's destination draws on its source, so every source
+    /// waits.
+    #[test]
+    fn ordering_publication_takes_a_bounded_number_of_steps_per_target() {
+        const MOVES: usize = 5_000;
+        let vault = MemoryVault::with(&[]);
+        let normalizer = VaultView::normalizer(&vault);
+        let mut operations = Vec::with_capacity(MOVES);
+        let mut transitions = Vec::with_capacity(2 * MOVES);
+        for move_at in 0..MOVES {
+            let (from, to) = (format!("a/{move_at}.md"), format!("b/{move_at}.md"));
+            let hash = FileState::present(content_hash(from.as_bytes()));
+            operations.push(Operation::new(OperationKind::move_document(
+                path(&from),
+                path(&to),
+            )));
+            transitions.push(Transition::new(
+                path(&from),
+                hash.clone(),
+                FileState::absent(),
+            ));
+            transitions.push(Transition::new(path(&to), FileState::absent(), hash));
+        }
+        let plan = ResolvedPlan::new(
+            VaultAddress::name(VaultName::new("notes").expect("a legal vault name")),
+            RootIdentity::from_device_and_inode(1, 2),
+            operations,
+            transitions,
+            Vec::new(),
+        );
+        let units = units(&plan, normalizer);
+        let phases: Vec<_> = units.iter().map(|unit| phase(&plan, *unit)).collect();
+        let lineage = recorded_lineage(&plan, normalizer);
+        ORDER_STEPS.with(|steps| steps.set(0));
+        let order = publication_order(&plan, &units, &phases, &lineage, normalizer);
+        let steps = ORDER_STEPS.with(std::cell::Cell::get);
+        assert_eq!(order.len(), 2 * MOVES);
+        assert!(
+            order.iter().take(MOVES).all(|&position| position % 2 == 1),
+            "every destination publishes before any source is removed"
+        );
+        assert!(
+            steps <= 4 * order.len(),
+            "{steps} steps to order {} targets",
+            order.len()
+        );
+    }
 }
