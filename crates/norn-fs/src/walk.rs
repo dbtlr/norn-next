@@ -144,6 +144,13 @@ impl Vault {
         self.normalizer.case_sensitivity()
     }
 
+    /// The identity rule this root proved when the vault was opened: the
+    /// one producer of this root's normalized path identities for a caller
+    /// deciding names against it.
+    pub fn normalizer(&self) -> &PathNormalizer {
+        &self.normalizer
+    }
+
     /// What this vault's walk finds at `relative`: the notation it states in
     /// place of reaching that name, or the kind standing at the end of it.
     ///
@@ -258,6 +265,44 @@ impl Vault {
             },
             at: self.traversed(&listed),
         })
+    }
+
+    /// The name of every entry directly inside the folder at `relative`,
+    /// whatever its kind, or `None` where the walk reaches no folder there.
+    ///
+    /// **The folder is reached the way [`reach`](Self::reach) reaches a
+    /// name**: an excluded root covering it, and a name above or at it the
+    /// walk does not descend through — a shadow basename, a symbolic link, an
+    /// entry that is not a directory, a spelling the tree does not list — hold
+    /// no folder, and neither does a missing name. What it lists is the
+    /// directory's own names as the directory renders them, each once and in
+    /// no promised order, with nothing skipped: a caller asking whether a
+    /// folder would be empty counts a shadow or an excluded entry inside it as
+    /// something that keeps it standing.
+    #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
+    pub fn folder_names(&self, relative: &Path) -> Result<Option<Vec<OsString>>, WalkError> {
+        let folder = self.normalize(relative)?;
+        if self.exclusions.covering_root(&folder).is_some() {
+            return Ok(None);
+        }
+        let Descent::Reached { directory, .. } = self.descend(folder.as_path())? else {
+            return Ok(None);
+        };
+        let access = self.root.join(folder.as_path());
+        let entries = Dir::read_from(&directory)
+            .map_err(|source| environment_errno("reading directory", &access, source))?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|source| environment_errno("reading entry in", &access, source))?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            crate::reads::count_dirents(1);
+            names.push(OsStr::from_bytes(name).to_owned());
+        }
+        Ok(Some(names))
     }
 
     /// Descends `names` from this vault's root, deciding each name the way the
@@ -3162,6 +3207,65 @@ mod tests {
         );
         assert_eq!(skip("dir/plain.md"), None, "a file the walk reads");
         assert_eq!(skip("dir"), None, "a directory the walk enters");
+    }
+
+    /// **A vault hands out the identity rule its root proved**, so a caller
+    /// producing that root's identities never states a case behavior itself.
+    #[test]
+    fn a_vault_s_normalizer_names_identities_under_the_behavior_its_root_proved() {
+        let scratch = Scratch::new("vault-normalizer");
+        scratch.place("Note.md", b"n");
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        let proved = PathNormalizer::detect(&scratch.at("")).expect("a provable root");
+        assert_eq!(
+            vault.normalizer().case_sensitivity(),
+            proved.case_sensitivity()
+        );
+        assert_eq!(
+            vault.normalizer().normalize(Path::new("./Note.md")),
+            proved.normalize(Path::new("Note.md"))
+        );
+    }
+
+    /// **A folder lists every name directly inside it, whatever its kind**, and
+    /// a path the walk reaches no folder at lists nothing: a missing name, a
+    /// document, a name beneath a document, one under a symbolic link and one
+    /// under an excluded root.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a link.
+    fn a_folder_lists_every_name_directly_inside_it() {
+        let scratch = Scratch::new("vault-folder-names");
+        scratch.directory("vault/dir/sub/deep");
+        scratch.directory("vault/dir/empty");
+        scratch.directory("vault/excluded");
+        scratch.place("dir/a.md", b"a");
+        scratch.place("dir/sub/deep/b.md", b"b");
+        scratch.place("excluded/c.md", b"c");
+        std::os::unix::fs::symlink("../excluded", scratch.at("dir/link")).expect("link");
+
+        let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
+        let names = |relative: &str| {
+            vault
+                .folder_names(Path::new(relative))
+                .expect("a decided folder")
+                .map(|mut names| {
+                    names.sort();
+                    names
+                })
+        };
+        let os = |names: &[&str]| names.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            names("dir"),
+            Some(os(&["a.md", "empty", "link", "sub"])),
+            "a folder's own names, one level deep"
+        );
+        assert_eq!(names("dir/empty"), Some(Vec::new()), "an empty folder");
+        assert_eq!(names("dir/sub"), Some(os(&["deep"])), "a folder of folders");
+        assert_eq!(names("dir/gone"), None, "a missing name");
+        assert_eq!(names("dir/a.md"), None, "a document");
+        assert_eq!(names("dir/a.md/under"), None, "a name beneath a document");
+        assert_eq!(names("dir/link"), None, "a symbolic link");
+        assert_eq!(names("excluded"), None, "an excluded root");
     }
 
     /// **A name the walk never descends to stands at nothing, for every
