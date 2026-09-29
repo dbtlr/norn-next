@@ -2400,7 +2400,9 @@ bound by the applier's lifecycle tests.
 - **Admission refuses only for a cause.** `Host::apply` raises the demand a read's hold
   raises, under ADR 0030's chain, and refuses at once with the code a read would carry where
   the entry stands on a cause: a park, withheld or lost trust, damaged derived state, an
-  unknown vault, or a registration change holding the entry. Everywhere else it queues the
+  unknown vault, or a registration change holding the entry. Over an entry that serves reads
+  with no reader standing, it asks for the reader again as a read does, and refuses with
+  `host/reader-unavailable` where that fails too. Everywhere else it queues the
   apply at once and returns a `PendingApply`, with no settle wait: over an entry taking in a
   change, the apply's own intake derives those facts; over an entry that is unattached,
   attaching from unattached, or releasing for idleness, the apply waits behind the attach its

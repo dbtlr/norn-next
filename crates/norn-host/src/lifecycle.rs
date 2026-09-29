@@ -1380,6 +1380,16 @@ struct ReadMint<R> {
     statements: u64,
 }
 
+/// What an apply's admission re-mint left: what the mint ran under the
+/// entry gate, and why no reader stands where it left the slot empty.
+struct AdmissionMint {
+    /// Statements the mint ran, and zero where there was nothing to mint.
+    statements: u64,
+    /// The reason a read over the entry would be refused with, where the
+    /// entry serves reads and still holds no handle.
+    refusal: Option<ReaderUnavailable>,
+}
+
 /// What a read does about an entry, read under the entry gate in the same
 /// critical section that reads the published demand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1758,6 +1768,36 @@ impl<A: SnapshotSource> EntryState<A> {
         ReadMint {
             handle: self.reader.as_ref().map(Arc::clone),
             statements,
+        }
+    }
+
+    /// Mint this entry's handle again for an apply's admission, as
+    /// [`EntryState::remint_for_a_read`] mints it for a read, and say why no
+    /// reader stands where the mint left the slot empty.
+    ///
+    /// **Admission does what a read does over the same entry**: an apply
+    /// runs only over a standing reader, so an entry serving reads with an
+    /// empty slot — a mint that met the environment and lost — is one no
+    /// later publication would mint for, and a queued apply would wait on it
+    /// for ever. Over an entry a read would refuse, and over coverage out
+    /// with a leg, nothing is minted and nothing refused here: the work the
+    /// entry owes, or the leg's own give-back, is what mints.
+    fn remint_for_an_apply(&mut self) -> AdmissionMint {
+        if self.read_stance() == ReadStance::Refuse || self.coverage.held().is_none() {
+            return AdmissionMint {
+                statements: 0,
+                refusal: None,
+            };
+        }
+        let minted = self.remint_for_a_read();
+        let refusal = minted.handle.is_none().then(|| {
+            self.reader_unavailable.clone().unwrap_or_else(|| {
+                ReaderUnavailable::new("this entry's coverage holds no read handle")
+            })
+        });
+        AdmissionMint {
+            statements: minted.statements,
+            refusal,
         }
     }
 
@@ -4834,8 +4874,11 @@ impl<O: EntryOps> Host<O> {
     /// holds nothing or holds untrusted coverage (ADR 0030). It then refuses at
     /// once, with the code a read would carry, only where the entry stands on
     /// a cause: out of service, parked, untrusted — trust withheld or lost,
-    /// damage published — or holding damage a read carried to a claim. The
-    /// demand goes back with the refusal.
+    /// damage published — or holding damage a read carried to a claim. Over
+    /// an entry serving reads with no handle standing, it asks for the mint
+    /// again as a read does, and refuses with the reader unavailable where
+    /// that mint fails too: an apply runs only over a reader, and nothing
+    /// else would mint one. The demand goes back with the refusal.
     ///
     /// Everywhere else the apply is queued at once, its demand standing
     /// until the job running it takes it off the queue, and nothing here
@@ -4875,7 +4918,13 @@ impl<O: EntryOps> Host<O> {
                     .answer(name),
                 )
             } else {
-                None
+                let minted = state.remint_for_an_apply();
+                self.shared
+                    .reads
+                    .count_mint_under_the_gate(minted.statements, minted.statements);
+                minted
+                    .refusal
+                    .map(|unavailable| ReadRefusal::ReaderUnavailable(unavailable).answer(name))
             };
             let awaits_a_change = state.recovery_awaits_a_change();
             let recovery_demand = record_demand(&mut state, !awaits_a_change);

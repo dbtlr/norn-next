@@ -1200,3 +1200,48 @@ fn a_publishing_apply_finishes_its_publication_and_changeset_before_its_leg_ends
     .unwrap_or_else(|failure| panic!("{failure}"));
     drop((lease, host));
 }
+
+/// **Admission over a `Ready` entry whose mint failed does what a read does
+/// there: it asks for the mint again.** The entry serves every surface but
+/// its read seam, and nothing it publishes afterwards would mint, so an
+/// apply queued to wait for a reader would wait for ever. A mint that now
+/// succeeds lets the apply take the claim and run.
+#[test]
+fn an_apply_over_a_ready_entry_whose_mint_failed_mints_the_reader_as_a_read_would() {
+    let ops = Arc::new(FakeOps::default());
+    ops.reader_mint_fails.store(true, Ordering::SeqCst);
+    let (host, name, lease) = a_ready_vault(&ops);
+    ops.reader_mint_fails.store(false, Ordering::SeqCst);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    for _ in 0..3 {
+        dispatcher_tick(&host.shared, Instant::now());
+    }
+    applied(answer_of(pending));
+    drop((lease, host));
+}
+
+/// **And where that mint fails again, admission refuses with the code a
+/// read would carry**: the reader is unavailable, for the reason the mint
+/// gave, and nothing is queued.
+#[test]
+fn an_apply_over_a_ready_entry_whose_mint_fails_again_is_refused_as_a_read_would_be() {
+    let ops = Arc::new(FakeOps::default());
+    ops.reader_mint_fails.store(true, Ordering::SeqCst);
+    let (host, name, lease) = a_ready_vault(&ops);
+
+    let refused = host
+        .admit_apply(&name, a_plan(&name))
+        .expect_err("an apply over an entry no reader can serve was admitted");
+    assert_eq!(
+        refused,
+        ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+            "this coverage mints no read handle"
+        ))
+        .answer(&name)
+    );
+    let state = host.shared.entries.get(&name).unwrap();
+    assert!(state.gate.lock().unwrap().applies.is_empty());
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    drop((lease, host));
+}
