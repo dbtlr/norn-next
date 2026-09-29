@@ -2370,8 +2370,9 @@ operations carry checked. A plan that fails this is not what its operations do: 
 drifted, since the wire names no check for it and no target drifted. A source is not
 replaced or removed until every other target drawing content from it has durably landed,
 and a plan whose content dependencies form a cycle is refused at planning; the applier
-refuses one as `request/plan-invalid` too, a cycle closed through a name the plan makes
-and removes again among them. Each condition is recorded
+refuses one as `request/plan-invalid` too, by the planner's one content-cycle rule over
+the plan's recorded order, a cycle closed through a name the plan makes and removes again
+among them. Each condition is recorded
 and checked as the vault would stand with every target of the plan at its after-state,
 after taking in the facts the watcher has delivered, so a plan's own progress never
 changes one.
