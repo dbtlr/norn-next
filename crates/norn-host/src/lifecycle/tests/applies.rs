@@ -1375,3 +1375,54 @@ fn the_hosts_destruction_over_an_idle_detach_answers_the_queue_at_once() {
     destroyed.join().expect("the host was destroyed");
     assert!(ops.applies_ran.lock().unwrap().is_empty());
 }
+
+/// **Damage a read carries to an apply's claim before its job runs is
+/// published with its rebuild when the job arrives, and the apply is
+/// answered not applied with it.** The apply takes the free claim at
+/// admission, and its job waits in the channel behind the one worker another
+/// vault's attach holds. A read meets damage meanwhile and carries it to the
+/// claim; the job that arrives runs nothing over it.
+#[test]
+fn damage_carried_to_an_apply_claim_before_its_job_runs_is_published_and_answers_the_apply() {
+    let ops = Arc::new(FakeOps::default());
+    let name = VaultName::new("a").unwrap();
+    let holding = VaultName::new("b").unwrap();
+    let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &holding]), 1);
+    let lease = host.demand(&name, AttachMode::Durable).unwrap();
+    wait_for_state(&host, &name, TrustState::Ready);
+    let hold = host
+        .begin_read(&name)
+        .expect("a ready entry answers a read");
+    ops.block_attach.store(true, Ordering::SeqCst);
+    let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+    wait_for_flag("attach_started", &ops.attach_started);
+
+    let pending = host.admit_apply(&name, a_plan(&name)).expect("admitted");
+    let _ = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+    drop(hold);
+    // Facts wait in the watcher, which an apply's intake would derive.
+    arrange_for(&ops.continuous_fact_handoff_for, &name);
+    let reconciled = ops.reconciles.load(Ordering::SeqCst);
+    ops.block_rebuild.store(true, Ordering::SeqCst);
+    ops.block_attach.store(false, Ordering::SeqCst);
+    ops.attach_release.store(true, Ordering::SeqCst);
+
+    let damaged = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+        "the store is damaged",
+    ));
+    assert_eq!(
+        not_applied_cause(answer_of(pending)),
+        ReadRefusal::NotServing(Demand::State(damaged)).answer(&name)
+    );
+    wait_for_flag("rebuild_started", &ops.rebuild_started);
+    assert!(ops.applies_ran.lock().unwrap().is_empty());
+    assert_eq!(
+        ops.reconciles.load(Ordering::SeqCst),
+        reconciled,
+        "the apply's intake derived into the damaged store"
+    );
+    *ops.continuous_fact_handoff_for.lock().unwrap() = None;
+    ops.rebuild_release.store(true, Ordering::SeqCst);
+    wait_for_state(&host, &name, TrustState::Ready);
+    drop((lease, holding_lease, host));
+}
