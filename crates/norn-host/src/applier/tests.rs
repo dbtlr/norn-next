@@ -2228,3 +2228,39 @@ fn an_unforced_write_keeps_no_violation_standing_on_the_field_it_rewrites() {
     );
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// **Every fresh plan a forced plan's refusal answers with is forced**, one
+/// whose operations no longer plan included: a chain of moves re-resolved
+/// over a document another writer put in its way is a content cycle, and
+/// the empty fresh plan still carries the force.
+#[test]
+fn a_refused_forced_plan_whose_operations_no_longer_plan_refreshes_forced() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let first = norn_wire::OperationId::new("first").expect("an identifier");
+    let mut plan = fixture.plan(vec![
+        moving("a.md", "b.md").with_id(first.clone()),
+        moving("b.md", "c.md").with_requires(vec![first]),
+    ]);
+    plan.force = true;
+    fixture.foreign("b.md", "# B, foreign\n");
+    let refused = refused(fixture.apply(plan));
+    assert!(refused.plan.operations.is_empty(), "{:?}", refused.plan);
+    assert_eq!(refused.unresolved.len(), 2, "{:?}", refused.unresolved);
+    assert!(refused.plan.force);
+}
+
+/// **A refused forced plan's fresh forecast lists the violations its fresh
+/// plan lets through**, exactly as a preview of that fresh plan lists them.
+#[test]
+fn a_refused_forced_plan_forecasts_what_its_fresh_plan_forces() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: [project]\n---\n")]);
+    let mut plan = fixture.plan(vec![pushing_a_stray_tag()]);
+    plan.force = true;
+    fixture.foreign("a.md", "---\ntags: [project]\ntitle: foreign\n---\n");
+    let refused = refused(fixture.apply(plan));
+    let (_, previewed) = fixture
+        .preview(refused.plan.clone())
+        .expect("the fresh plan previews");
+    assert_eq!(previewed.forced.len(), 1, "{:?}", previewed.forced);
+    assert_eq!(refused.forecast.forced, previewed.forced);
+}

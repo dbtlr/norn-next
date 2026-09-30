@@ -87,6 +87,7 @@ use norn_wire::{
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
+use crate::derivation::Declared;
 use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};
@@ -167,7 +168,7 @@ impl Applier<'_> {
             &declared,
         ) {
             Ok(staged) => staged,
-            Err(Stop::Refused(checks)) => return self.refuse(plan, checks),
+            Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
@@ -185,17 +186,18 @@ impl Applier<'_> {
             own_writes: self.own_writes,
         };
         let (progress, stopped) = publisher.publish(&plan, staged);
-        self.answer(plan, progress, stopped, forced, store)
+        self.answer(plan, progress, stopped, forced, &declared, store)
     }
 
     /// The outcome of a publication that ran as far as `progress`, whose
-    /// force let `forced` through.
+    /// force let `forced` through, under the declaration `declared`.
     fn answer(
         &self,
         plan: ResolvedPlan,
         progress: Progress,
         stopped: Option<Stopped>,
         forced: Vec<SchemaViolation>,
+        declared: &Declared,
         store: &mut Store,
     ) -> ApplyOutcome {
         let changeset = if progress.effects.is_empty() {
@@ -261,18 +263,26 @@ impl Applier<'_> {
         }
         match stopped {
             Stopped::ForeignEdit { path, holds } => {
-                self.refuse(plan, vec![RefusedCheck::drifted(path, holds)])
+                self.refuse(plan, declared, vec![RefusedCheck::drifted(path, holds)])
             }
-            Stopped::NameTaken { path } => self.refuse(plan, vec![RefusedCheck::name_taken(path)]),
+            Stopped::NameTaken { path } => {
+                self.refuse(plan, declared, vec![RefusedCheck::name_taken(path)])
+            }
             Stopped::RootReplaced => self.root_replaced(plan),
             Stopped::Io(detail) => write_failed(plan, detail),
         }
     }
 
-    /// Refuse `plan` for `checks`, answering with a fresh plan.
-    fn refuse(&self, plan: ResolvedPlan, checks: Vec<RefusedCheck>) -> ApplyOutcome {
+    /// Refuse `plan` for `checks`, answering with a fresh plan judged under
+    /// `declared`.
+    fn refuse(
+        &self,
+        plan: ResolvedPlan,
+        declared: &Declared,
+        checks: Vec<RefusedCheck>,
+    ) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions) {
-            Ok(view) => refresh::refuse_and_refresh(plan, &view, checks),
+            Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks),
             Err(error) => write_failed(plan, error.to_string()),
         }
     }
@@ -313,7 +323,7 @@ pub(crate) fn preview(
     anchor: &Path,
     root: norn_fs::Identity,
     exclusions: &[PathBuf],
-    declared: &crate::derivation::Declared,
+    declared: &Declared,
 ) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
@@ -331,7 +341,7 @@ pub(crate) fn preview(
             Ok(forecast) => return Ok((plan, forecast.with_forced(checked.forced))),
             Err(error) => write_failed(plan, error.to_string()),
         },
-        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, checks),
+        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, declared, checks),
         Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
         Err(Unfit::Failed(detail)) => write_failed(plan, detail),
     };

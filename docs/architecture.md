@@ -2420,7 +2420,7 @@ the plan still refuses where it stands on a field a frontmatter kind writes: an 
 tag the rewritten `tags` field keeps, which a body tag is not. A plan's `force` lets
 through the schema violations its results introduce and lists each, in the shape a refusal carries, on
 the preview's forecast and the applied report; it bypasses no other check, and a refusal's
-fresh plan carries it.
+fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
