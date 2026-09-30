@@ -272,9 +272,12 @@ type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), Wat
 /// it, so the reading taken here names exactly the state the changeset builds
 /// on, and it is the reading the answer is given under. The planner reads the
 /// files for its before-states, never the store. A `where` target is matched
-/// on a snapshot the store's own read handle establishes under the same
-/// claim, the first time one asks, which reads that same state; a plan with
-/// none opens no handle. A store that refuses that reading answers
+/// on a snapshot of a read handle the store mints for the job through the
+/// coverage's read seam, under the same claim, the first time one asks, which
+/// reads that same state; the handle closes when planning ends, before the
+/// applier runs, and a plan with none mints no handle. A handle that cannot
+/// be minted answers `host/reader-unavailable`, and what its mint ran is the
+/// job account's. A store that refuses that reading answers
 /// as a read meeting the same refusal does: `host/read-failed`, or damage the
 /// job publishes with the rebuild it owes.
 ///
@@ -286,6 +289,7 @@ fn apply_over(
     plan: PlanDocument,
     progress: &ApplyProgress,
     reporter: &ProgressReporter<ProductionAttachment>,
+    evidence: &JobEvidence,
 ) -> ApplyEnd {
     let ground = attachment.plan_ground();
     let snapshot = {
@@ -313,9 +317,15 @@ fn apply_over(
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
+            let source: &ProductionAttachment = attachment;
+            let mint = || {
+                let (snapshot, statements) = crate::apply::established_for_matching(source);
+                evidence.count_apply_mint(statements);
+                snapshot
+            };
             let matcher = crate::apply::SnapshotMatcher::on_demand(
                 authored.vault.clone(),
-                &attachment.store,
+                &mint,
                 ground.declared.content_model(),
             );
             match crate::apply::resolve_on(authored, &ground, name, &matcher) {
@@ -1562,7 +1572,7 @@ impl EntryOps for ProductionEntryOps {
         {
             return Err(JobFailure::LostMaintainership);
         }
-        let ended = apply_over(name, attachment, plan, progress, reporter);
+        let ended = apply_over(name, attachment, plan, progress, reporter, &self.evidence);
         // Any answered apply may have committed lane-1 work: an applied one,
         // and an interrupted one whose landed subset committed. A refusal
         // committed nothing, and its drain finds nothing new.
@@ -5669,6 +5679,56 @@ mod tests {
             host.read_evidence().mint_statements_under_the_gate,
             0,
             "the attach's mint moved the read account"
+        );
+    }
+
+    /// **An apply's `where` match mints its read handle through the
+    /// coverage's read seam and accounts the mint to the job account**: the
+    /// store's read-only open reports two statements, and an apply naming no
+    /// `where` target mints nothing.
+    #[test]
+    fn an_apply_matching_a_where_accounts_its_reader_mint_to_the_job_account() {
+        let f = Fixture::new("apply-mint-account");
+        fs::write(f.vault().join("a.md"), "---\nwave: flip\n---\n").unwrap();
+        let ops = fixture_ops(&f);
+        let evidence = Arc::clone(&ops.evidence);
+        let (host, name, _lease) = ready_host(&f, ops);
+        let setting = |target| {
+            norn_wire::SetParams::new(
+                norn_wire::VaultAddress::name(name.clone()),
+                norn_wire::ApplyMode::Apply,
+                target,
+                vec![norn_wire::FieldChange::set(
+                    "wave",
+                    norn_wire::AuthoredValue::string("flipped"),
+                )],
+            )
+        };
+
+        let before = evidence.read();
+        host.set(setting(norn_wire::WriteTarget::path(
+            norn_wire::DocumentPath::new("a.md").unwrap(),
+        )))
+        .expect("a set by path is admitted")
+        .wait()
+        .expect("a set by path applies");
+        assert_eq!(
+            evidence.read().since(before).apply_mint_statements,
+            0,
+            "an apply naming no `where` target minted a read handle"
+        );
+
+        let before = evidence.read();
+        let _ = host
+            .set(setting(norn_wire::WriteTarget::matching([
+                norn_wire::Predicate::equal_to("wave", "flipped"),
+            ])))
+            .expect("a set by `where` is admitted")
+            .wait();
+        assert_eq!(
+            evidence.read().since(before).apply_mint_statements,
+            2,
+            "the apply's mint is missing from the job account"
         );
     }
 

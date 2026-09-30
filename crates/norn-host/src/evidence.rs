@@ -77,6 +77,7 @@ pub struct JobEvidence {
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
+    apply_mint_statements: AtomicU64,
 }
 
 /// One reading of a host's account.
@@ -160,6 +161,14 @@ pub struct EvidenceReading {
     /// because it installed no coverage or parked coverage over a handle that
     /// was already standing, adds nothing.
     pub mint_statements_under_the_gate: u64,
+    /// Statements the apply jobs' reader mints ran against a database, inside
+    /// the entry's claim and outside its gate.
+    ///
+    /// An apply whose plan carries a `where` target mints a read handle of
+    /// its own to match it on, and that mint reads the database as a leg's
+    /// does. **A mint that refused counts what it ran before it refused**; an
+    /// apply with no `where` target mints nothing and adds nothing.
+    pub apply_mint_statements: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -207,6 +216,9 @@ impl EvidenceReading {
             mint_statements_under_the_gate: self
                 .mint_statements_under_the_gate
                 .saturating_sub(earlier.mint_statements_under_the_gate),
+            apply_mint_statements: self
+                .apply_mint_statements
+                .saturating_sub(earlier.apply_mint_statements),
         }
     }
 }
@@ -231,6 +243,7 @@ impl JobEvidence {
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
+            apply_mint_statements: get(&self.apply_mint_statements),
         }
     }
 
@@ -262,6 +275,13 @@ impl JobEvidence {
     /// watcher poll are counted at the act.
     pub(crate) fn count_mint_under_the_gate(&self, statements: u64) {
         self.mint_statements_under_the_gate
+            .fetch_add(statements, Ordering::Relaxed);
+    }
+
+    /// Record what one apply job's reader mint ran, counted at the act where
+    /// the mint returns, as a leg's mint is.
+    pub(crate) fn count_apply_mint(&self, statements: u64) {
+        self.apply_mint_statements
             .fetch_add(statements, Ordering::Relaxed);
     }
 

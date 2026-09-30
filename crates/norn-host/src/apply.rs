@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
-use norn_store::{ContentModel, PageRefusal, Snapshot, Store};
+use norn_store::{ContentModel, PageRefusal, Snapshot};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
     FindParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams, TrustState,
@@ -65,14 +65,14 @@ use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
 use crate::lifecycle::{
-    ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, SnapshotSource,
-    not_run, watcher_lost,
+    ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, ReaderUnavailable,
+    SnapshotSource, not_run, watcher_lost,
 };
 use crate::planner::expand::{ExpandingFailure, Matched, Matcher, listed, resolve_expanding};
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::view::TreeView;
 use crate::read::every_page;
-use crate::refusal::{PageRefused, page_refusal};
+use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
 /// What a plan is resolved against: the vault root as the entry's coverage
 /// spells it, the identity that root proved when the coverage was installed,
@@ -165,7 +165,7 @@ pub(crate) fn resolve_on(
             ExpandingFailure::Planning(PlanningFailure::View(error)) => {
                 PageRefused::Answered(unreadable(name, error))
             }
-            ExpandingFailure::Match(refusal) => page_refusal(refusal),
+            ExpandingFailure::Match(refused) => refused,
         }
     })
 }
@@ -175,12 +175,14 @@ pub(crate) fn resolve_on(
 ///
 /// **A preview matches on the snapshot its read hold took**, under the
 /// content model that snapshot pins. **An apply matches on a snapshot its job
-/// establishes inside the entry's claim**, on a read handle its own store
-/// mints, the first time a `where` target asks: the job holds the claim and
-/// its store is the one writer, so that snapshot reads exactly the state the
-/// apply's changeset builds on, and a plan with no `where` target opens
-/// none. Either way the match is the find a caller would have been answered
-/// at the same instant, paged to its end.
+/// establishes inside the entry's claim**, on a read handle the store mints
+/// for the job through the coverage's read seam ([`established_for_matching`])
+/// the first time a `where` target asks, held only while the job plans and
+/// closed before the applier runs: the job holds the claim and its store is
+/// the one writer, so that snapshot reads exactly the state the apply's
+/// changeset builds on, and a plan with no `where` target mints none. Either
+/// way the match is the find a caller would have been answered at the same
+/// instant, paged to its end.
 pub(crate) struct SnapshotMatcher<'a> {
     vault: VaultAddress,
     declared: &'a ContentModel,
@@ -191,9 +193,9 @@ pub(crate) struct SnapshotMatcher<'a> {
 enum MatchedOn<'a> {
     /// The snapshot a read hold took.
     Held(&'a Snapshot),
-    /// A snapshot established on `store`'s own read handle when first asked.
+    /// A snapshot `mint` establishes when first asked.
     OnDemand {
-        store: &'a Store,
+        mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         established: OnceCell<Snapshot>,
     },
 }
@@ -213,34 +215,35 @@ impl<'a> SnapshotMatcher<'a> {
         }
     }
 
-    /// Matching `vault`'s `where` targets on a snapshot of `store`,
-    /// established when first asked; `declared` is what `store` pins.
+    /// Matching `vault`'s `where` targets on the snapshot `mint`
+    /// establishes, once, when first asked; `declared` is what that snapshot
+    /// pins.
     pub(crate) const fn on_demand(
         vault: VaultAddress,
-        store: &'a Store,
+        mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         declared: &'a ContentModel,
     ) -> Self {
         SnapshotMatcher {
             vault,
             declared,
             on: MatchedOn::OnDemand {
-                store,
+                mint,
                 established: OnceCell::new(),
             },
         }
     }
 
-    fn snapshot(&self) -> Result<&Snapshot, PageRefusal> {
+    /// The snapshot matched on. **A handle that cannot be minted or
+    /// established refuses as a read over an unavailable read seam does**,
+    /// `host/reader-unavailable`: a failed mint changes no trust label.
+    fn snapshot(&self) -> Result<&Snapshot, PageRefused> {
         match &self.on {
             MatchedOn::Held(snapshot) => Ok(snapshot),
-            MatchedOn::OnDemand { store, established } => {
+            MatchedOn::OnDemand { mint, established } => {
                 if established.get().is_none() {
-                    let reader = Arc::new(store.open_reader().reader.map_err(PageRefusal::Store)?);
-                    let snapshot = reader
-                        .try_take()
-                        .expect("a read handle minted for this apply alone is idle")
-                        .establish()
-                        .map_err(PageRefusal::Store)?;
+                    let snapshot = mint().map_err(|unavailable| {
+                        PageRefused::Answered(reader_unavailable(unavailable.detail()))
+                    })?;
                     let _ = established.set(snapshot);
                 }
                 Ok(established
@@ -251,10 +254,37 @@ impl<'a> SnapshotMatcher<'a> {
     }
 }
 
+/// A snapshot for one apply's `where` matching, established through
+/// `source`'s own read seam — the mint every entry's read handle comes from
+/// and the establishment every read runs — with the statements the mint ran
+/// beside it, whichever way it ended.
+///
+/// The handle is the job's alone, so its connection is idle when taken; the
+/// snapshot holds it, and both close when the snapshot drops.
+pub(crate) fn established_for_matching<S>(
+    source: &S,
+) -> (
+    Result<<S::Reader as ReadSource>::Snapshot, ReaderUnavailable>,
+    u64,
+)
+where
+    S: SnapshotSource,
+{
+    let minted = source.open_reader();
+    let established = minted.reader.and_then(|reader| {
+        let turn = Arc::new(reader)
+            .try_take()
+            .expect("a read handle minted for this apply alone is idle");
+        S::Reader::establish(turn).map(|established| established.snapshot)
+    });
+    (established, minted.statements)
+}
+
 impl Matcher for SnapshotMatcher<'_> {
-    /// A refusal a read meeting it would answer with: the store's, or a
-    /// declaration the snapshot does not pin.
-    type Error = PageRefusal;
+    /// The refusal a read meeting it would answer with: the store's, a
+    /// declaration the snapshot does not pin, or a read seam that could not
+    /// be minted.
+    type Error = PageRefused;
 
     /// Every document `predicates` match, in the find's own order, which is
     /// path order, every page of it read on the one snapshot.
@@ -263,7 +293,7 @@ impl Matcher for SnapshotMatcher<'_> {
     /// the answer is the report in words rather than the empty match; so is a
     /// request the builder refuses for what it asks, such as a bound that
     /// does not read as its key's declared type.
-    fn matching(&self, predicates: &[Predicate]) -> Result<Matched, PageRefusal> {
+    fn matching(&self, predicates: &[Predicate]) -> Result<Matched, PageRefused> {
         let snapshot = self.snapshot()?;
         let request = FindParams::new(self.vault.clone())
             .with_predicates(predicates.to_vec())
@@ -286,7 +316,7 @@ impl Matcher for SnapshotMatcher<'_> {
         match paged {
             Ok((_, None)) => Ok(Ok(paths)),
             Ok((_, Some(unsatisfied))) => Ok(Err(unsatisfied)),
-            Err(refusal) => asked_amiss(refusal).map(Err),
+            Err(refusal) => asked_amiss(refusal).map(Err).map_err(page_refusal),
         }
     }
 }
@@ -491,6 +521,28 @@ mod tests {
             exclusions: Vec::new(),
             declared: Arc::new(Declared::unpinned()),
         }
+    }
+
+    /// **An apply's matcher whose read handle cannot be minted refuses as a
+    /// read over an unavailable read seam does**: `host/reader-unavailable`,
+    /// never a failed statement nor damage, since a failed mint changes no
+    /// trust label.
+    #[test]
+    fn a_matcher_whose_reader_cannot_be_minted_answers_reader_unavailable() {
+        let name = VaultName::new("notes").unwrap();
+        let declared = ContentModel::default();
+        let refused = || {
+            Err(crate::lifecycle::ReaderUnavailable::new(
+                "the open was refused",
+            ))
+        };
+        let matcher = SnapshotMatcher::on_demand(VaultAddress::name(name), &refused, &declared);
+
+        let answered = matcher.matching(&[Predicate::equal_to("wave", "flip")]);
+        let Err(PageRefused::Answered(envelope)) = answered else {
+            panic!("a refused mint answered {answered:?}");
+        };
+        assert_eq!(envelope.code(), &ReasonCode::HostReaderUnavailable);
     }
 
     /// **A root standing where its coverage proved it stands.**

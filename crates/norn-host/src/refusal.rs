@@ -797,7 +797,9 @@ pub(crate) fn config_refusal_told(error: &norn_config::ConfigError) -> String {
 }
 
 /// The envelope an entry that is serving with no read seam refuses with.
-fn reader_unavailable(detail: impl Into<String>) -> ErrorEnvelope {
+/// The refusal of a read whose entry is served and whose read seam is not:
+/// `host/reader-unavailable`, carrying the seam's own account in words.
+pub(crate) fn reader_unavailable(detail: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(
         "this vault is served and its read seam is not, so the read is refused",
         ErrorDetail::reader_unavailable(detail),
