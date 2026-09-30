@@ -1,10 +1,11 @@
 //! `edit`: change the text of one document.
 //!
 //! **An edit's anchor is exact.** A `str_replace` replaces text that occurs in
-//! the document exactly once; a section edit names a heading by its exact
-//! text without its `#` marks, which must head exactly one section at any
-//! level. An anchor that is gone or ambiguous leaves its operation unresolved
-//! rather than guessing.
+//! the document exactly once. A section edit addresses a heading through the
+//! one shared section resolver, the one `get --section` and wikilink anchors
+//! use: ASCII case and whitespace folded, then a slug fallback. Two headings
+//! the folding cannot tell apart are ambiguous. An anchor that is gone or
+//! ambiguous leaves its operation unresolved rather than guessing.
 //!
 //! **Edits compose in the order written.** Each edit compiles to one
 //! operation on the document, in the request's order, and each reads the
@@ -40,7 +41,10 @@ pub enum DocumentEdit {
     /// Replace the body of a section, keeping its heading line.
     #[non_exhaustive]
     ReplaceSection {
-        /// The heading's exact text, without its `#` marks.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The section's new body.
         content: String,
@@ -48,7 +52,10 @@ pub enum DocumentEdit {
     /// Append text to the end of a section's body.
     #[non_exhaustive]
     AppendToSection {
-        /// The heading's exact text, without its `#` marks.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text appended.
         content: String,
@@ -56,13 +63,19 @@ pub enum DocumentEdit {
     /// Remove a section: its heading line and its body.
     #[non_exhaustive]
     DeleteSection {
-        /// The heading's exact text, without its `#` marks.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
     },
     /// Insert text before a heading line.
     #[non_exhaustive]
     InsertBeforeHeading {
-        /// The heading's exact text, without its `#` marks.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text inserted.
         content: String,
@@ -70,7 +83,10 @@ pub enum DocumentEdit {
     /// Insert text after a heading line.
     #[non_exhaustive]
     InsertAfterHeading {
-        /// The heading's exact text, without its `#` marks.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text inserted.
         content: String,

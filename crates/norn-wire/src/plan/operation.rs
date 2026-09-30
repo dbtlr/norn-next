@@ -230,8 +230,10 @@ pub enum OperationKind {
     ReplaceSection {
         /// The document edited.
         path: DocumentPath,
-        /// The heading's exact text, without its `#` marks. It must head
-        /// exactly one section of the document, at any level.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The section's new body.
         content: String,
@@ -240,8 +242,10 @@ pub enum OperationKind {
     AppendToSection {
         /// The document edited.
         path: DocumentPath,
-        /// The heading's exact text, without its `#` marks. It must head
-        /// exactly one section of the document, at any level.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text appended.
         content: String,
@@ -250,16 +254,20 @@ pub enum OperationKind {
     DeleteSection {
         /// The document edited.
         path: DocumentPath,
-        /// The heading's exact text, without its `#` marks. It must head
-        /// exactly one section of the document, at any level.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
     },
     /// Insert text before a heading line.
     InsertBeforeHeading {
         /// The document edited.
         path: DocumentPath,
-        /// The heading's exact text, without its `#` marks. It must head
-        /// exactly one section of the document, at any level.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text inserted.
         content: String,
@@ -268,8 +276,10 @@ pub enum OperationKind {
     InsertAfterHeading {
         /// The document edited.
         path: DocumentPath,
-        /// The heading's exact text, without its `#` marks. It must head
-        /// exactly one section of the document, at any level.
+        /// The heading, resolved as `get --section` and a wikilink anchor
+        /// resolve one: ASCII case and whitespace folded, then a slug
+        /// fallback. Two headings the folding cannot tell apart are
+        /// ambiguous and leave the operation unresolved.
         heading: String,
         /// The text inserted.
         content: String,
