@@ -2399,6 +2399,27 @@ preconditions are checked against the states and conditions the plan carries, no
 the snapshot a planner read through
 ([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
 
+Beside the four kinds that place, edit, move and remove whole documents, a plan carries
+document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
+replaced, and a section replaced, deleted, appended to, or written before or after its
+heading. Each composes as a pure function of its one document's bytes through `norn-text`,
+which proves every splice by reading it back, and addresses a section through the one
+shared heading resolver a read and a wikilink anchor use. An edit that would change nothing
+or cannot be made leaves its operation unresolved rather than landing as a no-op: a push
+onto a scalar or a map, a pop or a removal of what the document does not hold, a heading
+that is ambiguous, missing or inside a container, empty content to append or insert, a
+refusal `norn-text` makes, and a nested value, which is not written until nested
+frontmatter values land. A resolved plan carries only path targets; a frontmatter
+operation's `where` target leaves its operation unresolved until planning expands it into
+one path target per matched document, and an empty one never matches.
+An author's condition — a content hash, or an expected frontmatter value that is absent or
+reads as exactly one value — is checked at planning: on a file the plan writes it becomes
+that target's before-state, and on any other file it travels as a condition on the file's
+content, which the applier checks as any condition. A plan's `force` lets through the
+schema violations its results introduce and lists each, in the shape a refusal carries, on
+the preview's forecast and the applied report; it bypasses no other check, and a refusal's
+fresh plan carries it.
+
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
 reply rides in the job. The seam holds these invariants; which gate hold carries each is

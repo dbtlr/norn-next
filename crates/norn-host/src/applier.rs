@@ -17,7 +17,8 @@
 //!   ([`recompose`]) — which must give back exactly the plan's transitions, so
 //!   a plan whose transitions say anything its operations do not is refused
 //!   before anything is staged — every composed result against the vault
-//!   schema ([`schema`]), judged against the document its content came from
+//!   schema ([`schema`]), which a forced plan lets through and lists on its
+//!   forecast and applied report, judged against the document its content came from
 //!   (the planner's one [`lineage`](crate::planner::lineage), followed in the
 //!   plan's recorded order, which also refuses a content cycle), and a shadow
 //!   for every written target, a create included.
