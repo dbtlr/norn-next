@@ -1851,23 +1851,22 @@ fn popping_a_block_lists_last_item_writes_an_empty_flow_list_on_its_key_line() {
     );
 }
 
-/// **A pop that would drop a comment refuses**: a comment trailing a popped
-/// item's own line would go with the line, and a commented flow list would
-/// be rewritten whole.
+/// **A popped item's own trailing comment goes with its line, and every
+/// other comment stays**: the comment annotates the item being removed. A
+/// commented flow list would be rewritten whole, so its pop refuses.
 #[test]
-fn a_pop_that_would_drop_a_comment_refuses() {
-    for source in [
-        "---\ntags:\n  - a # why\n  - b\n---\n",
-        "---\ntags: [a, b] # keep\n---\n",
-    ] {
-        assert_eq!(
-            Document::parse(source).pop_from_list("tags", &string("a")),
-            Err(EditError::CommentWouldBeLost {
-                field: "tags".into()
-            }),
-            "for {source:?}"
-        );
-    }
+fn a_popped_items_own_comment_goes_with_it_and_every_other_comment_stays() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a # why\n  # standalone\n  - b # keep\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  # standalone\n  - b # keep\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a, b] # keep\n---\n").pop_from_list("tags", &string("a")),
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
+    );
     // A comment on an item the pop keeps is not in the way.
     assert_eq!(
         Document::parse("---\ntags:\n  - a\n  - b # why\n---\n")

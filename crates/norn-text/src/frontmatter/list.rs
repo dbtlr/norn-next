@@ -19,8 +19,6 @@ pub(crate) struct BlockItem {
     pub(crate) line: Range<usize>,
     /// The bytes before the item's `-`.
     pub(crate) indent: Range<usize>,
-    /// Whether a comment trails the item on its line.
-    pub(crate) commented: bool,
 }
 
 /// The items of the block-list `field` in `content`, one per parsed item, or
@@ -52,7 +50,7 @@ pub(crate) fn block_item_lines(
         if body.is_empty() || body.starts_with('#') {
             continue;
         }
-        let item = block_item(content, start, line, text.len() - body.len())?;
+        let item = block_item(start, line, text.len() - body.len())?;
         let value = reparse(&content[item.value.clone()])?;
         if items.get(found.len()) != Some(&value) {
             return None;
@@ -68,10 +66,10 @@ struct ScannedItem {
     value: Range<usize>,
 }
 
-/// Read `line` — its terminator included, starting at `start` in `content`
+/// Read `line` — its terminator included, starting at `start` in the block
 /// and indented by `indent` bytes — as one block-list item whose value ends
 /// on the line.
-fn block_item(content: &str, start: usize, line: &str, indent: usize) -> Option<ScannedItem> {
+fn block_item(start: usize, line: &str, indent: usize) -> Option<ScannedItem> {
     let text = line.trim_end_matches(['\r', '\n']);
     let rest = text[indent..].strip_prefix('-')?;
     if !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
@@ -80,12 +78,10 @@ fn block_item(content: &str, start: usize, line: &str, indent: usize) -> Option<
     let after_dash = indent + 1;
     let (value, _, complete) = classify_value(start, after_dash, &text[after_dash..]);
     let value = value.filter(|_| complete)?;
-    let after_value = &content[value.end..start + text.len()];
     Some(ScannedItem {
         line_item: BlockItem {
             line: start..start + line.len(),
             indent: start..start + indent,
-            commented: !after_value.trim().is_empty(),
         },
         value,
     })

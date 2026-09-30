@@ -1054,12 +1054,13 @@ impl<'a> Document<'a> {
     /// items each sit on a line of their own, the lines of the matching items
     /// are deleted and nothing else; popping its last item writes `[]` on the
     /// key line, before any comment there, because a key with nothing under
-    /// it reads as null and `[]` reads back as the empty list. A matching item
-    /// whose line carries a comment refuses with
-    /// [`EditError::CommentWouldBeLost`], since the comment would go with the
-    /// line. Every other list is written whole by [`Document::set_field`],
-    /// only where its entry carries no comment, and refuses the same way
-    /// otherwise. Either way the result is re-read and proven as a set is.
+    /// it reads as null and `[]` reads back as the empty list. A comment
+    /// trailing a matching item on its own line goes with that line: it
+    /// annotates the item being removed. Comments on every other line stay.
+    /// Every other list is written whole by [`Document::set_field`], only
+    /// where its entry carries no comment; a comment that rewrite would drop
+    /// refuses with [`EditError::CommentWouldBeLost`]. Either way the result
+    /// is re-read and proven as a set is.
     pub fn pop_from_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
         let Some(items) = self.list_items(field)? else {
             return Err(EditError::FieldAbsent {
@@ -1088,11 +1089,6 @@ impl<'a> Document<'a> {
             .filter(|(_, item)| *item == value)
             .map(|(line, _)| line)
             .collect();
-        if popped.iter().any(|line| line.commented) {
-            return Err(EditError::CommentWouldBeLost {
-                field: field.to_string(),
-            });
-        }
         let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
         if kept.is_empty() {
             let Some(point) = key_line_value_point(self.source, located.line_range.start) else {
