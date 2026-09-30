@@ -8,8 +8,8 @@ use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_dir
 use norn_wire::{
     DoctorRegistryParams, DoctorRegistryReport, EngineHealth, ErrorEnvelope, ListParams,
     ListReport, MaintainerIdentity, NameSet, RegisterParams, RegisterReport, RegistryProblem,
-    RegistrySanity, ResolveParams, ResolveReport, RollUp, SetParams, SetReport, TooFewNames,
-    UnregisterParams, UnregisterReport, VaultName,
+    RegistrySanity, ResolveParams, ResolveReport, RollUp, TooFewNames, UnregisterParams,
+    UnregisterReport, VaultName, VaultSetParams, VaultSetReport,
 };
 
 use crate::lifecycle::{EntryOps, Host, ServingRefusal, StandingPark};
@@ -323,10 +323,10 @@ impl<O: EntryOps> Host<O> {
     /// its watch backend. The new entry holds nothing the old one's
     /// attachments recorded, so `vault status` reports its engine section
     /// undelivered and its advisories empty until that attach publishes them.
-    pub fn vault_set(&self, params: &SetParams) -> Result<SetReport, ErrorEnvelope> {
+    pub fn vault_set(&self, params: &VaultSetParams) -> Result<VaultSetReport, ErrorEnvelope> {
         let name = &params.name;
         let (registration, published) = self.set(params).map_err(|refusal| refusal.answer(name))?;
-        Ok(SetReport::new(registration, published.published(name)))
+        Ok(VaultSetReport::new(registration, published.published(name)))
     }
 }
 

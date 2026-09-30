@@ -305,6 +305,18 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::DeleteDocument { path } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
+            // NORN-296: planned in the host PR. Until then every document-local
+            // kind is left unresolved, naming why, rather than acting.
+            OperationKind::SetFrontmatter { .. }
+            | OperationKind::RemoveFrontmatter { .. }
+            | OperationKind::PushFrontmatter { .. }
+            | OperationKind::PopFrontmatter { .. }
+            | OperationKind::ReplaceBody { .. }
+            | OperationKind::ReplaceSection { .. }
+            | OperationKind::AppendToSection { .. }
+            | OperationKind::DeleteSection { .. }
+            | OperationKind::InsertBeforeHeading { .. }
+            | OperationKind::InsertAfterHeading { .. } => Err(not_yet_planned(kind)),
         })
     }
 
@@ -382,16 +394,33 @@ fn spelled_as_asked(identity: &NormalizedPath) -> String {
         .unwrap_or_default()
 }
 
+/// Why a document-local kind is left unresolved until its planning lands.
+// NORN-296: planned in the host PR, which removes this.
+pub(crate) fn not_yet_planned(kind: &OperationKind) -> Unresolved {
+    format!("a `{}` operation is not yet planned", kind.name())
+}
+
 /// The files an operation touches: a move touches its source and its
-/// destination, every other kind the one file it names.
+/// destination, a frontmatter kind with a `where` target none until planning
+/// expands it, and every other kind the one file it names.
 pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
     let (first, second) = match kind {
         OperationKind::CreateDocument { path, .. }
         | OperationKind::StrReplace { path, .. }
-        | OperationKind::DeleteDocument { path } => (path, None),
-        OperationKind::MoveDocument { from, to } => (from, Some(to)),
+        | OperationKind::DeleteDocument { path }
+        | OperationKind::ReplaceBody { path, .. }
+        | OperationKind::ReplaceSection { path, .. }
+        | OperationKind::AppendToSection { path, .. }
+        | OperationKind::DeleteSection { path, .. }
+        | OperationKind::InsertBeforeHeading { path, .. }
+        | OperationKind::InsertAfterHeading { path, .. } => (Some(path), None),
+        OperationKind::SetFrontmatter { target, .. }
+        | OperationKind::RemoveFrontmatter { target, .. }
+        | OperationKind::PushFrontmatter { target, .. }
+        | OperationKind::PopFrontmatter { target, .. } => (target.as_path(), None),
+        OperationKind::MoveDocument { from, to } => (Some(from), Some(to)),
     };
-    std::iter::once(first).chain(second)
+    first.into_iter().chain(second)
 }
 
 /// `bytes` with the one occurrence of `old` replaced by `new`.

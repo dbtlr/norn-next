@@ -53,16 +53,9 @@ pub enum RefusedCheck {
     /// or where no violation stood before the plan.
     #[non_exhaustive]
     SchemaViolation {
-        /// The target whose result violates the schema.
-        path: DocumentPath,
-        /// The finding kind the violation would be filed under.
-        kind: FindingKind,
-        /// What the violation is about inside the document, as the document
-        /// writes it — a field key, a tag — and `null` where it is about the
-        /// whole of it.
-        target: Option<String>,
-        /// The violation in words, for a person reading a report.
-        message: String,
+        /// The violation.
+        #[serde(flatten)]
+        violation: SchemaViolation,
     },
     /// Something stands at the path a create would publish at.
     #[non_exhaustive]
@@ -92,16 +85,51 @@ impl RefusedCheck {
         message: impl Into<String>,
     ) -> Self {
         RefusedCheck::SchemaViolation {
-            path,
-            kind,
-            target,
-            message: message.into(),
+            violation: SchemaViolation::new(path, kind, target, message),
         }
     }
 
     /// Something stands at `path`, where a create would publish.
     pub const fn name_taken(path: DocumentPath) -> Self {
         RefusedCheck::NameTaken { path }
+    }
+}
+
+/// A schema violation a target's result carries: one a check refuses, or
+/// one a forced plan lets through.
+///
+/// On the wire a violation is an object:
+/// `{"path":"notes/a.md","kind":"document/undeclared-tag","target":"draft","message":"…"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SchemaViolation {
+    /// The target whose result violates the schema.
+    pub path: DocumentPath,
+    /// The finding kind the violation would be filed under.
+    pub kind: FindingKind,
+    /// What the violation is about inside the document, as the document
+    /// writes it — a field key, a tag — and `null` where it is about the
+    /// whole of it.
+    pub target: Option<String>,
+    /// The violation in words, for a person reading a report.
+    pub message: String,
+}
+
+impl SchemaViolation {
+    /// The result at `path` would be filed under `kind`, about `target`,
+    /// described by `message`.
+    pub fn new(
+        path: DocumentPath,
+        kind: FindingKind,
+        target: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        SchemaViolation {
+            path,
+            kind,
+            target,
+            message: message.into(),
+        }
     }
 }
 
@@ -291,9 +319,24 @@ pub enum PlanFault {
         /// checked condition matches.
         paths: Vec<DocumentPath>,
     },
+    /// A resolved plan's operations still carry a `where` target. Planning
+    /// expands every `where` target into one operation per matched document,
+    /// each naming its document by path, so a resolved plan carrying one was
+    /// not made by planning. Preview its operations again.
+    #[non_exhaustive]
+    UnexpandedTarget {
+        /// The positions of the operations carrying a `where` target.
+        positions: Vec<usize>,
+    },
 }
 
 impl PlanFault {
+    /// The operations at `positions` carry a `where` target a resolved plan
+    /// may not.
+    pub const fn unexpanded_target(positions: Vec<usize>) -> Self {
+        PlanFault::UnexpandedTarget { positions }
+    }
+
     /// The operations at `positions` all carry `id`.
     pub const fn duplicate_id(id: OperationId, positions: Vec<usize>) -> Self {
         PlanFault::DuplicateId { id, positions }

@@ -16,30 +16,32 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, ChangesetOutcome,
+    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
     Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
     ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
-    DocumentRow, Drift, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, Facet, FacetKind, FieldType, FieldValue, FileState, FindParams,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
-    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
+    HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
     OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
     PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
     RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound, RequestPart,
+    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound, RequestPart,
     RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
     RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    Score, SearchParams, SearchReport, SetParams, SetReport, Severity, SidecarRevision,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
     SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
     TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
     UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
     UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName,
-    VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer,
+    VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -1355,7 +1357,7 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .iter()
             .map(|change| tag_string(change, "change"))
             .collect::<BTreeSet<_>>(),
-        advertised::<Change<SchemaSource>>(Some("change")),
+        advertised::<VaultChange<SchemaSource>>(Some("change")),
         "the changes built here are not the changes the vocabulary holds"
     );
     assert_eq!(
@@ -1363,7 +1365,7 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .iter()
             .map(|replacement| tag_string(replacement, "change"))
             .collect::<BTreeSet<_>>(),
-        advertised::<Replace<VaultRoot>>(Some("change")),
+        advertised::<VaultReplace<VaultRoot>>(Some("change")),
         "the replacements built here are not the ones the vocabulary holds"
     );
     assert_eq!(
@@ -2481,6 +2483,9 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "validate",
         "describe",
         "apply",
+        "set",
+        "edit",
+        "new",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2490,7 +2495,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 15);
+    assert_eq!(Verb::ALL.len(), 18);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2578,16 +2583,19 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 15);
+    assert_eq!(Verb::ALL.len(), 18);
     assert_eq!(
         addressed(Addressing::Required),
         [
             "apply",
             "count",
             "describe",
+            "edit",
             "find",
             "get",
+            "new",
             "search",
+            "set",
             "validate",
             "vault_reload",
         ]
@@ -5570,17 +5578,20 @@ fn reload_outcomes() -> Vec<ReloadOutcome> {
 }
 
 /// Every change an edit does to a field with a default.
-fn changes() -> Vec<Change<SchemaSource>> {
+fn changes() -> Vec<VaultChange<SchemaSource>> {
     vec![
-        Change::keep(),
-        Change::set(schema_sources().remove(0)),
-        Change::clear(),
+        VaultChange::keep(),
+        VaultChange::set(schema_sources().remove(0)),
+        VaultChange::clear(),
     ]
 }
 
 /// Every change an edit does to a field with no default.
-fn replacements() -> Vec<Replace<VaultRoot>> {
-    vec![Replace::keep(), Replace::set(vault_roots().remove(1))]
+fn replacements() -> Vec<VaultReplace<VaultRoot>> {
+    vec![
+        VaultReplace::keep(),
+        VaultReplace::set(vault_roots().remove(1)),
+    ]
 }
 
 /// Every shape the vault namespace and doctor's registry half carry survives
@@ -5661,14 +5672,14 @@ fn every_vault_namespace_params_and_report_shape_survives_the_round_trip() {
     round_trip(&ListParams::new());
     round_trip(&ListReport::new([]));
     round_trip(&ListReport::new(registrations()));
-    round_trip(&SetParams::new(name("notes")));
+    round_trip(&VaultSetParams::new(name("notes")));
     round_trip(
-        &SetParams::new(name("notes"))
+        &VaultSetParams::new(name("notes"))
             .with_root(replacements().remove(1))
             .with_schema_source(changes().remove(2))
-            .with_poll_backend(Change::set(PollBackend::Poll)),
+            .with_poll_backend(VaultChange::set(PollBackend::Poll)),
     );
-    round_trip(&SetReport::new(
+    round_trip(&VaultSetReport::new(
         registrations().remove(0),
         Published::parked(park()),
     ));
@@ -6138,19 +6149,19 @@ fn the_nameless_status_answer_carries_the_roll_up_alone() {
 #[test]
 fn a_change_tells_keeping_a_field_from_clearing_it() {
     assert_eq!(
-        wire(&Change::<SchemaSource>::keep()),
+        wire(&VaultChange::<SchemaSource>::keep()),
         r#"{"change":"keep"}"#
     );
     assert_eq!(
-        wire(&Change::set(schema_sources().remove(0))),
+        wire(&VaultChange::set(schema_sources().remove(0))),
         r#"{"change":"set","value":"/home/person/.config/norn/schemas/work.yaml"}"#
     );
     assert_eq!(
-        wire(&Change::<SchemaSource>::clear()),
+        wire(&VaultChange::<SchemaSource>::clear()),
         r#"{"change":"clear"}"#
     );
-    assert_eq!(Change::<SchemaSource>::default(), Change::keep());
-    assert_eq!(Replace::<VaultRoot>::default(), Replace::keep());
+    assert_eq!(VaultChange::<SchemaSource>::default(), VaultChange::keep());
+    assert_eq!(VaultReplace::<VaultRoot>::default(), VaultReplace::keep());
 }
 
 /// A registration cannot be without a root, so the root's edit has no clear to
@@ -6158,16 +6169,16 @@ fn a_change_tells_keeping_a_field_from_clearing_it() {
 #[test]
 fn a_root_cannot_be_cleared() {
     assert_eq!(
-        serde_json::from_str::<Replace<VaultRoot>>(r#"{"change":"keep"}"#)
+        serde_json::from_str::<VaultReplace<VaultRoot>>(r#"{"change":"keep"}"#)
             .expect("keeping the root"),
-        Replace::keep()
+        VaultReplace::keep()
     );
     assert!(
-        serde_json::from_str::<Replace<VaultRoot>>(r#"{"change":"clear"}"#).is_err(),
+        serde_json::from_str::<VaultReplace<VaultRoot>>(r#"{"change":"clear"}"#).is_err(),
         "a cleared root read back as a replacement"
     );
     assert!(
-        serde_json::from_str::<Change<SchemaSource>>(r#"{"change":"clear"}"#).is_ok(),
+        serde_json::from_str::<VaultChange<SchemaSource>>(r#"{"change":"clear"}"#).is_ok(),
         "a cleared schema source is what returns a vault to the in-vault default"
     );
 }
@@ -6203,10 +6214,10 @@ fn a_vault_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     let reload = || ReloadParams::new(VaultAddress::name(name("notes")));
     assert!(!reload().dry_run);
     assert!(reload().dry_run().dry_run);
-    let set = SetParams::new(name("notes"));
-    assert_eq!(set.root, Replace::keep());
-    assert_eq!(set.schema_source, Change::keep());
-    assert_eq!(set.poll_backend, Change::keep());
+    let set = VaultSetParams::new(name("notes"));
+    assert_eq!(set.root, VaultReplace::keep());
+    assert_eq!(set.schema_source, VaultChange::keep());
+    assert_eq!(set.poll_backend, VaultChange::keep());
     let registration = Registration::new(name("notes"), vault_roots().remove(1));
     assert_eq!(registration.schema_source, None);
     assert_eq!(registration.poll_backend, None);
@@ -6250,10 +6261,10 @@ fn every_unregister_setter_lands_in_the_bytes() {
 
 #[test]
 fn every_set_setter_lands_in_the_bytes() {
-    let request = SetParams::new(name("notes"))
+    let request = VaultSetParams::new(name("notes"))
         .with_root(replacements().remove(1))
-        .with_schema_source(Change::clear())
-        .with_poll_backend(Change::set(PollBackend::Poll));
+        .with_schema_source(VaultChange::clear())
+        .with_poll_backend(VaultChange::set(PollBackend::Poll));
     assert_eq!(
         wire(&request),
         r#"{"name":"notes","root":{"change":"set","value":"/home/person/notes"},"schema_source":{"change":"clear"},"poll_backend":{"change":"set","value":"poll"}}"#
@@ -6645,22 +6656,56 @@ fn a_root() -> RootIdentity {
     RootIdentity::from_device_and_inode(66_306, 2)
 }
 
-/// Every kind an operation is authored in, one each.
+/// The predicate list a `where` target here matches by.
+fn drafts() -> Vec<Predicate> {
+    vec![Predicate::equal_to("status", "draft")]
+}
+
+/// Every kind an operation is authored in, one each; the frontmatter kinds
+/// name their documents by path and by predicate list between them.
 fn operation_kinds() -> Vec<OperationKind> {
     vec![
         OperationKind::create_document(path("notes/new.md"), "# New\n"),
         OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
         OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
         OperationKind::delete_document(path("notes/b.md")),
+        OperationKind::set_frontmatter(
+            WriteTarget::path(path("notes/a.md")),
+            "status",
+            AuthoredValue::string("done"),
+        ),
+        OperationKind::remove_frontmatter(WriteTarget::matching(drafts()), "due"),
+        OperationKind::push_frontmatter(
+            WriteTarget::path(path("notes/a.md")),
+            "tags",
+            AuthoredValue::string("project"),
+        ),
+        OperationKind::pop_frontmatter(
+            WriteTarget::matching(drafts()),
+            "tags",
+            AuthoredValue::string("stale"),
+        ),
+        OperationKind::replace_body(path("notes/a.md"), "Body.\n"),
+        OperationKind::replace_section(path("notes/a.md"), "Notes", "New notes.\n"),
+        OperationKind::append_to_section(path("notes/a.md"), "Log", "- done\n"),
+        OperationKind::delete_section(path("notes/a.md"), "Scratch"),
+        OperationKind::insert_before_heading(path("notes/a.md"), "Notes", "Intro.\n"),
+        OperationKind::insert_after_heading(path("notes/a.md"), "Notes", "First.\n"),
     ]
 }
 
-/// Every condition an author writes on an operation.
+/// Every condition an author writes on an operation, the expected value
+/// both present and absent.
 fn author_conditions() -> Vec<AuthorCondition> {
-    vec![AuthorCondition::content_hash(
-        path("notes/a.md"),
-        content_hash(0xab),
-    )]
+    vec![
+        AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab)),
+        AuthorCondition::expected_value(
+            path("notes/a.md"),
+            "status",
+            ExpectedField::present(AuthoredValue::string("draft")),
+        ),
+        AuthorCondition::expected_value(path("notes/a.md"), "owner", ExpectedField::absent()),
+    ]
 }
 
 /// Every condition a resolved plan carries.
@@ -6806,7 +6851,18 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
         r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
         r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+        r#"{"kind":"set_frontmatter","fields":{"path":"notes/a.md","field":"status","value":"done"}}"#,
+        r#"{"kind":"remove_frontmatter","fields":{"where":[{"op":"eq","key":"status","value":"draft"}],"field":"due"}}"#,
+        r#"{"kind":"push_frontmatter","fields":{"path":"notes/a.md","field":"tags","value":"project"}}"#,
+        r#"{"kind":"pop_frontmatter","fields":{"where":[{"op":"eq","key":"status","value":"draft"}],"field":"tags","value":"stale"}}"#,
+        r#"{"kind":"replace_body","fields":{"path":"notes/a.md","content":"Body.\n"}}"#,
+        r#"{"kind":"replace_section","fields":{"path":"notes/a.md","heading":"Notes","content":"New notes.\n"}}"#,
+        r#"{"kind":"append_to_section","fields":{"path":"notes/a.md","heading":"Log","content":"- done\n"}}"#,
+        r#"{"kind":"delete_section","fields":{"path":"notes/a.md","heading":"Scratch"}}"#,
+        r#"{"kind":"insert_before_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"Intro.\n"}}"#,
+        r#"{"kind":"insert_after_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"First.\n"}}"#,
     ];
+    assert_eq!(operation_kinds().len(), pinned.len());
     for (kind, json) in operation_kinds().into_iter().zip(pinned) {
         assert_eq!(wire(&Operation::new(kind.clone())), json);
         assert_eq!(wire(&kind), json);
@@ -6826,7 +6882,9 @@ fn an_operation_carries_its_identifier_requirements_footnote_and_conditions() {
             concat!(
                 r#"{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}},"#,
                 r#""id":"edit-a","requires":["make-b"],"footnote":"marks it final","#,
-                r#""conditions":[{{"condition":"content_hash","path":"notes/a.md","hash":"{ab}"}}]}}"#
+                r#""conditions":[{{"condition":"content_hash","path":"notes/a.md","hash":"{ab}"}},"#,
+                r#"{{"condition":"expected_value","path":"notes/a.md","field":"status","expect":{{"state":"present","value":"draft"}}}},"#,
+                r#"{{"condition":"expected_value","path":"notes/a.md","field":"owner","expect":{{"state":"absent"}}}}]}}"#
             ),
             ab = hash_text(0xab)
         )
@@ -7005,9 +7063,9 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         .expect("an authored plan as JSON");
     for pointer in [
         "",
-        "/operations/4",
-        "/operations/4/fields",
-        "/operations/4/conditions/0",
+        "/operations/14",
+        "/operations/14/fields",
+        "/operations/14/conditions/0",
     ] {
         let json = with_surprise(&authored, pointer);
         assert!(
@@ -7396,6 +7454,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::requires_cycle(vec![1, 2]),
         PlanFault::content_cycle(vec![0, 1]),
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
+        PlanFault::unexpanded_target(vec![1]),
     ]
 }
 
@@ -7622,7 +7681,7 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
 fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
     assert_eq!(
         wire(&a_forecast()),
-        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"]}"#
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[]}"#
     );
     let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
     for transition in &a_resolved_plan().transitions {
@@ -7698,7 +7757,7 @@ fn an_apply_report_is_an_object_tagged_outcome() {
             concat!(
                 r#"{{"outcome":"applied","plan":{},"changeset":"committed","#,
                 r#""targets":[{{"path":"notes/a.md","result":"wrote"}},{{"path":"archive/new.md","result":"found"}}],"#,
-                r#""folders_made":["archive"],"folders_removed":["notes/old"]}}"#
+                r#""folders_made":["archive"],"folders_removed":["notes/old"],"forced":[]}}"#
             ),
             resolved_plan_json()
         )
@@ -7754,7 +7813,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
         format!(
             concat!(
                 r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
-                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[]}},"#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[]}},"#,
                 r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
                 r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
@@ -8065,11 +8124,75 @@ fn applier_decision(operation: &Operation) -> String {
         } => format!("edit {path}: {old_str} to {new_str}"),
         OperationKind::MoveDocument { from, to } => format!("move {from} to {to}"),
         OperationKind::DeleteDocument { path } => format!("delete {path}"),
+        OperationKind::SetFrontmatter {
+            target,
+            field,
+            value,
+        } => format!(
+            "set {field} of {} to {}",
+            target_decision(target),
+            value_decision(value)
+        ),
+        OperationKind::RemoveFrontmatter { target, field } => {
+            format!("remove {field} of {}", target_decision(target))
+        }
+        OperationKind::PushFrontmatter {
+            target,
+            field,
+            value,
+        } => format!(
+            "push {} onto {field} of {}",
+            value_decision(value),
+            target_decision(target)
+        ),
+        OperationKind::PopFrontmatter {
+            target,
+            field,
+            value,
+        } => format!(
+            "pop {} from {field} of {}",
+            value_decision(value),
+            target_decision(target)
+        ),
+        OperationKind::ReplaceBody { path, content } => {
+            format!("replace the body of {path} with {} bytes", content.len())
+        }
+        OperationKind::ReplaceSection {
+            path,
+            heading,
+            content,
+        } => format!("replace {heading} of {path} with {} bytes", content.len()),
+        OperationKind::AppendToSection {
+            path,
+            heading,
+            content,
+        } => format!("append {} bytes to {heading} of {path}", content.len()),
+        OperationKind::DeleteSection { path, heading } => format!("delete {heading} of {path}"),
+        OperationKind::InsertBeforeHeading {
+            path,
+            heading,
+            content,
+        } => format!("insert {} bytes before {heading} of {path}", content.len()),
+        OperationKind::InsertAfterHeading {
+            path,
+            heading,
+            content,
+        } => format!("insert {} bytes after {heading} of {path}", content.len()),
     };
     let observed: Vec<String> = conditions
         .iter()
         .map(|condition| match condition {
             AuthorCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
+            AuthorCondition::ExpectedValue {
+                path,
+                field,
+                expect,
+            } => match expect {
+                ExpectedField::Absent {} => format!("{path} without {field}"),
+                ExpectedField::Present { value } => {
+                    format!("{path} with {field} {}", value_decision(value))
+                }
+            },
         })
         .collect();
     let requires: Vec<&str> = requires.iter().map(OperationId::as_str).collect();
@@ -8080,6 +8203,42 @@ fn applier_decision(operation: &Operation) -> String {
         footnote.as_deref().unwrap_or("-"),
         observed.join(", ")
     )
+}
+
+/// Which documents a frontmatter kind writes, decided with no wildcard arm.
+fn target_decision(target: &WriteTarget) -> String {
+    match target {
+        WriteTarget::Path(path) => path.to_string(),
+        WriteTarget::Where(predicates) => format!("{} predicates' matches", predicates.len()),
+    }
+}
+
+/// What a written value is, decided with no wildcard arm: a shape minted
+/// without a decision here fails to compile.
+fn value_decision(value: &AuthoredValue) -> String {
+    match value {
+        AuthoredValue::Null => "null".to_string(),
+        AuthoredValue::Bool(value) => format!("bool {value}"),
+        AuthoredValue::Integer(value) => format!("integer {value}"),
+        AuthoredValue::Float(value) => format!("float {value}"),
+        AuthoredValue::String(value) => format!("string {value}"),
+        AuthoredValue::List(items) => format!(
+            "list [{}]",
+            items
+                .iter()
+                .map(value_decision)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AuthoredValue::Map(map) => format!(
+            "map {{{}}}",
+            map.entries()
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", value_decision(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn plan_check(condition: &PlanCondition) -> String {
@@ -8104,9 +8263,12 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
             plan: OperationsTag,
             vault,
             operations,
+            force,
             footnote,
         }) => {
-            let mut read = vec![format!("operations for {vault:?}, noting {footnote:?}")];
+            let mut read = vec![format!(
+                "operations for {vault:?}, forced {force}, noting {footnote:?}"
+            )];
             read.extend(operations.iter().map(applier_decision));
             read
         }
@@ -8118,10 +8280,11 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
             transitions,
             conditions,
             provenance,
+            force,
             footnote,
         }) => {
             let mut read = vec![format!(
-                "resolved for {vault:?} at {root:?}, noting {footnote:?}"
+                "resolved for {vault:?} at {root:?}, forced {force}, noting {footnote:?}"
             )];
             read.extend(operations.iter().map(applier_decision));
             read.extend(transitions.iter().map(
@@ -8157,11 +8320,20 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         decisions.last().map(String::as_str),
         Some(
             format!(
-                "edit notes/a.md: draft to final as edit-a, after [make-b], noting marks it final; notes/a.md at {}",
+                "edit notes/a.md: draft to final as edit-a, after [make-b], noting marks it final; notes/a.md at {}, notes/a.md with status string draft, notes/a.md without owner",
                 hash_text(0xab)
             )
             .as_str()
         )
+    );
+    assert_eq!(
+        decisions[4..8],
+        [
+            "set status of notes/a.md to string done as -, after [], noting -; ",
+            "remove due of 1 predicates' matches as -, after [], noting -; ",
+            "push string project onto tags of notes/a.md as -, after [], noting -; ",
+            "pop string stale from tags of 1 predicates' matches as -, after [], noting -; ",
+        ]
     );
     assert_eq!(
         plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
@@ -8197,6 +8369,7 @@ fn the_applier_reads_every_field_of_a_plan() {
         transitions: Vec::new(),
         conditions: Vec::new(),
         provenance: None,
+        force: false,
         footnote: None,
     };
     assert_eq!(
@@ -8208,6 +8381,7 @@ fn the_applier_reads_every_field_of_a_plan() {
             plan: OperationsTag,
             vault: VaultAddress::name(name("notes")),
             operations: Vec::new(),
+            force: false,
             footnote: None,
         }),
         r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[]}"#
@@ -8251,4 +8425,590 @@ fn the_applier_decides_every_mode_and_document_without_a_default() {
             "apply the resolved plan",
         ]
     );
+}
+
+// ── Document-local writes ────────────────────────────────────────────────
+
+/// A value that reads from `json`, or the refusal it reads as.
+fn authored_value(json: &str) -> Result<AuthoredValue, String> {
+    serde_json::from_str::<AuthoredValue>(json).map_err(|error| error.to_string())
+}
+
+/// **A written value is the plain JSON value of its shape.** Null, a
+/// boolean, an integer, a float, a string, a list and a map are written as
+/// themselves, with no tag, and each reads back as the shape it was written
+/// as — an integer never as a float, nor a float as an integer.
+#[test]
+fn a_written_value_is_the_plain_value_of_its_shape() {
+    let map = AuthoredValue::map([
+        ("zeta".to_string(), AuthoredValue::Integer(1)),
+        ("alpha".to_string(), AuthoredValue::Null),
+    ])
+    .expect("distinct keys");
+    let pinned = [
+        (AuthoredValue::Null, "null"),
+        (AuthoredValue::Bool(true), "true"),
+        (AuthoredValue::Integer(-3), "-3"),
+        (AuthoredValue::float(2.5).expect("a finite float"), "2.5"),
+        (AuthoredValue::float(1.0).expect("a finite float"), "1.0"),
+        (AuthoredValue::string("done"), r#""done""#),
+        (
+            AuthoredValue::list([AuthoredValue::string("a"), AuthoredValue::Integer(2)]),
+            r#"["a",2]"#,
+        ),
+        (map, r#"{"zeta":1,"alpha":null}"#),
+        (AuthoredValue::Integer(i64::MAX), "9223372036854775807"),
+    ];
+    for (value, json) in pinned {
+        assert_eq!(wire(&value), json);
+        assert_eq!(authored_value(json), Ok(value.clone()), "{json}");
+        round_trip(&value);
+    }
+    assert_ne!(authored_value("1"), authored_value("1.0"));
+}
+
+/// **A map keeps the order its keys are written in**, which is the order the
+/// document writes them, rather than sorting them.
+#[test]
+fn a_written_map_keeps_the_order_its_keys_are_written_in() {
+    let read = authored_value(r#"{"b":1,"a":2,"c":{"z":1,"y":2}}"#).expect("a map");
+    assert_eq!(wire(&read), r#"{"b":1,"a":2,"c":{"z":1,"y":2}}"#);
+    let AuthoredValue::Map(map) = read else {
+        panic!("a map reads as a map");
+    };
+    let keys: Vec<&str> = map.entries().iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["b", "a", "c"]);
+}
+
+/// **A written value refuses what no frontmatter field can hold**: a float
+/// that is `NaN` or an infinity, in any format that can spell one, an
+/// integer past the signed 64-bit range, and a map key written twice at any
+/// depth — which is refused rather than keeping either value.
+#[test]
+fn a_written_value_refuses_a_non_finite_float_a_wide_integer_and_a_repeated_key() {
+    for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(AuthoredValue::float(number).is_err(), "{number} was built");
+        let deserializer: F64Deserializer<ValueError> = number.into_deserializer();
+        assert!(
+            AuthoredValue::deserialize(deserializer).is_err(),
+            "{number} was read as a written value"
+        );
+        let deserializer: F64Deserializer<ValueError> = number.into_deserializer();
+        assert!(
+            norn_wire::FiniteFloat::deserialize(deserializer).is_err(),
+            "{number} was read as a finite float"
+        );
+    }
+    for yaml in [".nan", ".inf", "-.inf", "[1, .nan]"] {
+        assert!(
+            serde_yaml::from_str::<AuthoredValue>(yaml).is_err(),
+            "`{yaml}` was read as a written value"
+        );
+    }
+    assert!(authored_value("9223372036854775808").is_err());
+    for json in [
+        r#"{"a":1,"a":2}"#,
+        r#"{"a":1,"b":{"c":1,"c":1}}"#,
+        r#"[{"a":1,"a":1}]"#,
+    ] {
+        let refusal = authored_value(json).expect_err(json);
+        assert!(refusal.contains("twice"), "{json}: {refusal}");
+    }
+    assert_eq!(
+        ValueMap::new([
+            ("a".to_string(), AuthoredValue::Null),
+            ("a".to_string(), AuthoredValue::Null),
+        ]),
+        Err(norn_wire::DuplicateKey("a".to_string()))
+    );
+}
+
+/// **Only a `u64` above `i64::MAX` is refused as an integer.** Numbers JSON
+/// delivers as floats, which includes an integer beyond `u64` or below
+/// `i64::MIN`, read as floats that no longer hold the integer exactly.
+#[test]
+fn an_integer_beyond_the_signed_range_is_refused_or_read_as_a_float() {
+    assert!(authored_value("9223372036854775808").is_err());
+    assert!(authored_value("18446744073709551615").is_err());
+    for (json, float) in [
+        ("18446744073709551616", 18_446_744_073_709_551_616.0),
+        ("-9223372036854775809", -9_223_372_036_854_775_809.0),
+    ] {
+        assert_eq!(
+            authored_value(json).expect(json),
+            AuthoredValue::float(float).unwrap(),
+            "{json}"
+        );
+    }
+}
+
+/// **An empty `where` list is refused wherever a target is read.** A
+/// conjunction of no predicates matches every document, so `set --where []`
+/// would write the whole vault.
+#[test]
+fn an_empty_where_list_is_refused() {
+    let alone = r#"{"where":[]}"#;
+    assert!(
+        serde_json::from_str::<WriteTarget>(alone).is_err(),
+        "{alone} read as a target"
+    );
+    let operation =
+        r#"{"kind":"set_frontmatter","fields":{"where":[],"field":"status","value":"done"}}"#;
+    let refusal = serde_json::from_str::<Operation>(operation)
+        .expect_err("an empty where read as an operation");
+    assert!(
+        refusal.to_string().contains("at least one predicate"),
+        "{refusal}"
+    );
+    let request = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","where":[],"changes":[{"change":"remove","field":"due"}]}"#;
+    assert!(serde_json::from_str::<SetParams>(request).is_err());
+}
+
+/// **A frontmatter kind names its documents by exactly one of `path` and
+/// `where`.** Both, or neither, is refused wherever a target is read: alone,
+/// among an operation's fields, and among a `set` request's keys.
+#[test]
+fn a_target_is_exactly_one_of_path_and_where() {
+    let where_list = r#"[{"op":"eq","key":"status","value":"draft"}]"#;
+    assert_eq!(
+        serde_json::from_str::<WriteTarget>(r#"{"path":"notes/a.md"}"#).ok(),
+        Some(WriteTarget::path(path("notes/a.md")))
+    );
+    assert_eq!(
+        serde_json::from_str::<WriteTarget>(&format!(r#"{{"where":{where_list}}}"#)).ok(),
+        Some(WriteTarget::matching(drafts()))
+    );
+    for target in [
+        format!(r#""path":"notes/a.md","where":{where_list},"#),
+        String::new(),
+    ] {
+        let alone = format!("{{{}}}", target.trim_end_matches(','));
+        assert!(
+            serde_json::from_str::<WriteTarget>(&alone).is_err(),
+            "{alone} read as a target"
+        );
+        let operation = format!(
+            r#"{{"kind":"set_frontmatter","fields":{{{target}"field":"status","value":"done"}}}}"#
+        );
+        let refusal = serde_json::from_str::<Operation>(&operation)
+            .expect_err(&format!("{operation} read as an operation"));
+        assert!(
+            refusal.to_string().contains("`path` or `where`"),
+            "{refusal}"
+        );
+        assert!(serde_json::from_str::<OperationKind>(&operation).is_err());
+        let request = format!(
+            r#"{{"vault":{{"by":"name","name":"notes"}},"mode":"preview",{target}"changes":[{{"change":"remove","field":"due"}}]}}"#
+        );
+        assert!(
+            serde_json::from_str::<SetParams>(&request).is_err(),
+            "{request} read as a request"
+        );
+    }
+}
+
+/// **A kind's fields are its own**: a document-local kind carrying another
+/// kind's field, or lacking one of its own, is refused — a `where` target on
+/// a kind that names its document by path included.
+#[test]
+fn a_document_local_kind_refuses_fields_that_are_not_its_own() {
+    for json in [
+        r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"k","value":1,"heading":"H"}}"#,
+        r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"k"}}"#,
+        r#"{"kind":"remove_frontmatter","fields":{"path":"a.md","field":"k","value":1}}"#,
+        r#"{"kind":"push_frontmatter","fields":{"path":"a.md","value":1}}"#,
+        r#"{"kind":"pop_frontmatter","fields":{"path":"a.md","field":"k","value":1,"content":"x"}}"#,
+        r#"{"kind":"replace_body","fields":{"path":"a.md","content":"x","heading":"H"}}"#,
+        r#"{"kind":"replace_section","fields":{"path":"a.md","heading":"H","content":"x","value":1}}"#,
+        r#"{"kind":"replace_section","fields":{"path":"a.md","content":"x"}}"#,
+        r#"{"kind":"append_to_section","fields":{"path":"a.md","heading":"H"}}"#,
+        r#"{"kind":"delete_section","fields":{"path":"a.md","heading":"H","content":"x"}}"#,
+        r#"{"kind":"insert_before_heading","fields":{"where":[],"heading":"H","content":"x"}}"#,
+        r#"{"kind":"insert_after_heading","fields":{"path":"a.md","heading":"H","old_str":"x"}}"#,
+        r#"{"kind":"delete_document","fields":{"where":[]}}"#,
+        r#"{"kind":"str_replace","fields":{"path":"a.md","old_str":"a","new_str":"b","field":"k"}}"#,
+        r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"k","value":1,"value":2}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+    let null_value: Operation = serde_json::from_str(
+        r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"k","value":null}}"#,
+    )
+    .expect("a field set to null");
+    assert_eq!(
+        null_value.kind,
+        OperationKind::set_frontmatter(WriteTarget::path(path("a.md")), "k", AuthoredValue::Null)
+    );
+}
+
+/// **An expected value is absent, or present with exactly a value**, tagged
+/// `state` as a file state is, so a field holding null is present with the
+/// value `null` and never read as absent.
+#[test]
+fn an_expected_value_is_absent_or_present_with_its_value() {
+    let pinned = [
+        (
+            ExpectedField::absent(),
+            r#"{"condition":"expected_value","path":"notes/a.md","field":"owner","expect":{"state":"absent"}}"#,
+        ),
+        (
+            ExpectedField::present(AuthoredValue::Null),
+            r#"{"condition":"expected_value","path":"notes/a.md","field":"owner","expect":{"state":"present","value":null}}"#,
+        ),
+        (
+            ExpectedField::present(AuthoredValue::list([AuthoredValue::string("x")])),
+            r#"{"condition":"expected_value","path":"notes/a.md","field":"owner","expect":{"state":"present","value":["x"]}}"#,
+        ),
+    ];
+    for (expect, json) in pinned {
+        let condition = AuthorCondition::expected_value(path("notes/a.md"), "owner", expect);
+        assert_eq!(wire(&condition), json);
+        round_trip(&condition);
+    }
+    assert_ne!(
+        ExpectedField::absent(),
+        ExpectedField::present(AuthoredValue::Null)
+    );
+    for expect in [
+        r#"{"state":"absent","value":null}"#,
+        r#"{"state":"present"}"#,
+        r#"{"state":"missing"}"#,
+        r#"{"value":1}"#,
+    ] {
+        let json = format!(
+            r#"{{"condition":"expected_value","path":"notes/a.md","field":"owner","expect":{expect}}}"#
+        );
+        assert!(
+            serde_json::from_str::<AuthorCondition>(&json).is_err(),
+            "{json} read as a condition"
+        );
+    }
+    assert!(
+        serde_json::from_str::<AuthorCondition>(
+            r#"{"condition":"expected_value","path":"notes/a.md","field":"owner"}"#
+        )
+        .is_err(),
+        "an expected value observing nothing read as a condition"
+    );
+}
+
+/// **A plan's force is `false` unless it is written `true`.** A plan written
+/// without it reads as not forced and is written back without it, so every
+/// plan made before the flag existed reads and writes as it did; a forced
+/// plan writes `"force":true` and reads back forced, alone and as a
+/// document; and `null` is no flag.
+#[test]
+fn a_plan_is_forced_only_where_it_says_so() {
+    let unforced = wire(&a_bare_resolved_plan());
+    assert!(!unforced.contains("force"), "{unforced}");
+    let forced = a_bare_resolved_plan().with_force(true);
+    let json = wire(&forced);
+    assert_eq!(
+        json,
+        spliced(
+            &unforced,
+            r#""conditions":[]"#,
+            r#""conditions":[],"force":true"#
+        )
+    );
+    round_trip(&forced);
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&json).ok(),
+        Some(PlanDocument::resolved(forced))
+    );
+    let authored = an_authored_plan().with_force(true);
+    let json = wire(&PlanDocument::operations(authored.clone()));
+    assert!(json.ends_with(r#""force":true}"#), "{json}");
+    assert_eq!(
+        serde_json::from_str::<PlanDocument>(&json).ok(),
+        Some(PlanDocument::operations(authored))
+    );
+    assert_eq!(
+        serde_json::from_str::<AuthoredPlan>(
+            r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[]}"#
+        )
+        .map(|plan| plan.force)
+        .ok(),
+        Some(false)
+    );
+    for plan in [
+        r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[],"force":null}"#,
+        r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[],"force":"yes"}"#,
+        r#"{"plan":"operations","vault":{"by":"name","name":"notes"},"operations":[],"force":true,"force":false}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<PlanDocument>(plan).is_err(),
+            "{plan} read as a plan"
+        );
+    }
+}
+
+/// **A resolved plan carries only path targets.** Planning expands a `where`
+/// target, so a resolved plan still carrying one names each such operation
+/// by its position in the fault it answers with; one naming only paths has
+/// no such fault.
+#[test]
+fn a_resolved_plan_with_a_where_target_is_a_fault() {
+    let set = |target| {
+        Operation::new(OperationKind::set_frontmatter(
+            target,
+            "status",
+            AuthoredValue::string("done"),
+        ))
+    };
+    let mut plan = a_bare_resolved_plan();
+    plan.operations
+        .push(set(WriteTarget::path(path("notes/a.md"))));
+    assert_eq!(plan.unexpanded_targets(), None);
+    plan.operations.push(set(WriteTarget::matching(drafts())));
+    plan.operations
+        .push(Operation::new(OperationKind::remove_frontmatter(
+            WriteTarget::matching(Vec::new()),
+            "due",
+        )));
+    assert_eq!(
+        plan.unexpanded_targets(),
+        Some(PlanFault::unexpanded_target(vec![2, 3]))
+    );
+    assert_eq!(
+        wire(&PlanFault::unexpanded_target(vec![2, 3])),
+        r#"{"kind":"unexpanded_target","positions":[2,3]}"#
+    );
+}
+
+/// **A force is loud, in the shape a refusal carries.** The forecast and the
+/// applied report list every violation a force let through, each exactly
+/// the object a schema-violation check is without its `check` tag.
+#[test]
+fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
+    let violation = SchemaViolation::new(
+        path("notes/a.md"),
+        FindingKind::UndeclaredTag,
+        Some("draft".to_string()),
+        "the tag `draft` is not declared",
+    );
+    let refused = serde_json::to_value(RefusedCheck::schema_violation(
+        path("notes/a.md"),
+        FindingKind::UndeclaredTag,
+        Some("draft".to_string()),
+        "the tag `draft` is not declared",
+    ))
+    .expect("a check as JSON");
+    let mut without_tag = refused.as_object().expect("an object").clone();
+    without_tag.remove("check");
+    assert_eq!(
+        serde_json::to_value(&violation).expect("a violation as JSON"),
+        serde_json::Value::Object(without_tag)
+    );
+    let forecast = a_forecast().with_forced(vec![violation.clone()]);
+    round_trip(&forecast);
+    let forced_json = wire(&vec![violation.clone()]);
+    assert!(
+        wire(&forecast).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        "{}",
+        wire(&forecast)
+    );
+    let applied = ApplyReport::applied(
+        a_bare_resolved_plan().with_force(true),
+        ChangesetOutcome::Committed,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .with_forced(vec![violation.clone()]);
+    round_trip(&applied);
+    assert!(
+        wire(&applied).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        "{}",
+        wire(&applied)
+    );
+    let previewed =
+        ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()).with_forced(vec![violation]);
+    assert_eq!(
+        previewed,
+        ApplyReport::previewed(a_bare_resolved_plan(), forecast)
+    );
+}
+
+// ── The write verbs' requests ────────────────────────────────────────────
+
+fn notes() -> VaultAddress {
+    VaultAddress::name(name("notes"))
+}
+
+/// **A `set` compiles to one frontmatter operation per change**, in order,
+/// each with the request's target and conditions, forced as the request is.
+#[test]
+fn a_set_request_compiles_to_one_operation_per_change() {
+    let condition = AuthorCondition::expected_value(
+        path("notes/a.md"),
+        "status",
+        ExpectedField::present(AuthoredValue::string("draft")),
+    );
+    let target = WriteTarget::matching(drafts());
+    let request = SetParams::new(
+        notes(),
+        ApplyMode::Preview,
+        target.clone(),
+        vec![
+            FieldChange::set("status", AuthoredValue::string("done")),
+            FieldChange::remove("due"),
+            FieldChange::push("tags", AuthoredValue::string("closed")),
+            FieldChange::pop("tags", AuthoredValue::string("open")),
+        ],
+    )
+    .with_conditions(vec![condition.clone()])
+    .with_force(true);
+    round_trip(&request);
+    let operation = |kind| Operation::new(kind).with_conditions(vec![condition.clone()]);
+    assert_eq!(
+        request.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![
+                operation(OperationKind::set_frontmatter(
+                    target.clone(),
+                    "status",
+                    AuthoredValue::string("done")
+                )),
+                operation(OperationKind::remove_frontmatter(target.clone(), "due")),
+                operation(OperationKind::push_frontmatter(
+                    target.clone(),
+                    "tags",
+                    AuthoredValue::string("closed")
+                )),
+                operation(OperationKind::pop_frontmatter(
+                    target,
+                    "tags",
+                    AuthoredValue::string("open")
+                )),
+            ],
+        )
+        .with_force(true)
+    );
+}
+
+/// A `set` request names its documents by the keys an operation does, and is
+/// read by hand: pinned bytes read back, a path request compiles to path
+/// operations, and a request without its mode, with an unknown key, or with
+/// no change is refused.
+#[test]
+fn a_set_request_is_its_target_keys_beside_its_own() {
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/a.md","changes":[{"change":"set","field":"rank","value":2}]}"#;
+    let request: SetParams = serde_json::from_str(json).expect("a set request");
+    assert_eq!(wire(&request), json);
+    assert_eq!(request.mode, ApplyMode::Apply);
+    assert_eq!(
+        request.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::set_frontmatter(
+                WriteTarget::path(path("notes/a.md")),
+                "rank",
+                AuthoredValue::Integer(2),
+            ))],
+        )
+    );
+    for refused in [
+        json.replace(r#""mode":"apply","#, ""),
+        json.replace(r#""changes":"#, r#""surprise":1,"changes":"#),
+        json.replace(r#"[{"change":"set","field":"rank","value":2}]"#, "[]"),
+        json.replace(r#""field":"rank""#, r#""field":"rank","heading":"H""#),
+        json.replace(r#""change":"set""#, r#""change":"add""#),
+    ] {
+        assert!(
+            serde_json::from_str::<SetParams>(&refused).is_err(),
+            "{refused} read as a set request"
+        );
+    }
+}
+
+/// **An `edit` compiles to one operation per edit on its document**, in
+/// order, each carrying the request's conditions.
+#[test]
+fn an_edit_request_compiles_to_one_operation_per_edit() {
+    let condition = AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab));
+    let request = EditParams::new(
+        notes(),
+        ApplyMode::Apply,
+        path("notes/a.md"),
+        vec![
+            DocumentEdit::str_replace("draft", "final"),
+            DocumentEdit::replace_section("Notes", "New.\n"),
+            DocumentEdit::append_to_section("Log", "- done\n"),
+            DocumentEdit::delete_section("Scratch"),
+            DocumentEdit::insert_before_heading("Notes", "Intro.\n"),
+            DocumentEdit::insert_after_heading("Notes", "First.\n"),
+            DocumentEdit::replace_body("Body.\n"),
+        ],
+    )
+    .with_conditions(vec![condition.clone()]);
+    round_trip(&request);
+    let at = || path("notes/a.md");
+    let expected: Vec<Operation> = [
+        OperationKind::str_replace(at(), "draft", "final"),
+        OperationKind::replace_section(at(), "Notes", "New.\n"),
+        OperationKind::append_to_section(at(), "Log", "- done\n"),
+        OperationKind::delete_section(at(), "Scratch"),
+        OperationKind::insert_before_heading(at(), "Notes", "Intro.\n"),
+        OperationKind::insert_after_heading(at(), "Notes", "First.\n"),
+        OperationKind::replace_body(at(), "Body.\n"),
+    ]
+    .into_iter()
+    .map(|kind| Operation::new(kind).with_conditions(vec![condition.clone()]))
+    .collect();
+    assert_eq!(request.plan(), AuthoredPlan::new(notes(), expected));
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","path":"notes/a.md","edits":[{"edit":"delete_section","heading":"Scratch"}]}"#;
+    let read: EditParams = serde_json::from_str(json).expect("an edit request");
+    assert_eq!(wire(&read), json);
+    for refused in [
+        json.replace(r#""mode":"preview","#, ""),
+        json.replace(r#"[{"edit":"delete_section","heading":"Scratch"}]"#, "[]"),
+        json.replace(
+            r#""heading":"Scratch""#,
+            r#""heading":"Scratch","content":"x""#,
+        ),
+        json.replace(r#""edits":"#, r#""force":true,"surprise":1,"edits":"#),
+    ] {
+        assert!(
+            serde_json::from_str::<EditParams>(&refused).is_err(),
+            "{refused} read as an edit request"
+        );
+    }
+}
+
+/// **A `new` compiles to one `create_document`** carrying the request's
+/// conditions, forced as the request is.
+#[test]
+fn a_new_request_compiles_to_one_create() {
+    let request = NewParams::new(notes(), ApplyMode::Preview, path("inbox/new.md"), "# New\n")
+        .with_force(true);
+    round_trip(&request);
+    assert_eq!(
+        wire(&request),
+        r##"{"vault":{"by":"name","name":"notes"},"mode":"preview","path":"inbox/new.md","content":"# New\n","force":true}"##
+    );
+    assert_eq!(
+        request.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::create_document(
+                path("inbox/new.md"),
+                "# New\n"
+            ))],
+        )
+        .with_force(true)
+    );
+    for refused in [
+        r#"{"vault":{"by":"name","name":"notes"},"path":"a.md","content":""}"#,
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"a.md","content":"","title":"A"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<NewParams>(refused).is_err(),
+            "{refused} read as a new request"
+        );
+    }
 }

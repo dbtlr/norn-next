@@ -7,7 +7,8 @@
 //! crosses beside a resolved plan, which already names each target and its
 //! two states, so a forecast repeating them would carry every transition of
 //! a vault-wide preview twice. What the plan cannot say is left: which targets
-//! drifted, and the folders the plan makes and removes.
+//! drifted, the folders the plan makes and removes, and the schema
+//! violations its force lets through.
 //!
 //! **A drifted target is marked, not judged.** A fresh plan resolved after a
 //! refusal marks every target that drifted, because a hash cannot tell a file
@@ -15,6 +16,11 @@
 //! the target may already carry this plan's change, and applying the fresh
 //! plan is the caller's decision. A preview resolved from what the vault
 //! holds has no drifted target.
+//!
+//! **A force is loud.** A forced plan bypasses the schema check and nothing
+//! else, and the forecast lists every schema violation the force lets
+//! through, in the shape a refusal would carry it, so a caller reads what it
+//! is forcing before it applies. The applied report lists them again.
 //!
 //! **A folder is its own path type.** Folders are not transitions, and the
 //! forecast and the applied report name the folders a plan makes and removes.
@@ -30,6 +36,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::IllegalPath;
 use crate::document::DocumentPath;
+use crate::plan::outcome::SchemaViolation;
 
 /// What a folder path is called in a refusal that names one.
 const FOLDER_PATH: &str = "folder path";
@@ -120,11 +127,15 @@ pub struct Forecast {
     pub folders_made: Vec<FolderPath>,
     /// The folders the plan's removals leave empty, which it removes.
     pub folders_removed: Vec<FolderPath>,
+    /// Every schema violation a result carries that the plan's force lets
+    /// through. Empty for a plan that is not forced, and for a forced plan
+    /// whose every result is valid.
+    pub forced: Vec<SchemaViolation>,
 }
 
 impl Forecast {
     /// A plan whose targets `drifted` drifted, making `folders_made` and
-    /// removing `folders_removed`.
+    /// removing `folders_removed`, forcing nothing through.
     pub const fn new(
         drifted: Vec<DocumentPath>,
         folders_made: Vec<FolderPath>,
@@ -134,6 +145,14 @@ impl Forecast {
             drifted,
             folders_made,
             folders_removed,
+            forced: Vec::new(),
         }
+    }
+
+    /// The forecast of a forced plan letting `forced` through.
+    #[must_use]
+    pub fn with_forced(mut self, forced: Vec<SchemaViolation>) -> Self {
+        self.forced = forced;
+        self
     }
 }
