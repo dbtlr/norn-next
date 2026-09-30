@@ -8523,6 +8523,28 @@ fn a_written_value_refuses_a_non_finite_float_a_wide_integer_and_a_repeated_key(
     );
 }
 
+/// **An empty `where` list is refused wherever a target is read.** A
+/// conjunction of no predicates matches every document, so `set --where []`
+/// would write the whole vault.
+#[test]
+fn an_empty_where_list_is_refused() {
+    let alone = r#"{"where":[]}"#;
+    assert!(
+        serde_json::from_str::<WriteTarget>(alone).is_err(),
+        "{alone} read as a target"
+    );
+    let operation =
+        r#"{"kind":"set_frontmatter","fields":{"where":[],"field":"status","value":"done"}}"#;
+    let refusal = serde_json::from_str::<Operation>(operation)
+        .expect_err("an empty where read as an operation");
+    assert!(
+        refusal.to_string().contains("at least one predicate"),
+        "{refusal}"
+    );
+    let request = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","where":[],"changes":[{"change":"remove","field":"due"}]}"#;
+    assert!(serde_json::from_str::<SetParams>(request).is_err());
+}
+
 /// **A frontmatter kind names its documents by exactly one of `path` and
 /// `where`.** Both, or neither, is refused wherever a target is read: alone,
 /// among an operation's fields, and among a `set` request's keys.

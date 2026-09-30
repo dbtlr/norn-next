@@ -3445,6 +3445,8 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
         property_names(&target),
         ["path", "where"].into_iter().collect()
     );
+    assert_eq!(target["properties"]["where"]["minItems"].as_u64(), Some(1));
+    assert_eq!(set["properties"]["where"]["minItems"].as_u64(), Some(1));
     assert!(refuses_unknown_keys(&target), "{target} admits any key");
 }
 

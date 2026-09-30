@@ -5,7 +5,8 @@
 //! operation rather than a verb of its own. On the wire a target is exactly
 //! one of two keys, `path` or `where`, sitting among the fields that name it,
 //! so a frontmatter operation's `path` is the key every other kind names its
-//! document by. Both keys written, or neither, is refused.
+//! document by. Both keys written, or neither, is refused, and so is an empty
+//! `where`: a conjunction of no predicates matches every document.
 //!
 //! **A predicate list is the shared grammar, and planning expands it.** A
 //! `where` target is the conjunction a `find` filters by. The planner expands
@@ -60,13 +61,18 @@ impl WriteTarget {
         }
     }
 
-    /// The target the two keys spell: exactly one of them written.
+    /// The target the two keys spell: exactly one of them written, and a
+    /// `where` holding at least one predicate, since a conjunction of none
+    /// matches every document.
     pub(crate) fn from_keys(
         path: Option<DocumentPath>,
         predicates: Option<Vec<Predicate>>,
     ) -> Result<Self, &'static str> {
         match (path, predicates) {
             (Some(path), None) => Ok(WriteTarget::Path(path)),
+            (None, Some(predicates)) if predicates.is_empty() => {
+                Err("a `where` target names at least one predicate")
+            }
             (None, Some(predicates)) => Ok(WriteTarget::Where(predicates)),
             (Some(_), Some(_)) => Err("a target is `path` or `where`, not both"),
             (None, None) => Err("a target names `path` or `where`"),
@@ -181,8 +187,9 @@ fn target_properties(generator: &mut SchemaGenerator) -> (Schema, Schema) {
     let mut predicates = generator.subschema_for::<Vec<Predicate>>();
     predicates.insert(
         "description".to_string(),
-        "Every document matching all of these predicates is written; planning expands the match into one operation per document. Exactly one of `path` and `where` is written."
+        "Every document matching all of these predicates is written; planning expands the match into one operation per document. At least one predicate is required. Exactly one of `path` and `where` is written."
             .into(),
     );
+    predicates.insert("minItems".to_string(), 1.into());
     (path, predicates)
 }
