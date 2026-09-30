@@ -73,9 +73,9 @@
 //! [`doctor`](DoctorRegistryParams)'s registry half are spelled the same
 //! way: [`RegisterParams`] answering
 //! [`RegisterReport`], [`UnregisterParams`] answering [`UnregisterReport`],
-//! [`ListParams`] answering [`ListReport`], [`SetParams`] — whose every field
-//! is a [`Change`], or a [`Replace`] where the field has no default to be
-//! cleared to — answering [`SetReport`], [`ResolveParams`] answering
+//! [`ListParams`] answering [`ListReport`], [`VaultSetParams`] — whose every field
+//! is a [`VaultChange`], or a [`VaultReplace`] where the field has no default to be
+//! cleared to — answering [`VaultSetReport`], [`ResolveParams`] answering
 //! [`ResolveReport`], [`StatusParams`] answering [`StatusReport`],
 //! [`ReloadParams`] answering [`ReloadReport`] of a [`ReloadOutcome`], and
 //! [`DoctorRegistryParams`] answering [`DoctorRegistryReport`] over the
@@ -102,7 +102,7 @@
 //! whether it is forced past the schema check. A frontmatter kind names its
 //! documents by a [`WriteTarget`] and writes an [`AuthoredValue`] — a
 //! [`FiniteFloat`] or a [`ValueMap`] among its shapes. The document-local
-//! verbs each compile to an authored plan: `set` from [`SetFieldsParams`] of
+//! verbs each compile to an authored plan: `set` from [`SetParams`] of
 //! [`FieldChange`]s, `edit` from [`EditParams`] of [`DocumentEdit`]s, and
 //! `new` from [`NewParams`]. A preview answers with
 //! the resolved plan and a [`Forecast`] of what the plan does not carry — the
@@ -164,7 +164,7 @@
 //!   names, and the kind then takes the fields it names, refusing one it lacks
 //!   and one it does not take. A frontmatter kind's [`WriteTarget`] is two
 //!   keys among those fields, exactly one of them written, so the target is
-//!   written by hand on both sides too, and [`SetFieldsParams`], which holds a
+//!   written by hand on both sides too, and [`SetParams`], which holds a
 //!   target among its own keys, is read the way an operation is.
 //!   [`Cursor`] and [`PlanDocument`] are written by
 //!   hand on both sides: a cursor's wire shape is one opaque string rather
@@ -189,7 +189,7 @@
 //!   hold; [`Operation`] advertises its kind's own branches with its optional
 //!   parts added inside each, since each branch refuses a key it does not
 //!   name; [`WriteTarget`] advertises its two keys with exactly one required,
-//!   and [`OperationKind`] and [`SetFieldsParams`] keep the derive but settle
+//!   and [`OperationKind`] and [`SetParams`] keep the derive but settle
 //!   the target flattened into them as an object whose keys are all its own;
 //!   [`AuthoredValue`] and [`ValueMap`] are a tree of plain values, stating in
 //!   words the finiteness and single keys JSON Schema cannot;
@@ -330,8 +330,8 @@
 //! [`ControlFileFailure::new`],
 //! the constructor on each [`Advisory`], [`Attention`], [`ResolveReport`],
 //! [`StatusReport`], [`RegistrySanity`] and [`RegistryProblem`] variant,
-//! [`VaultStatus::new`], [`RollUp::of`], [`Change::keep`], [`Change::set`],
-//! [`Change::clear`], [`Replace::keep`], [`Replace::set`],
+//! [`VaultStatus::new`], [`RollUp::of`], [`VaultChange::keep`], [`VaultChange::set`],
+//! [`VaultChange::clear`], [`VaultReplace::keep`], [`VaultReplace::set`],
 //! [`EngineHealth::new`], and the `new` on each of the seven vault-namespace
 //! params types, on [`DoctorRegistryParams`], and on each of their reports;
 //! [`ContentHash::from_sha256`], [`ContentHash::new`],
@@ -341,7 +341,7 @@
 //! [`ApplyReport`] variant, [`ApplyReport::with_forced`], [`Forecast::new`],
 //! [`Forecast::with_forced`], [`SchemaViolation::new`],
 //! [`UnresolvedOperation::new`], [`AppliedTarget::new`],
-//! [`ApplyParams::new`], the `new` on [`SetFieldsParams`], [`EditParams`]
+//! [`ApplyParams::new`], the `new` on [`SetParams`], [`EditParams`]
 //! and [`NewParams`], and the constructor on each [`FieldChange`] and
 //! [`DocumentEdit`] variant. The plan types the applier destructures, below,
 //! can be written as literals and keep their constructors all the same:
@@ -425,7 +425,7 @@
 //! previews again under the build it is talking to. An answer that carries a
 //! plan — a report, or a refusal's fresh plan — still drops a field it does
 //! not know at its own level, and the plan inside it still refuses one. The
-//! document-local write requests — [`SetFieldsParams`], [`EditParams`] and
+//! document-local write requests — [`SetParams`], [`EditParams`] and
 //! [`NewParams`], with their changes and edits — refuse one too, since each
 //! becomes a plan and a field dropped from it would be dropped from the plan.
 //!
@@ -602,7 +602,7 @@ pub use vault::list::{ListParams, ListReport};
 pub use vault::register::{RegisterParams, RegisterReport};
 pub use vault::reload::{ReloadOutcome, ReloadParams, ReloadReport};
 pub use vault::resolve::{ResolveParams, ResolveReport};
-pub use vault::set::{Change, Replace, SetParams, SetReport};
+pub use vault::set::{VaultChange, VaultReplace, VaultSetParams, VaultSetReport};
 pub use vault::status::{StatusParams, StatusReport};
 pub use vault::unregister::{UnregisterParams, UnregisterReport};
 pub use verb::{
@@ -610,4 +610,4 @@ pub use verb::{
 };
 pub use write::edit::{DocumentEdit, EditParams};
 pub use write::new::NewParams;
-pub use write::set::{FieldChange, SetFieldsParams};
+pub use write::set::{FieldChange, SetParams};

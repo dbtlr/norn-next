@@ -16,32 +16,32 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change,
-    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
-    ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
-    CursorOrderChanged, DescribeParams, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams,
-    ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
-    ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FileState, FindParams,
-    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
-    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
-    NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
-    OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, Replace, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    ResolvedTag, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetFieldsParams, SetParams,
-    SetReport, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
-    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause, WriteTarget,
+    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
+    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
+    HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
+    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer,
+    VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -1357,7 +1357,7 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .iter()
             .map(|change| tag_string(change, "change"))
             .collect::<BTreeSet<_>>(),
-        advertised::<Change<SchemaSource>>(Some("change")),
+        advertised::<VaultChange<SchemaSource>>(Some("change")),
         "the changes built here are not the changes the vocabulary holds"
     );
     assert_eq!(
@@ -1365,7 +1365,7 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
             .iter()
             .map(|replacement| tag_string(replacement, "change"))
             .collect::<BTreeSet<_>>(),
-        advertised::<Replace<VaultRoot>>(Some("change")),
+        advertised::<VaultReplace<VaultRoot>>(Some("change")),
         "the replacements built here are not the ones the vocabulary holds"
     );
     assert_eq!(
@@ -5578,17 +5578,20 @@ fn reload_outcomes() -> Vec<ReloadOutcome> {
 }
 
 /// Every change an edit does to a field with a default.
-fn changes() -> Vec<Change<SchemaSource>> {
+fn changes() -> Vec<VaultChange<SchemaSource>> {
     vec![
-        Change::keep(),
-        Change::set(schema_sources().remove(0)),
-        Change::clear(),
+        VaultChange::keep(),
+        VaultChange::set(schema_sources().remove(0)),
+        VaultChange::clear(),
     ]
 }
 
 /// Every change an edit does to a field with no default.
-fn replacements() -> Vec<Replace<VaultRoot>> {
-    vec![Replace::keep(), Replace::set(vault_roots().remove(1))]
+fn replacements() -> Vec<VaultReplace<VaultRoot>> {
+    vec![
+        VaultReplace::keep(),
+        VaultReplace::set(vault_roots().remove(1)),
+    ]
 }
 
 /// Every shape the vault namespace and doctor's registry half carry survives
@@ -5669,14 +5672,14 @@ fn every_vault_namespace_params_and_report_shape_survives_the_round_trip() {
     round_trip(&ListParams::new());
     round_trip(&ListReport::new([]));
     round_trip(&ListReport::new(registrations()));
-    round_trip(&SetParams::new(name("notes")));
+    round_trip(&VaultSetParams::new(name("notes")));
     round_trip(
-        &SetParams::new(name("notes"))
+        &VaultSetParams::new(name("notes"))
             .with_root(replacements().remove(1))
             .with_schema_source(changes().remove(2))
-            .with_poll_backend(Change::set(PollBackend::Poll)),
+            .with_poll_backend(VaultChange::set(PollBackend::Poll)),
     );
-    round_trip(&SetReport::new(
+    round_trip(&VaultSetReport::new(
         registrations().remove(0),
         Published::parked(park()),
     ));
@@ -6146,19 +6149,19 @@ fn the_nameless_status_answer_carries_the_roll_up_alone() {
 #[test]
 fn a_change_tells_keeping_a_field_from_clearing_it() {
     assert_eq!(
-        wire(&Change::<SchemaSource>::keep()),
+        wire(&VaultChange::<SchemaSource>::keep()),
         r#"{"change":"keep"}"#
     );
     assert_eq!(
-        wire(&Change::set(schema_sources().remove(0))),
+        wire(&VaultChange::set(schema_sources().remove(0))),
         r#"{"change":"set","value":"/home/person/.config/norn/schemas/work.yaml"}"#
     );
     assert_eq!(
-        wire(&Change::<SchemaSource>::clear()),
+        wire(&VaultChange::<SchemaSource>::clear()),
         r#"{"change":"clear"}"#
     );
-    assert_eq!(Change::<SchemaSource>::default(), Change::keep());
-    assert_eq!(Replace::<VaultRoot>::default(), Replace::keep());
+    assert_eq!(VaultChange::<SchemaSource>::default(), VaultChange::keep());
+    assert_eq!(VaultReplace::<VaultRoot>::default(), VaultReplace::keep());
 }
 
 /// A registration cannot be without a root, so the root's edit has no clear to
@@ -6166,16 +6169,16 @@ fn a_change_tells_keeping_a_field_from_clearing_it() {
 #[test]
 fn a_root_cannot_be_cleared() {
     assert_eq!(
-        serde_json::from_str::<Replace<VaultRoot>>(r#"{"change":"keep"}"#)
+        serde_json::from_str::<VaultReplace<VaultRoot>>(r#"{"change":"keep"}"#)
             .expect("keeping the root"),
-        Replace::keep()
+        VaultReplace::keep()
     );
     assert!(
-        serde_json::from_str::<Replace<VaultRoot>>(r#"{"change":"clear"}"#).is_err(),
+        serde_json::from_str::<VaultReplace<VaultRoot>>(r#"{"change":"clear"}"#).is_err(),
         "a cleared root read back as a replacement"
     );
     assert!(
-        serde_json::from_str::<Change<SchemaSource>>(r#"{"change":"clear"}"#).is_ok(),
+        serde_json::from_str::<VaultChange<SchemaSource>>(r#"{"change":"clear"}"#).is_ok(),
         "a cleared schema source is what returns a vault to the in-vault default"
     );
 }
@@ -6211,10 +6214,10 @@ fn a_vault_params_constructor_takes_the_required_parts_and_defaults_the_rest() {
     let reload = || ReloadParams::new(VaultAddress::name(name("notes")));
     assert!(!reload().dry_run);
     assert!(reload().dry_run().dry_run);
-    let set = SetParams::new(name("notes"));
-    assert_eq!(set.root, Replace::keep());
-    assert_eq!(set.schema_source, Change::keep());
-    assert_eq!(set.poll_backend, Change::keep());
+    let set = VaultSetParams::new(name("notes"));
+    assert_eq!(set.root, VaultReplace::keep());
+    assert_eq!(set.schema_source, VaultChange::keep());
+    assert_eq!(set.poll_backend, VaultChange::keep());
     let registration = Registration::new(name("notes"), vault_roots().remove(1));
     assert_eq!(registration.schema_source, None);
     assert_eq!(registration.poll_backend, None);
@@ -6258,10 +6261,10 @@ fn every_unregister_setter_lands_in_the_bytes() {
 
 #[test]
 fn every_set_setter_lands_in_the_bytes() {
-    let request = SetParams::new(name("notes"))
+    let request = VaultSetParams::new(name("notes"))
         .with_root(replacements().remove(1))
-        .with_schema_source(Change::clear())
-        .with_poll_backend(Change::set(PollBackend::Poll));
+        .with_schema_source(VaultChange::clear())
+        .with_poll_backend(VaultChange::set(PollBackend::Poll));
     assert_eq!(
         wire(&request),
         r#"{"name":"notes","root":{"change":"set","value":"/home/person/notes"},"schema_source":{"change":"clear"},"poll_backend":{"change":"set","value":"poll"}}"#
@@ -8557,7 +8560,7 @@ fn a_target_is_exactly_one_of_path_and_where() {
             r#"{{"vault":{{"by":"name","name":"notes"}},"mode":"preview",{target}"changes":[{{"change":"remove","field":"due"}}]}}"#
         );
         assert!(
-            serde_json::from_str::<SetFieldsParams>(&request).is_err(),
+            serde_json::from_str::<SetParams>(&request).is_err(),
             "{request} read as a request"
         );
     }
@@ -8805,7 +8808,7 @@ fn a_set_request_compiles_to_one_operation_per_change() {
         ExpectedField::present(AuthoredValue::string("draft")),
     );
     let target = WriteTarget::matching(drafts());
-    let request = SetFieldsParams::new(
+    let request = SetParams::new(
         notes(),
         ApplyMode::Preview,
         target.clone(),
@@ -8854,7 +8857,7 @@ fn a_set_request_compiles_to_one_operation_per_change() {
 #[test]
 fn a_set_request_is_its_target_keys_beside_its_own() {
     let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/a.md","changes":[{"change":"set","field":"rank","value":2}]}"#;
-    let request: SetFieldsParams = serde_json::from_str(json).expect("a set request");
+    let request: SetParams = serde_json::from_str(json).expect("a set request");
     assert_eq!(wire(&request), json);
     assert_eq!(request.mode, ApplyMode::Apply);
     assert_eq!(
@@ -8876,7 +8879,7 @@ fn a_set_request_is_its_target_keys_beside_its_own() {
         json.replace(r#""change":"set""#, r#""change":"add""#),
     ] {
         assert!(
-            serde_json::from_str::<SetFieldsParams>(&refused).is_err(),
+            serde_json::from_str::<SetParams>(&refused).is_err(),
             "{refused} read as a set request"
         );
     }

@@ -15848,9 +15848,9 @@ mod tests {
         use super::*;
         use norn_config::registry::PollBackend;
         use norn_wire::{
-            Change, ErrorEnvelope, FindParams, ListParams, ReasonCode, RegisterParams,
-            RegisterReport, Replace, SetParams, SetReport, UnregisterParams, UnregisterReport,
-            VaultAddress,
+            ErrorEnvelope, FindParams, ListParams, ReasonCode, RegisterParams, RegisterReport,
+            UnregisterParams, UnregisterReport, VaultAddress, VaultChange, VaultReplace,
+            VaultSetParams, VaultSetReport,
         };
 
         const NOTES: &str = "notes";
@@ -16469,8 +16469,8 @@ mod tests {
         /// idled the entry out still holds it.
         fn set_once_idle(
             host: &crate::Host<ProductionEntryOps>,
-            edit: &SetParams,
-        ) -> Result<SetReport, ErrorEnvelope> {
+            edit: &VaultSetParams,
+        ) -> Result<VaultSetReport, ErrorEnvelope> {
             wait_until(
                 "the entry to be let go of",
                 lifecycle_budget(),
@@ -16484,8 +16484,8 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{failure}"))
         }
 
-        fn moving_to(root: &Path) -> SetParams {
-            SetParams::new(notes()).with_root(Replace::set(VaultRoot::new(root).unwrap()))
+        fn moving_to(root: &Path) -> VaultSetParams {
+            VaultSetParams::new(notes()).with_root(VaultReplace::set(VaultRoot::new(root).unwrap()))
         }
 
         /// A second vault root beside `f`'s, holding the in-vault schema and
@@ -16541,8 +16541,8 @@ mod tests {
 
             let report = set_once_idle(
                 &host,
-                &SetParams::new(notes())
-                    .with_schema_source(Change::set(SchemaSource::new(&source).unwrap())),
+                &VaultSetParams::new(notes())
+                    .with_schema_source(VaultChange::set(SchemaSource::new(&source).unwrap())),
             )
             .expect("the idle vault is edited");
 
@@ -16650,7 +16650,7 @@ mod tests {
             .unwrap();
 
             for edit in [
-                SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(notes()).with_poll_backend(VaultChange::set(PollBackend::Poll)),
                 moving_to(&moved),
             ] {
                 let refusal = set_once_idle(&host, &edit)
@@ -16817,7 +16817,8 @@ mod tests {
 
             let report = set_once_idle(
                 &host,
-                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+                &VaultSetParams::new(notes())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("an edit keeping the root met the maintainer lock");
             drop(held);
@@ -16878,7 +16879,8 @@ mod tests {
 
             let report = set_once_idle(
                 &host,
-                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+                &VaultSetParams::new(notes())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the served vault is edited");
 
@@ -16908,7 +16910,8 @@ mod tests {
 
             let report = set_once_idle(
                 &host,
-                &SetParams::new(notes()).with_poll_backend(Change::set(PollBackend::Poll)),
+                &VaultSetParams::new(notes())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the served vault is edited");
 

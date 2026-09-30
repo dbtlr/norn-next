@@ -13,28 +13,28 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change,
-    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
-    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
-    DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FileState, FindParams, FindReport, FindingKind, FindingRow,
-    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
-    HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth,
-    LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady,
-    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetFieldsParams, SetParams,
-    SetReport, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
-    TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress,
-    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
+    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
+    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
+    DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus,
+    ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType,
+    FieldValue, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady, Operation,
+    OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart,
+    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, RollUp,
+    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
+    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
     WriteTarget,
 };
 use serde_json::Value;
@@ -223,16 +223,16 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Attention>(),
         schema_of::<VaultStatus>(),
         schema_of::<RollUp>(),
-        schema_of::<Change<SchemaSource>>(),
-        schema_of::<Replace<VaultRoot>>(),
+        schema_of::<VaultChange<SchemaSource>>(),
+        schema_of::<VaultReplace<VaultRoot>>(),
         schema_of::<RegisterParams>(),
         schema_of::<RegisterReport>(),
         schema_of::<UnregisterParams>(),
         schema_of::<UnregisterReport>(),
         schema_of::<ListParams>(),
         schema_of::<ListReport>(),
-        schema_of::<SetParams>(),
-        schema_of::<SetReport>(),
+        schema_of::<VaultSetParams>(),
+        schema_of::<VaultSetReport>(),
         schema_of::<ResolveParams>(),
         schema_of::<ResolveReport>(),
         schema_of::<StatusParams>(),
@@ -279,7 +279,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<ExpectedField>(),
         schema_of::<SchemaViolation>(),
         schema_of::<FieldChange>(),
-        schema_of::<SetFieldsParams>(),
+        schema_of::<SetParams>(),
         schema_of::<DocumentEdit>(),
         schema_of::<EditParams>(),
         schema_of::<NewParams>(),
@@ -2662,13 +2662,16 @@ fn a_roll_up_advertises_its_counts_and_its_attention() {
 fn a_change_advertises_its_change_tag_and_a_root_that_cannot_be_cleared() {
     assert_eq!(
         sorted(tag_constants(
-            &schema_of::<Change<SchemaSource>>(),
+            &schema_of::<VaultChange<SchemaSource>>(),
             "change"
         )),
         sorted(["keep", "set", "clear"])
     );
     assert_eq!(
-        sorted(tag_constants(&schema_of::<Replace<VaultRoot>>(), "change")),
+        sorted(tag_constants(
+            &schema_of::<VaultReplace<VaultRoot>>(),
+            "change"
+        )),
         sorted(["keep", "set"])
     );
 }
@@ -2690,7 +2693,7 @@ fn every_vault_params_advertises_the_whole_of_what_a_request_carries() {
         "a listing advertises something to ask for"
     );
     assert_eq!(
-        property_names(&schema_of::<SetParams>()),
+        property_names(&schema_of::<VaultSetParams>()),
         ["name", "root", "schema_source", "poll_backend"]
             .into_iter()
             .collect()
@@ -2717,7 +2720,7 @@ fn every_vault_params_advertises_the_whole_of_what_a_request_carries() {
 /// and the two that are sums advertise their own tags.
 #[test]
 fn every_vault_report_advertises_the_whole_of_what_an_answer_holds() {
-    for report in [schema_of::<RegisterReport>(), schema_of::<SetReport>()] {
+    for report in [schema_of::<RegisterReport>(), schema_of::<VaultSetReport>()] {
         assert_eq!(
             property_names(&report),
             ["registration", "published"].into_iter().collect()
@@ -3396,7 +3399,7 @@ fn a_forced_violation_advertises_the_shape_a_refusal_carries() {
 fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
     for (schema, fields, required) in [
         (
-            schema_of::<SetFieldsParams>(),
+            schema_of::<SetParams>(),
             vec![
                 "vault",
                 "mode",
@@ -3427,7 +3430,7 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             Some("#/$defs/ApplyMode")
         );
     }
-    let set = schema_of::<SetFieldsParams>();
+    let set = schema_of::<SetParams>();
     assert_eq!(
         set["oneOf"],
         serde_json::json!([{"required": ["path"]}, {"required": ["where"]}])

@@ -3,17 +3,17 @@
 //! **An edit says what to do with a field, not what the field is.** A request
 //! that carried the new value alone could not tell "leave the schema source
 //! alone" apart from "clear it back to the in-vault default", because both are
-//! spelled by the absence of a value. [`Change`] makes the three an edit has —
+//! spelled by the absence of a value. [`VaultChange`] makes the three an edit has —
 //! keep, set, clear — three shapes, so an unmentioned field is kept and a
 //! cleared field is cleared, and neither is inferred from a `null`.
 //!
 //! **A field with no default cannot be cleared.** A registration without a
-//! root is not a registration, so the root's edit is a [`Replace`], which
+//! root is not a registration, so the root's edit is a [`VaultReplace`], which
 //! holds keep and set and has no clear to spell. A replacement is tagged
-//! `change` exactly as a [`Change`] is, and holds two of the same three
+//! `change` exactly as a [`VaultChange`] is, and holds two of the same three
 //! members, so a client reads both the same way. Dropping `clear` is a
 //! refusal at the read path rather than a rule a handler enforces:
-//! `{"change":"clear"}` is not a `Replace` a reader accepts.
+//! `{"change":"clear"}` is not a `VaultReplace` a reader accepts.
 //!
 //! **An edit under a standing park is refused under the park's own code**, so
 //! a `vault set` never silently withdraws a park. A vault parked
@@ -78,7 +78,7 @@ use crate::status::{Published, Registration};
 #[serde(tag = "change", rename_all = "snake_case")]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: DeserializeOwned"))]
 #[non_exhaustive]
-pub enum Change<T: JsonSchema + Serialize + DeserializeOwned> {
+pub enum VaultChange<T: JsonSchema + Serialize + DeserializeOwned> {
     /// Leave the field as it stands.
     Keep {},
     /// Put this value in the field.
@@ -91,20 +91,20 @@ pub enum Change<T: JsonSchema + Serialize + DeserializeOwned> {
     Clear {},
 }
 
-impl<T: JsonSchema + Serialize + DeserializeOwned> Change<T> {
+impl<T: JsonSchema + Serialize + DeserializeOwned> VaultChange<T> {
     /// Leave the field as it stands.
     pub const fn keep() -> Self {
-        Change::Keep {}
+        VaultChange::Keep {}
     }
 
     /// Put `value` in the field.
     pub const fn set(value: T) -> Self {
-        Change::Set { value }
+        VaultChange::Set { value }
     }
 
     /// Empty the field.
     pub const fn clear() -> Self {
-        Change::Clear {}
+        VaultChange::Clear {}
     }
 
     /// What the field holds once this edit is made to `field`: `field` as it
@@ -114,17 +114,17 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Change<T> {
         T: Clone,
     {
         match self {
-            Change::Keep {} => field,
-            Change::Set { value } => Some(value.clone()),
-            Change::Clear {} => None,
+            VaultChange::Keep {} => field,
+            VaultChange::Set { value } => Some(value.clone()),
+            VaultChange::Clear {} => None,
         }
     }
 }
 
-impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Change<T> {
+impl<T: JsonSchema + Serialize + DeserializeOwned> Default for VaultChange<T> {
     /// An edit that names nothing leaves the field as it stands.
     fn default() -> Self {
-        Change::keep()
+        VaultChange::keep()
     }
 }
 
@@ -138,7 +138,7 @@ impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Change<T> {
 #[serde(tag = "change", rename_all = "snake_case")]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: DeserializeOwned"))]
 #[non_exhaustive]
-pub enum Replace<T: JsonSchema + Serialize + DeserializeOwned> {
+pub enum VaultReplace<T: JsonSchema + Serialize + DeserializeOwned> {
     /// Leave the field as it stands.
     Keep {},
     /// Put this value in the field.
@@ -149,82 +149,82 @@ pub enum Replace<T: JsonSchema + Serialize + DeserializeOwned> {
     },
 }
 
-impl<T: JsonSchema + Serialize + DeserializeOwned> Replace<T> {
+impl<T: JsonSchema + Serialize + DeserializeOwned> VaultReplace<T> {
     /// Leave the field as it stands.
     pub const fn keep() -> Self {
-        Replace::Keep {}
+        VaultReplace::Keep {}
     }
 
     /// Put `value` in the field.
     pub const fn set(value: T) -> Self {
-        Replace::Set { value }
+        VaultReplace::Set { value }
     }
 
     /// The value this edit puts in the field, and nothing where it keeps the
     /// field as it stands.
     pub const fn value(&self) -> Option<&T> {
         match self {
-            Replace::Keep {} => None,
-            Replace::Set { value } => Some(value),
+            VaultReplace::Keep {} => None,
+            VaultReplace::Set { value } => Some(value),
         }
     }
 }
 
-impl<T: JsonSchema + Serialize + DeserializeOwned> Default for Replace<T> {
+impl<T: JsonSchema + Serialize + DeserializeOwned> Default for VaultReplace<T> {
     /// An edit that names nothing leaves the field as it stands.
     fn default() -> Self {
-        Replace::keep()
+        VaultReplace::keep()
     }
 }
 
 /// What a `vault set` request carries.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
-pub struct SetParams {
+pub struct VaultSetParams {
     /// The registration to edit.
     pub name: VaultName,
     /// What to do with the root. `keep` leaves it as registered; `set` moves
     /// the registration to the given root. There is no `clear`: a
     /// registration cannot be without a root.
-    pub root: Replace<VaultRoot>,
+    pub root: VaultReplace<VaultRoot>,
     /// What to do with the schema source. `keep` leaves it as registered;
     /// `set` reads the schema from the given path; `clear` returns the vault
     /// to the in-vault default.
-    pub schema_source: Change<SchemaSource>,
+    pub schema_source: VaultChange<SchemaSource>,
     /// What to do with the watch backend. `keep` leaves it as registered;
     /// `set` pins the given backend; `clear` returns the vault to the
     /// platform's native one.
-    pub poll_backend: Change<PollBackend>,
+    pub poll_backend: VaultChange<PollBackend>,
 }
 
-impl SetParams {
+impl VaultSetParams {
     /// An edit of `name` that changes nothing.
     pub const fn new(name: VaultName) -> Self {
-        SetParams {
+        VaultSetParams {
             name,
-            root: Replace::keep(),
-            schema_source: Change::keep(),
-            poll_backend: Change::keep(),
+            root: VaultReplace::keep(),
+            schema_source: VaultChange::keep(),
+            poll_backend: VaultChange::keep(),
         }
     }
 
     /// The edit doing `root` to the root.
     #[must_use]
-    pub fn with_root(mut self, root: Replace<VaultRoot>) -> Self {
+    pub fn with_root(mut self, root: VaultReplace<VaultRoot>) -> Self {
         self.root = root;
         self
     }
 
     /// The edit doing `schema_source` to the schema source.
     #[must_use]
-    pub fn with_schema_source(mut self, schema_source: Change<SchemaSource>) -> Self {
+    pub fn with_schema_source(mut self, schema_source: VaultChange<SchemaSource>) -> Self {
         self.schema_source = schema_source;
         self
     }
 
     /// The edit doing `poll_backend` to the watch backend.
     #[must_use]
-    pub fn with_poll_backend(mut self, poll_backend: Change<PollBackend>) -> Self {
+    pub fn with_poll_backend(mut self, poll_backend: VaultChange<PollBackend>) -> Self {
         self.poll_backend = poll_backend;
         self
     }
@@ -234,17 +234,17 @@ impl SetParams {
 /// its entry publishes after the edit.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
-pub struct SetReport {
+pub struct VaultSetReport {
     /// The registration as it now stands.
     pub registration: Registration,
     /// What the edited entry publishes.
     pub published: Published,
 }
 
-impl SetReport {
+impl VaultSetReport {
     /// The edit left `registration`, whose entry publishes `published`.
     pub const fn new(registration: Registration, published: Published) -> Self {
-        SetReport {
+        VaultSetReport {
             registration,
             published,
         }
@@ -262,20 +262,26 @@ mod tests {
     /// A keep leaves the field as it stands, whatever it holds.
     #[test]
     fn a_kept_field_stands_as_it_was() {
-        assert_eq!(Change::keep().applied_to(backend()), backend());
-        assert_eq!(Change::<PollBackend>::keep().applied_to(None), None);
+        assert_eq!(VaultChange::keep().applied_to(backend()), backend());
+        assert_eq!(VaultChange::<PollBackend>::keep().applied_to(None), None);
     }
 
     /// A set puts its value in the field, over a value or over nothing.
     #[test]
     fn a_set_field_holds_the_value() {
-        assert_eq!(Change::set(PollBackend::Poll).applied_to(None), backend());
+        assert_eq!(
+            VaultChange::set(PollBackend::Poll).applied_to(None),
+            backend()
+        );
     }
 
     /// A clear empties the field, which falls back to its default.
     #[test]
     fn a_cleared_field_holds_nothing() {
-        assert_eq!(Change::<PollBackend>::clear().applied_to(backend()), None);
+        assert_eq!(
+            VaultChange::<PollBackend>::clear().applied_to(backend()),
+            None
+        );
     }
 
     /// A replacement names the value it puts in the field, and a keep names
@@ -283,7 +289,7 @@ mod tests {
     #[test]
     fn a_replacement_names_its_value_and_a_keep_names_none() {
         let root = VaultRoot::new("/srv/vaults/notes").unwrap();
-        assert_eq!(Replace::set(root.clone()).value(), Some(&root));
-        assert_eq!(Replace::<VaultRoot>::keep().value(), None);
+        assert_eq!(VaultReplace::set(root.clone()).value(), Some(&root));
+        assert_eq!(VaultReplace::<VaultRoot>::keep().value(), None);
     }
 }

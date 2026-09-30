@@ -1097,7 +1097,7 @@ fn registration_changes_refuse_as_held(host: &Host<Arc<FakeOps>>, name: &VaultNa
         "vault unregister was not refused as held"
     );
     assert_eq!(
-        host.set(&SetParams::new(name.clone())).map(|_| ()),
+        host.set(&VaultSetParams::new(name.clone())).map(|_| ()),
         Err(RegistrationRefusal::Serving(ServingRefusal::Held)),
         "vault set was not refused as held"
     );

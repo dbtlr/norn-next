@@ -14,7 +14,8 @@ use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_store::{ContentModel, StoreReading};
 use norn_wire::{
     AnswerReading, AttachMode, ErrorDetail, ErrorEnvelope, MaintainerIdentity, PlanDocument,
-    SetParams, TrustState, UntrustedReason, VaultAnswer, VaultName, WarmingPhase, WatcherLossCause,
+    TrustState, UntrustedReason, VaultAnswer, VaultName, VaultSetParams, WarmingPhase,
+    WatcherLossCause,
 };
 
 use crate::apply::PlanGround;
@@ -4539,7 +4540,7 @@ impl<O: EntryOps> Host<O> {
     /// derived state, which the next attach derives again.
     pub(crate) fn set(
         &self,
-        edit: &SetParams,
+        edit: &VaultSetParams,
     ) -> Result<(Registration, Demand), RegistrationRefusal> {
         let shared = &self.shared;
         let _changing = registration_gate(shared);
@@ -26075,8 +26076,8 @@ mod tests {
         use super::*;
         use norn_config::registry::{PollBackend, SchemaSource};
         use norn_wire::{
-            Change, ListParams, Published, ReasonCode, RegisterParams, RegisterReport, Replace,
-            SetParams, SetReport, UnregisterParams, UnregisterReport,
+            ListParams, Published, ReasonCode, RegisterParams, RegisterReport, UnregisterParams,
+            UnregisterReport, VaultChange, VaultReplace, VaultSetParams, VaultSetReport,
         };
 
         fn register(
@@ -27351,7 +27352,10 @@ mod tests {
 
         // ---- `vault set`: an edit of one registration ----
 
-        fn set(host: &Host<Arc<FakeOps>>, edit: SetParams) -> Result<SetReport, ErrorEnvelope> {
+        fn set(
+            host: &Host<Arc<FakeOps>>,
+            edit: VaultSetParams,
+        ) -> Result<VaultSetReport, ErrorEnvelope> {
             host.vault_set(&edit)
         }
 
@@ -27422,7 +27426,8 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone()).with_schema_source(Change::set(source.clone())),
+                VaultSetParams::new(name.clone())
+                    .with_schema_source(VaultChange::set(source.clone())),
             )
             .expect("the idle vault is edited");
 
@@ -27450,7 +27455,7 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone()).with_schema_source(Change::clear()),
+                VaultSetParams::new(name.clone()).with_schema_source(VaultChange::clear()),
             )
             .expect("the idle vault is edited");
 
@@ -27470,7 +27475,8 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the idle vault is edited");
 
@@ -27492,7 +27498,7 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::clear()),
+                VaultSetParams::new(name.clone()).with_poll_backend(VaultChange::clear()),
             )
             .expect("the idle vault is edited");
 
@@ -27512,11 +27518,11 @@ mod tests {
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             let report =
-                set(&host, SetParams::new(name.clone())).expect("an empty edit is answered");
+                set(&host, VaultSetParams::new(name.clone())).expect("an empty edit is answered");
 
             assert_eq!(
                 report,
-                SetReport::new(
+                VaultSetReport::new(
                     serving(&host, &name),
                     Published::state(TrustState::Unattached)
                 )
@@ -27555,10 +27561,10 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone())
-                    .with_root(Replace::set(VaultRoot::new(&link).unwrap()))
-                    .with_schema_source(Change::set(source))
-                    .with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&link).unwrap()))
+                    .with_schema_source(VaultChange::set(source))
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("an edit to the standing values is answered");
 
@@ -27591,8 +27597,8 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone())
-                    .with_root(Replace::set(VaultRoot::new(&link).unwrap())),
+                VaultSetParams::new(name.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&link).unwrap())),
             )
             .expect("the idle vault is moved");
 
@@ -27626,8 +27632,8 @@ mod tests {
 
             let report = set(
                 &host,
-                SetParams::new(name.clone())
-                    .with_root(Replace::set(VaultRoot::new(&root).unwrap())),
+                VaultSetParams::new(name.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&root).unwrap())),
             )
             .expect("the vault is respelled at its own directory");
 
@@ -27663,8 +27669,8 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone())
-                    .with_root(Replace::set(VaultRoot::new(&link).unwrap())),
+                VaultSetParams::new(name.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&link).unwrap())),
             )
             .expect_err("a root another vault serves was taken");
 
@@ -27705,8 +27711,8 @@ mod tests {
             let standing = serving(&host, &name);
 
             let answers = [scratch.root().join("missing"), file, sealed.clone()].map(|root| {
-                let edit = SetParams::new(name.clone())
-                    .with_root(Replace::set(VaultRoot::new(&root).unwrap()));
+                let edit = VaultSetParams::new(name.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&root).unwrap()));
                 (set(&host, edit).map(|report| report.published), root)
             });
             std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -27732,7 +27738,8 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(absent.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(absent.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect_err("an unserved name was edited");
 
@@ -27753,7 +27760,8 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect_err("a held entry was edited");
 
@@ -27780,7 +27788,8 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect_err("a parked entry was edited");
 
@@ -27817,7 +27826,7 @@ mod tests {
             let ops = Arc::new(FakeOps::default());
             let (host, name, standing) = parked_host(&ops);
 
-            let refusal = set(&host, SetParams::new(name.clone()))
+            let refusal = set(&host, VaultSetParams::new(name.clone()))
                 .expect_err("a keep-only edit of a parked entry was answered");
 
             assert_eq!(
@@ -27839,7 +27848,7 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone()).with_root(Replace::set(
+                VaultSetParams::new(name.clone()).with_root(VaultReplace::set(
                     VaultRoot::new(scratch.root().join("missing")).unwrap(),
                 )),
             )
@@ -27866,7 +27875,7 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::clear()),
+                VaultSetParams::new(name.clone()).with_poll_backend(VaultChange::clear()),
             )
             .expect_err("a same-value edit of a held entry was answered");
 
@@ -27891,7 +27900,8 @@ mod tests {
 
             let refusal = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect_err("an edit the file refused went through");
 
@@ -27924,8 +27934,8 @@ mod tests {
                 let editing = scope.spawn(|| {
                     set(
                         &host,
-                        SetParams::new(name.clone())
-                            .with_poll_backend(Change::set(PollBackend::Poll)),
+                        VaultSetParams::new(name.clone())
+                            .with_poll_backend(VaultChange::set(PollBackend::Poll)),
                     )
                 });
                 let held = pause.enter();
@@ -28000,7 +28010,8 @@ mod tests {
 
             let edited = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the idle vault is edited");
             let observed = replaced
@@ -28053,7 +28064,8 @@ mod tests {
 
             let edited = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the idle vault is edited");
 
@@ -28084,8 +28096,8 @@ mod tests {
             let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
             let standing = serving(&host, &name);
             ops.panic_in_amend.store(true, Ordering::SeqCst);
-            let edit =
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll));
+            let edit = VaultSetParams::new(name.clone())
+                .with_poll_backend(VaultChange::set(PollBackend::Poll));
 
             let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| set(&host, edit.clone())));
 
@@ -28146,7 +28158,8 @@ mod tests {
 
             set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::set(PollBackend::Poll)),
+                VaultSetParams::new(name.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
             )
             .expect("the entry holding nothing is edited");
             let successor = host.shared.entries.get(&name).unwrap();
@@ -28189,7 +28202,8 @@ mod tests {
 
             let sourced = set(
                 &host,
-                SetParams::new(name.clone()).with_schema_source(Change::set(source.clone())),
+                VaultSetParams::new(name.clone())
+                    .with_schema_source(VaultChange::set(source.clone())),
             )
             .expect("the idle vault is edited");
             assert_eq!(sourced.registration.poll_backend, Some(PollBackend::Poll));
@@ -28197,7 +28211,7 @@ mod tests {
 
             let cleared = set(
                 &host,
-                SetParams::new(name.clone()).with_poll_backend(Change::clear()),
+                VaultSetParams::new(name.clone()).with_poll_backend(VaultChange::clear()),
             )
             .expect("the idle vault is edited");
             assert_eq!(cleared.registration.schema_source, Some(source));
@@ -28246,7 +28260,8 @@ mod tests {
 
             set(
                 &host,
-                SetParams::new(a.clone()).with_root(Replace::set(VaultRoot::new(&moved).unwrap())),
+                VaultSetParams::new(a.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&moved).unwrap())),
             )
             .expect("the idle vault standing on no park is moved");
 
@@ -28291,8 +28306,8 @@ mod tests {
                 let editing = scope.spawn(|| {
                     set(
                         &host,
-                        SetParams::new(name.clone())
-                            .with_root(Replace::set(VaultRoot::new(&moved).unwrap())),
+                        VaultSetParams::new(name.clone())
+                            .with_root(VaultReplace::set(VaultRoot::new(&moved).unwrap())),
                     )
                 });
                 let held = pause.enter();

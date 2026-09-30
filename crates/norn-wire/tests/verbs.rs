@@ -23,9 +23,9 @@ use norn_wire::{
     Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DescribeParams, DescribeReport,
     DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport, GetParams,
     GetReport, ListParams, ListReport, NewParams, RegisterParams, RegisterReport, ReloadParams,
-    ReloadReport, ResolveParams, ResolveReport, SearchParams, SearchReport, SetFieldsParams,
-    SetParams, SetReport, StatusParams, StatusReport, UnregisterParams, UnregisterReport,
-    ValidateParams, ValidateReport, Verb,
+    ReloadReport, ResolveParams, ResolveReport, SearchParams, SearchReport, SetParams,
+    StatusParams, StatusReport, UnregisterParams, UnregisterReport, ValidateParams, ValidateReport,
+    VaultSetParams, VaultSetReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -140,10 +140,10 @@ fn verb_table() -> Vec<Spelling> {
         Spelling {
             vault_at: VaultAt::Params,
             verb: Verb::Set,
-            params_type: "SetFieldsParams",
+            params_type: "SetParams",
             report_type: "ApplyReport",
             report_rows: None,
-            params: schema_of::<SetFieldsParams>(),
+            params: schema_of::<SetParams>(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {
@@ -194,11 +194,11 @@ fn verb_table() -> Vec<Spelling> {
         Spelling {
             vault_at: VaultAt::Params,
             verb: Verb::VaultSet,
-            params_type: "SetParams",
-            report_type: "SetReport",
+            params_type: "VaultSetParams",
+            report_type: "VaultSetReport",
             report_rows: None,
-            params: schema_of::<SetParams>(),
-            report: schema_of::<SetReport>(),
+            params: schema_of::<VaultSetParams>(),
+            report: schema_of::<VaultSetReport>(),
         },
         Spelling {
             vault_at: VaultAt::Params,

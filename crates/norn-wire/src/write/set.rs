@@ -142,7 +142,7 @@ impl FieldChange {
 #[serde(deny_unknown_fields)]
 #[schemars(transform = settle_flattened_target)]
 #[non_exhaustive]
-pub struct SetFieldsParams {
+pub struct SetParams {
     /// The vault written.
     pub vault: VaultAddress,
     /// Whether to preview the write or apply it. There is no default.
@@ -161,7 +161,7 @@ pub struct SetFieldsParams {
     pub force: bool,
 }
 
-impl SetFieldsParams {
+impl SetParams {
     /// A request to `mode` the `changes` to the documents `target` names in
     /// `vault`, with no condition and not forced.
     pub const fn new(
@@ -170,7 +170,7 @@ impl SetFieldsParams {
         target: WriteTarget,
         changes: Vec<FieldChange>,
     ) -> Self {
-        SetFieldsParams {
+        SetParams {
             vault,
             mode,
             target,
@@ -198,7 +198,7 @@ impl SetFieldsParams {
     /// change, in the request's order, each with the request's target and
     /// carrying its conditions, forced as the request is.
     pub fn plan(self) -> AuthoredPlan {
-        let SetFieldsParams {
+        let SetParams {
             vault,
             mode: _,
             target,
@@ -243,7 +243,7 @@ struct SetFieldsKeys {
     force: bool,
 }
 
-impl<'de> Deserialize<'de> for SetFieldsParams {
+impl<'de> Deserialize<'de> for SetParams {
     /// Every key is read by the derive, refusing any the request does not
     /// name and any written twice; the target is then built from exactly one
     /// of `path` and `where`.
@@ -265,7 +265,7 @@ impl<'de> Deserialize<'de> for SetFieldsParams {
                 "a `set` request names its documents: {problem}"
             ))
         })?;
-        Ok(SetFieldsParams {
+        Ok(SetParams {
             vault,
             mode,
             target,
