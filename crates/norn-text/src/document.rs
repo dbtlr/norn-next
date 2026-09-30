@@ -752,11 +752,15 @@ impl<'a> Document<'a> {
     /// bytes. Every line written carries the document's terminator, and empty
     /// `content` leaves the block alone with no body below it.
     ///
+    /// A closing delimiter that ends the file without a terminator gains one,
+    /// so the body starts on a line of its own.
+    ///
     /// A block that cannot be read refuses: where its closing delimiter is
     /// missing, nothing separates its fields from the body. The result is
     /// re-read before it is returned, and refuses unless the block reads as it
-    /// did and the body reads as `content` — content opening with a
-    /// delimiter would otherwise become a document's frontmatter.
+    /// did — the same block, as readable as it was — and the body reads as
+    /// `content`: content opening with a delimiter would otherwise make the
+    /// body a block, closed or not.
     pub fn replace_body(&self, content: &str) -> Result<String, EditError> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
@@ -767,15 +771,39 @@ impl<'a> Document<'a> {
             self.body_start
         };
         let mut edited = self.source[..start].to_string();
+        edited.push_str(self.break_before(start));
+        let written = edited.len();
         append_with_terminator(&mut edited, content, self.line_ending);
         let reread = Document::parse(&edited);
-        if reread.frontmatter() != self.frontmatter()
-            || reread.body_start() != self.body_start
-            || !same_lines(&edited[start..], content)
-        {
+        if !self.same_block(&reread) || !same_lines(&edited[written..], content) {
             return Err(EditError::BodyPostImageMismatch);
         }
         Ok(edited)
+    }
+
+    /// The terminator a write at the source offset `at` needs first so that
+    /// it starts a line: none where `at` already starts one, and none at the
+    /// document's first line, which a byte-order mark does not end.
+    fn break_before(&self, at: usize) -> &'static str {
+        let first_line = if self.byte_order_mark { BOM.len() } else { 0 };
+        if at > first_line && trailing_break(&self.source[..at]).is_none() {
+            self.line_ending.as_str()
+        } else {
+            ""
+        }
+    }
+
+    /// Whether `reread` — this document after a body or section write —
+    /// carries the frontmatter block this one does: the same value, from the
+    /// same bytes, read or refused the same way. A body or section write never
+    /// creates, removes or breaks a block, and a block broken by the write
+    /// reads as `None` exactly as a missing one does, so the value alone
+    /// cannot tell.
+    fn same_block(&self, reread: &Document<'_>) -> bool {
+        reread.frontmatter() == self.frontmatter()
+            && reread.frontmatter_range() == self.frontmatter_range()
+            && reread.frontmatter_refusal() == self.frontmatter_refusal()
+            && reread.frontmatter_broken() == self.frontmatter_broken()
     }
 
     /// Insert `content` directly above a heading's line, returning the whole
@@ -900,11 +928,7 @@ impl<'a> Document<'a> {
     /// above. A byte-order mark is the start of the first line, not a line.
     fn insert_lines(&self, at: usize, content: &str) -> String {
         let at = self.body_start + at;
-        let first_line = if self.byte_order_mark { BOM.len() } else { 0 };
-        let mut lines = String::new();
-        if at > first_line && trailing_break(&self.source[..at]).is_none() {
-            lines.push_str(self.line_ending.as_str());
-        }
+        let mut lines = self.break_before(at).to_string();
         append_with_terminator(&mut lines, content, self.line_ending);
         splice(self.source, at..at, &lines)
     }
@@ -1164,7 +1188,7 @@ impl<'a> Document<'a> {
             heading: address.heading.to_string(),
         };
         let reread = Document::parse(edited);
-        if reread.frontmatter() != self.frontmatter() {
+        if !self.same_block(&reread) {
             return Err(refuse());
         }
         let scan = reread.scan_body();
@@ -1213,7 +1237,7 @@ impl<'a> Document<'a> {
             .iter()
             .map(heading_key)
             .collect();
-        if reread.frontmatter() == self.frontmatter() && headings == expected {
+        if self.same_block(&reread) && headings == expected {
             Ok(())
         } else {
             Err(EditError::SectionPostImageMismatch {

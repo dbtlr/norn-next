@@ -1635,6 +1635,34 @@ fn a_body_replace_refuses_to_touch_what_the_frontmatter_says() {
     );
 }
 
+/// **A body replace never opens a block that cannot be read**: content
+/// opening with a delimiter it never closes would leave a document whose
+/// every later field edit refuses as unreadable.
+#[test]
+fn a_body_replace_never_opens_an_unreadable_block() {
+    for content in ["---\n\nx", "---\nt: 2\n\n# H", "---"] {
+        assert_eq!(
+            Document::parse("old\n").replace_body(content),
+            Err(EditError::BodyPostImageMismatch),
+            "for {content:?}"
+        );
+    }
+}
+
+/// **A body replace lands under a block whose closing delimiter ends the
+/// file without a terminator**, starting the body on a line of its own.
+#[test]
+fn a_body_replace_under_an_unterminated_closing_delimiter_starts_a_new_line() {
+    assert_eq!(
+        Document::parse("---\nt: 1\n---").replace_body("new"),
+        Ok("---\nt: 1\n---\nnew\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\r\nt: 1\r\n---").replace_body("new"),
+        Ok("---\r\nt: 1\r\n---\r\nnew\r\n".to_string())
+    );
+}
+
 // ── Pushing to and popping from a list field ─────────────────────────────
 
 fn string(text: &str) -> Value {

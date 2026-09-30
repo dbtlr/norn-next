@@ -1231,6 +1231,22 @@ fn an_insert_that_rewrites_a_heading_refuses() {
     );
 }
 
+/// **A section write never creates a frontmatter block, readable or not**:
+/// content inserted above a document's first line that opens with a
+/// delimiter would turn the body into a block.
+#[test]
+fn a_section_write_never_creates_a_frontmatter_block() {
+    for content in ["---\nt: 2", "---\nt: 2\n---", "---"] {
+        assert_eq!(
+            Document::parse("# A\nx\n").insert_before_heading("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
+
 /// Each section write verb, applied to `source` at `heading` with `content`
 /// where the verb takes content.
 fn every_section_verb(
