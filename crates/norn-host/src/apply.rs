@@ -68,7 +68,7 @@ use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, SnapshotSource,
     not_run, watcher_lost,
 };
-use crate::planner::expand::{ExpandingFailure, Matched, Matcher, resolve_expanding};
+use crate::planner::expand::{ExpandingFailure, Matched, Matcher, listed, resolve_expanding};
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::view::TreeView;
 use crate::read::every_page;
@@ -275,8 +275,8 @@ impl Matcher for SnapshotMatcher<'_> {
             |page| {
                 if !page.unsatisfied.is_empty() {
                     return ControlFlow::Break(format!(
-                        "the find reports parts it could not apply: {:?}",
-                        page.unsatisfied
+                        "the find reports parts it could not apply: {}",
+                        listed(&page.unsatisfied)
                     ));
                 }
                 paths.extend(page.rows.into_iter().map(|row| row.path));

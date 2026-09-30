@@ -152,9 +152,18 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
 }
 
 /// `predicates` named for a person reading why an operation did not
-/// resolve; the operation itself carries them as the wire spells them.
+/// resolve, in the wire's own names; the operation itself carries them as
+/// the wire spells them.
 fn told(predicates: &[Predicate]) -> String {
-    format!("{predicates:?}")
+    listed(predicates)
+}
+
+/// `parts` as a bracketed list of their human spellings, `[a, b]`: how a
+/// `where` target's predicates, and the parts a find could not apply, are
+/// named in a reason a person reads.
+pub(crate) fn listed<T: std::fmt::Display>(parts: &[T]) -> String {
+    let spelled: Vec<String> = parts.iter().map(ToString::to_string).collect();
+    format!("[{}]", spelled.join(", "))
 }
 
 /// `operation`, its `where` target replaced by the one document `path`.
@@ -361,7 +370,7 @@ mod tests {
         assert_eq!(
             left.reason,
             UnresolvedReason::no_longer_resolves(
-                r#"no document matches the `where` target [Eq { key: "status", value: "draft" }]"#
+                r#"no document matches the `where` target [{op: eq, key: "status", value: "draft"}]"#
             )
         );
     }
@@ -382,7 +391,7 @@ mod tests {
         assert_eq!(
             left.reason,
             UnresolvedReason::no_longer_resolves(
-                r#"the `where` target [Eq { key: "status", value: "draft" }] matches no document as asked: no document carries the key `status`"#
+                r#"the `where` target [{op: eq, key: "status", value: "draft"}] matches no document as asked: no document carries the key `status`"#
             )
         );
     }

@@ -36,12 +36,15 @@
 //! near a candidate has to be, and how many are offered, are that handler's,
 //! so a client renders the list and never re-derives it.
 
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ReasonCode;
 use crate::finding_row::CandidateHead;
+use crate::predicate::quoted_list;
 use crate::reading::{AnswerReading, Rung};
 use crate::target::ResolutionTarget;
 
@@ -471,5 +474,150 @@ impl<R> VaultAnswer<R> {
     /// make an answer incomplete.
     pub fn is_complete(&self) -> bool {
         self.unsatisfied.is_empty()
+    }
+}
+
+/// An unsatisfied part in the wire's own names, for a person reading why a
+/// request matched nothing: its `part` and its fields, each value quoted,
+/// `{part: unknown_predicate_key, key: "due", did_you_mean: ["date"]}`. The
+/// wire carries it as JSON; this is the same part in words, never a Rust
+/// type's. An ambiguous target names how many documents it could name.
+impl fmt::Display for Unsatisfied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let keyed = |f: &mut fmt::Formatter<'_>, part: &str, key: &str, near: &[String]| {
+            write!(f, "{{part: {part}, key: {key:?}, did_you_mean: ")?;
+            quoted_list(f, near)?;
+            f.write_str("}")
+        };
+        match self {
+            Unsatisfied::UnknownSortKey { key, did_you_mean } => {
+                keyed(f, "unknown_sort_key", key, did_you_mean)
+            }
+            Unsatisfied::UnknownProjectionKey { key, did_you_mean } => {
+                keyed(f, "unknown_projection_key", key, did_you_mean)
+            }
+            Unsatisfied::UnknownPredicateKey { key, did_you_mean } => {
+                keyed(f, "unknown_predicate_key", key, did_you_mean)
+            }
+            Unsatisfied::UnknownGroupKey { key, did_you_mean } => {
+                keyed(f, "unknown_group_key", key, did_you_mean)
+            }
+            Unsatisfied::BareDirectory { path } => {
+                write!(f, "{{part: bare_directory, path: {path:?}}}")
+            }
+            Unsatisfied::MalformedGlob { glob, problem } => {
+                write!(
+                    f,
+                    "{{part: malformed_glob, glob: {glob:?}, problem: {problem:?}}}"
+                )
+            }
+            Unsatisfied::MalformedQuery { query, problem } => write!(
+                f,
+                "{{part: malformed_query, query: {query:?}, problem: {problem:?}}}"
+            ),
+            Unsatisfied::ImpossiblePath { path } => {
+                write!(f, "{{part: impossible_path, path: {path:?}}}")
+            }
+            Unsatisfied::MissingSection { section } => {
+                write!(f, "{{part: missing_section, section: {section:?}}}")
+            }
+            Unsatisfied::MissingBlock { id } => write!(f, "{{part: missing_block, id: {id:?}}}"),
+            Unsatisfied::ResolvesNotApplicable { target } => write!(
+                f,
+                "{{part: resolves_not_applicable, target: {:?}}}",
+                target.to_string()
+            ),
+            Unsatisfied::QueryNamesNoWord { query } => {
+                write!(f, "{{part: query_names_no_word, query: {query:?}}}")
+            }
+            Unsatisfied::LinksToAmbiguous { target, candidates } => write!(
+                f,
+                "{{part: links_to_ambiguous, target: {:?}, candidates: {}}}",
+                target.to_string(),
+                candidates.total()
+            ),
+            Unsatisfied::LinksToUnknown { target } => write!(
+                f,
+                "{{part: links_to_unknown, target: {:?}}}",
+                target.to_string()
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod spelling_tests {
+    use super::*;
+
+    /// **An unsatisfied part reads in the wire's own names**: its `part` and
+    /// its fields, each value quoted, and no Rust type name among them.
+    #[test]
+    fn an_unsatisfied_part_reads_in_the_wires_own_names() {
+        let target = ResolutionTarget::new("Plan").expect("a legal target");
+        let near = || vec!["wave".to_string(), "wake".to_string()];
+        let spelled = [
+            (
+                Unsatisfied::unknown_sort_key("wav", near()),
+                r#"{part: unknown_sort_key, key: "wav", did_you_mean: ["wave", "wake"]}"#,
+            ),
+            (
+                Unsatisfied::unknown_projection_key("wav", Vec::new()),
+                r#"{part: unknown_projection_key, key: "wav", did_you_mean: []}"#,
+            ),
+            (
+                Unsatisfied::unknown_predicate_key("wav", near()),
+                r#"{part: unknown_predicate_key, key: "wav", did_you_mean: ["wave", "wake"]}"#,
+            ),
+            (
+                Unsatisfied::unknown_group_key("wav", Vec::new()),
+                r#"{part: unknown_group_key, key: "wav", did_you_mean: []}"#,
+            ),
+            (
+                Unsatisfied::bare_directory("notes"),
+                r#"{part: bare_directory, path: "notes"}"#,
+            ),
+            (
+                Unsatisfied::malformed_glob("[", "unclosed"),
+                r#"{part: malformed_glob, glob: "[", problem: "unclosed"}"#,
+            ),
+            (
+                Unsatisfied::malformed_query("\"", "unclosed"),
+                r#"{part: malformed_query, query: "\"", problem: "unclosed"}"#,
+            ),
+            (
+                Unsatisfied::impossible_path("/x"),
+                r#"{part: impossible_path, path: "/x"}"#,
+            ),
+            (
+                Unsatisfied::missing_section("Plan"),
+                r#"{part: missing_section, section: "Plan"}"#,
+            ),
+            (
+                Unsatisfied::missing_block("b1"),
+                r#"{part: missing_block, id: "b1"}"#,
+            ),
+            (
+                Unsatisfied::resolves_not_applicable(target.clone()),
+                r#"{part: resolves_not_applicable, target: "Plan"}"#,
+            ),
+            (
+                Unsatisfied::query_names_no_word("--"),
+                r#"{part: query_names_no_word, query: "--"}"#,
+            ),
+            (
+                Unsatisfied::links_to_ambiguous(
+                    target.clone(),
+                    CandidateHead::new([], 3).expect("a head"),
+                ),
+                r#"{part: links_to_ambiguous, target: "Plan", candidates: 3}"#,
+            ),
+            (
+                Unsatisfied::links_to_unknown(target),
+                r#"{part: links_to_unknown, target: "Plan"}"#,
+            ),
+        ];
+        for (part, expected) in spelled {
+            assert_eq!(part.to_string(), expected);
+        }
     }
 }

@@ -299,8 +299,8 @@ fn a_set_where_naming_an_unknown_key_is_unresolved_naming_it() {
         panic!("the operation is unresolved for {:?}", unresolved[0].reason);
     };
     assert!(
-        detail.contains("UnknownPredicateKey") && detail.contains("no-such-key-anywhere"),
-        "the reason names no unknown key: {detail}"
+        detail.contains(r#"{part: unknown_predicate_key, key: "no-such-key-anywhere""#),
+        "the reason names no unknown key in the wire's words: {detail}"
     );
 }
 
