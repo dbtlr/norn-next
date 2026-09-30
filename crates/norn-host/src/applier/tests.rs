@@ -2270,3 +2270,90 @@ fn a_refused_forced_plan_forecasts_what_its_fresh_plan_forces() {
     assert_eq!(previewed.forced.len(), 1, "{:?}", previewed.forced);
     assert_eq!(refused.forecast.forced, previewed.forced);
 }
+
+/// **A hand-authored plan creating a document it expects a value in is not
+/// what its operations do**: an expected value on the document a create
+/// writes names a document that did not stand before the plan, so it does
+/// not hold, and the plan answers `request/plan-invalid` naming the
+/// document, writing nothing.
+#[test]
+fn a_create_carrying_an_expected_value_on_its_own_document_is_invalid() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField};
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let content = "---\nstatus: x\n---\n";
+    let plan = fixture.by_hand(
+        vec![
+            creating("n.md", content).with_conditions(vec![AuthorCondition::expected_value(
+                path("n.md"),
+                "status",
+                ExpectedField::present(AuthoredValue::string("x")),
+            )]),
+        ],
+        vec![norn_wire::Transition::new(
+            path("n.md"),
+            norn_wire::FileState::absent(),
+            present(content),
+        )],
+    );
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
+    assert_eq!(fixture.read("n.md"), None);
+}
+
+/// **An absent expectation holds on a frontmatter block holding no
+/// mapping at all**: an empty block, and one holding only a comment, carry
+/// no field.
+#[test]
+fn an_absent_expectation_holds_on_an_empty_frontmatter_block() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField};
+    let mut fixture = Fixture::new(&[("a.md", "---\n---\n"), ("b.md", "---\n# c\n---\n")]);
+    let guarded = |at: &str| {
+        setting(at, "status", AuthoredValue::string("new")).with_conditions(vec![
+            AuthorCondition::expected_value(path(at), "status", ExpectedField::absent()),
+        ])
+    };
+    let plan = fixture.plan(vec![guarded("a.md"), guarded("b.md")]);
+    applied(fixture.apply(plan));
+    assert!(
+        fixture
+            .read("a.md")
+            .is_some_and(|content| content.contains("status: new")),
+        "{:?}",
+        fixture.read("a.md")
+    );
+    assert!(
+        fixture
+            .read("b.md")
+            .is_some_and(|content| content.contains("status: new")),
+        "{:?}",
+        fixture.read("b.md")
+    );
+}
+
+/// **A force does not bypass create exclusivity or the root's identity**: a
+/// forced create over a name another writer took refuses and leaves the
+/// other writer's document, and a forced plan for another root is refused
+/// with no plan.
+#[test]
+fn a_force_does_not_bypass_create_exclusivity_or_root_identity() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "# A\n")]);
+    let mut creating_stray = fixture.plan(vec![creating("n.md", "# N\n#stray\n")]);
+    creating_stray.force = true;
+    let mut elsewhere = creating_stray.clone();
+    elsewhere.root = RootIdentity::from_device_and_inode(1, 2);
+    assert!(matches!(
+        fixture.apply(elsewhere),
+        ApplyOutcome::RootChanged { .. }
+    ));
+    assert_eq!(fixture.read("n.md"), None);
+    fixture.foreign("n.md", "# N, foreign\n");
+    let checks = refused_for(fixture.apply(creating_stray));
+    assert!(
+        matches!(
+            checks.as_slice(),
+            [norn_wire::RefusedCheck::Drifted { path: at, .. }
+                | norn_wire::RefusedCheck::NameTaken { path: at, .. }] if *at == path("n.md")
+        ),
+        "{checks:?}"
+    );
+    assert_eq!(fixture.read("n.md").as_deref(), Some("# N, foreign\n"));
+}

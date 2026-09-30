@@ -290,6 +290,31 @@ fn an_interrupted_forced_apply_lists_what_its_force_let_through_where_it_landed(
     assert_eq!(forced, vec![("n.md", Some("stray"))]);
 }
 
+/// **A force does not bypass a create's exclusive publication**: a forced
+/// create whose name another writer takes after staging refuses on the taken
+/// name and leaves the other writer's document.
+#[test]
+fn a_forced_create_whose_name_is_taken_after_staging_refuses() {
+    let fixture = Fixture::with_schema(super::tests::TAG_SCHEMA, &[("e.md", "status draft\n")]);
+    let mut plan = fixture.plan(vec![creating("n.md", "# N\n#stray\n")]);
+    plan.force = true;
+    let child = run_child_pinned(
+        &fixture,
+        &plan,
+        "foreign@1=take",
+        Some(super::tests::TAG_SCHEMA),
+    );
+    assert!(child.lived);
+    let ErrorDetail::PlanRefused { checks, .. } = envelope(&child).detail() else {
+        panic!("the apply is refused: {:?}", child.outcome);
+    };
+    assert_eq!(
+        *checks,
+        vec![norn_wire::RefusedCheck::name_taken(path("n.md"))]
+    );
+    assert_ne!(fixture.read("n.md").as_deref(), Some("# N\n#stray\n"));
+}
+
 /// **A foreign edit on an interrupted move's source**, or on a chain's middle,
 /// leaves the move unresolved in the fresh plan a re-send answers with, and
 /// nothing foreign is removed.
