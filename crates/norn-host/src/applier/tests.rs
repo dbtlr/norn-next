@@ -1983,3 +1983,61 @@ fn a_plan_whose_state_does_not_hold_its_expected_value_is_invalid() {
     dropped.conditions.clear();
     assert_eq!(fixture.refuses_disagreeing(dropped), vec![path("c.md")]);
 }
+
+/// **A frontmatter write over a document another writer then edits refuses
+/// and refreshes against what the document holds now**: the set is resolved
+/// again over the foreign edit, and the push appends to the list the
+/// document holds now rather than writing a list computed before the edit.
+#[test]
+fn a_frontmatter_write_over_a_drifted_document_refreshes_against_its_content_now() {
+    use norn_wire::{AuthoredValue, WriteTarget};
+    let mut fixture = Fixture::new(&[("a.md", "---\nstatus: draft\ntags:\n  - x\n---\n")]);
+    let plan = fixture.plan(vec![
+        Operation::new(OperationKind::set_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "status",
+            AuthoredValue::string("done"),
+        )),
+        Operation::new(OperationKind::push_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "tags",
+            AuthoredValue::string("y"),
+        )),
+    ]);
+    let foreign = "---\nstatus: draft\ntags:\n  - x\n  - z\n---\n";
+    fixture.foreign("a.md", foreign);
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("a.md"),
+            present(foreign)
+        )]
+    );
+    assert!(refused.unresolved.is_empty(), "{:?}", refused.unresolved);
+    let refreshed = "---\nstatus: done\ntags:\n  - x\n  - z\n  - y\n---\n";
+    assert_eq!(
+        refused.plan.transitions,
+        vec![norn_wire::Transition::new(
+            path("a.md"),
+            present(foreign),
+            present(refreshed)
+        )]
+    );
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("a.md").as_deref(), Some(refreshed));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A forced plan refused for drift answers a fresh plan that is forced
+/// too**, so the plan the caller sends back applies as the one it previewed.
+#[test]
+fn a_refused_forced_plan_refreshes_forced() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.force = true;
+    fixture.foreign("a.md", "draft, edited\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(refused.plan.operations.len(), 1);
+    assert!(refused.plan.force);
+}

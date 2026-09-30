@@ -41,8 +41,9 @@ enum Fate {
 /// operations on one file stand or fall together — are listed as unresolved,
 /// never resolved again or dropped. Every drifted target is marked in the
 /// forecast, because a hash cannot tell whether it already carries this
-/// plan's change. Nothing is rebased: applying the fresh plan is the
-/// caller's decision.
+/// plan's change. The fresh plan carries the refused plan's footnote and its
+/// force. Nothing is rebased: applying the fresh plan is the caller's
+/// decision.
 pub(super) fn refuse_and_refresh(
     plan: ResolvedPlan,
     view: &TreeView,
@@ -96,6 +97,9 @@ pub(super) fn refuse_and_refresh(
             .collect(),
     );
     authored.footnote = plan.footnote.clone();
+    // The fresh plan is forced as the refused one was, so sending it back
+    // applies it the way the refused plan would have applied.
+    authored.force = plan.force;
     let mut unresolved: Vec<(usize, UnresolvedOperation)> = Vec::new();
     for (position, fate) in fates.into_iter().enumerate() {
         if let Fate::Unresolved(reason) = fate {
