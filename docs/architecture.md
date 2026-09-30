@@ -2410,18 +2410,22 @@ the document does not hold, a heading that is ambiguous, missing or inside a con
 empty content to append or insert, a refusal `norn-text` makes, and a nested value, which
 is not written until nested frontmatter values land. An edit that rewrites what the
 document already holds — a field set to its value, a body or a section replaced by
-itself — resolves to a transition whose after-state is its before-state, and lands found. A resolved plan carries only path targets; a frontmatter
-operation's `where` target leaves its operation unresolved until planning expands it into
-one path target per matched document, and an empty one never matches.
+itself — resolves to a transition whose after-state is its before-state, and lands found.
+A resolved plan carries only path targets. Planning does not yet expand a frontmatter
+operation's `where` target into the documents it matches: it leaves the operation
+unresolved, and an empty `where` names no document at all.
 An author's condition — a content hash, or an expected frontmatter value that is absent or
-reads as exactly one value — is checked at planning: on a file the plan writes it becomes
-that target's before-state, and on any other file it travels as a condition on the file's
-content, which the applier checks as any condition. A schema violation that stood before
-the plan still refuses where it stands on a field a frontmatter kind writes: an undeclared
-tag the rewritten `tags` field keeps, which a body tag is not. A plan's `force` lets
-through the schema violations its results introduce and lists each, in the shape a refusal carries, on
-the preview's forecast, the applied report, and an interruption for the targets that
-landed; it bypasses no other check, and a refusal's
+reads as exactly one value — is checked at planning, against the document as it stood
+before the plan: on a file the plan writes it becomes that target's before-state, and on
+any other file it travels as a condition on the file's content, which the applier checks
+as any condition. An expected value on another file is therefore a whole-file content-hash
+condition: any change to that file refuses the apply, one that leaves the field as
+observed included, and the refusal's fresh plan judges the field again. A schema violation
+that stood before the plan still refuses where it stands on a field a frontmatter kind
+writes: an undeclared tag the rewritten `tags` field keeps, which a body tag is not. A
+plan's `force` lets through the schema violations its results introduce and lists each, in
+the shape a refusal carries, on the preview's forecast, the applied report, and an
+interruption for the targets that landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
