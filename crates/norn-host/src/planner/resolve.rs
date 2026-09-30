@@ -46,7 +46,7 @@ pub(crate) enum PlanningFailure<E> {
 /// one that was dropped. `met` names those: a requirement on one is
 /// satisfied, orders nothing, and is left off the operation the resolved plan
 /// carries, so the fresh plan is a whole plan that can be sent back as it is.
-/// An authored plan and a write verb's operation plan with nothing met.
+/// An authored plan and a write verb's operations plan with nothing met.
 pub(crate) fn resolve<V: VaultView>(
     authored: AuthoredPlan,
     root: RootIdentity,

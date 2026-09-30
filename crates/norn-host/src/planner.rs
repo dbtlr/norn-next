@@ -3,7 +3,7 @@
 //!
 //! **What the planner owns.** Invariant 4 names one plan vocabulary and one
 //! applier; this is the one path from operations to the transitions that
-//! applier executes. A write verb's single operation, a caller's authored
+//! applier executes. A write verb's operations, a caller's authored
 //! plan, and the operations a refused apply re-resolves for its fresh plan all
 //! plan here, through [`resolve::resolve`], so an operation means the same
 //! thing wherever it arrives from. A refresh names the operations an earlier
