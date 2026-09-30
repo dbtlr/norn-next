@@ -554,17 +554,22 @@ impl Fixture {
     /// A vault holding `files` whose store pins the schema `schema`.
     pub(super) fn with_schema(schema: &str, files: &[(&str, &str)]) -> Fixture {
         let mut fixture = Fixture::new(files);
+        fixture.pin(schema);
         fixture
-            .store
+    }
+
+    /// Pin `schema` in the store and derive the vault under it.
+    pub(super) fn pin(&mut self, schema: &str) {
+        self.store
             .begin_request()
             .pin_vault_schema(schema.as_bytes(), "applier-test-schema")
             .expect("the schema pins");
-        heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
-        fixture
+        heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
     }
 }
 
-const TAG_SCHEMA: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
+pub(super) const TAG_SCHEMA: &str =
+    "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
 
 /// A plan refuses a violation of the vault schema it introduces, and one on
 /// what it writes, and not one that already stood in a target and that it
@@ -1016,6 +1021,7 @@ fn each_outcome_crosses_under_its_wire_code() {
             plan: plan.clone(),
             landed: vec![path("a.md")],
             cause: InterruptionCause::io_failure("a sync failed"),
+            forced: Vec::new(),
             changeset: ChangesetOutcome::Committed,
         }))),
         (ReasonCode::VaultPlanInterrupted, true)

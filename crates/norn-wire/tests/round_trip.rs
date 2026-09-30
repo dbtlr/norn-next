@@ -7530,7 +7530,12 @@ fn apply_details() -> Vec<ErrorDetail> {
         ErrorDetail::apply_outcome_unknown(a_resolved_plan()),
     ];
     details.extend(interruption_causes().into_iter().map(|cause| {
-        ErrorDetail::plan_interrupted(a_resolved_plan(), vec![path("notes/a.md")], cause)
+        ErrorDetail::plan_interrupted(
+            a_resolved_plan(),
+            vec![path("notes/a.md")],
+            cause,
+            Vec::new(),
+        )
     }));
     details.extend(plan_faults().into_iter().map(ErrorDetail::plan_invalid));
     details
@@ -7907,11 +7912,12 @@ fn the_apply_outcomes_carry_what_a_caller_sends_again() {
             a_bare_resolved_plan(),
             vec![path("notes/b.md")],
             InterruptionCause::name_taken(path("notes/new.md")),
+            Vec::new(),
         )),
         format!(
             concat!(
                 r#"{{"code":"vault/plan-interrupted","plan":{plan},"landed":["notes/b.md"],"#,
-                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}}}}"#
+                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}},"forced":[]}}"#
             ),
             plan = plan
         )
@@ -8053,6 +8059,7 @@ fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
             plan.clone(),
             vec![path("notes/a.md")],
             InterruptionCause::io_failure("the disk is full"),
+            Vec::new(),
         ),
         ErrorDetail::write_failed(plan.clone(), "the disk is full"),
         ErrorDetail::apply_not_run(a_park(), Some(plan.clone())),
@@ -8779,9 +8786,10 @@ fn a_resolved_plan_with_a_where_target_is_a_fault() {
     );
 }
 
-/// **A force is loud, in the shape a refusal carries.** The forecast and the
-/// applied report list every violation a force let through, each exactly
-/// the object a schema-violation check is without its `check` tag.
+/// **A force is loud, in the shape a refusal carries.** The forecast, the
+/// applied report and an interruption list every violation a force let
+/// through, each exactly the object a schema-violation check is without its
+/// `check` tag.
 #[test]
 fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
     let violation = SchemaViolation::new(
@@ -8824,6 +8832,18 @@ fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
         wire(&applied).ends_with(&format!(r#""forced":{forced_json}}}"#)),
         "{}",
         wire(&applied)
+    );
+    let interrupted = ErrorDetail::plan_interrupted(
+        a_bare_resolved_plan().with_force(true),
+        vec![path("notes/a.md")],
+        InterruptionCause::io_failure("the disk is full"),
+        vec![violation.clone()],
+    );
+    round_trip(&interrupted);
+    assert!(
+        wire(&interrupted).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        "{}",
+        wire(&interrupted)
     );
     let previewed =
         ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()).with_forced(vec![violation]);

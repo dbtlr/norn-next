@@ -254,10 +254,17 @@ impl Applier<'_> {
                 }
                 Stopped::Io(detail) => InterruptionCause::io_failure(detail),
             };
+            // What the force let through in a target that did not land is
+            // not written; a re-send that lands it lists it then.
+            let forced = forced
+                .into_iter()
+                .filter(|violation| landed.contains(&violation.path))
+                .collect();
             return ApplyOutcome::Interrupted(Box::new(Interrupted {
                 plan,
                 landed,
                 cause,
+                forced,
                 changeset,
             }));
         }

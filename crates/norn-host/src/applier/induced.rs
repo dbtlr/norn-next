@@ -26,6 +26,7 @@ const PLAN: &str = "NORN_APPLIER_PLAN";
 const OUTCOME: &str = "NORN_APPLIER_OUTCOME";
 const ARMED: &str = "NORN_FS_ARMED_STAGES";
 const HITS: &str = "NORN_FS_ARM_HITS";
+const SCHEMA: &str = "NORN_APPLIER_SCHEMA";
 
 /// The child: apply the plan it is handed to the vault it is handed, under
 /// whatever the environment arms, and write the outcome as the wire's JSON.
@@ -39,6 +40,9 @@ fn applier_child() {
     let plan: ResolvedPlan =
         serde_json::from_slice(&std::fs::read(var(PLAN)).expect("the plan")).expect("a plan");
     let mut fixture = Fixture::over(None, var(VAULT), var(DATA), "child.sqlite3");
+    if let Some(schema) = std::env::var_os(SCHEMA) {
+        fixture.pin(schema.to_str().expect("a UTF-8 schema"));
+    }
     let outcome = fixture
         .apply(plan)
         .into_wire()
@@ -61,6 +65,17 @@ struct Child {
 }
 
 fn run_child(fixture: &Fixture, plan: &ResolvedPlan, armed: &str) -> Child {
+    run_child_pinned(fixture, plan, armed, None)
+}
+
+/// What a child applying `plan` over `fixture` under `armed` came to, with
+/// `schema` pinned in its store where one is given.
+fn run_child_pinned(
+    fixture: &Fixture,
+    plan: &ResolvedPlan,
+    armed: &str,
+    schema: Option<&str>,
+) -> Child {
     let dir = fixture
         .data
         .join(norn_testkit::scratch::unique_name("child"));
@@ -72,7 +87,11 @@ fn run_child(fixture: &Fixture, plan: &ResolvedPlan, armed: &str) -> Child {
     );
     std::fs::write(&plan_file, serde_json::to_vec(plan).expect("a plan")).expect("the plan");
     std::fs::write(&hits_file, "").expect("the record file");
-    let output = Command::new(std::env::current_exe().expect("this test binary"))
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    if let Some(schema) = schema {
+        command.env(SCHEMA, schema);
+    }
+    let output = command
         .args(["--exact", "applier::induced::applier_child", "--nocapture"])
         .env(CHILD, "1")
         .env(VAULT, &fixture.vault)
@@ -237,6 +256,38 @@ fn a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_af
     expected.sort();
     assert_eq!(fixture.tree(), expected, "only the foreign file is new");
     assert_eq!(fixture.read("e.md").as_deref(), Some("status draft\n"));
+}
+
+/// **An interrupted forced apply lists the violations its force let through
+/// in the targets that landed**: the create that published carries its
+/// undeclared tag on the interruption, and the edit a foreign writer stopped
+/// carries none, since it did not land.
+#[test]
+fn an_interrupted_forced_apply_lists_what_its_force_let_through_where_it_landed() {
+    let fixture = Fixture::with_schema(super::tests::TAG_SCHEMA, &[("e.md", "status draft\n")]);
+    let mut plan = fixture.plan(vec![
+        editing("e.md", "draft", "draft #other"),
+        creating("n.md", "# N\n#stray\n"),
+    ]);
+    plan.force = true;
+    // The create publishes first: the edit's target changes under its second
+    // publication.
+    let child = run_child_pinned(
+        &fixture,
+        &plan,
+        "foreign@2=edit",
+        Some(super::tests::TAG_SCHEMA),
+    );
+    assert!(child.lived);
+    let ErrorDetail::PlanInterrupted { landed, forced, .. } = envelope(&child).detail() else {
+        panic!("the apply is interrupted: {:?}", child.outcome);
+    };
+    assert_eq!(*landed, vec![path("n.md")]);
+    let forced: Vec<(&str, Option<&str>)> = forced
+        .iter()
+        .map(|violation| (violation.path.as_str(), violation.target.as_deref()))
+        .collect();
+    assert_eq!(forced, vec![("n.md", Some("stray"))]);
 }
 
 /// **A foreign edit on an interrupted move's source**, or on a chain's middle,

@@ -2419,7 +2419,8 @@ content, which the applier checks as any condition. A schema violation that stoo
 the plan still refuses where it stands on a field a frontmatter kind writes: an undeclared
 tag the rewritten `tags` field keeps, which a body tag is not. A plan's `force` lets
 through the schema violations its results introduce and lists each, in the shape a refusal carries, on
-the preview's forecast and the applied report; it bypasses no other check, and a refusal's
+the preview's forecast, the applied report, and an interruption for the targets that
+landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
@@ -2479,7 +2480,8 @@ bound by the applier's lifecycle tests.
   entry nothing will serve.
 - **The outcome.** `PendingApply::wait` blocks until the outcome, with no host-level bound:
   applied, which names whether its changeset committed or the entry is healing from what the
-  paths hold; interrupted, naming the targets that landed; refused by a check, with a fresh
+  paths hold; interrupted, naming the targets that landed and what a force let through in
+  them; refused by a check, with a fresh
   resolved plan, or with none where the vault's root identity does not match; not applied,
   with a lifecycle cause or the I/O failure that stopped it before any target landed; or
   unknown. Every outcome given after planning carries the resolved plan, so a caller that

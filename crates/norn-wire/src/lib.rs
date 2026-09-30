@@ -113,7 +113,8 @@
 //! that ends any other
 //! way ends in a code, whose detail carries the [`RefusedCheck`]s and the
 //! [`UnresolvedOperation`]s — each with its [`UnresolvedReason`] — of a
-//! refusal, the [`InterruptionCause`] of an interruption, or the [`PlanFault`]
+//! refusal, the [`InterruptionCause`] of an interruption and what its force
+//! let through in what landed, or the [`PlanFault`]
 //! of a plan whose own shape is wrong.
 //!
 //! **A registry report and a lifecycle observation carry no answer reading.**

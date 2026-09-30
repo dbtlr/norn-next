@@ -94,6 +94,8 @@ pub(crate) struct Interrupted {
     pub(crate) landed: Vec<DocumentPath>,
     /// What stopped publication.
     pub(crate) cause: InterruptionCause,
+    /// Every schema violation its force let through in a target that landed.
+    pub(crate) forced: Vec<SchemaViolation>,
     /// Whether the landed subset committed, or the entry owes a heal. The wire
     /// does not carry it; the apply job reads it, through
     /// [`ApplyOutcome::heal`], to arm the heal.
@@ -200,6 +202,7 @@ impl ApplyOutcome {
                     interrupted.plan,
                     interrupted.landed,
                     interrupted.cause,
+                    interrupted.forced,
                 ),
             )),
             ApplyOutcome::WriteFailed { plan, detail } => Err(ErrorEnvelope::new(
