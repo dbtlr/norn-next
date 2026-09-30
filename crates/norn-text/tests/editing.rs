@@ -1634,3 +1634,54 @@ fn a_body_replace_refuses_to_touch_what_the_frontmatter_says() {
         Err(EditError::BodyPostImageMismatch)
     );
 }
+
+// ── Pushing to and popping from a list field ─────────────────────────────
+
+fn string(text: &str) -> Value {
+    Value::String(text.into())
+}
+
+/// **A push appends the value to the field's list, keeping the list's block or
+/// flow spelling**, and a value the list already holds is appended again.
+#[test]
+fn a_push_appends_to_a_list_and_allows_duplicates() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b\n---\nbody\n").push_to_list("tags", &string("a")),
+        Ok("---\ntags:\n  - a\n  - b\n  - a\n---\nbody\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a, b]\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags: [a, b, c]\n---\n".to_string())
+    );
+}
+
+/// **A push to an absent field, or to one written with no value, writes a
+/// one-element list.**
+#[test]
+fn a_push_to_an_absent_field_writes_a_one_element_list() {
+    assert_eq!(
+        Document::parse("---\ntitle: t\n---\n").push_to_list("tags", &string("a")),
+        Ok("---\ntitle: t\ntags:\n  - a\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\ntitle: t\n---\n").push_to_list("tags", &string("a")),
+        Ok("---\ntags:\n  - a\ntitle: t\n---\n".to_string())
+    );
+}
+
+/// **A push to a field holding a scalar or a map refuses**, naming what the
+/// field holds: turning a value into a list is a set, not a push.
+#[test]
+fn a_push_to_a_scalar_or_map_field_refuses() {
+    let source = "---\ntitle: t\nmeta:\n  k: v\n---\n";
+    for (field, kind) in [("title", "string"), ("meta", "map")] {
+        assert_eq!(
+            Document::parse(source).push_to_list(field, &string("a")),
+            Err(EditError::FieldNotAList {
+                field: field.into(),
+                kind
+            }),
+            "for {field}"
+        );
+    }
+}

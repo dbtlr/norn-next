@@ -70,6 +70,11 @@ pub enum EditError {
     FieldAbsent {
         field: String,
     },
+    /// A list edit addressed a field holding something other than a list.
+    FieldNotAList {
+        field: String,
+        kind: &'static str,
+    },
     Render(RenderError),
     Section(SectionError),
     /// The addressed heading sits inside a blockquote or a list item, whose
@@ -127,6 +132,9 @@ impl fmt::Display for EditError {
                 write!(f, "the field {field:?} cannot be edited in place")
             }
             EditError::FieldAbsent { field } => write!(f, "the field {field:?} is not present"),
+            EditError::FieldNotAList { field, kind } => {
+                write!(f, "the field {field:?} holds a {kind}, not a list")
+            }
             EditError::Render(error) => write!(f, "{error}"),
             EditError::Section(error) => write!(f, "{error}"),
             EditError::SectionInContainer { heading } => write!(
@@ -909,10 +917,46 @@ impl<'a> Document<'a> {
         })
     }
 
+    /// Append `value` to the list `field` holds, returning the whole edited
+    /// document.
+    ///
+    /// An absent field, or one written with no value (`tags:`), becomes a
+    /// one-element list; a value the list already holds is appended again. A
+    /// field holding a scalar or a map refuses with
+    /// [`EditError::FieldNotAList`]: turning it into a list is a set. The
+    /// write is [`Document::set_field`]'s, so the list keeps its block or flow
+    /// spelling and the result is proven the same way.
+    pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
+        let mut items = self.list_items(field)?.unwrap_or_default();
+        items.push(value.clone());
+        self.set_field(field, &Value::Sequence(items))
+    }
+
+    /// The items of the list `field` holds — none for a field written with no
+    /// value — or `None` where the block has no such field. A field holding
+    /// anything else refuses.
+    fn list_items(&self, field: &str) -> Result<Option<Vec<Value>>, EditError> {
+        match self.mapping_ref()?.and_then(|map| map.get(field)) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(Vec::new())),
+            Some(Value::Sequence(items)) => Ok(Some(items.clone())),
+            Some(other) => Err(EditError::FieldNotAList {
+                field: field.to_string(),
+                kind: other.kind(),
+            }),
+        }
+    }
+
     /// The frontmatter mapping, or `None` for an absent or null block.
     fn mapping(&self) -> Result<Option<Mapping>, EditError> {
+        Ok(self.mapping_ref()?.cloned())
+    }
+
+    /// The frontmatter mapping, borrowed, or `None` for an absent or null
+    /// block.
+    fn mapping_ref(&self) -> Result<Option<&Mapping>, EditError> {
         match (&self.frontmatter, &self.frontmatter_range) {
-            (Some(Value::Map(map)), _) => Ok(Some(map.clone())),
+            (Some(Value::Map(map)), _) => Ok(Some(map)),
             (Some(Value::Null), _) | (None, None) if !self.frontmatter_broken() => Ok(None),
             (Some(other), _) => Err(EditError::FrontmatterNotAMapping { kind: other.kind() }),
             _ => Err(EditError::FrontmatterUnreadable),
