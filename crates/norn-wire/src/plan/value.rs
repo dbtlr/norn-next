@@ -15,9 +15,12 @@
 //! `3`, `2.5`, `"done"`, `["a","b"]`, `{"k":1}`: there is no tag, because a
 //! value's shape is already its kind, and an author writing a field writes it
 //! the way the field reads in a document. An integer is a number written with
-//! no fraction and no exponent that fits a signed 64-bit integer; any other
-//! number is a float, and a float is finite — a format that can spell `NaN` or
-//! an infinity has that value refused, since no frontmatter field can hold
+//! no fraction and no exponent that fits a signed 64-bit integer. A `u64`
+//! above `i64::MAX` is refused, since no float holds it exactly. Any other
+//! number is a float: what the format delivers as a float, including an
+//! integer beyond `u64` or below `i64::MIN`, which reads as a float that no
+//! longer holds it exactly. A float is finite — a format that can spell `NaN`
+//! or an infinity has that value refused, since no frontmatter field can hold
 //! it. A map keeps the order its keys are written in, which is the order the
 //! document writes them, and refuses a key written twice rather than keeping
 //! either.
@@ -289,8 +292,8 @@ impl<'de> Visitor<'de> for AuthoredValueVisitor {
         Ok(AuthoredValue::Integer(value))
     }
 
-    /// An integer past the signed 64-bit range is refused rather than read
-    /// as a float that no longer holds it exactly.
+    /// A `u64` past the signed 64-bit range is refused rather than read as a
+    /// float that no longer holds it exactly.
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<AuthoredValue, E> {
         i64::try_from(value)
             .map(AuthoredValue::Integer)

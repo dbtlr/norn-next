@@ -8523,6 +8523,25 @@ fn a_written_value_refuses_a_non_finite_float_a_wide_integer_and_a_repeated_key(
     );
 }
 
+/// **Only a `u64` above `i64::MAX` is refused as an integer.** Numbers JSON
+/// delivers as floats, which includes an integer beyond `u64` or below
+/// `i64::MIN`, read as floats that no longer hold the integer exactly.
+#[test]
+fn an_integer_beyond_the_signed_range_is_refused_or_read_as_a_float() {
+    assert!(authored_value("9223372036854775808").is_err());
+    assert!(authored_value("18446744073709551615").is_err());
+    for (json, float) in [
+        ("18446744073709551616", 18_446_744_073_709_551_616.0),
+        ("-9223372036854775809", -9_223_372_036_854_775_809.0),
+    ] {
+        assert_eq!(
+            authored_value(json).expect(json),
+            AuthoredValue::float(float).unwrap(),
+            "{json}"
+        );
+    }
+}
+
 /// **An empty `where` list is refused wherever a target is read.** A
 /// conjunction of no predicates matches every document, so `set --where []`
 /// would write the whole vault.
