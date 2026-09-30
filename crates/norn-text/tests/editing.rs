@@ -1683,6 +1683,84 @@ fn a_push_appends_to_a_list_and_allows_duplicates() {
     );
 }
 
+/// **A push to a block list writes one item line below the last item and
+/// moves no other byte**: comments inside and after the list, the other
+/// items' quoting and the key's spelling all stand.
+#[test]
+fn a_push_to_a_block_list_splices_one_item_and_keeps_every_other_byte() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a # c1\n  # standalone\n  - b\n# after\n---\n")
+            .push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a # c1\n  # standalone\n  - b\n  - c\n# after\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\n\"yes\": # the list\n  - 'a'\n  - \"b\"\n---\n")
+            .push_to_list("yes", &string("c")),
+        Ok("---\n\"yes\": # the list\n  - 'a'\n  - \"b\"\n  - c\n---\n".to_string())
+    );
+}
+
+/// **A push that would rewrite a commented list whole refuses**: a flow list
+/// is rewritten whole, so a comment after it or inside a multi-line one would
+/// be lost, and so would one on a null field's line. A flow list with no
+/// comment still takes the push.
+#[test]
+fn a_push_that_would_drop_a_comment_refuses() {
+    for source in [
+        "---\ntags: [a] # keep\n---\n",
+        "---\ntags: [a,\n  # inside\n  b]\n---\n",
+        "---\ntags: null # later\n---\n",
+        "---\ntags: # later\n---\n",
+    ] {
+        assert_eq!(
+            Document::parse(source).push_to_list("tags", &string("c")),
+            Err(EditError::CommentWouldBeLost {
+                field: "tags".into()
+            }),
+            "for {source:?}"
+        );
+    }
+    assert_eq!(
+        Document::parse("---\ntags: ['a #b']\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags: ['a #b', c]\n---\n".to_string())
+    );
+}
+
+/// **A block list whose items are not one per line is rewritten whole only
+/// where it carries no comment**: a multi-line item cannot be spliced around,
+/// so the list is written as a set writes it, or refused where that would
+/// drop a comment.
+#[test]
+fn a_block_list_with_a_multi_line_item_is_rewritten_only_without_comments() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - \"two\n    lines\"\n---\n")
+            .push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a\n  - two lines\n  - c\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\n  # why\n  - \"two\n    lines\"\n---\n")
+            .push_to_list("tags", &string("c")),
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
+    );
+}
+
+/// **A pushed item takes the list's own indent and line terminator**: a list
+/// written at zero indent stays at zero indent, and a CRLF list gains a CRLF
+/// line.
+#[test]
+fn a_pushed_item_takes_the_lists_indent_and_terminator() {
+    assert_eq!(
+        Document::parse("---\ntags:\n- a\n---\n").push_to_list("tags", &string("b")),
+        Ok("---\ntags:\n- a\n- b\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\r\ntags:\r\n    - a\r\n---\r\n").push_to_list("tags", &string("b")),
+        Ok("---\r\ntags:\r\n    - a\r\n    - b\r\n---\r\n".to_string())
+    );
+}
+
 /// **A push to an absent field, or to one written with no value, writes a
 /// one-element list.**
 #[test]
@@ -1741,6 +1819,60 @@ fn a_pop_removes_every_equal_element() {
     assert_eq!(
         Document::parse("---\ntags: [a]\n---\n").pop_from_list("tags", &string("a")),
         Ok("---\ntags: []\n---\n".to_string())
+    );
+}
+
+/// **A pop from a block list deletes the lines of every matching item and
+/// moves no other byte**: the comments between them, the other items'
+/// quoting and the key's spelling stand.
+#[test]
+fn a_pop_from_a_block_list_deletes_only_the_matching_item_lines() {
+    assert_eq!(
+        Document::parse("---\n\"yes\":\n- a\n# one\n- 'b'\n  # two\n- a\n- \"c\" # c\n---\n")
+            .pop_from_list("yes", &string("a")),
+        Ok("---\n\"yes\":\n# one\n- 'b'\n  # two\n- \"c\" # c\n---\n".to_string())
+    );
+}
+
+/// **Popping a block list's last item writes `[]` on its key line**, before
+/// any comment there: a key with nothing under it reads as null, and `[]` is
+/// what reads back as the empty list the pop leaves. The comments the list
+/// held stay below it.
+#[test]
+fn popping_a_block_lists_last_item_writes_an_empty_flow_list_on_its_key_line() {
+    assert_eq!(
+        Document::parse("---\ntags: # my tags\n  - a\n  # kept\n  - a\ntitle: t\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags: [] # my tags\n  # kept\ntitle: t\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n---\n").pop_from_list("tags", &string("a")),
+        Ok("---\ntags: []\n---\n".to_string())
+    );
+}
+
+/// **A pop that would drop a comment refuses**: a comment trailing a popped
+/// item's own line would go with the line, and a commented flow list would
+/// be rewritten whole.
+#[test]
+fn a_pop_that_would_drop_a_comment_refuses() {
+    for source in [
+        "---\ntags:\n  - a # why\n  - b\n---\n",
+        "---\ntags: [a, b] # keep\n---\n",
+    ] {
+        assert_eq!(
+            Document::parse(source).pop_from_list("tags", &string("a")),
+            Err(EditError::CommentWouldBeLost {
+                field: "tags".into()
+            }),
+            "for {source:?}"
+        );
+    }
+    // A comment on an item the pop keeps is not in the way.
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b # why\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  - b # why\n---\n".to_string())
     );
 }
 

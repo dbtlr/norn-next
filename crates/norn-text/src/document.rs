@@ -11,9 +11,12 @@ use crate::frontmatter::extract::{
 use crate::frontmatter::fields::{
     Field, SplitRefusal, ValueStyle, classify_value, field_spans, reparse,
 };
+use crate::frontmatter::list::{
+    BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
+};
 use crate::frontmatter::render::{
-    RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
-    render_scalar_in_span, render_sequence_entry,
+    RenderError, ScalarStyle, render_block_item, render_flow_sequence, render_key,
+    render_scalar_entry, render_scalar_in_span, render_sequence_entry,
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
@@ -74,6 +77,12 @@ pub enum EditError {
     FieldNotAList {
         field: String,
         kind: &'static str,
+    },
+    /// A list edit would have to rewrite the field whole, and the field's
+    /// entry carries a comment that rewrite would drop. Nothing is written: a
+    /// comment is the author's, and no edit loses one silently.
+    CommentWouldBeLost {
+        field: String,
     },
     /// A pop named a value the field's list does not hold. A pop that changes
     /// nothing is refused rather than reported as done.
@@ -141,6 +150,10 @@ impl fmt::Display for EditError {
             EditError::FieldNotAList { field, kind } => {
                 write!(f, "the field {field:?} holds a {kind}, not a list")
             }
+            EditError::CommentWouldBeLost { field } => write!(
+                f,
+                "the list {field:?} carries a comment this edit would drop, so it was refused"
+            ),
             EditError::ListValueAbsent { field, value } => {
                 write!(f, "the list {field:?} holds no element equal to {value:?}")
             }
@@ -969,16 +982,63 @@ impl<'a> Document<'a> {
     /// Append `value` to the list `field` holds, returning the whole edited
     /// document.
     ///
-    /// An absent field, or one written with no value (`tags:`), becomes a
-    /// one-element list; a value the list already holds is appended again. A
-    /// field holding a scalar or a map refuses with
-    /// [`EditError::FieldNotAList`]: turning it into a list is a set. The
-    /// write is [`Document::set_field`]'s, so the list keeps its block or flow
-    /// spelling and the result is proven the same way.
+    /// A value the list already holds is appended again. A field holding a
+    /// scalar or a map refuses with [`EditError::FieldNotAList`]: turning it
+    /// into a list is a set.
+    ///
+    /// **Every byte the push does not change stays.** A block list whose
+    /// items each sit on a line of their own gains one item line below its
+    /// last item, at that item's indent and with its line terminator;
+    /// comments, the other items' quoting and the key's spelling are not
+    /// touched. Every other list — a flow list, a block list with a multi-line
+    /// item — and an absent or null field, which becomes a one-element list,
+    /// are written whole by [`Document::set_field`], and only where the entry
+    /// carries no comment: a comment the rewrite would drop refuses with
+    /// [`EditError::CommentWouldBeLost`] instead. Either way the result is
+    /// re-read and proven as a set is.
     pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
         let mut items = self.list_items(field)?.unwrap_or_default();
+        let lines = self
+            .field(field)
+            .and_then(|located| block_item_lines(self.source, located, &items));
+        let Some(last) = lines.as_ref().and_then(|lines| lines.last()) else {
+            items.push(value.clone());
+            return self.rewrite_list(field, items);
+        };
+        let terminator =
+            trailing_break(&self.source[last.line.clone()]).unwrap_or(self.line_ending.as_str());
+        let line = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
+        let edited = splice(self.source, last.line.end..last.line.end, &line);
+        refuse_past_bound(&edited)?;
         items.push(value.clone());
+        self.verified_list(edited, field, items)
+    }
+
+    /// Write `items` over `field` whole, as [`Document::set_field`] does, where
+    /// the field's entry carries no comment the rewrite would drop.
+    fn rewrite_list(&self, field: &str, items: Vec<Value>) -> Result<String, EditError> {
+        if let Some(located) = self.field(field)
+            && entry_carries_comment(self.source, located)
+        {
+            return Err(EditError::CommentWouldBeLost {
+                field: field.to_string(),
+            });
+        }
         self.set_field(field, &Value::Sequence(items))
+    }
+
+    /// `edited`, where it re-reads with `field` holding exactly `items` and
+    /// every other field untouched.
+    fn verified_list(
+        &self,
+        edited: String,
+        field: &str,
+        items: Vec<Value>,
+    ) -> Result<String, EditError> {
+        let mut expected = self.mapping()?.unwrap_or_default();
+        expected.insert(field, Value::Sequence(items));
+        self.verify(&edited, field, &expected)?;
+        Ok(edited)
     }
 
     /// Remove every element equal to `value` from the list `field` holds,
@@ -988,23 +1048,60 @@ impl<'a> Document<'a> {
     /// field stays. Nothing is silently left as it was: a value the list does
     /// not hold refuses with [`EditError::ListValueAbsent`], an absent field
     /// with [`EditError::FieldAbsent`], and a field holding a scalar or a map
-    /// with [`EditError::FieldNotAList`]. The write is
-    /// [`Document::set_field`]'s, proven the same way.
+    /// with [`EditError::FieldNotAList`].
+    ///
+    /// **Every byte the pop does not change stays.** From a block list whose
+    /// items each sit on a line of their own, the lines of the matching items
+    /// are deleted and nothing else; popping its last item writes `[]` on the
+    /// key line, before any comment there, because a key with nothing under
+    /// it reads as null and `[]` reads back as the empty list. A matching item
+    /// whose line carries a comment refuses with
+    /// [`EditError::CommentWouldBeLost`], since the comment would go with the
+    /// line. Every other list is written whole by [`Document::set_field`],
+    /// only where its entry carries no comment, and refuses the same way
+    /// otherwise. Either way the result is re-read and proven as a set is.
     pub fn pop_from_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
-        let Some(mut items) = self.list_items(field)? else {
+        let Some(items) = self.list_items(field)? else {
             return Err(EditError::FieldAbsent {
                 field: field.to_string(),
             });
         };
-        let held = items.len();
-        items.retain(|item| item != value);
-        if items.len() == held {
+        let kept: Vec<Value> = items
+            .iter()
+            .filter(|item| *item != value)
+            .cloned()
+            .collect();
+        if kept.len() == items.len() {
             return Err(EditError::ListValueAbsent {
                 field: field.to_string(),
                 value: value.clone(),
             });
         }
-        self.set_field(field, &Value::Sequence(items))
+        let Some((located, lines)) = self.field(field).and_then(|located| {
+            block_item_lines(self.source, located, &items).map(|lines| (located, lines))
+        }) else {
+            return self.rewrite_list(field, kept);
+        };
+        let popped: Vec<&BlockItem> = lines
+            .iter()
+            .zip(&items)
+            .filter(|(_, item)| *item == value)
+            .map(|(line, _)| line)
+            .collect();
+        if popped.iter().any(|line| line.commented) {
+            return Err(EditError::CommentWouldBeLost {
+                field: field.to_string(),
+            });
+        }
+        let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
+        if kept.is_empty() {
+            let Some(point) = key_line_value_point(self.source, located.line_range.start) else {
+                return self.rewrite_list(field, kept);
+            };
+            edits.push((point, " []"));
+        }
+        edits.extend(popped.iter().map(|line| (line.line.clone(), "")));
+        self.verified_list(splice_all(self.source, &edits), field, kept)
     }
 
     /// The items of the list `field` holds — none for a field written with no
@@ -1326,6 +1423,20 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
     out.push_str(&source[..range.start]);
     out.push_str(replacement);
     out.push_str(&source[range.end..]);
+    out
+}
+
+/// `source` with each range in `edits` replaced by its text. The ranges are in
+/// document order and do not overlap.
+fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        out.push_str(&source[copied..range.start]);
+        out.push_str(replacement);
+        copied = range.end;
+    }
+    out.push_str(&source[copied..]);
     out
 }
 
