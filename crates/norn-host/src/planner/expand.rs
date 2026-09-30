@@ -45,6 +45,7 @@
 //! expanded plan names the authored positions of the operations it concerns.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use norn_wire::{
     AuthoredPlan, DocumentPath, Operation, OperationKind, PlanFault, Predicate, RootIdentity,
@@ -52,11 +53,20 @@ use norn_wire::{
 };
 
 use super::resolve::{PlanningFailure, Resolution, resolve_leaving_out};
-use super::view::VaultView;
+use super::view::{Entry, Remembered, VaultView};
 
 /// What a `where` target's predicates match: the documents, in path order,
 /// or why the builder could not apply them as asked, in words.
-pub(crate) type Matched = Result<Vec<DocumentPath>, String>;
+pub(crate) type Matched = Result<Vec<MatchedDocument>, String>;
+
+/// One document a `where` target matched, with the content hash the index
+/// holds it under: the bytes the facts it matched on were derived from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MatchedDocument {
+    pub(crate) path: DocumentPath,
+    /// The 64 lowercase hexadecimal digits of the indexed content hash.
+    pub(crate) indexed: String,
+}
 
 /// The documents a predicate list matches, on the one snapshot a request
 /// plans against.
@@ -90,6 +100,9 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
     if let Some(fault) = authored.ordered_where_targets() {
         return Err(ExpandingFailure::Planning(PlanningFailure::Fault(fault)));
     }
+    // One observation of each file: the bytes a match is judged against
+    // here are the bytes the planner composes each expanded operation from.
+    let view = &Remembered::over(view);
     let AuthoredPlan {
         plan,
         vault,
@@ -113,11 +126,11 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
                 .matching(predicates)
                 .map_err(ExpandingFailure::Match)?
             {
-                Ok(paths) if paths.is_empty() => Err(format!(
+                Ok(documents) if documents.is_empty() => Err(format!(
                     "no document matches the `where` target {}",
                     told(predicates)
                 )),
-                Ok(paths) => Ok(paths),
+                Ok(documents) => Ok(documents),
                 Err(words) => Err(format!(
                     "the `where` target {} matches no document as asked: {words}",
                     told(predicates)
@@ -125,9 +138,14 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
             }
         };
         match matched {
-            Ok(paths) => {
-                for path in paths {
-                    expanded.push(at_path(&operation, path));
+            Ok(documents) => {
+                for document in documents {
+                    if let Some(changed) = changed_since_indexed(&document, view)
+                        .map_err(|error| ExpandingFailure::Planning(PlanningFailure::View(error)))?
+                    {
+                        left_out.insert(expanded.len(), changed);
+                    }
+                    expanded.push(at_path(&operation, document.path));
                     origin.push(position);
                 }
             }
@@ -148,6 +166,39 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
             }
             other => other,
         })
+    })
+}
+
+/// Why `document`'s expanded operation is left unresolved where the file
+/// holds other bytes than the index derived its facts from, and `None` where
+/// it holds the same ones, or no document at all — which composition leaves
+/// unresolved as it leaves any path naming no document.
+///
+/// **A match resting on facts the index has not taken in is not written.**
+/// The store may not have taken in a foreign edit the watcher has not yet
+/// delivered, and that edit may be the one that makes the document stop
+/// matching; the file's before-state carries the edit, so the write guard
+/// alone would not see it.
+fn changed_since_indexed<V: VaultView>(
+    document: &MatchedDocument,
+    view: &V,
+) -> Result<Option<UnresolvedReason>, V::Error> {
+    let Ok(identity) = view
+        .normalizer()
+        .normalize(Path::new(document.path.as_str()))
+    else {
+        return Ok(None);
+    };
+    Ok(match view.entry(&identity)? {
+        Entry::Document { hash, .. } if hash.hex() != document.indexed => {
+            Some(UnresolvedReason::no_longer_resolves(format!(
+                "`{}` changed since the vault's index saw it, so the `where` target's match \
+                 of it rests on facts the index has not taken in; re-send the plan once the \
+                 vault has indexed the change",
+                document.path
+            )))
+        }
+        _ => None,
     })
 }
 
@@ -265,8 +316,21 @@ mod tests {
             }
         }
 
+        /// `paths`, each indexed under the bytes of a draft, which is what
+        /// every document the cases match holds.
         fn paths(paths: &[&str]) -> Self {
-            Answering::with(Ok(paths.iter().map(|at| path(at)).collect()))
+            Answering::indexed(&paths.iter().map(|at| (*at, draft())).collect::<Vec<_>>())
+        }
+
+        /// Each path, indexed under the hash of the text beside it.
+        fn indexed(documents: &[(&str, &str)]) -> Self {
+            Answering::with(Ok(documents
+                .iter()
+                .map(|(at, text)| MatchedDocument {
+                    path: path(at),
+                    indexed: content_hash(text.as_bytes()).hex().to_string(),
+                })
+                .collect()))
         }
     }
 
@@ -436,6 +500,46 @@ mod tests {
             panic!("one operation is left out: {:?}", resolution.unresolved);
         };
         assert_eq!(left.operation, set_done(WriteTarget::path(path("gone.md"))));
+    }
+
+    /// **A matched document whose bytes are not the ones the index saw is
+    /// left unresolved alone, saying the plan should be re-sent**: the match
+    /// rests on facts the index has not taken in, and the document may no
+    /// longer match. The others resolve.
+    #[test]
+    fn a_matched_document_changed_since_the_index_saw_it_is_unresolved_alone() {
+        let published = "---\nstatus: published\n---\n";
+        let vault = MemoryVault::with(&[("a.md", draft()), ("b.md", published)]);
+        let resolution = planned(
+            &vault,
+            vec![set_done(WriteTarget::matching(drafts()))],
+            &Answering::indexed(&[("a.md", draft()), ("b.md", draft())]),
+        );
+
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![Transition::new(
+                path("a.md"),
+                present(draft()),
+                present(done())
+            )]
+        );
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("one operation is left out: {:?}", resolution.unresolved);
+        };
+        assert_eq!(left.operation, set_done(WriteTarget::path(path("b.md"))));
+        let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+            panic!("left out for {:?}", left.reason);
+        };
+        assert!(
+            detail.contains("changed since the vault's index saw it") && detail.contains("re-send"),
+            "{detail}"
+        );
+        assert_eq!(
+            vault.reads.borrow().get("a.md"),
+            Some(&1),
+            "a matched document was judged on other bytes than it was composed from"
+        );
     }
 
     /// **A `where` operation carrying an identifier or a requirement is a

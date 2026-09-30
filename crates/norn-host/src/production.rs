@@ -5682,6 +5682,129 @@ mod tests {
         );
     }
 
+    /// A vault of three `wave: flip` documents, attached and ready, whose
+    /// `wave/b.md` a foreign writer then changes to `wave: published`. The
+    /// host polls its watcher once a minute, so the store has not taken the
+    /// edit in when the case asks.
+    fn a_foreign_edit_the_index_has_not_seen(
+        label: &str,
+    ) -> (
+        Fixture,
+        crate::Host<ProductionEntryOps>,
+        VaultName,
+        crate::DemandLease<ProductionEntryOps>,
+    ) {
+        let f = Fixture::new(label);
+        fs::create_dir_all(f.vault().join("wave")).unwrap();
+        for at in ["a", "b", "c"] {
+            fs::write(
+                f.vault().join(format!("wave/{at}.md")),
+                "---\nwave: flip\n---\n",
+            )
+            .unwrap();
+        }
+        let ops = fixture_ops(&f);
+        let (host, name, lease) = ready_host(&f, ops);
+        fs::write(f.vault().join("wave/b.md"), "---\nwave: published\n---\n").unwrap();
+        (f, host, name, lease)
+    }
+
+    /// A set flipping every `wave: flip` document of `name` to `flipped`.
+    fn flipping(name: &VaultName, mode: norn_wire::ApplyMode) -> norn_wire::SetParams {
+        norn_wire::SetParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            mode,
+            norn_wire::WriteTarget::matching([norn_wire::Predicate::equal_to("wave", "flip")]),
+            vec![norn_wire::FieldChange::set(
+                "wave",
+                norn_wire::AuthoredValue::string("flipped"),
+            )],
+        )
+    }
+
+    /// The plan the rest resolved to and the one unresolved operation a
+    /// refusal names, asserting that operation is `wave/b.md`'s, left for a
+    /// change the vault's index has not seen.
+    fn refused_for_b(refusal: norn_wire::ErrorEnvelope) -> norn_wire::ResolvedPlan {
+        assert_eq!(refusal.code(), &norn_wire::ReasonCode::VaultPlanRefused);
+        let norn_wire::ErrorDetail::PlanRefused {
+            plan, unresolved, ..
+        } = refusal.detail().clone()
+        else {
+            panic!("the refusal carries {:?}", refusal.detail());
+        };
+        let [left] = unresolved.as_slice() else {
+            panic!("one operation is unresolved: {unresolved:?}");
+        };
+        assert_eq!(
+            left.operation
+                .kind
+                .target()
+                .and_then(|t| t.as_path())
+                .map(|p| p.as_str()),
+            Some("wave/b.md")
+        );
+        let norn_wire::UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+            panic!("the operation is unresolved for {:?}", left.reason);
+        };
+        assert!(
+            detail.contains("changed since the vault's index saw it") && detail.contains("re-send"),
+            "the reason says nothing of the index: {detail}"
+        );
+        let written: Vec<&str> = plan.transitions.iter().map(|t| t.path.as_str()).collect();
+        assert_eq!(written, ["wave/a.md", "wave/c.md"]);
+        plan
+    }
+
+    /// **A document a foreign edit changed after the vault's index saw it is
+    /// not written by a `where` its stale match names.** The apply matches on
+    /// the store, which still reads `wave: flip`, while the file reads
+    /// `wave: published`; that document's operation is left unresolved,
+    /// saying the plan should be re-sent, and the file keeps the foreign
+    /// value. The plan the rest resolved to writes the other two.
+    #[test]
+    fn a_where_leaves_unresolved_a_document_changed_since_the_index_saw_it() {
+        let (f, host, name, _lease) = a_foreign_edit_the_index_has_not_seen("where-stale-apply");
+
+        let refusal = host
+            .set(flipping(&name, norn_wire::ApplyMode::Apply))
+            .expect("the set is admitted")
+            .wait()
+            .expect_err("a stale match wrote");
+        let rest = refused_for_b(refusal);
+        let read = |at: &str| fs::read_to_string(f.vault().join(at)).unwrap();
+        assert_eq!(read("wave/b.md"), "---\nwave: published\n---\n");
+
+        host.apply(norn_wire::ApplyParams::new(
+            norn_wire::ApplyMode::Apply,
+            norn_wire::PlanDocument::resolved(rest),
+        ))
+        .expect("the rest is admitted")
+        .wait()
+        .expect("the rest applies");
+        assert_eq!(read("wave/a.md"), "---\nwave: flipped\n---\n");
+        assert_eq!(read("wave/c.md"), "---\nwave: flipped\n---\n");
+        assert_eq!(read("wave/b.md"), "---\nwave: published\n---\n");
+    }
+
+    /// **A preview leaves the same document unresolved**, so the resolved
+    /// plan it answers never carries it.
+    #[test]
+    fn a_preview_leaves_unresolved_a_document_changed_since_the_index_saw_it() {
+        let (f, host, name, _lease) = a_foreign_edit_the_index_has_not_seen("where-stale-preview");
+
+        let refusal = host
+            .set(flipping(&name, norn_wire::ApplyMode::Preview))
+            .expect("the preview is admitted")
+            .wait()
+            .expect_err("a stale match previewed");
+        refused_for_b(refusal);
+        assert_eq!(
+            fs::read_to_string(f.vault().join("wave/b.md")).unwrap(),
+            "---\nwave: published\n---\n"
+        );
+    }
+
     /// **An apply's `where` match mints its read handle through the
     /// coverage's read seam and accounts the mint to the job account**: the
     /// store's read-only open reports two statements, and an apply naming no
