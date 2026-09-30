@@ -8812,9 +8812,8 @@ fn an_authored_where_operation_carrying_an_id_or_a_requirement_is_a_fault() {
     assert_eq!(plan.ordered_where_targets(), None);
     plan.operations
         .push(set(WriteTarget::matching(drafts())).with_id(operation_id("bulk")));
-    plan.operations.push(
-        set(WriteTarget::matching(drafts())).with_requires(vec![operation_id("first")]),
-    );
+    plan.operations
+        .push(set(WriteTarget::matching(drafts())).with_requires(vec![operation_id("first")]));
     assert_eq!(
         plan.ordered_where_targets(),
         Some(PlanFault::where_target_ordered(vec![2, 3]))

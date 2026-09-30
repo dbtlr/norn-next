@@ -271,8 +271,10 @@ type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), Wat
 /// holds the entry's claim and this attachment's store is the one writer to
 /// it, so the reading taken here names exactly the state the changeset builds
 /// on, and it is the reading the answer is given under. The planner reads the
-/// files for its before-states, never the store, so nothing else is read off
-/// it before the applier commits. A store that refuses that reading answers
+/// files for its before-states, never the store. A `where` target is matched
+/// on a snapshot the store's own read handle establishes under the same
+/// claim, the first time one asks, which reads that same state; a plan with
+/// none opens no handle. A store that refuses that reading answers
 /// as a read meeting the same refusal does: `host/read-failed`, or damage the
 /// job publishes with the rebuild it owes.
 ///
@@ -311,11 +313,22 @@ fn apply_over(
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
-            match crate::apply::resolve_on(authored, &ground, name)
-                .and_then(crate::apply::fully_resolved)
-            {
-                Ok(resolution) => resolution.plan,
-                Err(refused) => return ApplyEnd::answered(Err(refused)),
+            let matcher = crate::apply::SnapshotMatcher::on_demand(
+                authored.vault.clone(),
+                &attachment.store,
+                ground.declared.content_model(),
+            );
+            match crate::apply::resolve_on(authored, &ground, name, &matcher) {
+                Ok(resolution) => match crate::apply::fully_resolved(resolution) {
+                    Ok(resolution) => resolution.plan,
+                    Err(refused) => return ApplyEnd::answered(Err(refused)),
+                },
+                Err(crate::refusal::PageRefused::Answered(refused)) => {
+                    return ApplyEnd::answered(Err(refused));
+                }
+                Err(crate::refusal::PageRefused::Damaged(detail)) => {
+                    return ApplyEnd::damaged(detail);
+                }
             }
         }
     };

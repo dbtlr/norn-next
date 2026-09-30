@@ -20,8 +20,9 @@
 //! **A plan is resolved against the files, on the ground the entry's coverage
 //! stands on.** The planner reads before-states from the vault through
 //! `norn-fs`, never from the store, so the snapshot a preview holds is what
-//! its answer's reading names and what an operation that reads derived facts
-//! would plan against; none of today's operation kinds reads one.
+//! its answer's reading names and what a `where` target is matched on
+//! ([`SnapshotMatcher`]), through the find builder in process.
+
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -43,14 +44,16 @@
 //! longer stands, and trust withdrawn for the environment's refusal where it
 //! stands and cannot be read.
 
+use std::cell::OnceCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
-use norn_store::Snapshot;
+use norn_store::{ContentModel, PageRefusal, Snapshot, Store};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ErrorDetail, ErrorEnvelope, PlanDocument,
-    RootIdentity, TrustState, UntrustedReason, VaultAnswer, VaultName,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ErrorDetail, ErrorEnvelope, FindParams,
+    PlanDocument, Predicate, RootIdentity, TrustState, UntrustedReason, VaultAddress, VaultAnswer,
+    VaultName,
 };
 
 use crate::address::registered_name;
@@ -60,8 +63,10 @@ use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, SnapshotSource,
     not_run, watcher_lost,
 };
-use crate::planner::resolve::{PlanningFailure, Resolution, resolve};
+use crate::planner::expand::{ExpandingFailure, Matched, Matcher, resolve_expanding};
+use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::view::TreeView;
+use crate::refusal::{PageRefused, page_refusal};
 
 /// What a plan is resolved against: the vault root as the entry's coverage
 /// spells it, the identity that root proved when the coverage was installed,
@@ -128,30 +133,180 @@ impl PlanGround {
     }
 }
 
-/// Plan `authored` against the vault on `ground`.
+/// Plan `authored` against the vault on `ground`, its `where` targets
+/// matched through `matcher`.
 ///
 /// The answer is the resolution, or the code planning ended in: a fault in
-/// the plan's own shape, or a vault the planner could not read.
+/// the plan's own shape, a vault the planner could not read, or the refusal
+/// of the snapshot the `where` targets are matched on — answered as a read
+/// meeting it is, damage included.
 pub(crate) fn resolve_on(
     authored: AuthoredPlan,
     ground: &PlanGround,
     name: &VaultName,
-) -> Result<Resolution, ErrorEnvelope> {
+    matcher: &SnapshotMatcher<'_>,
+) -> Result<Resolution, PageRefused> {
     let view = TreeView::open(&ground.root, &ground.exclusions)
-        .map_err(|error| unreadable(name, error))?;
-    resolve(
-        authored,
-        ground.root_identity(),
-        &std::collections::BTreeSet::new(),
-        &view,
-    )
-    .map_err(|failure| match failure {
-        PlanningFailure::Fault(fault) => ErrorEnvelope::new(
-            "the plan's operations are no plan: nothing was planned",
-            ErrorDetail::plan_invalid(fault),
-        ),
-        PlanningFailure::View(error) => unreadable(name, error),
+        .map_err(|error| PageRefused::Answered(unreadable(name, error)))?;
+    resolve_expanding(authored, ground.root_identity(), &view, matcher).map_err(|failure| {
+        match failure {
+            ExpandingFailure::Planning(PlanningFailure::Fault(fault)) => {
+                PageRefused::Answered(ErrorEnvelope::new(
+                    "the plan's operations are no plan: nothing was planned",
+                    ErrorDetail::plan_invalid(fault),
+                ))
+            }
+            ExpandingFailure::Planning(PlanningFailure::View(error)) => {
+                PageRefused::Answered(unreadable(name, error))
+            }
+            ExpandingFailure::Match(refusal) => page_refusal(refusal),
+        }
     })
+}
+
+/// Where a plan's `where` targets are matched: through the find builder, in
+/// process, on the one snapshot the request plans against.
+///
+/// **A preview matches on the snapshot its read hold took**, under the
+/// content model that snapshot pins. **An apply matches on a snapshot its job
+/// establishes inside the entry's claim**, on a read handle its own store
+/// mints, the first time a `where` target asks: the job holds the claim and
+/// its store is the one writer, so that snapshot reads exactly the state the
+/// apply's changeset builds on, and a plan with no `where` target opens
+/// none. Either way the match is the find a caller would have been answered
+/// at the same instant, paged to its end.
+pub(crate) struct SnapshotMatcher<'a> {
+    vault: VaultAddress,
+    declared: &'a ContentModel,
+    on: MatchedOn<'a>,
+}
+
+#[allow(clippy::large_enum_variant)] // One per planning, on the stack and never moved: boxing the snapshot would allocate for a plan with no `where` target.
+enum MatchedOn<'a> {
+    /// The snapshot a read hold took.
+    Held(&'a Snapshot),
+    /// A snapshot established on `store`'s own read handle when first asked.
+    OnDemand {
+        store: &'a Store,
+        established: OnceCell<Snapshot>,
+    },
+}
+
+impl<'a> SnapshotMatcher<'a> {
+    /// Matching `vault`'s `where` targets on `snapshot`, which pins
+    /// `declared`.
+    pub(crate) const fn held(
+        vault: VaultAddress,
+        snapshot: &'a Snapshot,
+        declared: &'a ContentModel,
+    ) -> Self {
+        SnapshotMatcher {
+            vault,
+            declared,
+            on: MatchedOn::Held(snapshot),
+        }
+    }
+
+    /// Matching `vault`'s `where` targets on a snapshot of `store`,
+    /// established when first asked; `declared` is what `store` pins.
+    pub(crate) const fn on_demand(
+        vault: VaultAddress,
+        store: &'a Store,
+        declared: &'a ContentModel,
+    ) -> Self {
+        SnapshotMatcher {
+            vault,
+            declared,
+            on: MatchedOn::OnDemand {
+                store,
+                established: OnceCell::new(),
+            },
+        }
+    }
+
+    fn snapshot(&self) -> Result<&Snapshot, PageRefusal> {
+        match &self.on {
+            MatchedOn::Held(snapshot) => Ok(snapshot),
+            MatchedOn::OnDemand { store, established } => {
+                if established.get().is_none() {
+                    let reader = Arc::new(store.open_reader().reader.map_err(PageRefusal::Store)?);
+                    let snapshot = reader
+                        .try_take()
+                        .expect("a read handle minted for this apply alone is idle")
+                        .establish()
+                        .map_err(PageRefusal::Store)?;
+                    let _ = established.set(snapshot);
+                }
+                Ok(established
+                    .get()
+                    .expect("the snapshot was just established"))
+            }
+        }
+    }
+}
+
+impl Matcher for SnapshotMatcher<'_> {
+    /// A refusal a read meeting it would answer with: the store's, or a
+    /// declaration the snapshot does not pin.
+    type Error = PageRefusal;
+
+    /// Every document `predicates` match, in the find's own order, which is
+    /// path order, every page of it read on the one snapshot.
+    ///
+    /// **A part the find reports unsatisfied matches nothing as asked**, so
+    /// the answer is the report in words rather than the empty match; so is a
+    /// request the builder refuses for what it asks, such as a bound that
+    /// does not read as its key's declared type.
+    fn matching(&self, predicates: &[Predicate]) -> Result<Matched, PageRefusal> {
+        let snapshot = self.snapshot()?;
+        let request = FindParams::new(self.vault.clone())
+            .with_predicates(predicates.to_vec())
+            .with_limit(norn_store::MAX_PAGE as u32);
+        let mut page_request = request.clone();
+        let mut paths = Vec::new();
+        loop {
+            let page = match snapshot.find(&page_request, self.declared) {
+                Ok(page) => page,
+                Err(refusal) => return asked_amiss(refusal).map(Err),
+            };
+            if !page.unsatisfied.is_empty() {
+                return Ok(Err(format!(
+                    "the find reports parts it could not apply: {:?}",
+                    page.unsatisfied
+                )));
+            }
+            paths.extend(page.rows.into_iter().map(|row| row.path));
+            let Some(after) = page.next else {
+                return Ok(Ok(paths));
+            };
+            page_request = request.clone().with_after(after);
+        }
+    }
+}
+
+/// A find refusal as a `where` target meets it: the request's own amiss
+/// part, in words, which leaves the operation unresolved; or what a read
+/// meeting it fails on, which fails planning.
+///
+/// Total by its match, as [`page_refusal`] is, so a refusal minted in the
+/// store without an arm here does not compile.
+fn asked_amiss(refusal: PageRefusal) -> Result<String, PageRefusal> {
+    match refusal {
+        PageRefusal::UnreadableBound { .. }
+        | PageRefusal::EmptyMembership { .. }
+        | PageRefusal::OutOfBound { .. }
+        | PageRefusal::UnknownPart { .. }
+        | PageRefusal::AmbiguousTarget(_)
+        | PageRefusal::UnknownTarget { .. }
+        | PageRefusal::PartNotTaken { .. } => Ok(refusal.to_string()),
+        // A matcher sends no cursor and pins its own declaration, so these
+        // are host defects or the store's own failure, answered as a read's.
+        PageRefusal::DeclarationNotPinned { .. }
+        | PageRefusal::OrderChanged(_)
+        | PageRefusal::CursorNotTaken { .. }
+        | PageRefusal::SummaryNotPaged
+        | PageRefusal::Store(_) => Err(refusal),
+    }
 }
 
 /// A resolution, where every operation resolved; the refusal naming the ones
@@ -261,8 +416,19 @@ where
             // what it planned: resolving checks no schema, so the plan it
             // answers goes through the same checks a resolved plan's does.
             PlanDocument::Operations(authored) => {
-                let resolution = fully_resolved(resolve_on(authored, &ground, name)?)?;
-                preview_resolved(resolution.plan, &ground)?
+                let matcher = SnapshotMatcher::held(
+                    authored.vault.clone(),
+                    hold.snapshot(),
+                    hold.content_model(),
+                );
+                let resolution = match resolve_on(authored, &ground, name, &matcher) {
+                    Ok(resolution) => resolution,
+                    Err(PageRefused::Answered(refused)) => return Err(refused),
+                    Err(PageRefused::Damaged(detail)) => {
+                        return Err(self.withdraw_for_read_damage(&hold, detail).answer(name));
+                    }
+                };
+                preview_resolved(fully_resolved(resolution)?.plan, &ground)?
             }
             PlanDocument::Resolved(resolved) => preview_resolved(resolved, &ground)?,
         };

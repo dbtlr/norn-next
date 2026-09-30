@@ -54,6 +54,22 @@ pub(crate) fn resolve<V: VaultView>(
     met: &BTreeSet<OperationId>,
     view: &V,
 ) -> Result<Resolution, PlanningFailure<V::Error>> {
+    resolve_leaving_out(authored, root, met, view, BTreeMap::new())
+}
+
+/// Plan `authored` as [`resolve`] does, with the operations `left_out` names
+/// already left out for the reason beside each.
+///
+/// **What `where` expansion could not expand is left out here**
+/// ([`super::expand`]): such an operation is never composed, falls with what
+/// it would take down with it, and is reported in plan order among the rest.
+pub(crate) fn resolve_leaving_out<V: VaultView>(
+    authored: AuthoredPlan,
+    root: RootIdentity,
+    met: &BTreeSet<OperationId>,
+    view: &V,
+    mut left_out: BTreeMap<usize, UnresolvedReason>,
+) -> Result<Resolution, PlanningFailure<V::Error>> {
     let AuthoredPlan {
         plan: OperationsTag,
         vault,
@@ -63,7 +79,7 @@ pub(crate) fn resolve<V: VaultView>(
     } = authored;
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view)?;
-    let mut left_out: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
+    leave_out_what_falls_with(&operations, &mut left_out, view);
     let (order, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
