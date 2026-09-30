@@ -187,7 +187,7 @@ fn failures<V: VaultView>(
                     path,
                     field,
                     expect,
-                } => unmet_expectation(path, field, expect, view)?,
+                } => unmet_expectation(path, field, expect, composition, view)?,
             };
             if let Some(detail) = unmet {
                 failed
@@ -200,7 +200,10 @@ fn failures<V: VaultView>(
 }
 
 /// Why the vault does not meet an author's condition that `path` holds
-/// `hash`, or `None` where it does.
+/// `hash`, or `None` where it does: on a document the plan writes, against
+/// the before-state `composition` records there, and on any other file
+/// against the file as it stands. [`unmet_expectation`] judges an expected
+/// value by the same rule.
 fn unmet_condition<V: VaultView>(
     path: &DocumentPath,
     hash: &ContentHash,
@@ -234,16 +237,21 @@ fn unmet_condition<V: VaultView>(
 /// Why the vault does not meet an author's condition that the document at
 /// `path` holds `expect` under `field`, or `None` where it does.
 ///
-/// **Judged where a content hash is**: on a document the plan writes,
-/// against the before-state the plan reads there — the view remembers each
-/// file as planning first read it, so this is that read — and on any other
-/// file against the file as it stands. A condition on a written document
-/// then says no more than its before-state does; one on another document
-/// travels as a condition on its content ([`plan_conditions`]).
+/// **Judged where a content hash is, as [`unmet_condition`] judges one**: on a
+/// document the plan writes, against the before-state `composition` records
+/// there, and on any other file against the file as it stands. A condition on
+/// a written document then says no more than its before-state does; one on
+/// another document travels as a condition on its content
+/// ([`plan_conditions`]). The before-state is a hash, and the field is read
+/// from the bytes behind it: the view remembers each file as planning first
+/// read it ([`Remembered`]), and composition read the before-state through
+/// that same view, so the bytes read here are the ones the before-state
+/// hashes.
 fn unmet_expectation<V: VaultView>(
     path: &DocumentPath,
     field: &str,
     expect: &ExpectedField,
+    composition: &Composition,
     view: &V,
 ) -> Result<Option<String>, V::Error> {
     let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
@@ -255,14 +263,27 @@ fn unmet_expectation<V: VaultView>(
     {
         return Ok(Some(detail));
     }
+    let absent = || {
+        Some(format!(
+            "no document stands at `{path}`, so its field `{field}` cannot be observed"
+        ))
+    };
+    let before = composition.before(&identity);
+    if matches!(before, Some(FileState::Absent {})) {
+        return Ok(absent());
+    }
     Ok(match view.entry(&identity)? {
         view::Entry::Document { at, .. } if let Some(detail) = view::unholdable(&at) => {
             Some(detail)
         }
-        view::Entry::Document { bytes, .. } => edit::expectation_unmet(path, &bytes, field, expect),
-        _ => Some(format!(
-            "no document stands at `{path}`, so its field `{field}` cannot be observed"
-        )),
+        view::Entry::Document { bytes, hash, .. } => {
+            debug_assert!(
+                before.is_none_or(|before| *before == FileState::present(hash)),
+                "the view remembers the bytes a written document's before-state hashes"
+            );
+            edit::expectation_unmet(path, &bytes, field, expect)
+        }
+        _ => absent(),
     })
 }
 
