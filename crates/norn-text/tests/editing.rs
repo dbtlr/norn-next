@@ -1584,3 +1584,53 @@ fn an_edit_moves_only_the_bytes_of_the_construct_it_addresses() {
         }
     }
 }
+
+// ── Replacing the body ───────────────────────────────────────────────────
+
+/// **A body replace rewrites everything after the frontmatter block and
+/// leaves the block byte-identical**, its comments, quoting and blank lines
+/// included; the content's lines carry the document's terminator.
+#[test]
+fn a_body_replace_leaves_the_frontmatter_block_byte_identical() {
+    let block = "---\r\n# kept\r\ntitle: 'Quoted'\r\n\r\ntags: [a, b]\r\n---\r\n";
+    let source = format!("{block}## Old\r\n\r\nold body\r\n");
+    assert_eq!(
+        Document::parse(&source).replace_body("# New\n\nnew body"),
+        Ok(format!("{block}# New\r\n\r\nnew body\r\n"))
+    );
+}
+
+/// **A document without a frontmatter block is all body**, so a body replace
+/// rewrites the whole of it — except a byte-order mark, which stays the
+/// document's first bytes.
+#[test]
+fn a_body_replace_without_a_block_rewrites_the_whole_document() {
+    assert_eq!(
+        Document::parse("old\n\nlines\n").replace_body("new"),
+        Ok("new\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("\u{feff}old\n").replace_body("new"),
+        Ok("\u{feff}new\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntitle: t\n---\nold\n").replace_body(""),
+        Ok("---\ntitle: t\n---\n".to_string())
+    );
+}
+
+/// **A body replace refuses where the block cannot be read, or where the new
+/// body would read as a block**: the first would overwrite an unclosed
+/// block's fields as body, and the second would change what the frontmatter
+/// says.
+#[test]
+fn a_body_replace_refuses_to_touch_what_the_frontmatter_says() {
+    assert_eq!(
+        Document::parse("---\ntitle: t\nno close\n").replace_body("new"),
+        Err(EditError::FrontmatterUnreadable)
+    );
+    assert_eq!(
+        Document::parse("old\n").replace_body("---\ntitle: forged\n---\nbody"),
+        Err(EditError::BodyPostImageMismatch)
+    );
+}

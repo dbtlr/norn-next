@@ -101,6 +101,10 @@ pub enum EditError {
     SectionPostImageMismatch {
         heading: String,
     },
+    /// The document a body replace produced does not read back with the same
+    /// frontmatter and the given body — the new body opens with something
+    /// that reads as a block. Nothing is returned.
+    BodyPostImageMismatch,
 }
 
 impl fmt::Display for EditError {
@@ -139,6 +143,10 @@ impl fmt::Display for EditError {
                 f,
                 "the edited document does not read back with the section {heading:?} as intended, \
                  so the edit was refused"
+            ),
+            EditError::BodyPostImageMismatch => f.write_str(
+                "the edited document does not read back with its frontmatter and the new body as \
+                 intended, so the edit was refused",
             ),
             EditError::FrontmatterPastBound { bytes, bound } => write!(
                 f,
@@ -716,6 +724,40 @@ impl<'a> Document<'a> {
             scan.headings(),
             span.content_end..span.content_end,
         )?;
+        Ok(edited)
+    }
+
+    /// Replace the body — everything after the frontmatter block — with
+    /// `content`, returning the whole edited document.
+    ///
+    /// The block stays byte-identical. A document without one is all body and
+    /// is rewritten whole, except a byte-order mark, which stays its first
+    /// bytes. Every line written carries the document's terminator, and empty
+    /// `content` leaves the block alone with no body below it.
+    ///
+    /// A block that cannot be read refuses: where its closing delimiter is
+    /// missing, nothing separates its fields from the body. The result is
+    /// re-read before it is returned, and refuses unless the block reads as it
+    /// did and the body reads as `content` — content opening with a
+    /// delimiter would otherwise become a document's frontmatter.
+    pub fn replace_body(&self, content: &str) -> Result<String, EditError> {
+        if self.frontmatter_broken() {
+            return Err(EditError::FrontmatterUnreadable);
+        }
+        let start = if self.byte_order_mark {
+            self.body_start.max(BOM.len())
+        } else {
+            self.body_start
+        };
+        let mut edited = self.source[..start].to_string();
+        append_with_terminator(&mut edited, content, self.line_ending);
+        let reread = Document::parse(&edited);
+        if reread.frontmatter() != self.frontmatter()
+            || reread.body_start() != self.body_start
+            || !same_lines(&edited[start..], content)
+        {
+            return Err(EditError::BodyPostImageMismatch);
+        }
         Ok(edited)
     }
 
