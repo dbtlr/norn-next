@@ -1777,8 +1777,11 @@ statement, since a bare deferred `BEGIN` takes no snapshot — so the trust labe
 snapshot describe the same instant, and the read runs outside the lock: it sees the last
 committed increment, never blocks the writer (checkpointing stays passive — an aggressive
 checkpoint mode would trade that guarantee away), and may trail in-flight derivation.
-Concurrent reads serialize against each other on the one reader per entry, and **no acquisition
-waits for that reader while it holds the entry gate**: a lock held across a wait for a
+Concurrent reads serialize against each other on the one reader per entry. The one exception
+is an apply whose plan carries a `where` target: its job matches that target on a read handle
+the store mints for the job alone, held briefly inside the entry's claim and closed before the
+applier runs, so no read waits behind it and it waits behind no read. **No acquisition
+waits for the entry's reader while it holds the entry gate**: a lock held across a wait for a
 connection that only another holder of the same lock can give back hangs the entry rather than
 slowing it. Under the gate an acquisition tries for the entry's connection without blocking,
 and establishes its snapshot there where the connection is free. Where another read holds it,
@@ -2421,9 +2424,11 @@ frontmatter operation's `where` target first, into one operation per document it
 each naming its document by path and keeping the original's kind and conditions, in path
 order at the original's place. The match is the find builder's, run in process on the one
 snapshot the request plans against — a preview's read-hold snapshot, and for an apply a
-snapshot its job establishes on the store's own read handle inside the entry's claim, the
-first time a `where` target asks — so a `where` matches what a `find` at that instant would
-answer. The match set is not a condition: each expanded operation is guarded by the
+snapshot on a read handle the store mints for the job through the coverage's read seam the
+first time a `where` target asks, held briefly inside the entry's claim and closed before
+the applier runs — so a `where` matches what a `find` at that instant would answer. A mint
+that fails there answers reader-unavailable, as a read's does, and changes no trust label;
+what the mint ran is counted in the host's account of its jobs. The match set is not a condition: each expanded operation is guarded by the
 before-state of the bytes it composed from, as any write is, and a resolved plan sent again
 writes exactly the documents it was previewed with. A `where` that expands to nothing does
 not resolve, in words: an empty predicate list, which is never matched; one matching no
