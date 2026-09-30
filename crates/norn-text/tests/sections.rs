@@ -42,6 +42,50 @@ fn inline_markup_in_a_heading_is_flattened_into_its_text() {
     assert_eq!(scan.headings()[0].text, "Use norn now");
 }
 
+/// **A heading on the first line of a document that opens with a byte-order
+/// mark is a heading**, and a write over its section leaves the mark the
+/// document's first bytes.
+#[test]
+fn a_heading_right_after_a_byte_order_mark_is_a_heading() {
+    let source = "\u{feff}# A\ntext\n\n# B\nb\n";
+    let document = Document::parse(source);
+    assert_eq!(document.headings()[0].text, "A");
+    assert_eq!(
+        document.replace_section("A", "new"),
+        Ok("\u{feff}# A\nnew\n\n# B\nb\n".to_string())
+    );
+    assert_eq!(
+        document.delete_section("A"),
+        Ok("\u{feff}# B\nb\n".to_string())
+    );
+    assert_eq!(
+        document.insert_before_heading("A", "lead"),
+        Ok("\u{feff}lead\n# A\ntext\n\n# B\nb\n".to_string())
+    );
+}
+
+/// **An ATX closing sequence followed by a tab is a closing sequence**, as one
+/// followed by a space is: CommonMark lets either trail it, so `## A ##\t`
+/// is the heading `A`.
+#[test]
+fn a_closing_sequence_followed_by_a_tab_is_not_heading_text() {
+    for source in ["## A ##\t\nb\n", "## A ## \t \nb\n", "## A\t#\t\nb\n"] {
+        let scan = BodyScan::new(source);
+        assert_eq!(scan.headings()[0].text, "A", "for {source:?}");
+        assert_eq!(
+            Document::parse(source).replace_section("A", "new"),
+            Ok(format!(
+                "{}new\n",
+                &source[..source.find('\n').unwrap() + 1]
+            )),
+            "for {source:?}"
+        );
+    }
+    // A hash that is not preceded by space or tab is the heading's text.
+    assert_eq!(BodyScan::new("## C#\t\n").headings()[0].text, "C#");
+    assert_eq!(BodyScan::new("## A \\##\t\n").headings()[0].text, "A ##");
+}
+
 #[test]
 fn a_hash_inside_a_fence_is_not_a_heading() {
     let scan = BodyScan::new("## Real\n```\n## Fake\n```\n");
