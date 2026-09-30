@@ -83,10 +83,13 @@
 //! repeatable: its order depends on state that drains underneath it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
+use std::ops::ControlFlow;
 
 use norn_semantic::{NearestWork, Neighbor, Watermark, Watermarks};
 use norn_store::{
-    Candidate, ContentModel, LexicalQuery, MAX_PAGE, PageRefusal, SearchWork, Snapshot, page_limit,
+    Candidate, Candidates, ContentModel, LexicalQuery, MAX_PAGE, PageRefusal, SearchWork, Snapshot,
+    page_limit,
 };
 use norn_wire::{
     AnswerAdvisory, Cursor, CursorKey, ErrorDetail, ErrorEnvelope, FindParams, LadderDeclaration,
@@ -95,7 +98,7 @@ use norn_wire::{
 };
 
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
-use crate::read::{Answered, BuildRefused, Built};
+use crate::read::{Answered, BuildRefused, Built, every_page};
 use crate::semantic::{SemanticAnswer, VectorRefusal, freshness};
 
 /// The constant of reciprocal-rank fusion: a document ranked `rank` by a rung,
@@ -415,31 +418,39 @@ fn admitted(
     let request = FindParams::new(params.vault.clone())
         .with_predicates(params.predicates.clone())
         .with_limit(MAX_PAGE as u32);
-    let first = snapshot.search_candidates(&request, declared)?;
-    let mut pages = 1;
-    let mut admitted = Admitted {
-        by_path: BTreeMap::new(),
-        unsatisfied: first.unsatisfied,
-        advisories: first.advisories,
-        snapshot: first.snapshot,
-    };
-    let mut page = first.candidates;
-    let mut next = first.next;
-    loop {
-        for candidate in page {
-            admitted
-                .by_path
-                .insert(candidate.path().to_string(), candidate);
-        }
-        let Some(after) = next else {
-            break;
-        };
-        let continued = snapshot.search_candidates(&request.clone().with_after(after), declared)?;
-        pages += 1;
-        page = continued.candidates;
-        next = continued.next;
-    }
-    Ok((admitted, pages))
+    let mut admitted: Option<Admitted> = None;
+    let (pages, _) = every_page(
+        &request,
+        |page| snapshot.search_candidates(page, declared),
+        |page| {
+            let Candidates {
+                candidates,
+                next,
+                unsatisfied,
+                advisories,
+                snapshot,
+                ..
+            } = page;
+            // The first page's report is the request's: every page judges the
+            // one conjunction on the one snapshot.
+            let admitted = admitted.get_or_insert_with(|| Admitted {
+                by_path: BTreeMap::new(),
+                unsatisfied,
+                advisories,
+                snapshot,
+            });
+            for candidate in candidates {
+                admitted
+                    .by_path
+                    .insert(candidate.path().to_string(), candidate);
+            }
+            ControlFlow::<Infallible, _>::Continue(next)
+        },
+    )?;
+    Ok((
+        admitted.expect("every page reads at least the first"),
+        pages,
+    ))
 }
 
 /// The rows an unfiltered search's vector rung holds beyond its depth: how

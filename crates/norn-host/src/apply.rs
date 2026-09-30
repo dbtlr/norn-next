@@ -49,6 +49,7 @@
 //! stands and cannot be read.
 
 use std::cell::OnceCell;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,6 +71,7 @@ use crate::lifecycle::{
 use crate::planner::expand::{ExpandingFailure, Matched, Matcher, resolve_expanding};
 use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::view::TreeView;
+use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal};
 
 /// What a plan is resolved against: the vault root as the entry's coverage
@@ -266,24 +268,25 @@ impl Matcher for SnapshotMatcher<'_> {
         let request = FindParams::new(self.vault.clone())
             .with_predicates(predicates.to_vec())
             .with_limit(norn_store::MAX_PAGE as u32);
-        let mut page_request = request.clone();
         let mut paths = Vec::new();
-        loop {
-            let page = match snapshot.find(&page_request, self.declared) {
-                Ok(page) => page,
-                Err(refusal) => return asked_amiss(refusal).map(Err),
-            };
-            if !page.unsatisfied.is_empty() {
-                return Ok(Err(format!(
-                    "the find reports parts it could not apply: {:?}",
-                    page.unsatisfied
-                )));
-            }
-            paths.extend(page.rows.into_iter().map(|row| row.path));
-            let Some(after) = page.next else {
-                return Ok(Ok(paths));
-            };
-            page_request = request.clone().with_after(after);
+        let paged = every_page(
+            &request,
+            |page| snapshot.find(page, self.declared),
+            |page| {
+                if !page.unsatisfied.is_empty() {
+                    return ControlFlow::Break(format!(
+                        "the find reports parts it could not apply: {:?}",
+                        page.unsatisfied
+                    ));
+                }
+                paths.extend(page.rows.into_iter().map(|row| row.path));
+                ControlFlow::Continue(page.next)
+            },
+        );
+        match paged {
+            Ok((_, None)) => Ok(Ok(paths)),
+            Ok((_, Some(unsatisfied))) => Ok(Err(unsatisfied)),
+            Err(refusal) => asked_amiss(refusal).map(Err),
         }
     }
 }
