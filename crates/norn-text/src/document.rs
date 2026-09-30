@@ -634,13 +634,7 @@ impl<'a> Document<'a> {
         content: &str,
     ) -> Result<String, EditError> {
         let address = address.into();
-        let scan = self.scan_body();
-        let span = scan.resolve_section(address)?;
-        if scan.headings()[span.heading].inside_container {
-            return Err(EditError::SectionInContainer {
-                heading: address.heading.to_string(),
-            });
-        }
+        let (scan, span) = self.editable_section(address)?;
         let start = self.body_start + span.content_start;
         let end = self.body_start + span.content_end;
 
@@ -684,6 +678,80 @@ impl<'a> Document<'a> {
             span.content_start..span.content_end,
         )?;
         Ok(edited)
+    }
+
+    /// Append `content` to the end of a section, returning the whole edited
+    /// document.
+    ///
+    /// The content lands below the section's last non-blank line — below its
+    /// subsections, which are the section's too — and above the blank lines
+    /// separating it from the next heading, so the document's blank structure
+    /// stands. An empty section is written as [`Document::replace_section`]
+    /// writes one, between its separators. Empty `content` changes nothing.
+    ///
+    /// Every line written carries the document's terminator, as a replace's
+    /// do. The result is re-read before it is returned, and refuses unless
+    /// the section now ends with `content` and every heading the body had is
+    /// still a heading.
+    pub fn append_to_section(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        let address = address.into();
+        let (scan, span) = self.editable_section(address)?;
+        if span.content_start == span.content_end {
+            return self.replace_section(address, content);
+        }
+        if content.is_empty() {
+            return Ok(self.source.to_string());
+        }
+        let edited = self.insert_lines(span.content_end, content);
+        let had = &self.body[span.content_start..span.content_end];
+        let expected = format!("{}\n{content}", had.trim_end_matches(['\n', '\r']));
+        self.verify_section(
+            &edited,
+            address,
+            &expected,
+            scan.headings(),
+            span.content_end..span.content_end,
+        )?;
+        Ok(edited)
+    }
+
+    /// The section `address` names, with the scan it was resolved over,
+    /// refused where its heading sits inside a container: every section write
+    /// resolves through here, so they agree about where a section is and
+    /// which ones they may touch.
+    fn editable_section(
+        &self,
+        address: SectionAddress<'a>,
+    ) -> Result<(BodyScan<'a>, SectionSpan), EditError> {
+        let scan = self.scan_body();
+        let span = scan.resolve_section(address)?;
+        if scan.headings()[span.heading].inside_container {
+            return Err(EditError::SectionInContainer {
+                heading: address.heading.to_string(),
+            });
+        }
+        Ok((scan, span))
+    }
+
+    /// The document with `content` inserted as whole lines at `at`, a body
+    /// offset, every line carrying the document's terminator.
+    ///
+    /// A point that does not start a line — the end of a last line with no
+    /// terminator — gains one first, so the content never welds onto the line
+    /// above. A byte-order mark is the start of the first line, not a line.
+    fn insert_lines(&self, at: usize, content: &str) -> String {
+        let at = self.body_start + at;
+        let first_line = if self.byte_order_mark { BOM.len() } else { 0 };
+        let mut lines = String::new();
+        if at > first_line && trailing_break(&self.source[..at]).is_none() {
+            lines.push_str(self.line_ending.as_str());
+        }
+        append_with_terminator(&mut lines, content, self.line_ending);
+        splice(self.source, at..at, &lines)
     }
 
     /// The section a heading owns, in source coordinates.

@@ -1072,3 +1072,60 @@ fn a_heading_chain_matches_on_its_last_heading() {
         );
     }
 }
+
+// ── Section write verbs: append, delete, insert around a heading ──────────
+
+/// **An append lands at the end of the section's content, above the blank
+/// lines that separate it from the next heading.** The section's subsections
+/// are its content, so the append follows them.
+#[test]
+fn an_append_lands_below_the_sections_content_and_above_its_separator() {
+    let source = "---\ntitle: t\n---\n## Alpha\n\na1\n\n### Sub\ns1\n\n## Beta\nb1\n";
+    assert_eq!(
+        Document::parse(source).append_to_section("Alpha", "added"),
+        Ok("---\ntitle: t\n---\n## Alpha\n\na1\n\n### Sub\ns1\nadded\n\n## Beta\nb1\n".to_string())
+    );
+}
+
+/// **An append into a CRLF document writes CRLF lines**, whatever breaks the
+/// content arrived with.
+#[test]
+fn an_append_into_a_crlf_document_is_all_crlf() {
+    let source = "## Alpha\r\n\r\na1\r\n\r\n## Beta\r\n";
+    assert_eq!(
+        Document::parse(source).append_to_section("Alpha", "one\ntwo"),
+        Ok("## Alpha\r\n\r\na1\r\none\r\ntwo\r\n\r\n## Beta\r\n".to_string())
+    );
+}
+
+/// **An append to a last line with no terminator starts a new line** rather
+/// than welding onto it, and an append to an empty section lands between its
+/// separators as a replace does.
+#[test]
+fn an_append_starts_its_own_line_and_fills_an_empty_section_between_separators() {
+    assert_eq!(
+        Document::parse("## Alpha\na1").append_to_section("Alpha", "added"),
+        Ok("## Alpha\na1\nadded\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("## Alpha\n\n\n## Beta\n").append_to_section("Alpha", "added"),
+        Ok("## Alpha\n\n\nadded\n\n## Beta\n".to_string())
+    );
+}
+
+/// **An append whose content swallows the document below it refuses**: an
+/// unclosed fence turns the next heading into code, and a setext underline
+/// turns the section's last line into a heading.
+#[test]
+fn an_append_that_swallows_structure_refuses() {
+    let source = "## Alpha\na1\n\n## Beta\nb1\n";
+    for content in ["```", "==="] {
+        assert_eq!(
+            Document::parse(source).append_to_section("Alpha", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "Alpha".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
