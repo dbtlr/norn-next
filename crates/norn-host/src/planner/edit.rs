@@ -195,6 +195,11 @@ pub(crate) fn text_value(value: &AuthoredValue) -> Value {
 /// Why the document at `path`, holding `bytes`, does not hold `expect` under
 /// `field`, or `None` where it does.
 ///
+/// **`bytes` are the document as it stood before the plan**, never as the
+/// operations ahead of the guarded one leave it, so the reason states that
+/// rule: a field the plan's own earlier operation writes is judged at what
+/// it held before.
+///
 /// **Absent means the document does not carry the field**: a document with
 /// no frontmatter block, or an empty one, carries none. **Present means the
 /// field reads as exactly the value**, under `norn-text`'s equality on its
@@ -244,6 +249,8 @@ pub(crate) fn expectation_unmet(
         (ExpectedField::Present { .. }, None) => false,
     };
     (!holds).then(|| {
-        format!("the field `{field}` of `{path}` no longer holds what its author observed")
+        format!(
+            "the field `{field}` of `{path}` does not hold what its author expected, judged against the document as it stood before the plan"
+        )
     })
 }

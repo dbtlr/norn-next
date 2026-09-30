@@ -758,6 +758,40 @@ mod tests {
         );
     }
 
+    /// **An expected value is judged against the document as it stood before
+    /// the plan, not after the operations ahead of it**: a set guarded on the
+    /// value an earlier set of the same plan writes is unresolved over a
+    /// document that never held it, and its reason states that rule rather
+    /// than a change the field never had.
+    #[test]
+    fn an_expected_value_is_judged_before_the_plan_and_says_so() {
+        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\n---\n")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                setting("a.md", "status", V::string("a")),
+                setting("a.md", "status", V::string("b")).with_conditions(vec![expecting(
+                    "a.md",
+                    "status",
+                    E::present(V::string("a")),
+                )]),
+            ],
+        );
+        assert_eq!(
+            resolution.unresolved.len(),
+            2,
+            "{:?}",
+            resolution.unresolved
+        );
+        let detail = match &resolution.unresolved[1].reason {
+            UnresolvedReason::NoLongerResolves { detail, .. } => detail.clone(),
+            other => panic!("no longer resolves: {other:?}"),
+        };
+        assert!(detail.contains("as it stood before the plan"), "{detail}");
+        assert!(!detail.contains("no longer"), "{detail}");
+    }
+
     /// **An expected present value holds only where the field reads as
     /// exactly that value**: a string is not the number it spells, an integer
     /// is not the float of its value, null is not absence, and a list holds
