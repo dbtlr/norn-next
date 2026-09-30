@@ -325,7 +325,9 @@ impl<O: EntryOps> Host<O> {
     /// undelivered and its advisories empty until that attach publishes them.
     pub fn vault_set(&self, params: &VaultSetParams) -> Result<VaultSetReport, ErrorEnvelope> {
         let name = &params.name;
-        let (registration, published) = self.set(params).map_err(|refusal| refusal.answer(name))?;
+        let (registration, published) = self
+            .amend_registration(params)
+            .map_err(|refusal| refusal.answer(name))?;
         Ok(VaultSetReport::new(registration, published.published(name)))
     }
 }

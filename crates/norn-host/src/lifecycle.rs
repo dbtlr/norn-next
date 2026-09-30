@@ -4538,7 +4538,7 @@ impl<O: EntryOps> Host<O> {
     /// the withdrawn entry back in service as it stood**, and so does an
     /// amendment that unwinds; what a refused root move did discard is
     /// derived state, which the next attach derives again.
-    pub(crate) fn set(
+    pub(crate) fn amend_registration(
         &self,
         edit: &VaultSetParams,
     ) -> Result<(Registration, Demand), RegistrationRefusal> {

@@ -22,7 +22,11 @@
 //! `norn-fs`, never from the store, so the snapshot a preview holds is what
 //! its answer's reading names and what a `where` target is matched on
 //! ([`SnapshotMatcher`]), through the find builder in process.
-
+//!
+//! **The write verbs enter here.** [`Host::set`], [`Host::edit`] and
+//! [`Host::new_document`] each compile their request to an authored plan and
+//! answer through [`Host::apply`], so a verb previews and applies exactly as
+//! the same operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -51,9 +55,9 @@ use std::sync::Arc;
 use norn_fs::WatchError;
 use norn_store::{ContentModel, PageRefusal, Snapshot, Store};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ErrorDetail, ErrorEnvelope, FindParams,
-    PlanDocument, Predicate, RootIdentity, TrustState, UntrustedReason, VaultAddress, VaultAnswer,
-    VaultName,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
+    FindParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams, TrustState,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -382,6 +386,36 @@ where
             ApplyMode::Preview => Ok(PendingApply::answered(self.preview(name, params.plan))),
             ApplyMode::Apply => self.admit_apply(name, params.plan),
         }
+    }
+
+    /// Answer a `set`: the frontmatter changes `params` names, compiled to
+    /// operations and previewed or applied through [`Host::apply`].
+    pub fn set(&self, params: SetParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer an `edit`: the edits `params` names to one document, compiled
+    /// to operations and previewed or applied through [`Host::apply`].
+    pub fn edit(&self, params: EditParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `new`: the document `params` creates at its path, compiled
+    /// to an operation and previewed or applied through [`Host::apply`].
+    pub fn new_document(&self, params: NewParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// A write verb's compiled `plan`, entering the one `apply` path.
+    fn apply_operations(
+        &self,
+        mode: ApplyMode,
+        plan: AuthoredPlan,
+    ) -> Result<PendingApply, ErrorEnvelope> {
+        self.apply(ApplyParams::new(mode, PlanDocument::operations(plan)))
     }
 
     /// Preview `plan` over the vault `name`: one read hold, one snapshot,
