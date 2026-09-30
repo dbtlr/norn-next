@@ -807,7 +807,8 @@ mod tests {
     }
 
     /// **A `push_frontmatter` appends to the list, a value it already holds
-    /// included, and makes an absent field a list of the one value.**
+    /// included, and makes an absent field, or one written with no value, a
+    /// list of the one value.**
     #[test]
     fn a_push_frontmatter_appends_and_makes_an_absent_field_a_list() {
         let vault = MemoryVault::with(&[
@@ -837,6 +838,20 @@ mod tests {
             Some(norn_text::Value::Sequence(vec![norn_text::Value::from(
                 "x"
             )]))
+        );
+        let stub = MemoryVault::with(&[("c.md", "---\ntags:\n---\n")]);
+        let made = composed_text(&stub, push("c.md"), "c.md").expect("a document");
+        let document = norn_text::Document::parse(&made);
+        assert_eq!(
+            document
+                .frontmatter()
+                .and_then(norn_text::Value::as_map)
+                .and_then(|map| map.get("tags"))
+                .cloned(),
+            Some(norn_text::Value::Sequence(vec![norn_text::Value::from(
+                "x"
+            )])),
+            "a field written with no value takes one element"
         );
     }
 
