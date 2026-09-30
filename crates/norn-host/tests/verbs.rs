@@ -486,3 +486,74 @@ fn a_set_guarded_by_an_absent_field_writes_only_where_it_is_absent() {
     assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
     assert_eq!(read(&vault, "owned.md"), owned);
 }
+
+/// A set flipping every `wave: flip` document to `wave: flipped`.
+fn flipping(vault: &attach::Vault, mode: ApplyMode) -> SetParams {
+    SetParams::new(
+        address(vault),
+        mode,
+        WriteTarget::matching([Predicate::equal_to("wave", "flip")]),
+        vec![FieldChange::set("wave", AuthoredValue::string("flipped"))],
+    )
+}
+
+/// **A set with a `where` target sent straight to apply matches inside the
+/// apply job and writes exactly the matched documents, in one changeset.**
+/// No preview runs first: the operations reach the job as authored, and its
+/// own match names the three documents it writes.
+#[test]
+fn a_set_where_sent_straight_to_apply_writes_exactly_the_matched_documents() {
+    let flip = "---\nwave: flip\n---\n";
+    let keep = "---\nwave: keep\n---\n";
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-set-where-apply",
+        &[
+            ("wave/a.md", flip),
+            ("wave/b.md", keep),
+            ("wave/c.md", flip),
+            ("wave/d.md", keep),
+            ("wave/e.md", flip),
+        ],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let (landed, changeset, targets) = applied(host.set(flipping(&vault, ApplyMode::Apply)));
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(targets, wrote(&["wave/a.md", "wave/c.md", "wave/e.md"]));
+    let written: Vec<&str> = landed.transitions.iter().map(|t| t.path.as_str()).collect();
+    assert_eq!(written, vec!["wave/a.md", "wave/c.md", "wave/e.md"]);
+    for at in ["wave/a.md", "wave/c.md", "wave/e.md"] {
+        assert_eq!(read(&vault, at), "---\nwave: flipped\n---\n");
+    }
+    for at in ["wave/b.md", "wave/d.md"] {
+        assert_eq!(read(&vault, at), keep);
+    }
+}
+
+/// **A matching document written after the attach is matched by an apply
+/// sent as soon as the vault's intake has derived it**: the apply's match
+/// reads the store the intake wrote, so the new document is written with the
+/// one that was there before.
+#[test]
+fn a_matching_document_the_intake_derived_is_matched_by_the_next_apply() {
+    let flip = "---\nwave: flip\n---\n";
+    let (_sandbox, vault) = a_vault("host-verbs-set-where-fresh", &[("wave/a.md", flip)]);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    std::fs::write(vault.path().join("wave/b.md"), flip).expect("write a new document");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while found(&host, &vault, vec![Predicate::equal_to("wave", "flip")]).len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the intake never derived the new document"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let (_, changeset, targets) = applied(host.set(flipping(&vault, ApplyMode::Apply)));
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(targets, wrote(&["wave/a.md", "wave/b.md"]));
+    assert_eq!(read(&vault, "wave/b.md"), "---\nwave: flipped\n---\n");
+}
