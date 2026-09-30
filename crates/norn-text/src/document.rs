@@ -716,8 +716,11 @@ impl<'a> Document<'a> {
     ///
     /// Every line written carries the document's terminator, as a replace's
     /// do. The result is re-read before it is returned, and refuses unless
-    /// the section now ends with `content` and every heading the body had is
-    /// still a heading.
+    /// the body's headings are exactly the ones it had with the content's own
+    /// headings at the end of the section — an underline that makes the
+    /// section's last line a heading returns nothing — and the section still
+    /// ends with `content`, which content opening a heading at the section's
+    /// level or above does not.
     pub fn append_to_section(
         &self,
         address: impl Into<SectionAddress<'a>>,
@@ -731,7 +734,7 @@ impl<'a> Document<'a> {
         if content.is_empty() {
             return Ok(self.source.to_string());
         }
-        let edited = self.insert_lines(span.content_end, content);
+        let edited = self.proven_insert(&scan, address, span.content_end, content)?;
         let had = &self.body[span.content_start..span.content_end];
         let expected = format!("{}\n{content}", had.trim_end_matches(['\n', '\r']));
         self.verify_section(
@@ -854,7 +857,20 @@ impl<'a> Document<'a> {
         if content.is_empty() {
             return Ok(self.source.to_string());
         }
-        let at = point(self.body, &span);
+        self.proven_insert(&scan, address, point(self.body, &span), content)
+    }
+
+    /// Insert `content` as whole lines at the body offset `at`, and refuse
+    /// unless the result keeps the frontmatter block and its headings are
+    /// exactly the body's own with the content's headings at `at`: the one
+    /// proof every insert makes, an append included.
+    fn proven_insert(
+        &self,
+        scan: &BodyScan<'_>,
+        address: SectionAddress<'_>,
+        at: usize,
+        content: &str,
+    ) -> Result<String, EditError> {
         let edited = self.insert_lines(at, content);
         let (above, below): (Vec<&Heading>, Vec<&Heading>) = scan
             .headings()

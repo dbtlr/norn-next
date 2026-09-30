@@ -1362,3 +1362,41 @@ fn an_append_that_swallows_structure_refuses() {
         );
     }
 }
+
+/// **An append that turns a line the section already had into a heading
+/// refuses**: a setext underline written below the last line makes that line
+/// a heading nobody wrote, whatever level it lands at.
+#[test]
+fn an_append_that_makes_an_existing_line_a_heading_refuses() {
+    let source = "# A\ntext\n\n# B\nb\n";
+    for content in ["---", "-", "==="] {
+        assert_eq!(
+            Document::parse(source).append_to_section("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
+
+/// **An append whose content opens a heading at the section's level or above
+/// refuses**: the content would start a section of its own rather than end
+/// the addressed one. A deeper heading is the section's subsection, and lands.
+#[test]
+fn an_append_that_would_leave_the_section_refuses() {
+    let source = "## A\ntext\n\n## B\nb\n";
+    for content in ["## C", "# C", "x\n## C\ny"] {
+        assert_eq!(
+            Document::parse(source).append_to_section("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+    assert_eq!(
+        Document::parse(source).append_to_section("A", "### C\nc"),
+        Ok("## A\ntext\n### C\nc\n\n## B\nb\n".to_string())
+    );
+}
