@@ -205,16 +205,19 @@ fn a_set_where_writes_exactly_the_matched_documents_in_one_changeset() {
 
     let applying = AtomicBool::new(true);
     let reading = Barrier::new(2);
-    let seen = std::thread::scope(|scope| {
+    let (before, seen) = std::thread::scope(|scope| {
         let reader = scope.spawn(|| {
             let flipped =
                 || found(&host, &vault, vec![Predicate::equal_to("wave", "flipped")]).len();
-            let mut seen = vec![flipped()];
+            let before = flipped();
             reading.wait();
+            // At least one read after the barrier, so the apply is racing a
+            // read however quickly it lands; the rest sample until it ends.
+            let mut seen = vec![flipped()];
             while applying.load(Ordering::SeqCst) {
                 seen.push(flipped());
             }
-            seen
+            (before, seen)
         });
         reading.wait();
         let landed = applied(host.apply(ApplyParams::new(
@@ -227,6 +230,7 @@ fn a_set_where_writes_exactly_the_matched_documents_in_one_changeset() {
         assert_eq!(landed.2, wrote(&["wave/a.md", "wave/c.md", "wave/e.md"]));
         reader.join().expect("the reader finished")
     });
+    assert_eq!(before, 0, "a document matched before the apply ran");
     assert!(
         seen.iter().all(|count| *count == 0 || *count == 3),
         "a read saw part of the changeset: {seen:?}"
