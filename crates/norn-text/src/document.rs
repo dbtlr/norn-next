@@ -1112,10 +1112,14 @@ impl<'a> Document<'a> {
 
     fn splice_existing(&self, located: &Field, value: &Value) -> Result<String, EditError> {
         // A sequence replaces the whole entry, keeping the author's flow or
-        // block spelling. A stubbed field — `tags:` with nothing after it —
-        // becomes a block sequence.
+        // block spelling. A stubbed field — `tags:` with nothing after it, or
+        // null however it is spelled (`null`, `~`, `Null`) — becomes a block
+        // sequence: a null holds no scalar a sequence would restyle.
+        let stubbed = located.style == ValueStyle::EmptyValue
+            || matches!(&self.frontmatter, Some(Value::Map(map))
+                if map.get(&located.name) == Some(&Value::Null));
         if let Value::Sequence(items) = value
-            && (located.style.is_sequence() || located.style == ValueStyle::EmptyValue)
+            && (located.style.is_sequence() || stubbed)
         {
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(

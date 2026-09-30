@@ -1697,6 +1697,21 @@ fn a_push_to_an_absent_field_writes_a_one_element_list() {
     );
 }
 
+/// **A push to a field holding null, however the null is spelled, writes a
+/// one-element list**: `null`, `~` and their case variants say the same as
+/// a field written with no value.
+#[test]
+fn a_push_to_a_null_field_in_any_spelling_writes_a_one_element_list() {
+    for null in ["null", "~", "Null", "NULL"] {
+        assert_eq!(
+            Document::parse(&format!("---\ntags: {null}\ntitle: t\n---\n"))
+                .push_to_list("tags", &string("a")),
+            Ok("---\ntags:\n  - a\ntitle: t\n---\n".to_string()),
+            "for {null:?}"
+        );
+    }
+}
+
 /// **A push to a field holding a scalar or a map refuses**, naming what the
 /// field holds: turning a value into a list is a set, not a push.
 #[test]
