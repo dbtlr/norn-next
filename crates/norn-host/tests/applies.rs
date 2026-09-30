@@ -518,3 +518,61 @@ fn a_valid_operations_preview_answers_its_resolved_plan_and_forecast() {
         (plan, forecast)
     );
 }
+
+/// **A forced operations plan previews the violation it lets through and
+/// applies the same, end to end.** Pushing an undeclared tag into the
+/// subject's frontmatter with `force` previews with the violation in the
+/// forecast's `forced`, and the previewed plan, sent back, applies with the
+/// same violation in the applied report and the tag on disk.
+#[test]
+fn a_forced_operations_plan_previews_its_violation_and_applies_the_same() {
+    let (_sandbox, vault) = a_vault("host-applies-forced");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), TAG_SCHEMA).expect("write the schema");
+    std::fs::write(
+        vault.path().join(SUBJECT),
+        "---\ntags: [project]\n---\n# Subject\n",
+    )
+    .expect("write the subject");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let pushing = PlanDocument::operations(
+        AuthoredPlan::new(
+            VaultAddress::name(vault.name().clone()),
+            vec![Operation::new(OperationKind::push_frontmatter(
+                norn_wire::WriteTarget::path(DocumentPath::new(SUBJECT).expect("a document path")),
+                "tags",
+                norn_wire::AuthoredValue::string("stray"),
+            ))],
+        )
+        .with_force(true),
+    );
+    let (plan, forecast) = previewed(&host, pushing);
+    assert!(plan.force);
+    let [violation] = forecast.forced.as_slice() else {
+        panic!("the preview lists one forced violation: {forecast:?}");
+    };
+    assert_eq!(violation.kind, FindingKind::UndeclaredTag);
+    assert_eq!(violation.target.as_deref(), Some("stray"));
+    let answered = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("the apply is admitted")
+        .wait()
+        .expect("the forced plan applies");
+    let ApplyReport::Applied {
+        plan: applied,
+        forced,
+        ..
+    } = answered.report
+    else {
+        panic!("an apply answered {:?}", answered.report);
+    };
+    assert_eq!(applied, plan);
+    assert_eq!(forced, forecast.forced);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        "---\ntags: [project, stray]\n---\n# Subject\n"
+    );
+}
