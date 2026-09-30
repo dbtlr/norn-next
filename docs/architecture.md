@@ -2345,7 +2345,7 @@ sequenceDiagram
   participant D as SQLite (via norn-store)
   C->>S: HTTP (bearer; protocol shape)
   S->>H: verb params (wire)
-  Note over H: a preview resolves operations on one snapshot, answers, and writes nothing
+  Note over H: a preview resolves operations on one snapshot, judges the plan as the applier does, answers, and writes nothing
   H->>W: apply: operations or a resolved plan, queued on the entry's claim (admission returns PendingApply)
   W->>D: intake: derive the facts delivered by then; one snapshot inside the claim
   W->>W: resolve operations → one transition per file (before-state, after-state), conditions read
@@ -2490,9 +2490,12 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
   gate; a preview and an apply each ask the filesystem whether the root still stands there
   before planning, outside any gate hold, and a root replaced since answers
   `vault/root-changed`.
-- **A resolved plan previews as the applier judges it.** The applier's own checks run over it
-  — the root identity, every target at its before- or after-state, every condition, the
-  operations recomposed, the schema — reading the vault and staging nothing. Where an apply
+- **Every preview ends in the applier's judgment.** Operations are resolved first, as an apply
+  resolves them, and the plan they resolve to is judged as a resolved plan sent directly is, so
+  a composed result the schema refuses previews as `vault/plan-refused`. The applier's own
+  checks run over the resolved plan — the root identity, every target at its before- or
+  after-state, every condition, the operations recomposed, the schema — reading the vault and
+  staging nothing. Where an apply
   would go on to stage, the preview answers the same plan and its forecast; where it would
   not, the preview answers what the apply ends in — a refusal, a fault in the plan's shape, or,
   where the checks cannot read the vault, `vault/write-failed` with the plan. So what a caller
