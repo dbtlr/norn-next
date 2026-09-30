@@ -1362,7 +1362,7 @@ fn an_edit_that_grows_the_block_past_the_bound_names_the_bound() {
 /// post-image check has no way to notice because the block still reads back as
 /// intended.
 #[test]
-fn a_stub_with_a_comment_takes_a_scalar_and_takes_a_sequence_with_the_comment() {
+fn a_stub_with_a_comment_takes_a_scalar_and_refuses_a_sequence() {
     let source = "---\ntags: # what goes here\nother: x\n---\n";
     assert_eq!(
         set(source, "tags", Value::String("draft".into())),
@@ -1370,7 +1370,9 @@ fn a_stub_with_a_comment_takes_a_scalar_and_takes_a_sequence_with_the_comment() 
     );
     assert_eq!(
         set(source, "tags", Value::Sequence(vec!["a".into()])),
-        Ok("---\ntags:\n  - a\nother: x\n---\n".to_string())
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
     );
 }
 
@@ -1786,6 +1788,21 @@ fn a_push_to_a_null_field_in_any_spelling_writes_a_one_element_list() {
                 .push_to_list("tags", &string("a")),
             Ok("---\ntags:\n  - a\ntitle: t\n---\n".to_string()),
             "for {null:?}"
+        );
+    }
+}
+
+/// **A list set over a stubbed or null field that carries a comment
+/// refuses**: the whole entry is replaced, so the comment would be dropped
+/// silently.
+#[test]
+fn a_list_set_over_a_commented_stub_or_null_refuses() {
+    for entry in ["x: # c", "x: null # c", "x: ~ # c"] {
+        assert_eq!(
+            Document::parse(&format!("---\n{entry}\n---\n"))
+                .set_field("x", &Value::Sequence(vec![string("v")])),
+            Err(EditError::CommentWouldBeLost { field: "x".into() }),
+            "for {entry:?}"
         );
     }
 }

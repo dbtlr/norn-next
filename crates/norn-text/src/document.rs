@@ -1214,6 +1214,14 @@ impl<'a> Document<'a> {
         if let Value::Sequence(items) = value
             && (located.style.is_sequence() || stubbed)
         {
+            // Replacing a stub's whole entry takes its key line with it, so a
+            // comment there — `tags: # c`, `tags: null # c` — would be dropped
+            // silently. It refuses instead.
+            if stubbed && entry_carries_comment(self.source, located) {
+                return Err(EditError::CommentWouldBeLost {
+                    field: located.name.clone(),
+                });
+            }
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(
                     "{}: {}{}",
