@@ -1,5 +1,10 @@
 //! The schema check on a composed result: a plan refuses a violation it
-//! introduces, and one on a field it writes.
+//! introduces, and one on a field it writes, unless it is forced.
+//!
+//! **A force bypasses this check and nothing else**, and it is loud: a forced
+//! plan's violations are listed, in the shape a refusal carries them in, on
+//! the forecast of its preview and on its applied report. A forced plan whose
+//! results are all valid lists nothing.
 //!
 //! **The judge is the derivation's own.** What a finding over a document would
 //! be filed under is what [`plan_document`] concludes from its bytes under the
@@ -26,7 +31,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use norn_store::Change;
-use norn_wire::{DocumentPath, FindingKind, RefusedCheck};
+use norn_wire::{DocumentPath, FindingKind, SchemaViolation};
 
 use crate::derivation::{Declared, plan_document};
 
@@ -70,9 +75,14 @@ pub(super) fn judge(path: &DocumentPath, bytes: &[u8], declared: &Declared) -> J
     Judged { violations, tags }
 }
 
-/// The checks refusing `after`, the composed result at `path`, against what
-/// stood in `before`: each document it was composed from.
-pub(super) fn refused(path: &DocumentPath, after: &Judged, before: &[Judged]) -> Vec<RefusedCheck> {
+/// The violations `after`, the composed result at `path`, introduces against
+/// what stood in `before`, each document it was composed from: each refuses
+/// an unforced plan, and a forced plan lets each through and lists it.
+pub(super) fn introduced(
+    path: &DocumentPath,
+    after: &Judged,
+    before: &[Judged],
+) -> Vec<SchemaViolation> {
     let stood: Vec<&(FindingKind, Option<String>)> = before
         .iter()
         .flat_map(|judged| judged.violations.iter().map(|(violation, _)| violation))
@@ -96,7 +106,7 @@ pub(super) fn refused(path: &DocumentPath, after: &Judged, before: &[Judged]) ->
             }
         })
         .map(|((kind, target), message)| {
-            RefusedCheck::schema_violation(path.clone(), *kind, target.clone(), message.clone())
+            SchemaViolation::new(path.clone(), *kind, target.clone(), message.clone())
         })
         .collect()
 }

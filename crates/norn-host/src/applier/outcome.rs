@@ -2,7 +2,8 @@
 
 use norn_wire::{
     AppliedTarget, ApplyReport, ChangesetOutcome, ErrorDetail, ErrorEnvelope, FolderPath, Forecast,
-    InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
+    InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, SchemaViolation,
+    UnresolvedOperation,
 };
 
 use norn_fs::Batch;
@@ -66,6 +67,9 @@ pub(crate) struct Applied {
     pub(crate) folders_made: Vec<FolderPath>,
     /// The folders its removals left empty, which it removed.
     pub(crate) folders_removed: Vec<FolderPath>,
+    /// Every schema violation its force let through: empty for a plan that
+    /// is not forced, and for a forced plan whose every result is valid.
+    pub(crate) forced: Vec<SchemaViolation>,
 }
 
 /// A refused plan, with the plan resolved afresh.
@@ -166,7 +170,8 @@ impl ApplyOutcome {
                 applied.targets,
                 applied.folders_made,
                 applied.folders_removed,
-            )),
+            )
+            .with_forced(applied.forced)),
             ApplyOutcome::Refused(refused) => Err(ErrorEnvelope::new(
                 "a check refused the plan before anything was published",
                 ErrorDetail::plan_refused(

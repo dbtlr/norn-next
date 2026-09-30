@@ -967,6 +967,7 @@ fn each_outcome_crosses_under_its_wire_code() {
         targets: Vec::new(),
         folders_made: Vec::new(),
         folders_removed: Vec::new(),
+        forced: Vec::new(),
     })
     .into_wire()
     .expect("an applied plan is answered")
@@ -1711,6 +1712,7 @@ fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
         targets: Vec::new(),
         folders_made: Vec::new(),
         folders_removed: Vec::new(),
+        forced: Vec::new(),
     });
     let normalizer = norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
 
@@ -2040,4 +2042,104 @@ fn a_refused_forced_plan_refreshes_forced() {
     let refused = refused(fixture.apply(plan));
     assert_eq!(refused.plan.operations.len(), 1);
     assert!(refused.plan.force);
+}
+
+/// A push of the tag `stray`, which `TAG_SCHEMA` does not declare, into
+/// `a.md`.
+fn pushing_a_stray_tag() -> Operation {
+    Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("a.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("stray"),
+    ))
+}
+
+/// **A forced plan lets a schema violation through, loudly**: unforced the
+/// push refuses on the undeclared tag; forced, its preview lists the
+/// violation in the forecast's `forced`, and its apply writes it and lists
+/// the same violation in the applied report, as the wire carries it.
+#[test]
+fn a_forced_plan_previews_the_violation_it_lets_through_and_applies_the_same() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: [project]\n---\n")]);
+    let plan = fixture.plan(vec![pushing_a_stray_tag()]);
+    let unforced = refused_for(fixture.apply(plan.clone()));
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = unforced.as_slice() else {
+        panic!("the unforced plan refuses on the schema: {unforced:?}");
+    };
+    assert_eq!(violation.kind, norn_wire::FindingKind::UndeclaredTag);
+    assert_eq!(violation.target.as_deref(), Some("stray"));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project]\n---\n")
+    );
+
+    let mut forced = plan;
+    forced.force = true;
+    let (previewed, forecast) = fixture
+        .preview(forced.clone())
+        .unwrap_or_else(|refusal| panic!("the forced plan previews: {refusal:?}"));
+    assert_eq!(previewed, forced);
+    assert_eq!(forecast.forced, vec![violation.clone()]);
+    let landed = applied(fixture.apply(forced));
+    assert_eq!(landed.forced, vec![violation.clone()]);
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project, stray]\n---\n")
+    );
+    let report = ApplyOutcome::Applied(landed)
+        .into_wire()
+        .expect("an applied plan is answered")
+        .expect("an applied plan is a report");
+    let norn_wire::ApplyReport::Applied { forced, .. } = report else {
+        panic!("an applied report: {report:?}");
+    };
+    assert_eq!(forced, vec![violation.clone()]);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A forced plan whose results are all valid lists nothing.**
+#[test]
+fn a_forced_plan_whose_results_are_valid_lists_nothing() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: []\n---\n")]);
+    let mut plan = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("a.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("project"),
+    ))]);
+    plan.force = true;
+    let (_, forecast) = fixture.preview(plan.clone()).expect("the plan previews");
+    assert!(forecast.forced.is_empty());
+    assert!(applied(fixture.apply(plan)).forced.is_empty());
+}
+
+/// **A force bypasses the schema check and nothing else**: a forced plan
+/// over a drifted target, or with a condition another writer broke, refuses
+/// as an unforced one does.
+#[test]
+fn a_force_does_not_bypass_drift_or_a_failing_condition() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[("a.md", "---\ntags: [project]\n---\n"), ("c.md", "seen\n")],
+    );
+    let seen = crate::planner::compose::content_hash(b"seen\n");
+    let mut drifting = fixture.plan(vec![pushing_a_stray_tag()]);
+    drifting.force = true;
+    let mut conditioned = fixture.plan(vec![pushing_a_stray_tag().with_conditions(vec![
+        norn_wire::AuthorCondition::content_hash(path("c.md"), seen),
+    ])]);
+    conditioned.force = true;
+    fixture.foreign("c.md", "changed\n");
+    assert!(matches!(
+        refused_for(fixture.apply(conditioned)).as_slice(),
+        [norn_wire::RefusedCheck::ConditionFailed { .. }]
+    ));
+    fixture.foreign("a.md", "---\ntags: [project, other]\n---\n");
+    assert!(matches!(
+        refused_for(fixture.apply(drifting)).as_slice(),
+        [norn_wire::RefusedCheck::Drifted { .. }]
+    ));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project, other]\n---\n")
+    );
 }

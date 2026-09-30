@@ -112,8 +112,8 @@ pub(crate) fn resolve<V: VaultView>(
         conditions,
     );
     plan.footnote = footnote;
-    // NORN-296: the applier's schema check honours the force in the host PR;
-    // until then the plan carries it and a forced plan is checked as any other.
+    // The applier reads the force from the plan, so a forced preview sent
+    // back applies the way it previewed.
     plan.force = force;
     let unresolved = left_out
         .into_iter()

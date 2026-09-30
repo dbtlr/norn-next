@@ -81,7 +81,7 @@ use norn_fs::{OwnWrites, Published, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
     AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, Forecast, InterruptionCause,
-    RefusedCheck, ResolvedPlan, RootIdentity, TargetResult,
+    RefusedCheck, ResolvedPlan, RootIdentity, SchemaViolation, TargetResult,
 };
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
@@ -157,7 +157,7 @@ impl Applier<'_> {
             Ok(declared) => declared,
             Err(failure) => return write_failed(plan, format!("{failure:?}")),
         };
-        let staged = match stage::check_and_stage(
+        let mut staged = match stage::check_and_stage(
             self.anchor,
             self.root,
             self.shadows,
@@ -172,6 +172,7 @@ impl Applier<'_> {
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
         };
         drop(view);
+        let forced = std::mem::take(&mut staged.forced);
         if !(self.publishing)() {
             stage::discard_all(self.anchor, self.shadows, staged.targets);
             return ApplyOutcome::StoodDown;
@@ -183,15 +184,17 @@ impl Applier<'_> {
             own_writes: self.own_writes,
         };
         let (progress, stopped) = publisher.publish(&plan, staged);
-        self.answer(plan, progress, stopped, store)
+        self.answer(plan, progress, stopped, forced, store)
     }
 
-    /// The outcome of a publication that ran as far as `progress`.
+    /// The outcome of a publication that ran as far as `progress`, whose
+    /// force let `forced` through.
     fn answer(
         &self,
         plan: ResolvedPlan,
         progress: Progress,
         stopped: Option<Stopped>,
+        forced: Vec<SchemaViolation>,
         store: &mut Store,
     ) -> ApplyOutcome {
         let changeset = if progress.effects.is_empty() {
@@ -236,6 +239,7 @@ impl Applier<'_> {
                 targets,
                 folders_made: folder_paths(&progress.folders_made),
                 folders_removed: folder_paths(&progress.folders_removed),
+                forced,
             });
         };
         if !progress.effects.is_empty() {
@@ -322,8 +326,8 @@ pub(crate) fn preview(
         Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
     };
     let outcome = match stage::check(&plan, &view, declared) {
-        Ok(_) => match forecast(&plan.transitions, &view) {
-            Ok(forecast) => return Ok((plan, forecast)),
+        Ok(checked) => match forecast(&plan.transitions, &view) {
+            Ok(forecast) => return Ok((plan, forecast.with_forced(checked.forced))),
             Err(error) => write_failed(plan, error.to_string()),
         },
         Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, checks),
