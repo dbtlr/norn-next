@@ -16,14 +16,16 @@
 //! trust state and the store generation an answer names describe the instant
 //! its rows were read at.
 
+use std::ops::ControlFlow;
+
 use norn_store::{
     ContentModel, CountWork, Counted, DescribeWork, Described, FindWork, Found, GetWork, Gotten,
     PageRefusal, Snapshot, SnapshotCounters, ValidateWork, Validated,
 };
 use norn_wire::{
-    AnswerAdvisory, AnswerReading, CountParams, CountReport, DescribeParams, DescribeReport,
-    ErrorDetail, ErrorEnvelope, FindParams, FindReport, GetParams, GetReport, ReadFailure,
-    Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
+    AnswerAdvisory, AnswerReading, CountParams, CountReport, Cursor, DescribeParams,
+    DescribeReport, ErrorDetail, ErrorEnvelope, FindParams, FindReport, GetParams, GetReport,
+    ReadFailure, Unsatisfied, ValidateParams, ValidateReport, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -270,5 +272,128 @@ impl From<Gotten> for Built<GetReport, GetWork> {
             report,
             work,
         }
+    }
+}
+
+/// Every page of `request`, one after another on one snapshot: each read by
+/// `page` and handed to `take`, which answers the cursor the next page begins
+/// at, `None` where that page was the last, or breaks with a value where
+/// reading on would tell it nothing more.
+///
+/// The answer is how many pages were read and what `take` broke with, if it
+/// broke; a refused page ends the reading with its refusal. Both a filtered
+/// search's candidates and a `where` target's match read a find request to
+/// its end through here, so paging a find is written once.
+pub(crate) fn every_page<P, B>(
+    request: &FindParams,
+    mut page: impl FnMut(&FindParams) -> Result<P, PageRefusal>,
+    mut take: impl FnMut(P) -> ControlFlow<B, Option<Cursor>>,
+) -> Result<(u64, Option<B>), PageRefusal> {
+    let mut pages = 0;
+    let mut next = page(request)?;
+    loop {
+        pages += 1;
+        match take(next) {
+            ControlFlow::Break(broke) => return Ok((pages, Some(broke))),
+            ControlFlow::Continue(None) => return Ok((pages, None)),
+            ControlFlow::Continue(Some(after)) => {
+                next = page(&request.clone().with_after(after))?;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use norn_wire::{CursorKey, Snapshot as Reading, VaultAddress};
+
+    use super::*;
+
+    fn request() -> FindParams {
+        let name = VaultName::new("notes").expect("a legal vault name");
+        FindParams::new(VaultAddress::name(name)).with_limit(2)
+    }
+
+    fn cursor(after: &str) -> Cursor {
+        Cursor::new(
+            Reading::new("epoch", 1, None, None),
+            CursorKey::tally([Some(after.to_string())]),
+        )
+    }
+
+    /// Pages of two over `paths`, each the paths after the request's cursor,
+    /// recording every request it read.
+    struct Pages<'a> {
+        paths: &'a [&'a str],
+        asked: RefCell<Vec<FindParams>>,
+    }
+
+    impl Pages<'_> {
+        fn page(&self, request: &FindParams) -> Result<(Vec<String>, Option<Cursor>), PageRefusal> {
+            self.asked.borrow_mut().push(request.clone());
+            let start = match &request.after {
+                None => 0,
+                Some(after) => {
+                    self.paths
+                        .iter()
+                        .position(|at| cursor(at) == *after)
+                        .expect("a cursor this reader handed out")
+                        + 1
+                }
+            };
+            let rows: Vec<String> = self.paths[start..]
+                .iter()
+                .take(2)
+                .map(|at| (*at).to_string())
+                .collect();
+            let next = (start + 2 < self.paths.len()).then(|| cursor(self.paths[start + 1]));
+            Ok((rows, next))
+        }
+    }
+
+    /// **Every page of a request is read, each continuing the cursor the one
+    /// before it named, until a page names none.**
+    #[test]
+    fn every_page_reads_on_until_a_page_names_no_cursor() {
+        let pages = Pages {
+            paths: &["a.md", "b.md", "c.md", "d.md", "e.md"],
+            asked: RefCell::new(Vec::new()),
+        };
+        let mut read = Vec::new();
+        let answered = every_page(
+            &request(),
+            |request| pages.page(request),
+            |(rows, next)| {
+                read.extend(rows);
+                ControlFlow::<(), _>::Continue(next)
+            },
+        )
+        .expect("every page reads");
+
+        assert_eq!(answered, (3, None));
+        assert_eq!(read, ["a.md", "b.md", "c.md", "d.md", "e.md"]);
+        let asked = pages.asked.borrow();
+        assert_eq!(asked[0], request());
+        assert_eq!(asked[2], request().with_after(cursor("d.md")));
+    }
+
+    /// **A page `take` breaks on is the last one read.**
+    #[test]
+    fn every_page_stops_where_take_breaks() {
+        let pages = Pages {
+            paths: &["a.md", "b.md", "c.md", "d.md", "e.md"],
+            asked: RefCell::new(Vec::new()),
+        };
+        let answered = every_page(
+            &request(),
+            |request| pages.page(request),
+            |(rows, _)| ControlFlow::Break(rows),
+        )
+        .expect("the first page reads");
+
+        assert_eq!(answered, (1, Some(vec!["a.md".into(), "b.md".into()])));
+        assert_eq!(pages.asked.borrow().len(), 1);
     }
 }

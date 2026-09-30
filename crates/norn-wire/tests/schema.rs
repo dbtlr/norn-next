@@ -3262,7 +3262,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "requires_cycle",
             "content_cycle",
             "transitions_disagree",
-            "unexpanded_target"
+            "unexpanded_target",
+            "where_target_ordered"
         ])
     );
     let schema = schema_of::<ErrorDetail>();

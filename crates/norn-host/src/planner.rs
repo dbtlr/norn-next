@@ -8,9 +8,14 @@
 //! plan here, through [`resolve::resolve`], so an operation means the same
 //! thing wherever it arrives from. A refresh names the operations an earlier
 //! apply already landed, which it drops, so a remaining operation's
-//! requirement on one of them is met rather than a fault. Planning is five
+//! requirement on one of them is met rather than a fault. Planning is six
 //! steps, one module each:
 //!
+//! - [`expand`] — each `where` target turned into one operation per document
+//!   it matches, each naming its document by path, through the find builder
+//!   on the one snapshot the request holds; a `where` matching nothing, or
+//!   nothing as asked, is left unresolved in words. What follows plans only
+//!   path targets.
 //! - [`order`] — the plan's shape: the order its operations compose in, and
 //!   the faults `request/plan-invalid` answers — an identifier carried twice,
 //!   a requirement nothing carries, a cycle of requirements, and a cycle of
@@ -30,8 +35,8 @@
 //!   also names what does not resolve: a push onto a scalar, a pop or a
 //!   remove of what the document does not hold, a heading that is ambiguous,
 //!   missing or inside a container, empty content to append or insert, a
-//!   nested value, and a `where` target not yet expanded. The pop, the
-//!   remove and the empty content are left unresolved where they would
+//!   nested value, and a `where` target [`expand`] did not expand. The pop,
+//!   the remove and the empty content are left unresolved where they would
 //!   otherwise land as a silent no-op. An edit that rewrites what its
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
@@ -82,7 +87,9 @@
 //! through a [`view::VaultView`]: the store holds no document's exact bytes,
 //! and a hash read from it could name bytes nobody composed against. The
 //! request's one snapshot is what an operation that reads derived facts plans
-//! against; none of today's kinds reads one.
+//! against: a `where` target, which [`expand`] matches there. The match names
+//! documents; the files then say what each holds, and a matched document the
+//! files no longer hold does not resolve.
 //!
 //! **A create publishes before any removal.** ADR 0031 publishes creates
 //! first and removals last, so a name a removal of this plan vacates still
@@ -106,13 +113,16 @@
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's
-//! operations through [`resolve::resolve`] for refuse-and-refresh; the apply
-//! job plans an authored plan inside the entry's claim over a
-//! [`view::TreeView`]; and a preview plans on one snapshot, taking no claim
-//! (`crate::apply`).
+//! operations through [`resolve::resolve`] for refuse-and-refresh — a
+//! resolved plan's operations carry only path targets, so nothing is matched
+//! again; the apply job plans an authored plan through
+//! [`expand::resolve_expanding`] inside the entry's claim over a
+//! [`view::TreeView`], matching on a snapshot it takes there; and a preview
+//! plans the same way on its one snapshot, taking no claim (`crate::apply`).
 
 pub(crate) mod compose;
 pub(crate) mod edit;
+pub(crate) mod expand;
 pub(crate) mod forecast;
 pub(crate) mod lineage;
 pub(crate) mod order;

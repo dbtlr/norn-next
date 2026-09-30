@@ -298,8 +298,10 @@ pub(crate) struct Section<'a> {
 /// One page section's statement and its parameters, in the numbering the text
 /// states.
 ///
-/// Every section selects the document id, its path and its sort value — null
-/// outside a field sort's valued section — in the order the page runs.
+/// Every section selects the document id, its path, its sort value — null
+/// outside a field sort's valued section — and the content hash the document
+/// was indexed under, in the order the page runs. A valued section reads the
+/// hash off the document's row by its key, for the rows the page hands back.
 ///
 /// **Where a section resumes is its lower bound**, not a test applied to the
 /// rows it read: one row-value seek past its place in the answer order
@@ -356,7 +358,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let place = format!("COALESCE({after}, {beyond})");
             (
                 format!(
-                    "SELECT d.id, d.path, NULL FROM documents AS d
+                    "SELECT d.id, d.path, NULL, d.content_hash FROM documents AS d
                      WHERE {}",
                     path_seek(order_seek, comparison, &place)
                 ),
@@ -390,7 +392,9 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             };
             (
                 format!(
-                    "SELECT f.document, f.path, f.{column} FROM document_fields AS f
+                    "SELECT f.document, f.path, f.{column},
+                         (SELECT h.content_hash FROM documents AS h WHERE h.id = f.document)
+                     FROM document_fields AS f
                      WHERE f.key = {key} AND {order_seek}f.{marker} = 1
                        AND {}",
                     seek.spelled()
@@ -410,7 +414,7 @@ pub(crate) fn compose_page(section: &Section<'_>) -> (String, Vec<Value>) {
             let place = format!("COALESCE({after}, {beyond})");
             (
                 format!(
-                    "SELECT d.id, d.path, NULL FROM documents AS d
+                    "SELECT d.id, d.path, NULL, d.content_hash FROM documents AS d
                      WHERE {}
                        AND NOT EXISTS (SELECT 1 FROM document_fields AS m
                            WHERE m.document = d.id AND m.key = {key} AND m.{marker} = 1)",

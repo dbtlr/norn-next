@@ -16,8 +16,8 @@
 //! document unchanged, which lands found.
 //!
 //! **What the planner refuses before any splice.** A frontmatter kind whose
-//! target is a `where` list, which planning expands into path targets before
-//! anything composes; an append or insert with empty content, which would
+//! target is still a `where` list, which planning expands into path targets
+//! before anything composes ([`super::expand`]); an append or insert with empty content, which would
 //! land as a change of nothing; and a value that is nested — a map, or a list
 //! holding a list or a map — which the value model holds and `norn-text`'s
 //! writer does not write yet (NORN-317). An element pushed to or popped from a
@@ -59,8 +59,10 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
             "a `where` target names at least one predicate, since a conjunction of none matches every document"
                 .to_string(),
         ),
-        // NORN-296: where expansion lands with the host verbs (PR 4b), which
-        // expands a `where` target before composition and replaces this.
+        // Planning expands every `where` target before composition
+        // (`super::expand`), so only a plan resolved without expansion — a
+        // refresh re-resolving a resolved plan's operations, which the
+        // applier refuses first if one carries a `where` — could meet one.
         WriteTarget::Where(_) => Err(
             "a `where` target is not yet expanded into the documents it matches".to_string(),
         ),

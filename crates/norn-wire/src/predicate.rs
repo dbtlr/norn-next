@@ -24,6 +24,8 @@
 //! built; nothing here holds the sugar, so two surfaces cannot expand it two
 //! ways.
 
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -255,4 +257,142 @@ where
         ));
     }
     Ok(values)
+}
+
+/// A predicate in the wire's own names, for a person reading why a request
+/// matched nothing: its `op` and its fields, each value quoted,
+/// `{op: eq, key: "type", value: "note"}`. The wire carries it as JSON; this
+/// is the same part in words, never a Rust type's.
+impl fmt::Display for Predicate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Predicate::Eq { key, value } => write!(f, "{{op: eq, key: {key:?}, value: {value:?}}}"),
+            Predicate::NotEq { key, value } => {
+                write!(f, "{{op: not_eq, key: {key:?}, value: {value:?}}}")
+            }
+            Predicate::In { key, values } => {
+                write!(f, "{{op: in, key: {key:?}, values: ")?;
+                quoted_list(f, values)?;
+                f.write_str("}")
+            }
+            Predicate::Has { key } => write!(f, "{{op: has, key: {key:?}}}"),
+            Predicate::Missing { key } => write!(f, "{{op: missing, key: {key:?}}}"),
+            Predicate::Before { key, value } => {
+                write!(f, "{{op: before, key: {key:?}, value: {value:?}}}")
+            }
+            Predicate::After { key, value } => {
+                write!(f, "{{op: after, key: {key:?}, value: {value:?}}}")
+            }
+            Predicate::Matches { query } => write!(f, "{{op: matches, query: {query:?}}}"),
+            Predicate::Path { glob } => write!(f, "{{op: path, glob: {glob:?}}}"),
+            Predicate::LinksTo { target } => {
+                write!(f, "{{op: links_to, target: {:?}}}", target.to_string())
+            }
+            Predicate::Resolves { target } => {
+                write!(f, "{{op: resolves, target: {:?}}}", target.to_string())
+            }
+            Predicate::Tag { name } => write!(f, "{{op: tag, name: {name:?}}}"),
+            Predicate::HasFinding { kind } => {
+                write!(f, "{{op: has_finding, kind: {:?}}}", kind.as_str())
+            }
+        }
+    }
+}
+
+/// `values` as a bracketed list, each quoted: `["a", "b"]`.
+pub(crate) fn quoted_list(f: &mut fmt::Formatter<'_>, values: &[String]) -> fmt::Result {
+    f.write_str("[")?;
+    for (at, value) in values.iter().enumerate() {
+        if at > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{value:?}")?;
+    }
+    f.write_str("]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A predicate reads in the wire's own names**: its `op` and its
+    /// fields, each value quoted, and no Rust type name among them.
+    #[test]
+    fn a_predicate_reads_in_the_wires_own_names() {
+        let target = ResolutionTarget::new("Plan").expect("a legal target");
+        let spelled = [
+            (
+                Predicate::equal_to("wave", "flip"),
+                r#"{op: eq, key: "wave", value: "flip"}"#,
+            ),
+            (
+                Predicate::NotEq {
+                    key: "wave".into(),
+                    value: "flip".into(),
+                },
+                r#"{op: not_eq, key: "wave", value: "flip"}"#,
+            ),
+            (
+                Predicate::In {
+                    key: "wave".into(),
+                    values: vec!["a".into(), "b\"c".into()],
+                },
+                r#"{op: in, key: "wave", values: ["a", "b\"c"]}"#,
+            ),
+            (Predicate::Has { key: "k".into() }, r#"{op: has, key: "k"}"#),
+            (
+                Predicate::Missing { key: "k".into() },
+                r#"{op: missing, key: "k"}"#,
+            ),
+            (
+                Predicate::Before {
+                    key: "due".into(),
+                    value: "2026".into(),
+                },
+                r#"{op: before, key: "due", value: "2026"}"#,
+            ),
+            (
+                Predicate::After {
+                    key: "due".into(),
+                    value: "2026".into(),
+                },
+                r#"{op: after, key: "due", value: "2026"}"#,
+            ),
+            (
+                Predicate::Matches { query: "q".into() },
+                r#"{op: matches, query: "q"}"#,
+            ),
+            (
+                Predicate::Path {
+                    glob: "a/**".into(),
+                },
+                r#"{op: path, glob: "a/**"}"#,
+            ),
+            (
+                Predicate::LinksTo {
+                    target: target.clone(),
+                },
+                r#"{op: links_to, target: "Plan"}"#,
+            ),
+            (
+                Predicate::Resolves { target },
+                r#"{op: resolves, target: "Plan"}"#,
+            ),
+            (
+                Predicate::Tag {
+                    name: "draft".into(),
+                },
+                r#"{op: tag, name: "draft"}"#,
+            ),
+            (
+                Predicate::HasFinding {
+                    kind: FindingKind::Broken,
+                },
+                r#"{op: has_finding, kind: "link/broken"}"#,
+            ),
+        ];
+        for (predicate, expected) in spelled {
+            assert_eq!(predicate.to_string(), expected);
+        }
+    }
 }

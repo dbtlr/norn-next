@@ -20,8 +20,13 @@
 //! **A plan is resolved against the files, on the ground the entry's coverage
 //! stands on.** The planner reads before-states from the vault through
 //! `norn-fs`, never from the store, so the snapshot a preview holds is what
-//! its answer's reading names and what an operation that reads derived facts
-//! would plan against; none of today's operation kinds reads one.
+//! its answer's reading names and what a `where` target is matched on
+//! ([`SnapshotMatcher`]), through the find builder in process.
+//!
+//! **The write verbs enter here.** [`Host::set`], [`Host::edit`] and
+//! [`Host::new_document`] each compile their request to an authored plan and
+//! answer through [`Host::apply`], so a verb previews and applies exactly as
+//! the same operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -43,25 +48,33 @@
 //! longer stands, and trust withdrawn for the environment's refusal where it
 //! stands and cannot be read.
 
+use std::cell::OnceCell;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
-use norn_store::Snapshot;
+use norn_store::{ContentModel, PageRefusal, Snapshot};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ErrorDetail, ErrorEnvelope, PlanDocument,
-    RootIdentity, TrustState, UntrustedReason, VaultAnswer, VaultName,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
+    FindParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams, TrustState,
+    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
 use crate::lifecycle::{
-    ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, SnapshotSource,
-    not_run, watcher_lost,
+    ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, ReaderUnavailable,
+    SnapshotSource, not_run, watcher_lost,
 };
-use crate::planner::resolve::{PlanningFailure, Resolution, resolve};
+use crate::planner::expand::{
+    ExpandingFailure, Matched, MatchedDocument, Matcher, listed, resolve_expanding,
+};
+use crate::planner::resolve::{PlanningFailure, Resolution};
 use crate::planner::view::TreeView;
+use crate::read::every_page;
+use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
 
 /// What a plan is resolved against: the vault root as the entry's coverage
 /// spells it, the identity that root proved when the coverage was installed,
@@ -128,30 +141,216 @@ impl PlanGround {
     }
 }
 
-/// Plan `authored` against the vault on `ground`.
+/// Plan `authored` against the vault on `ground`, its `where` targets
+/// matched through `matcher`.
 ///
 /// The answer is the resolution, or the code planning ended in: a fault in
-/// the plan's own shape, or a vault the planner could not read.
+/// the plan's own shape, a vault the planner could not read, or the refusal
+/// of the snapshot the `where` targets are matched on — answered as a read
+/// meeting it is, damage included.
 pub(crate) fn resolve_on(
     authored: AuthoredPlan,
     ground: &PlanGround,
     name: &VaultName,
-) -> Result<Resolution, ErrorEnvelope> {
+    matcher: &SnapshotMatcher<'_>,
+) -> Result<Resolution, PageRefused> {
     let view = TreeView::open(&ground.root, &ground.exclusions)
-        .map_err(|error| unreadable(name, error))?;
-    resolve(
-        authored,
-        ground.root_identity(),
-        &std::collections::BTreeSet::new(),
-        &view,
-    )
-    .map_err(|failure| match failure {
-        PlanningFailure::Fault(fault) => ErrorEnvelope::new(
-            "the plan's operations are no plan: nothing was planned",
-            ErrorDetail::plan_invalid(fault),
-        ),
-        PlanningFailure::View(error) => unreadable(name, error),
+        .map_err(|error| PageRefused::Answered(unreadable(name, error)))?;
+    resolve_expanding(authored, ground.root_identity(), &view, matcher).map_err(|failure| {
+        match failure {
+            ExpandingFailure::Planning(PlanningFailure::Fault(fault)) => {
+                PageRefused::Answered(ErrorEnvelope::new(
+                    "the plan's operations are no plan: nothing was planned",
+                    ErrorDetail::plan_invalid(fault),
+                ))
+            }
+            ExpandingFailure::Planning(PlanningFailure::View(error)) => {
+                PageRefused::Answered(unreadable(name, error))
+            }
+            ExpandingFailure::Match(refused) => refused,
+        }
     })
+}
+
+/// Where a plan's `where` targets are matched: through the find builder, in
+/// process, on the one snapshot the request plans against.
+///
+/// **A preview matches on the snapshot its read hold took**, under the
+/// content model that snapshot pins. **An apply matches on a snapshot its job
+/// establishes inside the entry's claim**, on a read handle the store mints
+/// for the job through the coverage's read seam ([`established_for_matching`])
+/// the first time a `where` target asks, held only while the job plans and
+/// closed before the applier runs: the job holds the claim and its store is
+/// the one writer, so that snapshot reads exactly the state the apply's
+/// changeset builds on, and a plan with no `where` target mints none. Either
+/// way the match is the find a caller would have been answered at the same
+/// instant, paged to its end.
+pub(crate) struct SnapshotMatcher<'a> {
+    vault: VaultAddress,
+    declared: &'a ContentModel,
+    on: MatchedOn<'a>,
+}
+
+#[allow(clippy::large_enum_variant)] // One per planning, on the stack and never moved: boxing the snapshot would allocate for a plan with no `where` target.
+enum MatchedOn<'a> {
+    /// The snapshot a read hold took.
+    Held(&'a Snapshot),
+    /// A snapshot `mint` establishes when first asked.
+    OnDemand {
+        mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
+        established: OnceCell<Snapshot>,
+    },
+}
+
+impl<'a> SnapshotMatcher<'a> {
+    /// Matching `vault`'s `where` targets on `snapshot`, which pins
+    /// `declared`.
+    pub(crate) const fn held(
+        vault: VaultAddress,
+        snapshot: &'a Snapshot,
+        declared: &'a ContentModel,
+    ) -> Self {
+        SnapshotMatcher {
+            vault,
+            declared,
+            on: MatchedOn::Held(snapshot),
+        }
+    }
+
+    /// Matching `vault`'s `where` targets on the snapshot `mint`
+    /// establishes, once, when first asked; `declared` is what that snapshot
+    /// pins.
+    pub(crate) const fn on_demand(
+        vault: VaultAddress,
+        mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
+        declared: &'a ContentModel,
+    ) -> Self {
+        SnapshotMatcher {
+            vault,
+            declared,
+            on: MatchedOn::OnDemand {
+                mint,
+                established: OnceCell::new(),
+            },
+        }
+    }
+
+    /// The snapshot matched on. **A handle that cannot be minted or
+    /// established refuses as a read over an unavailable read seam does**,
+    /// `host/reader-unavailable`: a failed mint changes no trust label.
+    fn snapshot(&self) -> Result<&Snapshot, PageRefused> {
+        match &self.on {
+            MatchedOn::Held(snapshot) => Ok(snapshot),
+            MatchedOn::OnDemand { mint, established } => {
+                if established.get().is_none() {
+                    let snapshot = mint().map_err(|unavailable| {
+                        PageRefused::Answered(reader_unavailable(unavailable.detail()))
+                    })?;
+                    let _ = established.set(snapshot);
+                }
+                Ok(established
+                    .get()
+                    .expect("the snapshot was just established"))
+            }
+        }
+    }
+}
+
+/// A snapshot for one apply's `where` matching, established through
+/// `source`'s own read seam — the mint every entry's read handle comes from
+/// and the establishment every read runs — with the statements the mint ran
+/// beside it, whichever way it ended.
+///
+/// The handle is the job's alone, so its connection is idle when taken; the
+/// snapshot holds it, and both close when the snapshot drops.
+pub(crate) fn established_for_matching<S>(
+    source: &S,
+) -> (
+    Result<<S::Reader as ReadSource>::Snapshot, ReaderUnavailable>,
+    u64,
+)
+where
+    S: SnapshotSource,
+{
+    let minted = source.open_reader();
+    let established = minted.reader.and_then(|reader| {
+        let turn = Arc::new(reader)
+            .try_take()
+            .expect("a read handle minted for this apply alone is idle");
+        S::Reader::establish(turn).map(|established| established.snapshot)
+    });
+    (established, minted.statements)
+}
+
+impl Matcher for SnapshotMatcher<'_> {
+    /// The refusal a read meeting it would answer with: the store's, a
+    /// declaration the snapshot does not pin, or a read seam that could not
+    /// be minted.
+    type Error = PageRefused;
+
+    /// Every document `predicates` match, in the find's own order, which is
+    /// path order, every page of it read on the one snapshot.
+    ///
+    /// **A part the find reports unsatisfied matches nothing as asked**, so
+    /// the answer is the report in words rather than the empty match; so is a
+    /// request the builder refuses for what it asks, such as a bound that
+    /// does not read as its key's declared type.
+    fn matching(&self, predicates: &[Predicate]) -> Result<Matched, PageRefused> {
+        let snapshot = self.snapshot()?;
+        let request = FindParams::new(self.vault.clone())
+            .with_predicates(predicates.to_vec())
+            .with_limit(norn_store::MAX_PAGE as u32);
+        let mut paths = Vec::new();
+        let paged = every_page(
+            &request,
+            |page| snapshot.find(page, self.declared),
+            |page| {
+                if !page.unsatisfied.is_empty() {
+                    return ControlFlow::Break(format!(
+                        "the find reports parts it could not apply: {}",
+                        listed(&page.unsatisfied)
+                    ));
+                }
+                paths.extend(page.rows.into_iter().zip(page.content_hashes).map(
+                    |(row, indexed)| MatchedDocument {
+                        path: row.path,
+                        indexed,
+                    },
+                ));
+                ControlFlow::Continue(page.next)
+            },
+        );
+        match paged {
+            Ok((_, None)) => Ok(Ok(paths)),
+            Ok((_, Some(unsatisfied))) => Ok(Err(unsatisfied)),
+            Err(refusal) => asked_amiss(refusal).map(Err).map_err(page_refusal),
+        }
+    }
+}
+
+/// A find refusal as a `where` target meets it: the request's own amiss
+/// part, in words, which leaves the operation unresolved; or what a read
+/// meeting it fails on, which fails planning.
+///
+/// Total by its match, as [`page_refusal`] is, so a refusal minted in the
+/// store without an arm here does not compile.
+fn asked_amiss(refusal: PageRefusal) -> Result<String, PageRefusal> {
+    match refusal {
+        PageRefusal::UnreadableBound { .. }
+        | PageRefusal::EmptyMembership { .. }
+        | PageRefusal::OutOfBound { .. }
+        | PageRefusal::UnknownPart { .. }
+        | PageRefusal::AmbiguousTarget(_)
+        | PageRefusal::UnknownTarget { .. }
+        | PageRefusal::PartNotTaken { .. } => Ok(refusal.to_string()),
+        // A matcher sends no cursor and pins its own declaration, so these
+        // are host defects or the store's own failure, answered as a read's.
+        PageRefusal::DeclarationNotPinned { .. }
+        | PageRefusal::OrderChanged(_)
+        | PageRefusal::CursorNotTaken { .. }
+        | PageRefusal::SummaryNotPaged
+        | PageRefusal::Store(_) => Err(refusal),
+    }
 }
 
 /// A resolution, where every operation resolved; the refusal naming the ones
@@ -229,6 +428,36 @@ where
         }
     }
 
+    /// Answer a `set`: the frontmatter changes `params` names, compiled to
+    /// operations and previewed or applied through [`Host::apply`].
+    pub fn set(&self, params: SetParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer an `edit`: the edits `params` names to one document, compiled
+    /// to operations and previewed or applied through [`Host::apply`].
+    pub fn edit(&self, params: EditParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `new`: the document `params` creates at its path, compiled
+    /// to an operation and previewed or applied through [`Host::apply`].
+    pub fn new_document(&self, params: NewParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// A write verb's compiled `plan`, entering the one `apply` path.
+    fn apply_operations(
+        &self,
+        mode: ApplyMode,
+        plan: AuthoredPlan,
+    ) -> Result<PendingApply, ErrorEnvelope> {
+        self.apply(ApplyParams::new(mode, PlanDocument::operations(plan)))
+    }
+
     /// Preview `plan` over the vault `name`: one read hold, one snapshot,
     /// and nothing written. Operations are resolved through the one planner,
     /// and the plan they resolve to is judged by the applier's own checks,
@@ -261,8 +490,19 @@ where
             // what it planned: resolving checks no schema, so the plan it
             // answers goes through the same checks a resolved plan's does.
             PlanDocument::Operations(authored) => {
-                let resolution = fully_resolved(resolve_on(authored, &ground, name)?)?;
-                preview_resolved(resolution.plan, &ground)?
+                let matcher = SnapshotMatcher::held(
+                    authored.vault.clone(),
+                    hold.snapshot(),
+                    hold.content_model(),
+                );
+                let resolution = match resolve_on(authored, &ground, name, &matcher) {
+                    Ok(resolution) => resolution,
+                    Err(PageRefused::Answered(refused)) => return Err(refused),
+                    Err(PageRefused::Damaged(detail)) => {
+                        return Err(self.withdraw_for_read_damage(&hold, detail).answer(name));
+                    }
+                };
+                preview_resolved(fully_resolved(resolution)?.plan, &ground)?
             }
             PlanDocument::Resolved(resolved) => preview_resolved(resolved, &ground)?,
         };
@@ -288,6 +528,28 @@ mod tests {
             exclusions: Vec::new(),
             declared: Arc::new(Declared::unpinned()),
         }
+    }
+
+    /// **An apply's matcher whose read handle cannot be minted refuses as a
+    /// read over an unavailable read seam does**: `host/reader-unavailable`,
+    /// never a failed statement nor damage, since a failed mint changes no
+    /// trust label.
+    #[test]
+    fn a_matcher_whose_reader_cannot_be_minted_answers_reader_unavailable() {
+        let name = VaultName::new("notes").unwrap();
+        let declared = ContentModel::default();
+        let refused = || {
+            Err(crate::lifecycle::ReaderUnavailable::new(
+                "the open was refused",
+            ))
+        };
+        let matcher = SnapshotMatcher::on_demand(VaultAddress::name(name), &refused, &declared);
+
+        let answered = matcher.matching(&[Predicate::equal_to("wave", "flip")]);
+        let Err(PageRefused::Answered(envelope)) = answered else {
+            panic!("a refused mint answered {answered:?}");
+        };
+        assert_eq!(envelope.code(), &ReasonCode::HostReaderUnavailable);
     }
 
     /// **A root standing where its coverage proved it stands.**
