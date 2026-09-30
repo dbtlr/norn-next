@@ -2435,7 +2435,14 @@ not resolve, in words: an empty predicate list, which is never matched; one matc
 document, naming its predicates; and one the builder cannot apply as asked — a part it
 reports unsatisfied, such as an unknown key, or a request it refuses — naming the report. A
 matched document the files no longer hold leaves its own expanded operation unresolved, as
-any path naming no document does. An authored `where` operation carrying an identifier or
+any path naming no document does. A matched document whose file no longer hashes to the
+content hash the store indexed it under — a change the watcher has not yet delivered, which
+may be the edit that makes it stop matching — leaves its own expanded operation unresolved
+too, saying the plan should be re-sent once the vault has indexed the change: its
+before-state already carries that edit, so the write guard alone would let a stale match
+overwrite it. The indexed hash rides the find builder's page rows, never the wire, and a
+preview and an apply judge it alike. A document the store does not list yet is not matched,
+as a `find` at that instant would not list it. An authored `where` operation carrying an identifier or
 a requirement is `request/plan-invalid` (`where_target_ordered`): it expands to several
 operations, from the vault as it stands before the plan.
 An author's condition — a content hash, or an expected frontmatter value that is absent or

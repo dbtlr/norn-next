@@ -35,6 +35,16 @@
 //! does not list yet is not matched: the snapshot is what a read at the same
 //! instant would have answered.
 //!
+//! **A match resting on facts the store has not taken in is not written.**
+//! Each matched document carries the content hash the store indexed it
+//! under; where the file's bytes — the before-state its expanded operation
+//! is composed from, read once through the same view — hash otherwise, the
+//! file changed since the index saw it, perhaps by the very edit that makes
+//! it stop matching, and the before-state guard alone cannot tell, since it
+//! already carries that edit. That document's expanded operation is left
+//! unresolved, saying the plan should be re-sent once the vault has indexed
+//! the change; the others resolve. A preview and an apply judge alike.
+//!
 //! **Expansion keeps what an operation says beyond its target.** Each
 //! expanded operation carries the original's kind and author conditions, in
 //! the order the matcher answers, which is path order, at the original's
