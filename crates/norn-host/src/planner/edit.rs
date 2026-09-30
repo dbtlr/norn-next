@@ -32,12 +32,11 @@ use std::sync::Arc;
 use norn_text::{Document, EditError, Mapping, SectionError, Value};
 use norn_wire::{AuthoredValue, DocumentPath, ExpectedField, OperationKind, WriteTarget};
 
-/// Why a document-local kind cannot act, in words.
-pub(crate) type Refusal = String;
+use super::compose::Unresolved;
 
 /// The document path a document-local kind names, or why it names none yet;
 /// `None` for a kind that is not document-local.
-pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath, Refusal>> {
+pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath, Unresolved>> {
     let target = match kind {
         OperationKind::SetFrontmatter { target, .. }
         | OperationKind::RemoveFrontmatter { target, .. }
@@ -70,7 +69,7 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
 
 /// Why `kind` cannot act on any document, whatever it holds: a value it does
 /// not write yet, or content that would change nothing. `None` where it can.
-pub(crate) fn refused_whatever_the_document(kind: &OperationKind) -> Option<Refusal> {
+pub(crate) fn refused_whatever_the_document(kind: &OperationKind) -> Option<Unresolved> {
     match kind {
         OperationKind::SetFrontmatter { value, .. } => nested(value, false),
         OperationKind::PushFrontmatter { value, .. }
@@ -91,7 +90,7 @@ pub(crate) fn refused_whatever_the_document(kind: &OperationKind) -> Option<Refu
 
 /// Why `value` is not written yet: a map, or a list holding a list or a map;
 /// and, where it is a list's element (`element`), a list at all.
-fn nested(value: &AuthoredValue, element: bool) -> Option<Refusal> {
+fn nested(value: &AuthoredValue, element: bool) -> Option<Unresolved> {
     let is_nested = match value {
         AuthoredValue::Map(_) => true,
         AuthoredValue::List(items) => {
@@ -110,7 +109,7 @@ fn nested(value: &AuthoredValue, element: bool) -> Option<Refusal> {
 
 /// `bytes`, the document the operation names as it stands so far, edited as
 /// the document-local `kind` edits it; or why it cannot be.
-pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Refusal> {
+pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Unresolved> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Err(
             "the document is not UTF-8 text, so its frontmatter and sections cannot be edited"
@@ -160,7 +159,7 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Re
 /// A section refusal is restated: the wire addresses a section by its heading
 /// alone, so the resolver's advice to address an occurrence is not the
 /// caller's to take.
-fn refusal(error: &EditError) -> Refusal {
+fn refusal(error: &EditError) -> Unresolved {
     match error {
         EditError::Section(SectionError::HeadingNotFound { heading }) => {
             format!("no heading in the document reads as {heading:?}")
@@ -214,7 +213,7 @@ pub(crate) fn expectation_unmet(
     bytes: &[u8],
     field: &str,
     expect: &ExpectedField,
-) -> Option<Refusal> {
+) -> Option<Unresolved> {
     if let ExpectedField::Present { value } = expect
         && let Some(refusal) = nested(value, false)
     {

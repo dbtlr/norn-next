@@ -101,8 +101,8 @@ struct Simulated<'view, V> {
     folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
 }
 
-/// Why one operation cannot act on the state it met.
-type Unresolved = String;
+/// Why one operation cannot act on the state it met, in words.
+pub(crate) type Unresolved = String;
 
 /// Where one name an operation carries leads.
 enum Place {
