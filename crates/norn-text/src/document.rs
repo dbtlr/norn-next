@@ -18,7 +18,7 @@ use crate::frontmatter::render::{
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{Link, parse_wikilinks_in_text};
-use crate::section::{SectionAddress, SectionError, SectionSpan};
+use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
@@ -719,6 +719,37 @@ impl<'a> Document<'a> {
         Ok(edited)
     }
 
+    /// Delete a section — its heading line and everything it owns, its
+    /// subsections included — returning the whole edited document.
+    ///
+    /// The blank lines below the section go with it, because they sit inside
+    /// its range; the ones above its heading are the section before's and
+    /// stay. The result is re-read before it is returned, and refuses unless
+    /// the body's headings are exactly the ones it had, less the deleted
+    /// ones, in order: a delete that fuses the text above it into the heading
+    /// below changes that heading and returns nothing.
+    pub fn delete_section(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+    ) -> Result<String, EditError> {
+        let address = address.into();
+        let (scan, span) = self.editable_section(address)?;
+        let deleted = line_start(self.body, span.heading_start)..span.end;
+        let edited = splice(
+            self.source,
+            self.body_start + deleted.start..self.body_start + deleted.end,
+            "",
+        );
+        let expected = scan
+            .headings()
+            .iter()
+            .filter(|heading| !deleted.contains(&heading.span.byte_offset))
+            .map(heading_key)
+            .collect();
+        self.verify_headings(&edited, address, expected)?;
+        Ok(edited)
+    }
+
     /// The section `address` names, with the scan it was resolved over,
     /// refused where its heading sits inside a container: every section write
     /// resolves through here, so they agree about where a section is and
@@ -973,6 +1004,44 @@ impl<'a> Document<'a> {
         }
         Ok(())
     }
+
+    /// Re-read the bytes a structural section edit produced and refuse unless
+    /// the frontmatter is the one that was there and the body's headings are
+    /// exactly `expected`, by level and text, in document order.
+    ///
+    /// An insert or a delete names every heading the result should have: the
+    /// ones the body had, less what was deleted, plus what the inserted
+    /// content carries at the point it went in. A heading swallowed by an
+    /// unclosed fence, fused into a setext title, or conjured by an underline
+    /// all break that sequence.
+    fn verify_headings(
+        &self,
+        edited: &str,
+        address: SectionAddress<'_>,
+        expected: Vec<(u8, String)>,
+    ) -> Result<(), EditError> {
+        let reread = Document::parse(edited);
+        let headings: Vec<(u8, String)> = reread
+            .scan_body()
+            .headings()
+            .iter()
+            .map(heading_key)
+            .collect();
+        if reread.frontmatter() == self.frontmatter() && headings == expected {
+            Ok(())
+        } else {
+            Err(EditError::SectionPostImageMismatch {
+                heading: address.heading.to_string(),
+            })
+        }
+    }
+}
+
+/// A heading as a structural edit's post-image check compares it: its level
+/// and its text. Position is not part of it, because an edit moves the bytes
+/// below it.
+fn heading_key(heading: &Heading) -> (u8, String) {
+    (heading.level, heading.text.clone())
 }
 
 /// Where `text` begins inside the `written` bytes that produced it, when those

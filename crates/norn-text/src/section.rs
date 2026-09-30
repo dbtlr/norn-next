@@ -254,7 +254,7 @@ pub fn resolve_section(
 /// A heading inside a container starts past the container's prefix on its
 /// line — `> ## Q`, `- # L` — and that prefix is the container's, which the
 /// next section holds, so the section the heading ends stops at the line.
-fn line_start(body: &str, at: usize) -> usize {
+pub(crate) fn line_start(body: &str, at: usize) -> usize {
     let at = at.min(body.len());
     body.as_bytes()[..at]
         .iter()

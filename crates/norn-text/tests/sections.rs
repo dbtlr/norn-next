@@ -1113,6 +1113,36 @@ fn an_append_starts_its_own_line_and_fills_an_empty_section_between_separators()
     );
 }
 
+/// **A delete removes the heading line and everything the section owns** —
+/// its subsections and the separator below it — and leaves the blank lines
+/// above the heading, which are the section before's.
+#[test]
+fn a_delete_removes_the_heading_and_its_body_and_keeps_the_blank_lines_above() {
+    let source = "---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n### Sub\ns1\n\n## Beta\nb1\n";
+    assert_eq!(
+        Document::parse(source).delete_section("Alpha"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Beta\nb1\n".to_string())
+    );
+    assert_eq!(
+        Document::parse(source).delete_section("Beta"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n### Sub\ns1\n\n".to_string())
+    );
+}
+
+/// **A delete that would fuse the text above into the heading below
+/// refuses**: without the deleted section between them, a paragraph line
+/// becomes the first line of a setext heading's title.
+#[test]
+fn a_delete_that_rewrites_a_surviving_heading_refuses() {
+    let source = "para\n## Alpha\na1\nBeta\n====\n";
+    assert_eq!(
+        Document::parse(source).delete_section("Alpha"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Alpha".into()
+        })
+    );
+}
+
 /// **An append whose content swallows the document below it refuses**: an
 /// unclosed fence turns the next heading into code, and a setext underline
 /// turns the section's last line into a heading.
