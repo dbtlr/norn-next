@@ -88,19 +88,29 @@
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
-//! The one write verb, `apply`, is spelled the same way: [`ApplyParams`] — an
-//! [`ApplyMode`] and a [`PlanDocument`] — answering [`ApplyReport`]. A plan
+//! The four write verbs are spelled the same way, and all four answer
+//! [`ApplyReport`]. `apply` carries [`ApplyParams`] — an [`ApplyMode`] and a
+//! [`PlanDocument`]. A plan
 //! document is an [`AuthoredPlan`] of [`Operation`]s, each an
 //! [`OperationKind`] with the [`OperationId`] it is required by and the
-//! [`AuthorCondition`]s its author observed, or a [`ResolvedPlan`]: the
+//! [`AuthorCondition`]s its author observed — a content hash, or the
+//! [`ExpectedField`] a frontmatter field held — or a [`ResolvedPlan`]: the
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
 //! between two [`FileState`]s, each absent or a [`ContentHash`], the
 //! [`PlanCondition`]s its planning read, and the [`Provenance`] a repair plan
-//! cites, with the [`SkippedFinding`]s it left alone. A preview answers with
+//! cites, with the [`SkippedFinding`]s it left alone. Either plan carries
+//! whether it is forced past the schema check. A frontmatter kind names its
+//! documents by a [`WriteTarget`] and writes an [`AuthoredValue`] — a
+//! [`FiniteFloat`] or a [`ValueMap`] among its shapes. The document-local
+//! verbs each compile to an authored plan: `set` from [`SetFieldsParams`] of
+//! [`FieldChange`]s, `edit` from [`EditParams`] of [`DocumentEdit`]s, and
+//! `new` from [`NewParams`]. A preview answers with
 //! the resolved plan and a [`Forecast`] of what the plan does not carry — the
-//! targets that drifted and the [`FolderPath`]s a plan makes and removes; an
-//! applied plan with its [`ChangesetOutcome`] and the
-//! [`TargetResult`] of each [`AppliedTarget`]. An apply that ends any other
+//! targets that drifted, the [`FolderPath`]s a plan makes and removes, and
+//! each [`SchemaViolation`] a force lets through; an
+//! applied plan with its [`ChangesetOutcome`], the
+//! [`TargetResult`] of each [`AppliedTarget`] and what it forced. An apply
+//! that ends any other
 //! way ends in a code, whose detail carries the [`RefusedCheck`]s and the
 //! [`UnresolvedOperation`]s — each with its [`UnresolvedReason`] — of a
 //! refusal, the [`InterruptionCause`] of an interruption, or the [`PlanFault`]
@@ -134,7 +144,9 @@
 //!   [`VaultName`], [`VaultRoot`], [`SchemaSource`], [`DocumentPath`],
 //!   [`FolderPath`], [`ResolutionTarget`], [`Directory`], [`ContentHash`],
 //!   [`RootIdentity`], [`OperationId`] and [`Score`] refuse a string outside
-//!   their grammar,
+//!   their grammar, [`FiniteFloat`] refuses `NaN` and an infinity,
+//!   [`AuthoredValue`] and [`ValueMap`] read any plain value through that same
+//!   refusal and refuse a map key written twice,
 //!   [`RungSet`] refuses a ladder that runs no rung, [`RegistrySanity`]
 //!   refuses a problem list that names no problem and [`NameSet`] refuses a
 //!   name list naming fewer than two distinct names, and five shapes refuse a
@@ -145,11 +157,16 @@
 //!   [`BodyText`] and [`CandidateHead`] — whose total must be a total the
 //!   head they carry can head, the last of them refusing a head wider than
 //!   [`CANDIDATE_HEAD`] as well — each with the wire shape a derive would
-//!   read. [`Operation`]'s read path is written by hand because the derive
+//!   read. [`Operation`]'s read path, and [`OperationKind`]'s alone, are
+//!   written by hand because the derive
 //!   cannot refuse what it must: the derive reads it into a private shape
 //!   that refuses any key it does not name and holds every field any kind
 //!   names, and the kind then takes the fields it names, refusing one it lacks
-//!   and one it does not take. [`Cursor`] and [`PlanDocument`] are written by
+//!   and one it does not take. A frontmatter kind's [`WriteTarget`] is two
+//!   keys among those fields, exactly one of them written, so the target is
+//!   written by hand on both sides too, and [`SetFieldsParams`], which holds a
+//!   target among its own keys, is read the way an operation is.
+//!   [`Cursor`] and [`PlanDocument`] are written by
 //!   hand on both sides: a cursor's wire shape is one opaque string rather
 //!   than the fields a derive would emit, and a document is written as the
 //!   plan it holds and read by the derive into one private shape holding its
@@ -171,7 +188,13 @@
 //!   [`OperationId`] advertise the pattern or floor their constructors
 //!   hold; [`Operation`] advertises its kind's own branches with its optional
 //!   parts added inside each, since each branch refuses a key it does not
-//!   name; [`PlanDocument`] is one of the two plan types, each advertising
+//!   name; [`WriteTarget`] advertises its two keys with exactly one required,
+//!   and [`OperationKind`] and [`SetFieldsParams`] keep the derive but settle
+//!   the target flattened into them as an object whose keys are all its own;
+//!   [`AuthoredValue`] and [`ValueMap`] are a tree of plain values, stating in
+//!   words the finiteness and single keys JSON Schema cannot;
+//!   [`FiniteFloat`] is a number;
+//!   [`PlanDocument`] is one of the two plan types, each advertising
 //!   its own tag, and the tags [`OperationsTag`] and [`ResolvedTag`] are each
 //!   their constant inline; [`Cursor`] is one opaque string
 //!   rather than the fields a derive would emit; [`RungSet`],
@@ -184,6 +207,9 @@
 //!   rungs contain a retrieval rung; and [`RungSubtraction`] advertises its
 //!   rungs each once and never every retrieval rung.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.
+//!   [`FiniteFloat`] holds it by construction, since the one value that breaks
+//!   a float's equality cannot be built, so a plan carrying a written float is
+//!   `Eq` like every other plan.
 //!
 //! **Enums are internally tagged with an explicit tag name, never externally
 //! tagged.** An externally tagged enum makes the variant name a JSON key, so a
@@ -206,6 +232,13 @@
 //! any answer is the bytes a caller sends back; [`PlanDocument`] is written as
 //! the plan it holds and read by dispatching on that tag, rather than being a
 //! serde-tagged enum that would consume the tag before its plan read it.
+//!
+//! **Two write shapes carry no tag at all.** An [`AuthoredValue`] is the
+//! plain JSON value of its shape, because the shape already says what it is
+//! and an author writes a field the way the field reads in a document. A
+//! [`WriteTarget`] is exactly one of two keys, `path` or `where`, among the
+//! fields that name it, because `path` is the key every other kind names its
+//! document by; which key is written is what the target is.
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
@@ -305,13 +338,18 @@
 //! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
 //! [`FolderPath::new`], the constructor on each [`RefusedCheck`],
 //! [`UnresolvedReason`], [`InterruptionCause`], [`PlanFault`] and
-//! [`ApplyReport`] variant, [`Forecast::new`],
-//! [`UnresolvedOperation::new`], [`AppliedTarget::new`] and
-//! [`ApplyParams::new`]. The plan types the applier destructures, below, can
-//! be written as literals and keep their constructors all the same:
+//! [`ApplyReport`] variant, [`ApplyReport::with_forced`], [`Forecast::new`],
+//! [`Forecast::with_forced`], [`SchemaViolation::new`],
+//! [`UnresolvedOperation::new`], [`AppliedTarget::new`],
+//! [`ApplyParams::new`], the `new` on [`SetFieldsParams`], [`EditParams`]
+//! and [`NewParams`], and the constructor on each [`FieldChange`] and
+//! [`DocumentEdit`] variant. The plan types the applier destructures, below,
+//! can be written as literals and keep their constructors all the same:
 //! [`Operation::new`], the constructor on each [`OperationKind`],
-//! [`AuthorCondition`], [`PlanCondition`], [`FileState`] and [`PlanDocument`]
-//! variant, [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
+//! [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`], [`FileState`],
+//! [`WriteTarget`] and [`PlanDocument`] variant, [`AuthoredValue::string`],
+//! [`AuthoredValue::float`], [`AuthoredValue::list`], [`AuthoredValue::map`],
+//! [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
 //! [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
@@ -321,14 +359,17 @@
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
 //! [`FindingScope`], [`RungSelection`], [`ApplyMode`], [`PlanDocument`],
-//! [`OperationKind`], [`FileState`], [`AuthorCondition`] and [`PlanCondition`]
-//! are the nine members of that class: a section composes with an engine's
+//! [`OperationKind`], [`WriteTarget`], [`AuthoredValue`], [`FileState`],
+//! [`AuthorCondition`], [`ExpectedField`] and [`PlanCondition`]
+//! are the twelve members of that class: a section composes with an engine's
 //! own refusal to say what a client should do, a scope decides whether a
 //! finding is withheld from a document row, a selection is resolved to the
 //! ladder a search runs, and the one applier must decide what every mode,
-//! plan document, operation kind, file state and condition means — whether a
+//! plan document, operation kind, target, written value, file state and
+//! condition means — whether a
 //! request writes, how a document is planned, how a kind resolves into
-//! transitions, how a state is verified, how a condition is checked — since a
+//! transitions, which documents it writes and what it writes there, how a
+//! state is verified, how a condition is checked — since a
 //! request it cannot interpret must never apply as though it could, and a
 //! mode it has not decided must never fall into "otherwise apply". A composer of
 //! any of them that has not made the decision should fail to compile rather
@@ -340,7 +381,8 @@
 //! composer.
 //!
 //! **What the one applier interprets is exhaustively destructurable.** The
-//! payload variants of [`OperationKind`], [`FileState`], [`AuthorCondition`]
+//! payload variants of [`OperationKind`], [`WriteTarget`], [`AuthoredValue`],
+//! [`FileState`], [`AuthorCondition`], [`ExpectedField`]
 //! and [`PlanCondition`], and the structs [`Operation`], [`Transition`],
 //! [`ResolvedPlan`], [`AuthoredPlan`], [`Provenance`] and [`SkippedFinding`],
 //! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
@@ -382,7 +424,10 @@
 //! version field because it is short-lived: a caller whose plan is refused
 //! previews again under the build it is talking to. An answer that carries a
 //! plan — a report, or a refusal's fresh plan — still drops a field it does
-//! not know at its own level, and the plan inside it still refuses one.
+//! not know at its own level, and the plan inside it still refuses one. The
+//! document-local write requests — [`SetFieldsParams`], [`EditParams`] and
+//! [`NewParams`], with their changes and edits — refuse one too, since each
+//! becomes a plan and a field dropped from it would be dropped from the plan.
 //!
 //! # The code grammar, and what is not a code
 //!

@@ -2359,8 +2359,9 @@ sequenceDiagram
   S-->>C: HTTP response
 ```
 
-A write verb is a plan of one operation; `apply` is the same flow entered with an externally
-supplied plan, either operations or a resolved plan from a preview. Repair is a planner over
+A write verb compiles to a plan of its operations, one per change or edit it names; `apply`
+is the same flow entered with an externally supplied plan, either operations or a resolved
+plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they
 were planned against, and repair reads the live ambiguity class rather than a finding's
 snapshot. A request states whether it previews or applies; the wire has no default mode.

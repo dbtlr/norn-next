@@ -15,6 +15,22 @@
 //! condition cannot be mistaken for provenance, and an author's condition
 //! that became a before-state is not carried twice.
 //!
+//! **A plan carries its own force.** Either plan says whether it applies past
+//! the schema check, and the applier reads it from the plan, so a forced
+//! preview sent back applies the same way. It bypasses the schema check and
+//! nothing else — never create exclusivity, drift, a condition or the root's
+//! identity. The flag defaults to `false` and is written only when `true`:
+//! absent can only mean the strict reading, so a plan that omits it — every
+//! plan made before it existed included — is checked in full, and forcing is
+//! something a plan says out loud.
+//!
+//! **A resolved plan names its documents by path.** Planning expands a
+//! frontmatter kind's `where` target into one operation per matched document,
+//! so a resolved plan still carrying one is a fault in its shape, named by
+//! [`ResolvedPlan::unexpanded_targets`] and answered `request/plan-invalid`.
+//! It is judged rather than refused at the read, so it answers with that code
+//! and the operations it names.
+//!
 //! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
 //! the finding generation they read and the findings they skipped. No Layer 4
 //! planner emits provenance — every Layer 4 plan is authored by a write verb

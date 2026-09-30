@@ -7,7 +7,8 @@
 //! crosses beside a resolved plan, which already names each target and its
 //! two states, so a forecast repeating them would carry every transition of
 //! a vault-wide preview twice. What the plan cannot say is left: which targets
-//! drifted, and the folders the plan makes and removes.
+//! drifted, the folders the plan makes and removes, and the schema
+//! violations its force lets through.
 //!
 //! **A drifted target is marked, not judged.** A fresh plan resolved after a
 //! refusal marks every target that drifted, because a hash cannot tell a file

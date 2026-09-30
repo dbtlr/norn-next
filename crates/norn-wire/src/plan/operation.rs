@@ -19,9 +19,29 @@
 //! its `kind` reads, a key written twice is refused at every level, and a plan
 //! read in any format reads the same inside a request as alone.
 //!
-//! **An edit's anchor is not a condition.** The text a `str_replace` replaces
-//! is part of the operation: an operation whose anchor is gone no longer
-//! resolves, which is a different outcome from a condition that fails.
+//! **An edit's anchor is not a condition.** The text a `str_replace` replaces,
+//! and the heading a section kind names, are part of the operation: an
+//! operation whose anchor is gone or ambiguous no longer resolves, which is a
+//! different outcome from a condition that fails.
+//!
+//! **The kind map.** Four kinds place, edit, move and remove whole documents:
+//! `create_document`, `str_replace`, `move_document` and `delete_document`.
+//! Four write one frontmatter field of the documents a target names —
+//! `set_frontmatter`, `remove_frontmatter`, `push_frontmatter` and
+//! `pop_frontmatter` — and six edit one document's text: `replace_body` and
+//! the five section kinds. Push and pop stay kinds of their own rather than
+//! compiling to a set of the list they compute, so a plan resolved again
+//! after a foreign edit appends to or removes from what the document holds
+//! then, rather than writing a list computed before the edit. The legacy
+//! `add_frontmatter` is retired, not minted: adding a field only where it is
+//! absent is `set_frontmatter` under an expected-value condition of absent,
+//! and appending is `push_frontmatter`.
+//!
+//! **An expected value is the author's condition on one field.** It is
+//! checked at planning and becomes the document's before-state, as a content
+//! hash on a document the plan writes does. Its observation is tagged
+//! `state`, absent or present with a value, as a file state is, so a field
+//! holding null is never mistaken for a field that is absent.
 
 use std::borrow::Cow;
 use std::fmt;
