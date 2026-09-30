@@ -177,7 +177,9 @@ pub(super) struct Checked {
 
 /// Check every target of `plan`, reading the vault and writing nothing.
 ///
-/// **The checks run in this order**: the store can name every target; before
+/// **The checks run in this order**: no operation carries a `where` target
+/// planning did not expand, which stops as [`PlanFault::UnexpandedTarget`];
+/// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
 /// the vault gives it, at a place the vault reads documents at; no target
@@ -198,6 +200,12 @@ pub(super) fn check(
     view: &TreeView,
     declared: &Declared,
 ) -> Result<Checked, Unfit> {
+    // An operation whose target planning never expanded touches no file the
+    // shape check or the recomposition could name, so it is refused first,
+    // before it could pass unread.
+    if let Some(fault) = plan.unexpanded_targets() {
+        return Err(Unfit::Invalid(fault));
+    }
     let normalizer = view.normalizer();
     let stored = stored_paths(plan).map_err(|paths| Unfit::Invalid(disagreement(paths)))?;
     let misshapen = shape_disagrees(plan, normalizer);

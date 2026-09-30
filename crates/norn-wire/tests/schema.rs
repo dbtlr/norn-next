@@ -13,27 +13,29 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change, ChangesetOutcome,
-    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
-    DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentPath,
-    DocumentRow, Drift, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
-    Facet, FacetKind, FieldType, FieldValue, FileState, FindParams, FindReport, FindingKind,
-    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
-    GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily,
-    LinkHealth, LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NotReady,
+    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, Change,
+    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
+    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
+    DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldType, FieldValue, FileState, FindParams, FindReport, FindingKind, FindingRow,
+    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
+    HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth,
+    LinkRow, ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady,
     Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
     PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
     ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
     RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, Replace,
     RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
     ResolvedPlan, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaSource, Score, SearchParams, SearchReport, SetParams, SetReport, Severity,
-    SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport,
-    TagRow, TagSource, TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams,
-    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, VaultAddress, VaultAnswer, VaultName, VaultRoot, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause,
+    SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetFieldsParams, SetParams,
+    SetReport, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
+    TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress,
+    VaultAnswer, VaultName, VaultRoot, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -270,6 +272,17 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<TargetResult>(),
         schema_of::<AppliedTarget>(),
         schema_of::<ApplyReport>(),
+        schema_of::<AuthoredValue>(),
+        schema_of::<norn_wire::FiniteFloat>(),
+        schema_of::<ValueMap>(),
+        schema_of::<WriteTarget>(),
+        schema_of::<ExpectedField>(),
+        schema_of::<SchemaViolation>(),
+        schema_of::<FieldChange>(),
+        schema_of::<SetFieldsParams>(),
+        schema_of::<DocumentEdit>(),
+        schema_of::<EditParams>(),
+        schema_of::<NewParams>(),
     ]
 }
 
@@ -2843,12 +2856,48 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("str_replace", vec!["path", "old_str", "new_str"]),
         ("move_document", vec!["from", "to"]),
         ("delete_document", vec!["path"]),
+        ("replace_body", vec!["path", "content"]),
+        ("replace_section", vec!["path", "heading", "content"]),
+        ("append_to_section", vec!["path", "heading", "content"]),
+        ("delete_section", vec!["path", "heading"]),
+        ("insert_before_heading", vec!["path", "heading", "content"]),
+        ("insert_after_heading", vec!["path", "heading", "content"]),
+    ];
+    let targeted = [
+        ("set_frontmatter", vec!["field", "value"]),
+        ("remove_frontmatter", vec!["field"]),
+        ("push_frontmatter", vec!["field", "value"]),
+        ("pop_frontmatter", vec!["field", "value"]),
     ];
     assert_eq!(
         sorted(tag_constants(&schema, "kind")),
-        sorted(kinds.iter().map(|(kind, _)| *kind))
+        sorted(kinds.iter().chain(&targeted).map(|(kind, _)| *kind))
     );
-    for (kind, fields) in &kinds {
+    for (kind, own) in &targeted {
+        let fields_schema = &branch(&schema, "kind", kind)["properties"]["fields"];
+        let mut fields: BTreeSet<&str> = own.iter().copied().collect();
+        assert_eq!(required_names(fields_schema), fields, "the {kind} fields");
+        fields.extend(["path", "where"]);
+        assert_eq!(property_names(fields_schema), fields, "the {kind} fields");
+        assert!(
+            refuses_unknown_keys(fields_schema),
+            "the {kind} fields admit any key: {fields_schema}"
+        );
+        assert_eq!(
+            fields_schema["oneOf"],
+            serde_json::json!([{"required": ["path"]}, {"required": ["where"]}]),
+            "the {kind} fields do not name exactly one of `path` and `where`"
+        );
+        assert_eq!(
+            fields_schema["properties"]["where"]["items"]["$ref"].as_str(),
+            Some("#/$defs/Predicate")
+        );
+        assert!(
+            fields_schema.get("description").is_none(),
+            "the {kind} fields carry the target's description: {fields_schema}"
+        );
+    }
+    for (kind, _) in kinds.iter().chain(&targeted) {
         let branch = branch(&schema, "kind", kind);
         assert_eq!(
             property_names(branch),
@@ -2866,6 +2915,17 @@ fn an_operation_advertises_each_kind_with_its_fields() {
             refuses_unknown_keys(branch),
             "the {kind} branch admits any key"
         );
+        assert_eq!(
+            branch["properties"]["conditions"]["items"]["$ref"].as_str(),
+            Some("#/$defs/AuthorCondition")
+        );
+        assert_eq!(
+            branch["properties"]["id"]["anyOf"][0]["$ref"].as_str(),
+            Some("#/$defs/OperationId")
+        );
+    }
+    for (kind, fields) in &kinds {
+        let branch = branch(&schema, "kind", kind);
         let fields_schema = &branch["properties"]["fields"];
         assert_eq!(
             property_names(fields_schema),
@@ -2880,14 +2940,6 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         assert!(
             refuses_unknown_keys(fields_schema),
             "the {kind} fields admit any key"
-        );
-        assert_eq!(
-            branch["properties"]["conditions"]["items"]["$ref"].as_str(),
-            Some("#/$defs/AuthorCondition")
-        );
-        assert_eq!(
-            branch["properties"]["id"]["anyOf"][0]["$ref"].as_str(),
-            Some("#/$defs/OperationId")
         );
     }
     assert_eq!(
@@ -2951,12 +3003,13 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
                 "transitions",
                 "conditions",
                 "provenance",
+                "force",
                 "footnote",
             ],
         ),
         (
             schema_of::<AuthoredPlan>(),
-            vec!["plan", "vault", "operations", "footnote"],
+            vec!["plan", "vault", "operations", "force", "footnote"],
         ),
         (schema_of::<Transition>(), vec!["path", "before", "after"]),
         (
@@ -2981,8 +3034,15 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         .into_iter()
         .collect()
     );
+    assert_eq!(
+        sorted(tag_constants(&schema_of::<AuthorCondition>(), "condition")),
+        sorted(["content_hash", "expected_value"])
+    );
+    assert_eq!(
+        tag_constants(&schema_of::<PlanCondition>(), "condition"),
+        ["content_hash"]
+    );
     for schema in [schema_of::<AuthorCondition>(), schema_of::<PlanCondition>()] {
-        assert_eq!(tag_constants(&schema, "condition"), ["content_hash"]);
         let branch = branch(&schema, "condition", "content_hash");
         assert!(refuses_unknown_keys(branch), "{branch} admits any key");
         assert_eq!(
@@ -3042,7 +3102,7 @@ fn a_plan_document_advertises_both_plans_under_its_plan_tag() {
     let operations = plan("operations");
     assert_eq!(
         property_names(operations),
-        ["plan", "vault", "operations", "footnote"]
+        ["plan", "vault", "operations", "force", "footnote"]
             .into_iter()
             .collect()
     );
@@ -3057,6 +3117,7 @@ fn a_plan_document_advertises_both_plans_under_its_plan_tag() {
             "transitions",
             "conditions",
             "provenance",
+            "force",
             "footnote",
         ]
         .into_iter()
@@ -3125,6 +3186,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "targets",
             "folders_made",
             "folders_removed",
+            "forced",
         ]
         .into_iter()
         .collect()
@@ -3148,7 +3210,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
     let forecast = schema_of::<Forecast>();
     assert_eq!(
         property_names(&forecast),
-        ["drifted", "folders_made", "folders_removed"]
+        ["drifted", "folders_made", "folders_removed", "forced"]
             .into_iter()
             .collect()
     );
@@ -3196,7 +3258,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "unknown_requirement",
             "requires_cycle",
             "content_cycle",
-            "transitions_disagree"
+            "transitions_disagree",
+            "unexpanded_target"
         ])
     );
     let schema = schema_of::<ErrorDetail>();
@@ -3225,5 +3288,190 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
         branch(&schema, "code", "host/apply-not-run")["properties"]["cause"]["$ref"].as_str(),
         Some("#/$defs/ErrorEnvelope"),
         "the cause an apply did not run for is not the one refusal shape"
+    );
+}
+
+// ── Document-local writes ────────────────────────────────────────────────
+
+/// **A written value advertises a tree of plain values**: every JSON type,
+/// its list items and map entries the value type itself, and no tag.
+#[test]
+fn a_written_value_advertises_a_tree_of_plain_values() {
+    let schema = schema_of::<AuthoredValue>();
+    assert_eq!(
+        schema["type"],
+        serde_json::json!([
+            "null", "boolean", "integer", "number", "string", "array", "object"
+        ])
+    );
+    assert_eq!(schema["items"]["$ref"].as_str(), Some("#"));
+    assert_eq!(schema["additionalProperties"]["$ref"].as_str(), Some("#"));
+    assert!(
+        schema.get("properties").is_none(),
+        "a value is tagged: {schema}"
+    );
+    let description = schema["description"].as_str().expect("a description");
+    for promise in ["finite", "order", "each key once"] {
+        assert!(description.contains(promise), "{description}");
+    }
+}
+
+/// **An expected value advertises its `state` tag**, absent carrying nothing
+/// and present carrying the written value, each refusing any other key.
+#[test]
+fn an_expected_value_advertises_its_state_tag() {
+    let schema = schema_of::<ExpectedField>();
+    assert_eq!(
+        sorted(tag_constants(&schema, "state")),
+        sorted(["absent", "present"])
+    );
+    assert_eq!(
+        property_names(branch(&schema, "state", "absent")),
+        ["state"].into_iter().collect()
+    );
+    let present = branch(&schema, "state", "present");
+    assert_eq!(
+        required_names(present),
+        ["state", "value"].into_iter().collect()
+    );
+    assert_eq!(
+        present["properties"]["value"]["$ref"].as_str(),
+        Some("#/$defs/AuthoredValue")
+    );
+    for state in ["absent", "present"] {
+        assert!(refuses_unknown_keys(branch(&schema, "state", state)));
+    }
+    let condition = branch(
+        &schema_of::<AuthorCondition>(),
+        "condition",
+        "expected_value",
+    )
+    .clone();
+    assert_eq!(
+        required_names(&condition),
+        ["condition", "path", "field", "expect"]
+            .into_iter()
+            .collect()
+    );
+    assert!(
+        refuses_unknown_keys(&condition),
+        "{condition} admits any key"
+    );
+}
+
+/// **A forced violation and a refused one advertise one shape.** The forecast
+/// and the applied report list the violation type, and the schema-violation
+/// check carries that type's four fields beside its tag.
+#[test]
+fn a_forced_violation_advertises_the_shape_a_refusal_carries() {
+    let violation = schema_of::<SchemaViolation>();
+    let fields: BTreeSet<&str> = ["path", "kind", "target", "message"].into_iter().collect();
+    assert_eq!(property_names(&violation), fields);
+    let checks = schema_of::<RefusedCheck>();
+    let check = branch(&checks, "check", "schema_violation");
+    let mut with_tag = fields.clone();
+    with_tag.insert("check");
+    assert_eq!(property_names(check), with_tag, "{check}");
+    assert_eq!(
+        required_names(check),
+        ["check", "path", "kind", "message"].into_iter().collect()
+    );
+    assert_eq!(
+        schema_of::<Forecast>()["properties"]["forced"]["items"]["$ref"].as_str(),
+        Some("#/$defs/SchemaViolation")
+    );
+    assert_eq!(
+        branch(&schema_of::<ApplyReport>(), "outcome", "applied")["properties"]["forced"]["items"]
+            ["$ref"]
+            .as_str(),
+        Some("#/$defs/SchemaViolation")
+    );
+}
+
+/// **A write request advertises the whole of what it carries and admits no
+/// other key**: its vault and its mode required, with no default, its
+/// changes or edits required with a floor of one, and its conditions and
+/// force optional. A `set` advertises exactly one of `path` and `where`.
+#[test]
+fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
+    for (schema, fields, required) in [
+        (
+            schema_of::<SetFieldsParams>(),
+            vec![
+                "vault",
+                "mode",
+                "path",
+                "where",
+                "changes",
+                "conditions",
+                "force",
+            ],
+            vec!["vault", "mode", "changes"],
+        ),
+        (
+            schema_of::<EditParams>(),
+            vec!["vault", "mode", "path", "edits", "conditions", "force"],
+            vec!["vault", "mode", "path", "edits"],
+        ),
+        (
+            schema_of::<NewParams>(),
+            vec!["vault", "mode", "path", "content", "conditions", "force"],
+            vec!["vault", "mode", "path", "content"],
+        ),
+    ] {
+        assert_eq!(property_names(&schema), fields.into_iter().collect());
+        assert_eq!(required_names(&schema), required.into_iter().collect());
+        assert!(refuses_unknown_keys(&schema), "{schema} admits any key");
+        assert_eq!(
+            schema["properties"]["mode"]["$ref"].as_str(),
+            Some("#/$defs/ApplyMode")
+        );
+    }
+    let set = schema_of::<SetFieldsParams>();
+    assert_eq!(
+        set["oneOf"],
+        serde_json::json!([{"required": ["path"]}, {"required": ["where"]}])
+    );
+    assert_eq!(set["properties"]["changes"]["minItems"].as_u64(), Some(1));
+    assert_eq!(
+        schema_of::<EditParams>()["properties"]["edits"]["minItems"].as_u64(),
+        Some(1)
+    );
+    let target = schema_of::<WriteTarget>();
+    assert_eq!(
+        property_names(&target),
+        ["path", "where"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(&target), "{target} admits any key");
+}
+
+/// A change advertises its `change` tag and an edit its `edit` tag, each
+/// member refusing a key it does not name.
+#[test]
+fn a_change_and_an_edit_advertise_their_tags() {
+    let changes = schema_of::<FieldChange>();
+    assert_eq!(
+        sorted(tag_constants(&changes, "change")),
+        sorted(["set", "remove", "push", "pop"])
+    );
+    let edits = schema_of::<DocumentEdit>();
+    assert_eq!(
+        sorted(tag_constants(&edits, "edit")),
+        sorted([
+            "str_replace",
+            "replace_section",
+            "append_to_section",
+            "delete_section",
+            "insert_before_heading",
+            "insert_after_heading",
+            "replace_body",
+        ])
+    );
+    for branch in branches(&changes).iter().chain(branches(&edits)) {
+        assert!(refuses_unknown_keys(branch), "{branch} admits any key");
+    }
+    assert_eq!(
+        branch(&changes, "change", "set")["properties"]["value"]["$ref"].as_str(),
+        Some("#/$defs/AuthoredValue")
     );
 }

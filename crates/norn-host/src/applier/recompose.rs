@@ -200,7 +200,17 @@ fn conditions_differ(
         .collect();
     let mut differing = Vec::new();
     for operation in &plan.operations {
-        for AuthorCondition::ContentHash { path, hash } in &operation.conditions {
+        for condition in &operation.conditions {
+            let (path, hash) = match condition {
+                AuthorCondition::ContentHash { path, hash } => (path, hash),
+                // NORN-296: planned in the host PR. Until then planning never
+                // resolves an operation carrying one, so a resolved plan that
+                // does is not what its operations do.
+                AuthorCondition::ExpectedValue { path, .. } => {
+                    differing.push(path.clone());
+                    continue;
+                }
+            };
             let held = identity(normalizer, path.as_str()).is_some_and(|file| {
                 match composition.before(&file) {
                     Some(before) => *before == FileState::present(hash.clone()),

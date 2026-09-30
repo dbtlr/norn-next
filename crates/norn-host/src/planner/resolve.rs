@@ -57,6 +57,7 @@ pub(crate) fn resolve<V: VaultView>(
         plan: OperationsTag,
         vault,
         operations,
+        force,
         footnote,
     } = authored;
     let view = &Remembered::over(view);
@@ -110,6 +111,9 @@ pub(crate) fn resolve<V: VaultView>(
         conditions,
     );
     plan.footnote = footnote;
+    // NORN-296: the applier's schema check honours the force in the host PR;
+    // until then the plan carries it and a forced plan is checked as any other.
+    plan.force = force;
     let unresolved = left_out
         .into_iter()
         .map(|(position, reason)| UnresolvedOperation::new(operations[position].clone(), reason))
@@ -173,8 +177,18 @@ fn failures<V: VaultView>(
     }
     let mut failed = BTreeMap::new();
     for &position in order {
-        for AuthorCondition::ContentHash { path, hash } in &operations[position].conditions {
-            if let Some(detail) = unmet_condition(path, hash, composition, view)? {
+        for condition in &operations[position].conditions {
+            let unmet = match condition {
+                AuthorCondition::ContentHash { path, hash } => {
+                    unmet_condition(path, hash, composition, view)?
+                }
+                // NORN-296: planned in the host PR. Until then an operation
+                // carrying an expected value is left unresolved, naming why.
+                AuthorCondition::ExpectedValue { .. } => {
+                    Some("an `expected_value` condition is not yet planned".to_string())
+                }
+            };
+            if let Some(detail) = unmet {
                 failed
                     .entry(position)
                     .or_insert_with(|| UnresolvedReason::no_longer_resolves(detail));
@@ -322,7 +336,13 @@ fn plan_conditions<V: VaultView>(
 ) -> Result<Vec<PlanCondition>, V::Error> {
     let mut conditions: Vec<PlanCondition> = Vec::new();
     for &position in order {
-        for AuthorCondition::ContentHash { path, hash } in &operations[position].conditions {
+        for condition in &operations[position].conditions {
+            let (path, hash) = match condition {
+                AuthorCondition::ContentHash { path, hash } => (path, hash),
+                // NORN-296: planned in the host PR. Until then an operation
+                // carrying one never resolves, so none reaches here.
+                AuthorCondition::ExpectedValue { .. } => continue,
+            };
             let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
                 continue;
             };
@@ -396,6 +416,57 @@ mod tests {
                     .expect("an unresolved operation is one of the plan's")
             })
             .collect()
+    }
+
+    // NORN-296: the host PR plans these and replaces this test.
+    /// **A document-local kind or an expected value is left unresolved until
+    /// it is planned**, naming why, rather than acting or being dropped: the
+    /// operations on its document fall with it, and a forced plan carries
+    /// its force.
+    #[test]
+    fn a_document_local_write_is_unresolved_until_it_is_planned() {
+        let vault = MemoryVault::with(&[("a.md", "draft"), ("b.md", "B")]);
+        let operations = vec![
+            Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final")),
+            Operation::new(OperationKind::replace_body(path("a.md"), "body")),
+            Operation::new(OperationKind::set_frontmatter(
+                norn_wire::WriteTarget::matching(Vec::new()),
+                "status",
+                norn_wire::AuthoredValue::Bool(true),
+            )),
+            Operation::new(OperationKind::delete_document(path("b.md"))).with_conditions(vec![
+                AuthorCondition::expected_value(
+                    path("b.md"),
+                    "status",
+                    norn_wire::ExpectedField::absent(),
+                ),
+            ]),
+        ];
+        let resolution = match resolve(
+            authored(operations.clone()).with_force(true),
+            root(),
+            &BTreeSet::new(),
+            &vault,
+        ) {
+            Ok(resolution) => resolution,
+            Err(failure) => panic!("the plan resolves: {failure:?}"),
+        };
+        let mut positions = unresolved_positions(&resolution, &operations);
+        positions.sort_unstable();
+        assert_eq!(positions, vec![0, 1, 2, 3]);
+        assert!(resolution.plan.transitions.is_empty());
+        assert!(resolution.plan.force);
+        let details: Vec<String> = resolution
+            .unresolved
+            .iter()
+            .map(|unresolved| format!("{:?}", unresolved.reason))
+            .collect();
+        for named in ["replace_body", "set_frontmatter", "expected_value"] {
+            assert!(
+                details.iter().any(|detail| detail.contains(named)),
+                "no reason names `{named}`: {details:?}"
+            );
+        }
     }
 
     #[test]

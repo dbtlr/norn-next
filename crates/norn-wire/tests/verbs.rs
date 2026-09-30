@@ -8,10 +8,11 @@
 //! that spells it, and that the vault a request carries is the one vault
 //! address the vocabulary has.
 //!
-//! The table holds all fifteen verbs the registry declares, and the suite
+//! The table holds all eighteen verbs the registry declares, and the suite
 //! holds the table equal to [`Verb::ALL`]: a verb minted without a row here is
 //! a verb no surface can render, and a row here naming a verb the registry
-//! does not hold spells a request nobody can make.
+//! does not hold spells a request nobody can make. The three document-local
+//! write verbs answer as `apply` does, so their rows share its report type.
 //!
 //! One verb carries its vault somewhere other than its params' own `vault`:
 //! `apply` sends a plan, and a plan names its vault by address, so every plan
@@ -20,10 +21,11 @@
 
 use norn_wire::{
     Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DescribeParams, DescribeReport,
-    DoctorRegistryParams, DoctorRegistryReport, FindParams, FindReport, GetParams, GetReport,
-    ListParams, ListReport, RegisterParams, RegisterReport, ReloadParams, ReloadReport,
-    ResolveParams, ResolveReport, SearchParams, SearchReport, SetParams, SetReport, StatusParams,
-    StatusReport, UnregisterParams, UnregisterReport, ValidateParams, ValidateReport, Verb,
+    DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport, GetParams,
+    GetReport, ListParams, ListReport, NewParams, RegisterParams, RegisterReport, ReloadParams,
+    ReloadReport, ResolveParams, ResolveReport, SearchParams, SearchReport, SetFieldsParams,
+    SetParams, SetReport, StatusParams, StatusReport, UnregisterParams, UnregisterReport,
+    ValidateParams, ValidateReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -133,6 +135,33 @@ fn verb_table() -> Vec<Spelling> {
             report_type: "ApplyReport",
             report_rows: None,
             params: schema_of::<ApplyParams>(),
+            report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::Set,
+            params_type: "SetFieldsParams",
+            report_type: "ApplyReport",
+            report_rows: None,
+            params: schema_of::<SetFieldsParams>(),
+            report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::Edit,
+            params_type: "EditParams",
+            report_type: "ApplyReport",
+            report_rows: None,
+            params: schema_of::<EditParams>(),
+            report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::New,
+            params_type: "NewParams",
+            report_type: "ApplyReport",
+            report_rows: None,
+            params: schema_of::<NewParams>(),
             report: schema_of::<ApplyReport>(),
         },
         Spelling {

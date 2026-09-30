@@ -30,3 +30,5 @@ pub(crate) mod hash;
 pub(crate) mod operation;
 pub(crate) mod outcome;
 pub(crate) mod root;
+pub(crate) mod value;
+pub(crate) mod write_target;

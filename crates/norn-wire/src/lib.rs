@@ -481,6 +481,7 @@ mod target;
 mod trust;
 mod vault;
 mod verb;
+mod write;
 
 pub use address::{
     Directory, IllegalPath, PollBackend, SchemaSource, UnknownPollBackend, VaultAddress, VaultRoot,
@@ -518,12 +519,15 @@ pub use plan::document::{
 pub use plan::forecast::{FolderPath, Forecast};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
-    AuthorCondition, IllegalOperationId, Operation, OperationId, OperationKind,
+    AuthorCondition, ExpectedField, IllegalOperationId, Operation, OperationId, OperationKind,
 };
 pub use plan::outcome::{
-    InterruptionCause, PlanFault, RefusedCheck, UnresolvedOperation, UnresolvedReason,
+    InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
+    UnresolvedReason,
 };
 pub use plan::root::RootIdentity;
+pub use plan::value::{AuthoredValue, DuplicateKey, FiniteFloat, NonFiniteFloat, ValueMap};
+pub use plan::write_target::WriteTarget;
 pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};
@@ -559,3 +563,6 @@ pub use vault::unregister::{UnregisterParams, UnregisterReport};
 pub use verb::{
     Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
 };
+pub use write::edit::{DocumentEdit, EditParams};
+pub use write::new::NewParams;
+pub use write::set::{FieldChange, SetFieldsParams};

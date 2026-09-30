@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::document::DocumentPath;
 use crate::plan::document::{PlanDocument, ResolvedPlan};
 use crate::plan::forecast::{FolderPath, Forecast};
+use crate::plan::outcome::SchemaViolation;
 
 /// Whether a request previews a plan or applies it.
 ///
@@ -134,6 +135,10 @@ pub enum ApplyReport {
         folders_made: Vec<FolderPath>,
         /// The folders the plan's removals left empty, which it removed.
         folders_removed: Vec<FolderPath>,
+        /// Every schema violation a written result carries that the plan's
+        /// force let through. Empty for a plan that is not forced, and for a
+        /// forced plan whose every result is valid.
+        forced: Vec<SchemaViolation>,
     },
 }
 
@@ -144,7 +149,7 @@ impl ApplyReport {
     }
 
     /// The `plan` applied, its `changeset`'s outcome, its `targets`, and the
-    /// folders it made and removed.
+    /// folders it made and removed, forcing nothing through.
     pub const fn applied(
         plan: ResolvedPlan,
         changeset: ChangesetOutcome,
@@ -158,6 +163,18 @@ impl ApplyReport {
             targets,
             folders_made,
             folders_removed,
+            forced: Vec::new(),
         }
+    }
+
+    /// The report listing `violations` as those a forced plan lets through:
+    /// in a preview's forecast, or in the applied report itself.
+    #[must_use]
+    pub fn with_forced(mut self, violations: Vec<SchemaViolation>) -> Self {
+        match &mut self {
+            ApplyReport::Applied { forced, .. } => *forced = violations,
+            ApplyReport::Previewed { forecast, .. } => forecast.forced = violations,
+        }
+        self
     }
 }

@@ -108,6 +108,19 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
+                // NORN-296: planned in the host PR. Until then a
+                // document-local kind never composes, so no order it stands
+                // in carries content anywhere.
+                OperationKind::SetFrontmatter { .. }
+                | OperationKind::RemoveFrontmatter { .. }
+                | OperationKind::PushFrontmatter { .. }
+                | OperationKind::PopFrontmatter { .. }
+                | OperationKind::ReplaceBody { .. }
+                | OperationKind::ReplaceSection { .. }
+                | OperationKind::AppendToSection { .. }
+                | OperationKind::DeleteSection { .. }
+                | OperationKind::InsertBeforeHeading { .. }
+                | OperationKind::InsertAfterHeading { .. } => {}
             }
         }
         lineage

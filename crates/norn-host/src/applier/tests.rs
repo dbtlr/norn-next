@@ -591,9 +591,14 @@ fn a_plan_refuses_the_schema_violations_it_introduces() {
         checks
             .into_iter()
             .map(|check| match check {
-                norn_wire::RefusedCheck::SchemaViolation {
-                    path, kind, target, ..
-                } => norn_wire::RefusedCheck::schema_violation(path, kind, target, String::new()),
+                norn_wire::RefusedCheck::SchemaViolation { violation, .. } => {
+                    norn_wire::RefusedCheck::schema_violation(
+                        violation.path,
+                        violation.kind,
+                        violation.target,
+                        String::new(),
+                    )
+                }
                 other => other,
             })
             .collect()
@@ -1077,6 +1082,37 @@ fn a_move_whose_destination_transition_is_dropped_is_refused() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
 }
 
+/// **A resolved plan still carrying a `where` target is invalid.** Planning
+/// expands every `where` target into operations on paths, so such a plan was
+/// not made by planning: it answers `request/plan-invalid` naming the
+/// operation, before the vault is read, and nothing is published.
+#[test]
+fn a_resolved_plan_carrying_a_where_target_is_invalid() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.operations
+        .push(Operation::new(norn_wire::OperationKind::set_frontmatter(
+            norn_wire::WriteTarget::matching(Vec::new()),
+            "status",
+            norn_wire::AuthoredValue::string("done"),
+        )));
+    let envelope = fixture
+        .apply(plan)
+        .into_wire()
+        .expect("a refusal is answered")
+        .expect_err("the plan is refused");
+    assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
+    assert_eq!(
+        envelope.detail(),
+        &norn_wire::ErrorDetail::plan_invalid(norn_wire::PlanFault::unexpanded_target(vec![1]))
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "no write recorded"
+    );
+}
+
 /// A removal no operation makes, added to a plan, is refused.
 #[test]
 fn an_extra_removal_no_operation_makes_is_refused() {
@@ -1423,8 +1459,10 @@ fn a_result_is_judged_against_the_document_its_content_came_from() {
             .checks
             .iter()
             .map(|check| match check {
-                norn_wire::RefusedCheck::SchemaViolation { path, target, .. } =>
-                    (path.as_str().to_string(), target.clone()),
+                norn_wire::RefusedCheck::SchemaViolation { violation, .. } => (
+                    violation.path.as_str().to_string(),
+                    violation.target.clone()
+                ),
                 other => panic!("a schema check: {other:?}"),
             })
             .collect::<Vec<_>>(),

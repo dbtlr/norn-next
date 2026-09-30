@@ -206,6 +206,13 @@ pub enum Verb {
     Describe,
     /// Preview or apply a plan: operations, or a resolved plan.
     Apply,
+    /// Change the frontmatter of one document, or of every document a
+    /// predicate list matches.
+    Set,
+    /// Change the text of one document.
+    Edit,
+    /// Create one document at a path.
+    New,
     /// Register a vault under a name.
     VaultRegister,
     /// Stop serving a registered name and remove its registration.
@@ -231,7 +238,7 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 15] = [
+    pub const ALL: [Verb; 18] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
@@ -239,6 +246,9 @@ impl Verb {
         Verb::Validate,
         Verb::Describe,
         Verb::Apply,
+        Verb::Set,
+        Verb::Edit,
+        Verb::New,
         Verb::VaultRegister,
         Verb::VaultUnregister,
         Verb::VaultList,
@@ -259,6 +269,9 @@ impl Verb {
             Verb::Validate => "validate",
             Verb::Describe => "describe",
             Verb::Apply => "apply",
+            Verb::Set => "set",
+            Verb::Edit => "edit",
+            Verb::New => "new",
             Verb::VaultRegister => "vault_register",
             Verb::VaultUnregister => "vault_unregister",
             Verb::VaultList => "vault_list",
@@ -280,7 +293,8 @@ impl Verb {
         match self {
             // A vault address is carried, and the request is answered from
             // that vault's entry under a hold of it. An apply carries its
-            // vault as the address its plan names.
+            // vault as the address its plan names; a write verb carries it
+            // as its own.
             Verb::Find
             | Verb::Search
             | Verb::Get
@@ -288,6 +302,9 @@ impl Verb {
             | Verb::Validate
             | Verb::Describe
             | Verb::Apply
+            | Verb::Set
+            | Verb::Edit
+            | Verb::New
             | Verb::VaultReload => Addressing::Required,
             // No vault address is carried; the request is answered from the
             // serving set and the registry, naming no entry to be held.
