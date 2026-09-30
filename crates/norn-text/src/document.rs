@@ -75,6 +75,12 @@ pub enum EditError {
         field: String,
         kind: &'static str,
     },
+    /// A pop named a value the field's list does not hold. A pop that changes
+    /// nothing is refused rather than reported as done.
+    ListValueAbsent {
+        field: String,
+        value: Value,
+    },
     Render(RenderError),
     Section(SectionError),
     /// The addressed heading sits inside a blockquote or a list item, whose
@@ -134,6 +140,9 @@ impl fmt::Display for EditError {
             EditError::FieldAbsent { field } => write!(f, "the field {field:?} is not present"),
             EditError::FieldNotAList { field, kind } => {
                 write!(f, "the field {field:?} holds a {kind}, not a list")
+            }
+            EditError::ListValueAbsent { field, value } => {
+                write!(f, "the list {field:?} holds no element equal to {value:?}")
             }
             EditError::Render(error) => write!(f, "{error}"),
             EditError::Section(error) => write!(f, "{error}"),
@@ -929,6 +938,32 @@ impl<'a> Document<'a> {
     pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
         let mut items = self.list_items(field)?.unwrap_or_default();
         items.push(value.clone());
+        self.set_field(field, &Value::Sequence(items))
+    }
+
+    /// Remove every element equal to `value` from the list `field` holds,
+    /// returning the whole edited document.
+    ///
+    /// Popping the last element leaves the field holding an empty list; the
+    /// field stays. Nothing is silently left as it was: a value the list does
+    /// not hold refuses with [`EditError::ListValueAbsent`], an absent field
+    /// with [`EditError::FieldAbsent`], and a field holding a scalar or a map
+    /// with [`EditError::FieldNotAList`]. The write is
+    /// [`Document::set_field`]'s, proven the same way.
+    pub fn pop_from_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
+        let Some(mut items) = self.list_items(field)? else {
+            return Err(EditError::FieldAbsent {
+                field: field.to_string(),
+            });
+        };
+        let held = items.len();
+        items.retain(|item| item != value);
+        if items.len() == held {
+            return Err(EditError::ListValueAbsent {
+                field: field.to_string(),
+                value: value.clone(),
+            });
+        }
         self.set_field(field, &Value::Sequence(items))
     }
 

@@ -1685,3 +1685,57 @@ fn a_push_to_a_scalar_or_map_field_refuses() {
         );
     }
 }
+
+/// **A pop removes every element equal to the value**, and popping the last
+/// one leaves the field holding an empty list rather than removing it.
+#[test]
+fn a_pop_removes_every_equal_element() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b\n  - a\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  - b\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a]\n---\n").pop_from_list("tags", &string("a")),
+        Ok("---\ntags: []\n---\n".to_string())
+    );
+}
+
+/// **A pop of a value the list does not hold, or from a field the block does
+/// not have, refuses** rather than succeeding with nothing changed.
+#[test]
+fn a_pop_of_an_absent_value_or_from_an_absent_field_refuses() {
+    let source = "---\ntags: [a]\ntitle: t\n---\n";
+    assert_eq!(
+        Document::parse(source).pop_from_list("tags", &string("z")),
+        Err(EditError::ListValueAbsent {
+            field: "tags".into(),
+            value: string("z")
+        })
+    );
+    assert_eq!(
+        Document::parse(source).pop_from_list("aliases", &string("a")),
+        Err(EditError::FieldAbsent {
+            field: "aliases".into()
+        })
+    );
+    assert_eq!(
+        Document::parse(source).pop_from_list("title", &string("t")),
+        Err(EditError::FieldNotAList {
+            field: "title".into(),
+            kind: "string"
+        })
+    );
+}
+
+/// **Removing a field the block does not have refuses as absent** rather than
+/// succeeding with nothing changed.
+#[test]
+fn removing_an_absent_field_refuses_as_absent() {
+    assert_eq!(
+        remove("---\ntitle: t\n---\n", "status"),
+        Err(EditError::FieldAbsent {
+            field: "status".into()
+        })
+    );
+}
