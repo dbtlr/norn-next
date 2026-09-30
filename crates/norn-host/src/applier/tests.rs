@@ -2357,3 +2357,35 @@ fn a_force_does_not_bypass_create_exclusivity_or_root_identity() {
     );
     assert_eq!(fixture.read("n.md").as_deref(), Some("# N, foreign\n"));
 }
+
+/// **An edit whose result is what the document already holds lands as a
+/// no-change transition, answered found**: a field set to the value it
+/// holds and a body replaced by itself resolve, their after-state is their
+/// before-state, and the apply writes nothing and reports each found, never
+/// wrote (ADR 0031's landed rule).
+#[test]
+fn an_edit_to_what_the_document_already_holds_lands_found() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\nstatus: draft\n---\n# A\n"),
+        ("b.md", "---\ntitle: B\n---\n# B\nbody\n"),
+    ]);
+    let plan = fixture.plan(vec![
+        setting("a.md", "status", norn_wire::AuthoredValue::string("draft")),
+        Operation::new(OperationKind::replace_body(path("b.md"), "# B\nbody\n")),
+    ]);
+    for transition in &plan.transitions {
+        assert_eq!(transition.after, transition.before, "{transition:?}");
+    }
+    let landed = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&landed),
+        vec![
+            ("a.md".to_string(), TargetResult::Found),
+            ("b.md".to_string(), TargetResult::Found),
+        ]
+    );
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "nothing written"
+    );
+}

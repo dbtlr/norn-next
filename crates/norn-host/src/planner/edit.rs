@@ -7,10 +7,13 @@
 //! back, refusing rather than returning bytes that do not read as intended.
 //! This module only names which splice a kind is, converts the author's
 //! [`AuthoredValue`] into the value model one to one ([`text_value`]), and
-//! states the planner's own refusals: the ones a splice would otherwise
-//! perform as a silent no-op, and the values `norn-text` does not write yet.
-//! Every refusal is an operation that does not resolve, in words, never a
-//! fault in the plan's shape.
+//! states the planner's own refusals: an append or insert of empty content,
+//! which a splice would otherwise perform as a silent no-op, and the values
+//! `norn-text` does not write yet. Every refusal is an operation that does
+//! not resolve, in words, never a fault in the plan's shape. An edit whose
+//! result is the bytes it was given — a field set to the value it holds, a
+//! body or a section replaced by itself — is no refusal: it composes to its
+//! document unchanged, which lands found.
 //!
 //! **What the planner refuses before any splice.** A frontmatter kind whose
 //! target is a `where` list, which planning expands into path targets before

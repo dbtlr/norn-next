@@ -2404,12 +2404,13 @@ document-local kinds: a frontmatter field set, removed, pushed to or popped from
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,
 which proves every splice by reading it back, and addresses a section through the one
-shared heading resolver a read and a wikilink anchor use. An edit that would change nothing
-or cannot be made leaves its operation unresolved rather than landing as a no-op: a push
-onto a scalar or a map, a pop or a removal of what the document does not hold, a heading
-that is ambiguous, missing or inside a container, empty content to append or insert, a
-refusal `norn-text` makes, and a nested value, which is not written until nested
-frontmatter values land. A resolved plan carries only path targets; a frontmatter
+shared heading resolver a read and a wikilink anchor use. An edit that cannot be made
+leaves its operation unresolved: a push onto a scalar or a map, a pop or a removal of what
+the document does not hold, a heading that is ambiguous, missing or inside a container,
+empty content to append or insert, a refusal `norn-text` makes, and a nested value, which
+is not written until nested frontmatter values land. An edit that rewrites what the
+document already holds — a field set to its value, a body or a section replaced by
+itself — resolves to a transition whose after-state is its before-state, and lands found. A resolved plan carries only path targets; a frontmatter
 operation's `where` target leaves its operation unresolved until planning expands it into
 one path target per matched document, and an empty one never matches.
 An author's condition — a content hash, or an expected frontmatter value that is absent or
