@@ -2493,9 +2493,9 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
 - **Every preview ends in the applier's judgment.** Operations are resolved first, as an apply
   resolves them, and the plan they resolve to is judged as a resolved plan sent directly is, so
   a composed result the schema refuses previews as `vault/plan-refused`. The applier's own
-  checks run over the resolved plan
-  — the root identity, every target at its before- or after-state, every condition, the
-  operations recomposed, the schema — reading the vault and staging nothing. Where an apply
+  checks run over the resolved plan — the root identity, every target at its before- or
+  after-state, every condition, the operations recomposed, the schema — reading the vault and
+  staging nothing. Where an apply
   would go on to stage, the preview answers the same plan and its forecast; where it would
   not, the preview answers what the apply ends in — a refusal, a fault in the plan's shape, or,
   where the checks cannot read the vault, `vault/write-failed` with the plan. So what a caller
