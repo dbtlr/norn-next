@@ -18,9 +18,9 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
-    DocumentPath, ErrorDetail, Forecast, GetParams, GetReport, Operation, OperationId,
-    OperationKind, PlanDocument, PlanFault, ReasonCode, ResolutionTarget, ResolvedPlan,
-    TargetResult, Transition, VaultAddress,
+    DocumentPath, ErrorDetail, FindingKind, FolderPath, Forecast, GetParams, GetReport, Operation,
+    OperationId, OperationKind, PlanDocument, PlanFault, ReasonCode, RefusedCheck,
+    ResolutionTarget, ResolvedPlan, TargetResult, Transition, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -422,5 +422,98 @@ fn a_preview_leaves_every_entry_of_the_vault_as_it_was() {
         tree_state(vault.path()),
         before,
         "a preview wrote to the vault"
+    );
+}
+
+/// A vault schema declaring the one tag `project` and reporting any other.
+const TAG_SCHEMA: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
+
+/// **An operations preview refuses as its apply would: a composed result
+/// that violates the vault schema answers `vault/plan-refused`.** Tagging the
+/// subject with a tag the schema does not declare resolves, but the result
+/// breaks the schema: the preview answers the same refusal, carrying the
+/// same `SchemaViolation` check, as an apply of the same operations, and
+/// neither writes.
+#[test]
+fn an_operations_preview_introducing_a_schema_violation_refuses_as_its_apply_does() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-schema");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), TAG_SCHEMA).expect("write the schema");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = tree_state(vault.path());
+    let tagging = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::str_replace(
+            DocumentPath::new(SUBJECT).expect("a document path"),
+            "draft",
+            "draft #stray",
+        ))],
+    ));
+
+    let answer = |mode| {
+        host.apply(ApplyParams::new(mode, tagging.clone()))
+            .expect("the request is answered")
+            .wait()
+            .expect_err("a plan violating the schema is refused")
+    };
+    let previewed = answer(ApplyMode::Preview);
+    assert_eq!(
+        tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
+    let applied = answer(ApplyMode::Apply);
+    assert_eq!(previewed.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused { checks, .. } = previewed.detail() else {
+        panic!("the preview answered {:?}", previewed.detail());
+    };
+    assert!(
+        matches!(
+            checks.as_slice(),
+            [RefusedCheck::SchemaViolation { path, kind: FindingKind::UndeclaredTag, target, .. }]
+                if path == &DocumentPath::new(SUBJECT).unwrap()
+                    && target.as_deref() == Some("stray")
+        ),
+        "the preview refused for {checks:?}"
+    );
+    assert_eq!(previewed.detail(), applied.detail());
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
+/// **A valid operations preview answers the plan its operations resolve to,
+/// with that plan's forecast**: moving the one document out of `inbox/` into
+/// `archive/` forecasts the folder it makes and the one it empties, and
+/// previewing the resolved plan it answers agrees on both.
+#[test]
+fn a_valid_operations_preview_answers_its_resolved_plan_and_forecast() {
+    let (_sandbox, vault) = a_vault("host-applies-preview-valid");
+    std::fs::create_dir(vault.path().join("inbox")).expect("make the inbox");
+    std::fs::write(vault.path().join("inbox/filed.md"), "# Filed\n").expect("write a document");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let filing = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new("inbox/filed.md").expect("a document path"),
+            DocumentPath::new("archive/filed.md").expect("a document path"),
+        ))],
+    ));
+
+    let (plan, forecast) = previewed(&host, filing);
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(
+        forecast,
+        Forecast::new(
+            Vec::new(),
+            vec![FolderPath::new("archive").unwrap()],
+            vec![FolderPath::new("inbox").unwrap()],
+        )
+    );
+    assert_eq!(
+        previewed(&host, PlanDocument::resolved(plan.clone())),
+        (plan, forecast)
     );
 }

@@ -3,14 +3,19 @@
 //!
 //! **One entry point, one handle.** [`Host::apply`] answers both modes with a
 //! [`PendingApply`]. A preview takes an ordinary read hold — the demand and the
-//! refusals a read's hold carries, and one snapshot — plans operations through
-//! the one planner or judges a resolved plan through the one applier's
-//! checks, and writes nothing, so its handle holds the answer
+//! refusals a read's hold carries, and one snapshot — plans any operations
+//! through the one planner, judges the resolved plan through the one
+//! applier's checks, and writes nothing, so its handle holds the answer
 //! already and [`PendingApply::wait`] returns it at once. An apply is admitted
 //! onto its entry's queue ([`Host::admit_apply`]), and its handle waits on the
 //! job that runs it. A caller therefore never branches on the mode to learn how
 //! to be answered, and the host call blocks no longer than admission or the
 //! preview's own planning.
+//!
+//! **Every preview ends in the applier's judgment.** Operations are resolved
+//! first, as an apply resolves them, and the plan they resolve to is then
+//! judged as a resolved plan is, so a composed result the vault schema
+//! refuses previews as `vault/plan-refused`, as its apply answers.
 //!
 //! **A plan is resolved against the files, on the ground the entry's coverage
 //! stands on.** The planner reads before-states from the vault through
@@ -225,8 +230,10 @@ where
     }
 
     /// Preview `plan` over the vault `name`: one read hold, one snapshot,
-    /// and nothing written. Operations are resolved through the one planner;
-    /// a resolved plan is judged by the applier's own checks.
+    /// and nothing written. Operations are resolved through the one planner,
+    /// and the plan they resolve to is judged by the applier's own checks,
+    /// as a resolved plan sent directly is: the preview answers that plan or
+    /// exactly the refusal its apply would.
     ///
     /// The ground is the one the entry's coverage recorded, read under the
     /// gate; whether its root still stands there is asked of the filesystem
@@ -250,9 +257,12 @@ where
         })?;
         ground.standing(name)?;
         let report = match plan {
+            // Planned as an apply plans it, then judged as an apply judges
+            // what it planned: resolving checks no schema, so the plan it
+            // answers goes through the same checks a resolved plan's does.
             PlanDocument::Operations(authored) => {
                 let resolution = fully_resolved(resolve_on(authored, &ground, name)?)?;
-                ApplyReport::previewed(resolution.plan, resolution.forecast)
+                preview_resolved(resolution.plan, &ground)?
             }
             PlanDocument::Resolved(resolved) => preview_resolved(resolved, &ground)?,
         };
