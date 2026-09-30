@@ -470,9 +470,10 @@ fn an_operations_preview_introducing_a_schema_violation_refuses_as_its_apply_doe
     assert!(
         matches!(
             checks.as_slice(),
-            [RefusedCheck::SchemaViolation { path, kind: FindingKind::UndeclaredTag, target, .. }]
-                if path == &DocumentPath::new(SUBJECT).unwrap()
-                    && target.as_deref() == Some("stray")
+            [RefusedCheck::SchemaViolation { violation, .. }]
+                if violation.path == DocumentPath::new(SUBJECT).unwrap()
+                    && violation.kind == FindingKind::UndeclaredTag
+                    && violation.target.as_deref() == Some("stray")
         ),
         "the preview refused for {checks:?}"
     );
