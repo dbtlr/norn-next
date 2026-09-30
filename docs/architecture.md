@@ -2415,8 +2415,10 @@ one path target per matched document, and an empty one never matches.
 An author's condition — a content hash, or an expected frontmatter value that is absent or
 reads as exactly one value — is checked at planning: on a file the plan writes it becomes
 that target's before-state, and on any other file it travels as a condition on the file's
-content, which the applier checks as any condition. A plan's `force` lets through the
-schema violations its results introduce and lists each, in the shape a refusal carries, on
+content, which the applier checks as any condition. A schema violation that stood before
+the plan still refuses where it stands on a field a frontmatter kind writes: an undeclared
+tag the rewritten `tags` field keeps, which a body tag is not. A plan's `force` lets
+through the schema violations its results introduce and lists each, in the shape a refusal carries, on
 the preview's forecast and the applied report; it bypasses no other check, and a refusal's
 fresh plan carries it.
 

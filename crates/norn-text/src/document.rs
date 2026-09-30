@@ -27,7 +27,7 @@ use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
 
 /// The one frontmatter field whose strings are read as tags.
-const TAGS_FIELD: &str = "tags";
+pub const TAGS_FIELD: &str = "tags";
 
 /// A frontmatter string value and where its bytes are.
 ///

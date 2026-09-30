@@ -456,8 +456,15 @@ impl Judging<'_> {
     /// **Each result is judged against the document its content came from**:
     /// its own before-state where it is edited in place, the moved document's
     /// where a move carried it, and nothing where an operation wrote it.
+    ///
+    /// **The fields written into a result** are those the plan's frontmatter
+    /// kinds write at its path, or at the path its content came from, since
+    /// an operation composes on the document before or after a move carries
+    /// it.
     fn violations(&self, units: &[Unit], contents: &[Option<Arc<[u8]>>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
+        let written_fields = schema::written_fields(self.plan, self.normalizer);
+        let no_field = BTreeSet::new();
         let mut checks = Vec::new();
         for (unit, content) in units.iter().zip(contents) {
             let Some(after) = content else { continue };
@@ -469,9 +476,20 @@ impl Judging<'_> {
                 continue;
             }
             let path = &self.plan.transitions[written].path;
-            let drawn_from = identity(self.normalizer, path.as_str())
-                .and_then(|file| self.lineage.source(&file))
-                .and_then(|source| index_of.get(&source.from).copied());
+            let file = identity(self.normalizer, path.as_str());
+            let source = file
+                .as_ref()
+                .and_then(|file| self.lineage.source(file))
+                .map(|source| source.from.clone());
+            let drawn_from = source
+                .as_ref()
+                .and_then(|source| index_of.get(source).copied());
+            let fields: BTreeSet<String> = [file.as_ref(), source.as_ref()]
+                .into_iter()
+                .flatten()
+                .flat_map(|file| written_fields.get(file).unwrap_or(&no_field))
+                .cloned()
+                .collect();
             let before: Vec<schema::Judged> = drawn_from
                 .and_then(|index| match &self.states[index] {
                     TargetState::AtBefore(Some(bytes)) => Some(schema::judge(
@@ -484,7 +502,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared);
-            checks.extend(schema::introduced(path, &after, &before));
+            checks.extend(schema::introduced(path, &after, &before, &fields));
         }
         checks
     }

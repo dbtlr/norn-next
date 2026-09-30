@@ -2143,3 +2143,88 @@ fn a_force_does_not_bypass_drift_or_a_failing_condition() {
         Some("---\ntags: [project, other]\n---\n")
     );
 }
+
+/// A set of `field` in `at` to `value`.
+fn setting(at: &str, field: &str, value: norn_wire::AuthoredValue) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        norn_wire::WriteTarget::path(path(at)),
+        field,
+        value,
+    ))
+}
+
+/// The tags `names`, as a written list value.
+fn tag_list(names: &[&str]) -> norn_wire::AuthoredValue {
+    norn_wire::AuthoredValue::List(
+        names
+            .iter()
+            .map(|name| norn_wire::AuthoredValue::string(*name))
+            .collect(),
+    )
+}
+
+/// **An unforced write keeps no schema violation standing on the field it
+/// rewrites**: a set or a push of `tags` that leaves an undeclared tag in
+/// the field refuses on it, though the tag stood before; forced, the set
+/// applies and lists it. A violation on no field the plan writes still does
+/// not refuse: an undeclared tag in the body beside a rewritten `tags`, and
+/// one in `tags` beside a rewritten `status`.
+#[test]
+fn an_unforced_write_keeps_no_violation_standing_on_the_field_it_rewrites() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[
+            ("a.md", "---\ntags: [stray]\n---\n# A\n"),
+            ("b.md", "---\ntags: [stray]\n---\n# B\n"),
+            ("c.md", "---\ntags: []\n---\n# C\n#stray\n"),
+            ("d.md", "---\ntags: [stray]\n---\n# D\n"),
+        ],
+    );
+    let set = fixture.plan(vec![setting(
+        "a.md",
+        "tags",
+        tag_list(&["stray", "project"]),
+    )]);
+    let checks = refused_for(fixture.apply(set.clone()));
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("the set refuses on the tag its field keeps: {checks:?}");
+    };
+    assert_eq!(violation.path, path("a.md"));
+    assert_eq!(violation.kind, norn_wire::FindingKind::UndeclaredTag);
+    assert_eq!(violation.target.as_deref(), Some("stray"));
+    let pushed = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("b.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("project"),
+    ))]);
+    assert!(matches!(
+        refused_for(fixture.apply(pushed)).as_slice(),
+        [norn_wire::RefusedCheck::SchemaViolation { .. }]
+    ));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [stray]\n---\n# A\n")
+    );
+
+    let mut forced = set;
+    forced.force = true;
+    let (_, forecast) = fixture
+        .preview(forced.clone())
+        .expect("the forced set previews");
+    assert_eq!(forecast.forced, vec![violation.clone()]);
+    assert_eq!(
+        applied(fixture.apply(forced)).forced,
+        vec![violation.clone()]
+    );
+
+    let elsewhere = applied(fixture.apply(fixture.plan(vec![
+        setting("c.md", "tags", tag_list(&["project"])),
+        setting("d.md", "status", norn_wire::AuthoredValue::string("done")),
+    ])));
+    assert!(elsewhere.forced.is_empty());
+    assert_eq!(
+        fixture.read("c.md").as_deref(),
+        Some("---\ntags: [project]\n---\n# C\n#stray\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
