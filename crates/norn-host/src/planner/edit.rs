@@ -19,11 +19,15 @@
 //! holding a list or a map — which the value model holds and `norn-text`'s
 //! writer does not write yet (NORN-317). An element pushed to or popped from a
 //! list is itself a list's element, so a list or a map there is nested too.
+//!
+//! **An expected value is judged here too**, on a document's bytes
+//! ([`expectation_unmet`]), so the field an author observed and the field an
+//! operation writes are read by one rule.
 
 use std::sync::Arc;
 
 use norn_text::{Document, EditError, Mapping, SectionError, Value};
-use norn_wire::{AuthoredValue, DocumentPath, OperationKind, WriteTarget};
+use norn_wire::{AuthoredValue, DocumentPath, ExpectedField, OperationKind, WriteTarget};
 
 /// Why a document-local kind cannot act, in words.
 pub(crate) type Refusal = String;
@@ -183,4 +187,60 @@ pub(crate) fn text_value(value: &AuthoredValue) -> Value {
             Value::Map(mapping)
         }
     }
+}
+
+/// Why the document at `path`, holding `bytes`, does not hold `expect` under
+/// `field`, or `None` where it does.
+///
+/// **Absent means the document does not carry the field**: a document with
+/// no frontmatter block, or an empty one, carries none. **Present means the
+/// field reads as exactly the value**, under `norn-text`'s equality on its
+/// value model: one shape for one shape — a string is never the number or the
+/// boolean it spells, an integer never the float of its value, null never
+/// absence — floats compared by their total order, so `-0.0` is not `0.0`,
+/// and a list holding equal elements in the same order. A nested expected
+/// value is not judged until nested values land (NORN-317), and a block that
+/// cannot be read, or holds no mapping, holds no field to observe.
+pub(crate) fn expectation_unmet(
+    path: &DocumentPath,
+    bytes: &[u8],
+    field: &str,
+    expect: &ExpectedField,
+) -> Option<Refusal> {
+    if let ExpectedField::Present { value } = expect
+        && let Some(refusal) = nested(value, false)
+    {
+        return Some(format!(
+            "the expected value of `{field}` in `{path}` cannot be judged: {refusal}"
+        ));
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Some(format!(
+            "`{path}` is not UTF-8 text, so its field `{field}` cannot be observed"
+        ));
+    };
+    let document = Document::parse(text);
+    if document.frontmatter_refusal().is_some() {
+        return Some(format!(
+            "the frontmatter block of `{path}` cannot be read, so its field `{field}` cannot be observed"
+        ));
+    }
+    let held = match document.frontmatter() {
+        None | Some(Value::Null) => None,
+        Some(Value::Map(map)) => map.get(field),
+        Some(other) => {
+            return Some(format!(
+                "the frontmatter block of `{path}` holds a {}, and only a mapping has fields",
+                other.kind()
+            ));
+        }
+    };
+    let holds = match (expect, held) {
+        (ExpectedField::Absent {}, held) => held.is_none(),
+        (ExpectedField::Present { value }, Some(held)) => *held == text_value(value),
+        (ExpectedField::Present { .. }, None) => false,
+    };
+    (!holds).then(|| {
+        format!("the field `{field}` of `{path}` no longer holds what its author observed")
+    })
 }

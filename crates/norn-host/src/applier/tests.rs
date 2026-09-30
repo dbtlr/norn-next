@@ -1883,3 +1883,103 @@ fn each_document_local_kind_previews_as_it_applies_and_a_re_send_is_found() {
         );
     }
 }
+
+/// **A resolved plan carrying an expected value applies as its conditions
+/// were planned, and is found when sent again**: the condition on the
+/// document it writes is that document's before-state, and the one on a
+/// document it does not write travels as a condition on its content, which
+/// another writer's change then breaks.
+#[test]
+fn a_plan_carrying_expected_values_applies_and_refuses_once_the_observed_document_changes() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField, WriteTarget};
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let operations = vec![
+        Operation::new(OperationKind::set_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "status",
+            AuthoredValue::string("new"),
+        ))
+        .with_conditions(vec![
+            AuthorCondition::expected_value(path("a.md"), "status", ExpectedField::absent()),
+            AuthorCondition::expected_value(
+                path("c.md"),
+                "status",
+                ExpectedField::present(AuthoredValue::string("ready")),
+            ),
+        ]),
+    ];
+    let plan = fixture.plan(operations.clone());
+    assert_eq!(plan.conditions.len(), 1);
+    applied(fixture.apply(plan.clone()));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntitle: A\nstatus: new\n---\n")
+    );
+    let again = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&again),
+        vec![("a.md".to_string(), TargetResult::Found)]
+    );
+
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let plan = fixture.plan(operations);
+    fixture.foreign("c.md", "---\nstatus: held\n---\n");
+    let refused = refused(fixture.apply(plan));
+    assert!(
+        matches!(
+            refused.checks.as_slice(),
+            [norn_wire::RefusedCheck::ConditionFailed { .. }]
+        ),
+        "{:?}",
+        refused.checks
+    );
+    assert!(refused.plan.operations.is_empty());
+    assert_eq!(refused.unresolved.len(), 1, "{:?}", refused.unresolved);
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntitle: A\n---\n")
+    );
+}
+
+/// **A resolved plan whose recorded state does not hold its own operation's
+/// expected value is not what its operations do**: an expectation edited
+/// after planning on the document it writes, or a plan dropping the content
+/// condition an expectation on another document travels as, is
+/// `request/plan-invalid` naming the document, and nothing is published.
+#[test]
+fn a_plan_whose_state_does_not_hold_its_expected_value_is_invalid() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField, WriteTarget};
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let set = Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(path("a.md")),
+        "status",
+        AuthoredValue::string("new"),
+    ));
+    let mut edited = fixture.plan(vec![set.clone().with_conditions(vec![
+        AuthorCondition::expected_value(path("a.md"), "status", ExpectedField::absent()),
+    ])]);
+    edited.operations[0].conditions = vec![AuthorCondition::expected_value(
+        path("a.md"),
+        "title",
+        ExpectedField::present(AuthoredValue::string("B")),
+    )];
+    assert_eq!(fixture.refuses_disagreeing(edited), vec![path("a.md")]);
+    let mut dropped = fixture.plan(vec![set.with_conditions(vec![
+        AuthorCondition::expected_value(
+            path("c.md"),
+            "status",
+            ExpectedField::present(AuthoredValue::string("ready")),
+        ),
+    ])]);
+    dropped.conditions.clear();
+    assert_eq!(fixture.refuses_disagreeing(dropped), vec![path("c.md")]);
+}

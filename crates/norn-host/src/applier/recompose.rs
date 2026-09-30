@@ -29,10 +29,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{AuthorCondition, DocumentPath, FileState, PlanCondition, PlanFault, ResolvedPlan};
+use norn_wire::{
+    AuthorCondition, DocumentPath, ExpectedField, FileState, PlanCondition, PlanFault, ResolvedPlan,
+};
 
 use super::observe::{TargetState, identity};
 use crate::planner::compose::{Composition, compose, content_hash, edits_in_place, touches};
+use crate::planner::edit;
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
@@ -120,7 +123,7 @@ pub(super) fn recompose<V: VaultView>(
         &composition,
         &before,
     ));
-    disagreeing.extend(conditions_differ(plan, &composition, view.normalizer()));
+    disagreeing.extend(conditions_differ(plan, &composition, &before)?);
     if !disagreeing.is_empty() {
         return Ok(Recomposed::Invalid(disagreement(disagreeing)));
     }
@@ -184,11 +187,23 @@ fn transitions_differ<V>(
 /// does not check it at: a condition on a file the plan writes is that
 /// file's before-state, and one on any other file travels as a plan
 /// condition.
-fn conditions_differ(
+///
+/// **An expected value is judged on the bytes its check stands for.** On a
+/// file the plan writes, the recorded before-state must hold the expected
+/// value, judged on the bytes the target holds there — unless this apply
+/// cannot see them, a target already holding its change, which is landed
+/// whatever it held. On any other file a plan condition must name the file,
+/// and where the file holds the content that condition names — which every
+/// file does here, since a failed condition refused before recomposition —
+/// that content must hold the expected value. Either way a plan whose
+/// recorded state does not hold its own operation's expectation is not what
+/// its operations do.
+fn conditions_differ<V: VaultView>(
     plan: &ResolvedPlan,
     composition: &Composition,
-    normalizer: &PathNormalizer,
-) -> Vec<DocumentPath> {
+    before: &BeforeStates<'_, V>,
+) -> Result<Vec<DocumentPath>, V::Error> {
+    let normalizer = before.normalizer();
     let carried: Vec<(NormalizedPath, &norn_wire::ContentHash)> = plan
         .conditions
         .iter()
@@ -196,33 +211,75 @@ fn conditions_differ(
             Some((identity(normalizer, path.as_str())?, hash))
         })
         .collect();
+    let carries = |file: &NormalizedPath, hash: Option<&norn_wire::ContentHash>| {
+        carried.iter().any(|(condition, carried)| {
+            condition == file && hash.is_none_or(|hash| *carried == hash)
+        })
+    };
     let mut differing = Vec::new();
     for operation in &plan.operations {
         for condition in &operation.conditions {
-            let (path, hash) = match condition {
-                AuthorCondition::ContentHash { path, hash } => (path, hash),
-                // NORN-296: planned in the host PR. Until then planning never
-                // resolves an operation carrying one, so a resolved plan that
-                // does is not what its operations do.
-                AuthorCondition::ExpectedValue { path, .. } => {
-                    differing.push(path.clone());
-                    continue;
-                }
+            let held = match condition {
+                AuthorCondition::ContentHash { path, hash } => identity(normalizer, path.as_str())
+                    .is_some_and(|file| match composition.before(&file) {
+                        Some(before) => *before == FileState::present(hash.clone()),
+                        None => carries(&file, Some(hash)),
+                    }),
+                AuthorCondition::ExpectedValue {
+                    path,
+                    field,
+                    expect,
+                } => match identity(normalizer, path.as_str()) {
+                    None => false,
+                    Some(file) => {
+                        expectation_held(&file, path, field, expect, composition, before, &carries)?
+                    }
+                },
             };
-            let held = identity(normalizer, path.as_str()).is_some_and(|file| {
-                match composition.before(&file) {
-                    Some(before) => *before == FileState::present(hash.clone()),
-                    None => carried
-                        .iter()
-                        .any(|(condition, carried)| *condition == file && *carried == hash),
-                }
-            });
             if !held {
-                differing.push(path.clone());
+                differing.push(condition_path(condition).clone());
             }
         }
     }
-    differing
+    Ok(differing)
+}
+
+/// Whether the expected value on `file` holds where the plan checks it: on
+/// the recorded before-state of a file the plan writes, and on the content a
+/// plan condition names for any other file (see [`conditions_differ`]).
+fn expectation_held<V: VaultView>(
+    file: &NormalizedPath,
+    path: &DocumentPath,
+    field: &str,
+    expect: &ExpectedField,
+    composition: &Composition,
+    before: &BeforeStates<'_, V>,
+    carries: &impl Fn(&NormalizedPath, Option<&norn_wire::ContentHash>) -> bool,
+) -> Result<bool, V::Error> {
+    let written = composition.before(file).is_some();
+    if written && before.unseen.contains(file) {
+        return Ok(true);
+    }
+    if !written && !carries(file, None) {
+        return Ok(false);
+    }
+    Ok(match before.entry(file)? {
+        Entry::Document { bytes, hash, .. } if written || carries(file, Some(&hash)) => {
+            edit::expectation_unmet(path, &bytes, field, expect).is_none()
+        }
+        // A carried condition the file does not meet refused before
+        // recomposition, so it is not judged again here.
+        _ => !written,
+    })
+}
+
+/// The file an author condition names.
+fn condition_path(condition: &AuthorCondition) -> &DocumentPath {
+    match condition {
+        AuthorCondition::ContentHash { path, .. } | AuthorCondition::ExpectedValue { path, .. } => {
+            path
+        }
+    }
 }
 
 /// The vault as it stood before the plan, where the plan touches it, and the
