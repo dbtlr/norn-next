@@ -8,7 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
-use norn_wire::{DocumentPath, FileState, PlanFault, RefusedCheck, ResolvedPlan, Transition};
+use norn_wire::{
+    DocumentPath, FileState, PlanFault, RefusedCheck, ResolvedPlan, SchemaViolation, Transition,
+};
 
 use super::observe::{
     TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
@@ -28,6 +30,8 @@ use crate::planner::view::{TreeView, VaultView, wire_hash};
 #[derive(Debug)]
 pub(super) struct StagedPlan {
     pub(super) targets: Vec<StagedTarget>,
+    /// Every schema violation the plan's force let through.
+    pub(super) forced: Vec<SchemaViolation>,
     /// Each transition's path as the store names it, by index.
     pub(super) stored: Vec<norn_store::DocumentPath>,
 }
@@ -168,6 +172,9 @@ pub(super) fn check_and_stage(
 /// phase, with the lineage its publication order follows. Its contents are
 /// held only until [`stage`] has staged them.
 pub(super) struct Checked {
+    /// Every schema violation the plan's force let through: none for a plan
+    /// that is not forced, which refuses on each instead.
+    pub(super) forced: Vec<SchemaViolation>,
     units: Vec<Unit>,
     contents: Vec<Option<Arc<[u8]>>>,
     phases: Vec<Phase>,
@@ -185,7 +192,8 @@ pub(super) struct Checked {
 /// the vault gives it, at a place the vault reads documents at; no target
 /// drifted and every condition holds; the operations, run again from the
 /// before-states, are exactly the plan's transitions ([`recompose`]); and
-/// every result passes the vault schema. A plan whose store paths, shape,
+/// every result passes the vault schema, or, for a forced plan, has each
+/// violation it introduces listed rather than refused. A plan whose store paths, shape,
 /// target places or recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
@@ -254,12 +262,26 @@ pub(super) fn check(
         normalizer,
         declared,
     };
-    checks.extend(schema.checks(&units, &contents));
+    let violations = schema.violations(&units, &contents);
+    let forced = if plan.force {
+        violations
+    } else {
+        checks.extend(violations.into_iter().map(|violation| {
+            RefusedCheck::schema_violation(
+                violation.path,
+                violation.kind,
+                violation.target,
+                violation.message,
+            )
+        }));
+        Vec::new()
+    };
     if !checks.is_empty() {
         return Err(Unfit::Refused(checks));
     }
     let phases: Vec<Phase> = units.iter().map(|unit| phase(plan, *unit)).collect();
     Ok(Checked {
+        forced,
         units,
         contents,
         phases,
@@ -284,6 +306,7 @@ pub(super) fn stage(
     checked: Checked,
 ) -> Result<StagedPlan, Stop> {
     let Checked {
+        forced,
         units,
         contents,
         phases,
@@ -310,6 +333,7 @@ pub(super) fn stage(
     }
     Ok(StagedPlan {
         targets: staged,
+        forced,
         stored,
     })
 }
@@ -426,14 +450,21 @@ struct Judging<'a> {
 }
 
 impl Judging<'_> {
-    /// The schema checks refusing any composed result a target at its
-    /// before-state would publish.
+    /// The schema violations any composed result a target at its
+    /// before-state would publish introduces.
     ///
     /// **Each result is judged against the document its content came from**:
     /// its own before-state where it is edited in place, the moved document's
     /// where a move carried it, and nothing where an operation wrote it.
-    fn checks(&self, units: &[Unit], contents: &[Option<Arc<[u8]>>]) -> Vec<RefusedCheck> {
+    ///
+    /// **The fields written into a result** are those the plan's frontmatter
+    /// kinds write at its path, or at the path its content came from, since
+    /// an operation composes on the document before or after a move carries
+    /// it.
+    fn violations(&self, units: &[Unit], contents: &[Option<Arc<[u8]>>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
+        let written_fields = schema::written_fields(self.plan, self.normalizer);
+        let no_field = BTreeSet::new();
         let mut checks = Vec::new();
         for (unit, content) in units.iter().zip(contents) {
             let Some(after) = content else { continue };
@@ -445,9 +476,20 @@ impl Judging<'_> {
                 continue;
             }
             let path = &self.plan.transitions[written].path;
-            let drawn_from = identity(self.normalizer, path.as_str())
-                .and_then(|file| self.lineage.source(&file))
-                .and_then(|source| index_of.get(&source.from).copied());
+            let file = identity(self.normalizer, path.as_str());
+            let source = file
+                .as_ref()
+                .and_then(|file| self.lineage.source(file))
+                .map(|source| source.from.clone());
+            let drawn_from = source
+                .as_ref()
+                .and_then(|source| index_of.get(source).copied());
+            let fields: BTreeSet<String> = [file.as_ref(), source.as_ref()]
+                .into_iter()
+                .flatten()
+                .flat_map(|file| written_fields.get(file).unwrap_or(&no_field))
+                .cloned()
+                .collect();
             let before: Vec<schema::Judged> = drawn_from
                 .and_then(|index| match &self.states[index] {
                     TargetState::AtBefore(Some(bytes)) => Some(schema::judge(
@@ -460,7 +502,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared);
-            checks.extend(schema::refused(path, &after, &before));
+            checks.extend(schema::introduced(path, &after, &before, &fields));
         }
         checks
     }

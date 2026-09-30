@@ -6,12 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_wire::{
-    AuthorCondition, AuthoredPlan, ContentHash, DocumentPath, FileState, Forecast, Operation,
-    OperationId, OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity, Transition,
-    UnresolvedOperation, UnresolvedReason,
+    AuthorCondition, AuthoredPlan, ContentHash, DocumentPath, ExpectedField, FileState, Forecast,
+    Operation, OperationId, OperationsTag, PlanCondition, PlanFault, ResolvedPlan, RootIdentity,
+    Transition, UnresolvedOperation, UnresolvedReason,
 };
 
 use super::compose::{Composition, compose, content_hash, touches};
+use super::edit;
 use super::forecast::forecast;
 use super::lineage::content_cycle;
 use super::order::dependencies;
@@ -111,8 +112,8 @@ pub(crate) fn resolve<V: VaultView>(
         conditions,
     );
     plan.footnote = footnote;
-    // NORN-296: the applier's schema check honours the force in the host PR;
-    // until then the plan carries it and a forced plan is checked as any other.
+    // The applier reads the force from the plan, so a forced preview sent
+    // back applies the way it previewed.
     plan.force = force;
     let unresolved = left_out
         .into_iter()
@@ -182,11 +183,11 @@ fn failures<V: VaultView>(
                 AuthorCondition::ContentHash { path, hash } => {
                     unmet_condition(path, hash, composition, view)?
                 }
-                // NORN-296: planned in the host PR. Until then an operation
-                // carrying an expected value is left unresolved, naming why.
-                AuthorCondition::ExpectedValue { .. } => {
-                    Some("an `expected_value` condition is not yet planned".to_string())
-                }
+                AuthorCondition::ExpectedValue {
+                    path,
+                    field,
+                    expect,
+                } => unmet_expectation(path, field, expect, composition, view)?,
             };
             if let Some(detail) = unmet {
                 failed
@@ -199,7 +200,10 @@ fn failures<V: VaultView>(
 }
 
 /// Why the vault does not meet an author's condition that `path` holds
-/// `hash`, or `None` where it does.
+/// `hash`, or `None` where it does: on a document the plan writes, against
+/// the before-state `composition` records there, and on any other file
+/// against the file as it stands. [`unmet_expectation`] judges an expected
+/// value by the same rule.
 fn unmet_condition<V: VaultView>(
     path: &DocumentPath,
     hash: &ContentHash,
@@ -228,6 +232,59 @@ fn unmet_condition<V: VaultView>(
         },
     };
     Ok((!holds).then(|| format!("`{path}` no longer holds the content its author observed")))
+}
+
+/// Why the vault does not meet an author's condition that the document at
+/// `path` holds `expect` under `field`, or `None` where it does.
+///
+/// **Judged where a content hash is, as [`unmet_condition`] judges one**: on a
+/// document the plan writes, against the before-state `composition` records
+/// there, and on any other file against the file as it stands. A condition on
+/// a written document then says no more than its before-state does; one on
+/// another document travels as a condition on its content
+/// ([`plan_conditions`]). The before-state is a hash, and the field is read
+/// from the bytes behind it: the view remembers each file as planning first
+/// read it ([`Remembered`]), and composition read the before-state through
+/// that same view, so the bytes read here are the ones the before-state
+/// hashes.
+fn unmet_expectation<V: VaultView>(
+    path: &DocumentPath,
+    field: &str,
+    expect: &ExpectedField,
+    composition: &Composition,
+    view: &V,
+) -> Result<Option<String>, V::Error> {
+    let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
+        return Ok(Some(format!("`{path}` names no document in the vault")));
+    };
+    if let Some(detail) = view::document_path(identity.as_path())
+        .as_ref()
+        .and_then(view::unholdable)
+    {
+        return Ok(Some(detail));
+    }
+    let absent = || {
+        Some(format!(
+            "no document stands at `{path}`, so its field `{field}` cannot be observed"
+        ))
+    };
+    let before = composition.before(&identity);
+    if matches!(before, Some(FileState::Absent {})) {
+        return Ok(absent());
+    }
+    Ok(match view.entry(&identity)? {
+        view::Entry::Document { at, .. } if let Some(detail) = view::unholdable(&at) => {
+            Some(detail)
+        }
+        view::Entry::Document { bytes, hash, .. } => {
+            debug_assert!(
+                before.is_none_or(|before| *before == FileState::present(hash)),
+                "the view remembers the bytes a written document's before-state hashes"
+            );
+            edit::expectation_unmet(path, &bytes, field, expect)
+        }
+        _ => absent(),
+    })
 }
 
 /// Where each identifier is carried.
@@ -328,6 +385,11 @@ fn leave_out_what_falls_with<V: VaultView>(
 /// does not write, each once, at the spelling the tree lists, in the order
 /// the operations compose. Each holds: [`failures`] left out every operation
 /// whose condition does not.
+///
+/// **An expected value travels as the content it was judged on**: a
+/// condition that the document holds the bytes planning read there, which
+/// the applier checks as it checks a content hash, so a document changed
+/// since planning refuses the apply rather than being judged again.
 fn plan_conditions<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -337,11 +399,9 @@ fn plan_conditions<V: VaultView>(
     let mut conditions: Vec<PlanCondition> = Vec::new();
     for &position in order {
         for condition in &operations[position].conditions {
-            let (path, hash) = match condition {
-                AuthorCondition::ContentHash { path, hash } => (path, hash),
-                // NORN-296: planned in the host PR. Until then an operation
-                // carrying one never resolves, so none reaches here.
-                AuthorCondition::ExpectedValue { .. } => continue,
+            let (path, observed) = match condition {
+                AuthorCondition::ContentHash { path, hash } => (path, Some(hash)),
+                AuthorCondition::ExpectedValue { path, .. } => (path, None),
             };
             let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {
                 continue;
@@ -349,11 +409,15 @@ fn plan_conditions<V: VaultView>(
             if composition.before(&identity).is_some() {
                 continue;
             }
-            let at = match view.entry(&identity)? {
-                view::Entry::Document { at, .. } => at,
-                _ => path.clone(),
+            let (at, held) = match view.entry(&identity)? {
+                view::Entry::Document { at, hash, .. } => (at, Some(hash)),
+                _ => (path.clone(), None),
             };
-            let condition = PlanCondition::content_hash(at, hash.clone());
+            // An expected value held, so a document stands and is read.
+            let Some(hash) = observed.cloned().or(held) else {
+                continue;
+            };
+            let condition = PlanCondition::content_hash(at, hash);
             if !conditions.contains(&condition) {
                 conditions.push(condition);
             }
@@ -418,29 +482,24 @@ mod tests {
             .collect()
     }
 
-    // NORN-296: the host PR plans these and replaces this test.
-    /// **A document-local kind or an expected value is left unresolved until
-    /// it is planned**, naming why, rather than acting or being dropped: the
-    /// operations on its document fall with it, and a forced plan carries
-    /// its force.
+    /// **A document-local kind resolves to one transition on its document,
+    /// and a forced plan carries its force**, while a `where` target that
+    /// reaches planning unexpanded is left unresolved, naming why, and the
+    /// operations on its document do not fall with it, since it touches none.
     #[test]
-    fn a_document_local_write_is_unresolved_until_it_is_planned() {
-        let vault = MemoryVault::with(&[("a.md", "draft"), ("b.md", "B")]);
+    fn a_document_local_write_resolves_and_an_unexpanded_where_does_not() {
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\n---\n")]);
         let operations = vec![
-            Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final")),
-            Operation::new(OperationKind::replace_body(path("a.md"), "body")),
+            Operation::new(OperationKind::set_frontmatter(
+                norn_wire::WriteTarget::path(path("a.md")),
+                "status",
+                norn_wire::AuthoredValue::string("done"),
+            )),
             Operation::new(OperationKind::set_frontmatter(
                 norn_wire::WriteTarget::matching(Vec::new()),
                 "status",
                 norn_wire::AuthoredValue::Bool(true),
             )),
-            Operation::new(OperationKind::delete_document(path("b.md"))).with_conditions(vec![
-                AuthorCondition::expected_value(
-                    path("b.md"),
-                    "status",
-                    norn_wire::ExpectedField::absent(),
-                ),
-            ]),
         ];
         let resolution = match resolve(
             authored(operations.clone()).with_force(true),
@@ -451,22 +510,16 @@ mod tests {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),
         };
-        let mut positions = unresolved_positions(&resolution, &operations);
-        positions.sort_unstable();
-        assert_eq!(positions, vec![0, 1, 2, 3]);
-        assert!(resolution.plan.transitions.is_empty());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![1]);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition(
+                "a.md",
+                present("---\nstatus: draft\n---\n"),
+                present("---\nstatus: done\n---\n")
+            )]
+        );
         assert!(resolution.plan.force);
-        let details: Vec<String> = resolution
-            .unresolved
-            .iter()
-            .map(|unresolved| format!("{:?}", unresolved.reason))
-            .collect();
-        for named in ["replace_body", "set_frontmatter", "expected_value"] {
-            assert!(
-                details.iter().any(|detail| detail.contains(named)),
-                "no reason names `{named}`: {details:?}"
-            );
-        }
     }
 
     #[test]
@@ -670,6 +723,190 @@ mod tests {
         );
         assert_eq!(resolution.unresolved.len(), 1);
         assert!(resolution.plan.transitions.is_empty());
+    }
+
+    fn expecting(at: &str, field: &str, expect: norn_wire::ExpectedField) -> AuthorCondition {
+        AuthorCondition::expected_value(path(at), field, expect)
+    }
+
+    fn setting(at: &str, field: &str, value: norn_wire::AuthoredValue) -> Operation {
+        Operation::new(OperationKind::set_frontmatter(
+            norn_wire::WriteTarget::path(path(at)),
+            field,
+            value,
+        ))
+    }
+
+    fn unresolved_detail(resolution: &Resolution) -> String {
+        match &resolution.unresolved[..] {
+            [unresolved] => match &unresolved.reason {
+                UnresolvedReason::NoLongerResolves { detail, .. } => detail.clone(),
+                other => panic!("no longer resolves: {other:?}"),
+            },
+            other => panic!("one operation is unresolved: {other:?}"),
+        }
+    }
+
+    /// **An expected value of absent on a document the plan writes is judged
+    /// against its before-state and becomes that before-state**: a set of a
+    /// field the document does not carry resolves, carrying no plan
+    /// condition, and the same set over a document carrying the field is left
+    /// unresolved, naming it — `add_frontmatter`'s add-only-if-absent.
+    #[test]
+    fn an_expected_absence_is_judged_at_the_written_documents_before_state() {
+        let vault = MemoryVault::with(&[
+            ("a.md", "---\ntitle: A\n---\n"),
+            ("b.md", "---\nstatus: draft\n---\n"),
+        ]);
+        let add = |at: &str| {
+            setting(at, "status", norn_wire::AuthoredValue::string("new")).with_conditions(vec![
+                expecting(at, "status", norn_wire::ExpectedField::absent()),
+            ])
+        };
+        let added = planned(&vault, vec![add("a.md")]);
+        assert!(added.unresolved.is_empty(), "{:?}", added.unresolved);
+        assert!(added.plan.conditions.is_empty());
+        assert_eq!(
+            added.plan.transitions[0].before,
+            present("---\ntitle: A\n---\n")
+        );
+        let refused = planned(&vault, vec![add("b.md")]);
+        assert!(refused.plan.transitions.is_empty());
+        let detail = unresolved_detail(&refused);
+        assert!(
+            detail.contains("status") && detail.contains("b.md"),
+            "{detail}"
+        );
+    }
+
+    /// **An expected value is judged against the document as it stood before
+    /// the plan, not after the operations ahead of it**: a set guarded on the
+    /// value an earlier set of the same plan writes is unresolved over a
+    /// document that never held it, and its reason states that rule rather
+    /// than a change the field never had.
+    #[test]
+    fn an_expected_value_is_judged_before_the_plan_and_says_so() {
+        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\n---\n")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                setting("a.md", "status", V::string("a")),
+                setting("a.md", "status", V::string("b")).with_conditions(vec![expecting(
+                    "a.md",
+                    "status",
+                    E::present(V::string("a")),
+                )]),
+            ],
+        );
+        assert_eq!(
+            resolution.unresolved.len(),
+            2,
+            "{:?}",
+            resolution.unresolved
+        );
+        let detail = match &resolution.unresolved[1].reason {
+            UnresolvedReason::NoLongerResolves { detail, .. } => detail.clone(),
+            other => panic!("no longer resolves: {other:?}"),
+        };
+        assert!(detail.contains("as it stood before the plan"), "{detail}");
+        assert!(!detail.contains("no longer"), "{detail}");
+    }
+
+    /// **An expected present value holds only where the field reads as
+    /// exactly that value**: a string is not the number it spells, an integer
+    /// is not the float of its value, null is not absence, and a list holds
+    /// its elements in order.
+    #[test]
+    fn an_expected_value_holds_only_for_exactly_that_value() {
+        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        let vault = MemoryVault::with(&[(
+            "a.md",
+            "---\ncount: 3\nlabel: '3'\nempty:\ntags: [a, b]\n---\n",
+        )]);
+        let judged = |field: &str, expect: E| {
+            let resolution = planned(
+                &vault,
+                vec![
+                    Operation::new(OperationKind::replace_body(path("a.md"), "x\n"))
+                        .with_conditions(vec![expecting("a.md", field, expect)]),
+                ],
+            );
+            resolution.unresolved.is_empty()
+        };
+        let list = |items: &[&str]| V::list(items.iter().map(|item| V::string(*item)));
+        assert!(judged("count", E::present(V::Integer(3))));
+        assert!(!judged("count", E::present(V::float(3.0).expect("finite"))));
+        assert!(!judged("count", E::present(V::string("3"))));
+        assert!(judged("label", E::present(V::string("3"))));
+        assert!(judged("empty", E::present(V::Null)));
+        assert!(!judged("empty", E::absent()));
+        assert!(judged("missing", E::absent()));
+        assert!(!judged("missing", E::present(V::Null)));
+        assert!(judged("tags", E::present(list(&["a", "b"]))));
+        assert!(!judged("tags", E::present(list(&["b", "a"]))));
+    }
+
+    /// **An expected value on a document the plan does not write is judged
+    /// as it stands and travels as a condition on its content**, so the
+    /// document the author observed is the document the apply finds.
+    #[test]
+    fn an_expected_value_on_an_unwritten_document_is_a_content_condition() {
+        let vault = MemoryVault::with(&[("a.md", "draft"), ("c.md", "---\nstatus: ready\n---\n")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final"))
+                    .with_conditions(vec![expecting(
+                        "c.md",
+                        "status",
+                        norn_wire::ExpectedField::present(norn_wire::AuthoredValue::string(
+                            "ready",
+                        )),
+                    )]),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.conditions,
+            vec![PlanCondition::content_hash(
+                path("c.md"),
+                content_hash(b"---\nstatus: ready\n---\n")
+            )]
+        );
+    }
+
+    /// **An expected value cannot hold where it cannot be observed**: on no
+    /// document, on a block that cannot be read, or holding a nested value,
+    /// which names the limit and NORN-317. Each leaves its operation
+    /// unresolved.
+    #[test]
+    fn an_expected_value_that_cannot_be_observed_leaves_its_operation_unresolved() {
+        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        let vault = MemoryVault::with(&[
+            ("a.md", "body"),
+            ("broken.md", "---\ntitle: [unclosed\n---\n"),
+        ]);
+        let nested = V::map([("k".to_string(), V::Integer(1))]).expect("a map");
+        for (at, expect, named) in [
+            ("gone.md", E::absent(), "no document"),
+            ("broken.md", E::absent(), "cannot be read"),
+            ("a.md", E::present(nested), "NORN-317"),
+        ] {
+            let resolution = planned(
+                &vault,
+                vec![
+                    Operation::new(OperationKind::replace_body(path("a.md"), "x\n"))
+                        .with_conditions(vec![expecting(at, "owner", expect)]),
+                ],
+            );
+            let detail = unresolved_detail(&resolution);
+            assert!(detail.contains(named), "{at}: {detail}");
+        }
     }
 
     #[test]

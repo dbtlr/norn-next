@@ -8,6 +8,7 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_wire::{ContentHash, DocumentPath, FileState, Operation, OperationKind};
 
+use super::edit;
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
 
 /// What composing a plan's operations came to.
@@ -100,8 +101,8 @@ struct Simulated<'view, V> {
     folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
 }
 
-/// Why one operation cannot act on the state it met.
-type Unresolved = String;
+/// Why one operation cannot act on the state it met, in words.
+pub(crate) type Unresolved = String;
 
 /// Where one name an operation carries leads.
 enum Place {
@@ -305,8 +306,6 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::DeleteDocument { path } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-296: planned in the host PR. Until then every document-local
-            // kind is left unresolved, naming why, rather than acting.
             OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }
             | OperationKind::PushFrontmatter { .. }
@@ -316,8 +315,29 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             | OperationKind::AppendToSection { .. }
             | OperationKind::DeleteSection { .. }
             | OperationKind::InsertBeforeHeading { .. }
-            | OperationKind::InsertAfterHeading { .. } => Err(not_yet_planned(kind)),
+            | OperationKind::InsertAfterHeading { .. } => self.edit_in_place(kind)?,
         })
+    }
+
+    /// Edit the document a document-local `kind` names where it stands, as a
+    /// pure function of what it holds so far (see [`super::edit`]).
+    fn edit_in_place(&mut self, kind: &OperationKind) -> Result<Result<(), Unresolved>, V::Error> {
+        let path = match edit::local_target(kind).expect("a document-local kind") {
+            Ok(path) => path,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        if let Some(detail) = edit::refused_whatever_the_document(kind) {
+            return Ok(Err(detail));
+        }
+        let spelling = match self.standing(path)? {
+            Ok(spelling) => spelling,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let file = self.target(&spelling);
+        let bytes = file.after.as_ref().expect("a document stands");
+        Ok(edit::edited(kind, bytes).map(|edited| {
+            file.after = Some(edited);
+        }))
     }
 
     /// Move the document at `from` to `to`.
@@ -394,10 +414,15 @@ fn spelled_as_asked(identity: &NormalizedPath) -> String {
         .unwrap_or_default()
 }
 
-/// Why a document-local kind is left unresolved until its planning lands.
-// NORN-296: planned in the host PR, which removes this.
-pub(crate) fn not_yet_planned(kind: &OperationKind) -> Unresolved {
-    format!("a `{}` operation is not yet planned", kind.name())
+/// Whether `kind` edits a document where it stands, changing the content the
+/// file already holds: a `str_replace` and every document-local kind. Such an
+/// edit names no name it fills or empties and carries no content from another
+/// file.
+pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
+    match kind {
+        OperationKind::StrReplace { .. } => true,
+        other => edit::local_target(other).is_some(),
+    }
 }
 
 /// The files an operation touches: a move touches its source and its
@@ -462,6 +487,8 @@ pub(crate) fn content_hash(bytes: &[u8]) -> ContentHash {
 
 #[cfg(test)]
 mod tests {
+    use norn_wire::{AuthoredValue, WriteTarget};
+
     use super::super::view::memory::MemoryVault;
     use super::*;
 
@@ -729,6 +756,428 @@ mod tests {
             Operation::new(OperationKind::delete_document(path("x/../a/b.md"))),
         );
         assert!(detail.contains("names no document"), "{detail}");
+    }
+
+    fn composed_text(vault: &MemoryVault, operation: Operation, at: &str) -> Option<String> {
+        let operations = [operation];
+        let composition =
+            compose(&operations, &in_order(&operations), vault).expect("an infallible view");
+        assert!(
+            composition.unresolvable.is_empty(),
+            "{:?}",
+            composition.unresolvable
+        );
+        after_text(&composition, at)
+    }
+
+    fn at(text: &str) -> WriteTarget {
+        WriteTarget::path(path(text))
+    }
+
+    /// **A `set_frontmatter` writes exactly the value sent into the one
+    /// field**, leaving every other byte of the document as it was.
+    #[test]
+    fn a_set_frontmatter_writes_its_value_into_the_field() {
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\ntitle: A\n---\nbody\n")]);
+        let composed = composed_text(
+            &vault,
+            Operation::new(OperationKind::set_frontmatter(
+                at("a.md"),
+                "status",
+                AuthoredValue::string("done"),
+            )),
+            "a.md",
+        );
+        assert_eq!(
+            composed.as_deref(),
+            Some("---\nstatus: done\ntitle: A\n---\nbody\n")
+        );
+    }
+
+    /// **A `remove_frontmatter` takes the field's whole entry away.**
+    #[test]
+    fn a_remove_frontmatter_takes_the_field_away() {
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\ntitle: A\n---\nbody\n")]);
+        let composed = composed_text(
+            &vault,
+            Operation::new(OperationKind::remove_frontmatter(at("a.md"), "status")),
+            "a.md",
+        );
+        assert_eq!(composed.as_deref(), Some("---\ntitle: A\n---\nbody\n"));
+    }
+
+    /// **A `push_frontmatter` appends to the list, a value it already holds
+    /// included, and makes an absent field, or one written with no value, a
+    /// list of the one value.**
+    #[test]
+    fn a_push_frontmatter_appends_and_makes_an_absent_field_a_list() {
+        let vault = MemoryVault::with(&[
+            ("a.md", "---\ntags:\n  - x\n---\n"),
+            ("b.md", "---\ntitle: B\n---\n"),
+        ]);
+        let push = |at_path: &str| {
+            Operation::new(OperationKind::push_frontmatter(
+                at(at_path),
+                "tags",
+                AuthoredValue::string("x"),
+            ))
+        };
+        assert_eq!(
+            composed_text(&vault, push("a.md"), "a.md").as_deref(),
+            Some("---\ntags:\n  - x\n  - x\n---\n")
+        );
+        let made = composed_text(&vault, push("b.md"), "b.md").expect("a document");
+        let document = norn_text::Document::parse(&made);
+        let tags = document
+            .frontmatter()
+            .and_then(norn_text::Value::as_map)
+            .and_then(|map| map.get("tags"))
+            .cloned();
+        assert_eq!(
+            tags,
+            Some(norn_text::Value::Sequence(vec![norn_text::Value::from(
+                "x"
+            )]))
+        );
+        let stub = MemoryVault::with(&[("c.md", "---\ntags:\n---\n")]);
+        let made = composed_text(&stub, push("c.md"), "c.md").expect("a document");
+        let document = norn_text::Document::parse(&made);
+        assert_eq!(
+            document
+                .frontmatter()
+                .and_then(norn_text::Value::as_map)
+                .and_then(|map| map.get("tags"))
+                .cloned(),
+            Some(norn_text::Value::Sequence(vec![norn_text::Value::from(
+                "x"
+            )])),
+            "a field written with no value takes one element"
+        );
+    }
+
+    /// **A `pop_frontmatter` removes every element equal to its value.**
+    #[test]
+    fn a_pop_frontmatter_removes_every_equal_element() {
+        let vault = MemoryVault::with(&[("a.md", "---\ntags:\n  - x\n  - y\n  - x\n---\n")]);
+        let composed = composed_text(
+            &vault,
+            Operation::new(OperationKind::pop_frontmatter(
+                at("a.md"),
+                "tags",
+                AuthoredValue::string("x"),
+            )),
+            "a.md",
+        );
+        assert_eq!(composed.as_deref(), Some("---\ntags:\n  - y\n---\n"));
+    }
+
+    /// **A `replace_body` replaces everything after the frontmatter block and
+    /// leaves the block byte-identical.**
+    #[test]
+    fn a_replace_body_keeps_the_block_byte_identical() {
+        let vault = MemoryVault::with(&[("a.md", "---\ntitle:   'A'  # kept\n---\nold body\n")]);
+        let composed = composed_text(
+            &vault,
+            Operation::new(OperationKind::replace_body(path("a.md"), "new body\n")),
+            "a.md",
+        );
+        assert_eq!(
+            composed.as_deref(),
+            Some("---\ntitle:   'A'  # kept\n---\nnew body\n")
+        );
+    }
+
+    /// **The section kinds address a section by its heading through the one
+    /// shared resolver**: a replace keeps the heading line, a delete removes
+    /// heading and body, an append lands at the section's end, and an insert
+    /// goes directly before or after the heading line, adding no blank line.
+    #[test]
+    fn the_section_kinds_edit_the_section_their_heading_names() {
+        let source = "# Top\n\n## Tasks\n\none\n\n## Notes\n\ntwo\n";
+        let vault = MemoryVault::with(&[("a.md", source)]);
+        let cases = [
+            (
+                OperationKind::replace_section(path("a.md"), "tasks", "fresh\n"),
+                "# Top\n\n## Tasks\n\nfresh\n\n## Notes\n\ntwo\n",
+            ),
+            (
+                OperationKind::delete_section(path("a.md"), "Tasks"),
+                "# Top\n\n## Notes\n\ntwo\n",
+            ),
+            (
+                OperationKind::append_to_section(path("a.md"), "Tasks", "added"),
+                "# Top\n\n## Tasks\n\none\nadded\n\n## Notes\n\ntwo\n",
+            ),
+            (
+                OperationKind::insert_before_heading(path("a.md"), "Notes", "above"),
+                "# Top\n\n## Tasks\n\none\n\nabove\n## Notes\n\ntwo\n",
+            ),
+            (
+                OperationKind::insert_after_heading(path("a.md"), "Notes", "below"),
+                "# Top\n\n## Tasks\n\none\n\n## Notes\nbelow\n\ntwo\n",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let name = kind.name();
+            assert_eq!(
+                composed_text(&vault, Operation::new(kind), "a.md").as_deref(),
+                Some(expected),
+                "{name}"
+            );
+        }
+    }
+
+    /// **A push onto a field holding a scalar or a map does not resolve**:
+    /// turning it into a list is a set.
+    #[test]
+    fn a_push_onto_a_scalar_or_a_map_does_not_resolve() {
+        let vault = MemoryVault::with(&[
+            ("a.md", "---\ntags: one\n---\n"),
+            ("b.md", "---\ntags:\n  k: v\n---\n"),
+        ]);
+        for at_path in ["a.md", "b.md"] {
+            let detail = unresolvable_detail(
+                &vault,
+                Operation::new(OperationKind::push_frontmatter(
+                    at(at_path),
+                    "tags",
+                    AuthoredValue::string("x"),
+                )),
+            );
+            assert!(detail.contains("not a list"), "{at_path}: {detail}");
+        }
+    }
+
+    /// **A pop of a value the list does not hold, or of an absent field, does
+    /// not resolve**, rather than landing as a silent no-op.
+    #[test]
+    fn a_pop_of_a_value_not_held_or_an_absent_field_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "---\ntags:\n  - y\nempty:\n---\n")]);
+        let pop = |field: &str| {
+            Operation::new(OperationKind::pop_frontmatter(
+                at("a.md"),
+                field,
+                AuthoredValue::string("x"),
+            ))
+        };
+        let not_held = unresolvable_detail(&vault, pop("tags"));
+        assert!(not_held.contains("holds no element"), "{not_held}");
+        let written_empty = unresolvable_detail(&vault, pop("empty"));
+        assert!(
+            written_empty.contains("holds no element"),
+            "{written_empty}"
+        );
+        let absent = unresolvable_detail(&vault, pop("missing"));
+        assert!(absent.contains("not present"), "{absent}");
+    }
+
+    /// **A remove of a field the document does not carry does not resolve.**
+    #[test]
+    fn a_remove_of_an_absent_field_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "---\ntitle: A\n---\n"), ("b.md", "no block\n")]);
+        for at_path in ["a.md", "b.md"] {
+            let detail = unresolvable_detail(
+                &vault,
+                Operation::new(OperationKind::remove_frontmatter(at(at_path), "status")),
+            );
+            assert!(detail.contains("not present"), "{at_path}: {detail}");
+        }
+    }
+
+    /// **A heading the folding cannot tell apart from another is ambiguous,
+    /// and a heading no line reads as is not found**: neither resolves, and
+    /// neither advises addressing an occurrence the wire cannot name.
+    #[test]
+    fn an_ambiguous_or_missing_heading_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "## Tasks\n\none\n\n### tasks\n\ntwo\n")]);
+        let ambiguous = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::delete_section(path("a.md"), "Tasks")),
+        );
+        assert!(ambiguous.contains("2 headings"), "{ambiguous}");
+        assert!(!ambiguous.contains("occurrence"), "{ambiguous}");
+        let missing = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::replace_section(path("a.md"), "Notes", "x")),
+        );
+        assert!(missing.contains("no heading"), "{missing}");
+    }
+
+    /// **A heading inside a blockquote or a list item never matches as a
+    /// section to edit.**
+    #[test]
+    fn a_heading_in_a_container_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "> ## Quoted\n> body\n")]);
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::replace_section(path("a.md"), "Quoted", "x")),
+        );
+        assert!(detail.contains("blockquote or list item"), "{detail}");
+    }
+
+    /// **An append or insert with empty content does not resolve**, so it
+    /// never lands as a change of nothing; a replace with empty content
+    /// empties the section and resolves.
+    #[test]
+    fn an_append_or_insert_with_empty_content_does_not_resolve() {
+        let vault = MemoryVault::with(&[("a.md", "## Tasks\n\none\n")]);
+        for kind in [
+            OperationKind::append_to_section(path("a.md"), "Tasks", ""),
+            OperationKind::insert_before_heading(path("a.md"), "Tasks", ""),
+            OperationKind::insert_after_heading(path("a.md"), "Tasks", ""),
+        ] {
+            let name = kind.name();
+            let detail = unresolvable_detail(&vault, Operation::new(kind));
+            assert!(detail.contains("empty content"), "{name}: {detail}");
+        }
+        assert_eq!(
+            composed_text(
+                &vault,
+                Operation::new(OperationKind::replace_section(path("a.md"), "Tasks", "")),
+                "a.md"
+            )
+            .as_deref(),
+            Some("## Tasks\n\n")
+        );
+    }
+
+    /// **An operation whose value is nested does not resolve, naming the
+    /// limit and NORN-317**: a map, or a list holding a list or a map, set;
+    /// or a list or a map pushed or popped as one element.
+    #[test]
+    fn a_nested_value_does_not_resolve_naming_the_limit() {
+        let vault = MemoryVault::with(&[("a.md", "---\ntags: []\n---\n")]);
+        let map =
+            AuthoredValue::map([("k".to_string(), AuthoredValue::Integer(1))]).expect("a map");
+        let flat = AuthoredValue::list([AuthoredValue::string("a")]);
+        let deep = AuthoredValue::list([flat.clone()]);
+        for kind in [
+            OperationKind::set_frontmatter(at("a.md"), "owner", map.clone()),
+            OperationKind::set_frontmatter(at("a.md"), "grid", deep),
+            OperationKind::push_frontmatter(at("a.md"), "tags", flat.clone()),
+            OperationKind::pop_frontmatter(at("a.md"), "tags", map),
+        ] {
+            let name = kind.name();
+            let detail = unresolvable_detail(&vault, Operation::new(kind));
+            assert!(
+                detail.contains("nested") && detail.contains("NORN-317"),
+                "{name}: {detail}"
+            );
+        }
+        let set_flat = composed_text(
+            &vault,
+            Operation::new(OperationKind::set_frontmatter(at("a.md"), "tags", flat)),
+            "a.md",
+        );
+        assert!(set_flat.is_some(), "a flat list is written");
+    }
+
+    /// **A refusal `norn-text` makes leaves the operation unresolved with its
+    /// message**: a list rewrite that would drop a comment, and a
+    /// frontmatter block that cannot be read.
+    #[test]
+    fn an_edit_norn_text_refuses_does_not_resolve_with_its_message() {
+        let vault = MemoryVault::with(&[
+            ("a.md", "---\ntags: [a]  # keep\n---\n"),
+            ("b.md", "---\ntitle: [unclosed\n---\n"),
+        ]);
+        let commented = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::push_frontmatter(
+                at("a.md"),
+                "tags",
+                AuthoredValue::string("b"),
+            )),
+        );
+        assert!(commented.contains("comment"), "{commented}");
+        let unreadable = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::set_frontmatter(
+                at("b.md"),
+                "status",
+                AuthoredValue::Bool(true),
+            )),
+        );
+        assert!(unreadable.contains("cannot be read"), "{unreadable}");
+    }
+
+    /// **A document that is not UTF-8 text takes no document-local edit.**
+    #[test]
+    fn a_document_that_is_not_text_does_not_resolve() {
+        let vault = MemoryVault::with_bytes(&[("a.md", b"\xff\xfe body\n")]);
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::replace_body(path("a.md"), "x")),
+        );
+        assert!(detail.contains("not UTF-8"), "{detail}");
+    }
+
+    /// **A `where` target reaching composition does not resolve, and an empty
+    /// one says why it names nothing**: a resolved plan carries only path
+    /// targets, and a conjunction of no predicates matches every document.
+    #[test]
+    fn a_where_target_does_not_resolve_and_an_empty_one_is_refused() {
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\n---\n")]);
+        let predicate: norn_wire::Predicate =
+            serde_json::from_str(r#"{"op":"eq","key":"status","value":"draft"}"#)
+                .expect("a predicate");
+        let matching = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::set_frontmatter(
+                WriteTarget::matching([predicate]),
+                "status",
+                AuthoredValue::string("done"),
+            )),
+        );
+        assert!(matching.contains("not yet expanded"), "{matching}");
+        let empty = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::remove_frontmatter(
+                WriteTarget::matching(Vec::new()),
+                "status",
+            )),
+        );
+        assert!(empty.contains("at least one predicate"), "{empty}");
+    }
+
+    /// **A document-local edit of a document that is not there does not
+    /// resolve.**
+    #[test]
+    fn a_document_local_edit_of_an_absent_document_does_not_resolve() {
+        let detail = unresolvable_detail(
+            &MemoryVault::default(),
+            Operation::new(OperationKind::replace_body(path("a.md"), "x")),
+        );
+        assert!(detail.contains("no document"), "{detail}");
+    }
+
+    /// **Document-local edits compose in order over what the document holds
+    /// so far**, a create in the same plan included.
+    #[test]
+    fn document_local_edits_compose_over_what_the_plan_left() {
+        let operations = [
+            Operation::new(OperationKind::create_document(path("a.md"), "## Log\n")),
+            Operation::new(OperationKind::push_frontmatter(
+                at("a.md"),
+                "tags",
+                AuthoredValue::string("new"),
+            )),
+            Operation::new(OperationKind::append_to_section(
+                path("a.md"),
+                "Log",
+                "entry",
+            )),
+        ];
+        let composition = compose(&operations, &in_order(&operations), &MemoryVault::default())
+            .expect("an infallible view");
+        assert!(
+            composition.unresolvable.is_empty(),
+            "{:?}",
+            composition.unresolvable
+        );
+        let text = after_text(&composition, "a.md").expect("a document");
+        assert!(text.contains("new"), "{text}");
+        assert!(text.ends_with("## Log\nentry\n"), "{text}");
     }
 
     #[test]

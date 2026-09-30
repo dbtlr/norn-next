@@ -1,5 +1,10 @@
 //! The schema check on a composed result: a plan refuses a violation it
-//! introduces, and one on a field it writes.
+//! introduces, and one on a field it writes, unless it is forced.
+//!
+//! **A force bypasses this check and nothing else**, and it is loud: a forced
+//! plan's violations are listed, in the shape a refusal carries them in, on
+//! the forecast of its preview and on its applied report. A forced plan whose
+//! results are all valid lists nothing.
 //!
 //! **The judge is the derivation's own.** What a finding over a document would
 //! be filed under is what [`plan_document`] concludes from its bytes under the
@@ -16,26 +21,46 @@
 //! the same kind about the same subject is concluded from the bytes the target
 //! was composed from — the target's own before-state, or, where it was absent,
 //! a document the plan takes away, which is where a moved document's content
-//! came from. A violation that stood before still refuses where the plan
-//! writes its subject: a tag the result writes a different number of times
-//! than the before-state did. A violation about the whole document that stood
-//! before names no field, so an edit elsewhere in the document does not
-//! refuse on it.
+//! came from.
+//!
+//! **A violation that stood before still refuses where the plan writes its
+//! subject** (ADR 0031). Two things write a subject:
+//!
+//! - a frontmatter kind — set, remove, push or pop — names the field it
+//!   writes, and a violation standing on that field in the result refuses.
+//!   Only an undeclared tag stands on a field: the `tags` field
+//!   ([`norn_text::TAGS_FIELD`]), where the result's frontmatter carries the
+//!   tag. The same tag written only in the body stands on no field. Every
+//!   other kind the derivation concludes is about the whole document — its
+//!   path, its bytes, its frontmatter block as a whole — and names no field;
+//! - any kind writes a tag the result carries a different number of times
+//!   than the before-state did, which refuses a standing undeclared tag
+//!   whichever kind wrote it.
+//!
+//! The fields a plan writes are read from its operations alone
+//! ([`written_fields`]), so a preview and an apply of one plan judge alike. A
+//! whole-document kind — a create, a text replaced, a body or a section
+//! edited — writes no named field, so a violation about the whole document
+//! that stood before, and one on a field only such a kind rewrote, refuse
+//! only by the count above.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use norn_store::Change;
-use norn_wire::{DocumentPath, FindingKind, RefusedCheck};
+use norn_fs::{NormalizedPath, PathNormalizer};
+use norn_store::{Change, TagSource};
+use norn_wire::{DocumentPath, FindingKind, OperationKind, ResolvedPlan, SchemaViolation};
 
+use super::observe::identity;
 use crate::derivation::{Declared, plan_document};
 
 /// What the derivation concludes about one document's bytes: each violation,
-/// by kind and subject, with its message, and how many times it writes each
-/// tag, folded.
+/// by kind and subject, with its message, how many times it writes each tag,
+/// and which tags its frontmatter carries, each folded.
 pub(super) struct Judged {
     violations: Vec<((FindingKind, Option<String>), String)>,
     tags: BTreeMap<String, usize>,
+    frontmatter_tags: BTreeSet<String>,
 }
 
 /// Judge `bytes` as the document at `path` under `declared`.
@@ -60,19 +85,98 @@ pub(super) fn judge(path: &DocumentPath, bytes: &[u8], declared: &Declared) -> J
         })
         .collect();
     let mut tags = BTreeMap::new();
+    let mut frontmatter_tags = BTreeSet::new();
     if let Some(Change::Upsert(facts)) = &plan.change {
         for tag in &facts.tags {
-            *tags
-                .entry(norn_wire::fold_tag(&tag.name).to_string())
-                .or_default() += 1;
+            let folded = norn_wire::fold_tag(&tag.name).to_string();
+            if tag.source == TagSource::Frontmatter {
+                frontmatter_tags.insert(folded.clone());
+            }
+            *tags.entry(folded).or_default() += 1;
         }
     }
-    Judged { violations, tags }
+    Judged {
+        violations,
+        tags,
+        frontmatter_tags,
+    }
 }
 
-/// The checks refusing `after`, the composed result at `path`, against what
-/// stood in `before`: each document it was composed from.
-pub(super) fn refused(path: &DocumentPath, after: &Judged, before: &[Judged]) -> Vec<RefusedCheck> {
+/// The frontmatter fields each file's operations in `plan` write, by the
+/// file's identity: the field a set, a remove, a push or a pop names, at the
+/// document its path target names. A pure function of the operations.
+pub(super) fn written_fields(
+    plan: &ResolvedPlan,
+    normalizer: &PathNormalizer,
+) -> BTreeMap<NormalizedPath, BTreeSet<String>> {
+    let mut written: BTreeMap<NormalizedPath, BTreeSet<String>> = BTreeMap::new();
+    for operation in &plan.operations {
+        let (target, field) = match &operation.kind {
+            OperationKind::SetFrontmatter { target, field, .. }
+            | OperationKind::RemoveFrontmatter { target, field }
+            | OperationKind::PushFrontmatter { target, field, .. }
+            | OperationKind::PopFrontmatter { target, field, .. } => (target, field),
+            _ => continue,
+        };
+        let Some(file) = target
+            .as_path()
+            .and_then(|path| identity(normalizer, path.as_str()))
+        else {
+            continue;
+        };
+        written.entry(file).or_default().insert(field.clone());
+    }
+    written
+}
+
+/// Whether the violation `kind` about `subject` stands on a field in
+/// `written`, the fields the plan writes into the result `after`.
+///
+/// **The field a kind stands on**: an undeclared tag stands on the `tags`
+/// field where the result's frontmatter carries it, and on no field where
+/// only its body does. Every other kind names no field: the path, bytes and
+/// frontmatter-block kinds are about the whole document, and a link's health
+/// is not a schema violation.
+fn on_written_field(
+    kind: FindingKind,
+    subject: Option<&str>,
+    after: &Judged,
+    written: &BTreeSet<String>,
+) -> bool {
+    match kind {
+        FindingKind::UndeclaredTag => {
+            written.contains(norn_text::TAGS_FIELD)
+                && subject.is_some_and(|tag| {
+                    after
+                        .frontmatter_tags
+                        .contains(&norn_wire::fold_tag(tag).to_string())
+                })
+        }
+        FindingKind::PathBytesNotUtf8
+        | FindingKind::PathNamesNoDocument
+        | FindingKind::BodyBytesNotUtf8
+        | FindingKind::FrontmatterTooLarge
+        | FindingKind::FrontmatterUnclosed
+        | FindingKind::FrontmatterUnreadable
+        | FindingKind::Broken
+        | FindingKind::Ambiguous
+        | FindingKind::MissingAnchor => false,
+        // A kind minted after these is about the whole document until it is
+        // given a field here.
+        _ => false,
+    }
+}
+
+/// The violations `after`, the composed result at `path`, introduces against
+/// what stood in `before`, each document it was composed from, where the plan
+/// writes the frontmatter fields `written` into it: each refuses an unforced
+/// plan, and a forced plan lets each through and lists it.
+pub(super) fn introduced(
+    path: &DocumentPath,
+    after: &Judged,
+    before: &[Judged],
+    written: &BTreeSet<String>,
+) -> Vec<SchemaViolation> {
     let stood: Vec<&(FindingKind, Option<String>)> = before
         .iter()
         .flat_map(|judged| judged.violations.iter().map(|(violation, _)| violation))
@@ -81,7 +185,9 @@ pub(super) fn refused(path: &DocumentPath, after: &Judged, before: &[Judged]) ->
         .violations
         .iter()
         .filter(|(violation, _)| {
-            if !stood.contains(&violation) {
+            if !stood.contains(&violation)
+                || on_written_field(violation.0, violation.1.as_deref(), after, written)
+            {
                 return true;
             }
             match &violation.1 {
@@ -96,7 +202,7 @@ pub(super) fn refused(path: &DocumentPath, after: &Judged, before: &[Judged]) ->
             }
         })
         .map(|((kind, target), message)| {
-            RefusedCheck::schema_violation(path.clone(), *kind, target.clone(), message.clone())
+            SchemaViolation::new(path.clone(), *kind, target.clone(), message.clone())
         })
         .collect()
 }

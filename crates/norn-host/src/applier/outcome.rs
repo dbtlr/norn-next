@@ -2,7 +2,8 @@
 
 use norn_wire::{
     AppliedTarget, ApplyReport, ChangesetOutcome, ErrorDetail, ErrorEnvelope, FolderPath, Forecast,
-    InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, UnresolvedOperation,
+    InterruptionCause, PlanFault, RefusedCheck, ResolvedPlan, RootIdentity, SchemaViolation,
+    UnresolvedOperation,
 };
 
 use norn_fs::Batch;
@@ -66,6 +67,9 @@ pub(crate) struct Applied {
     pub(crate) folders_made: Vec<FolderPath>,
     /// The folders its removals left empty, which it removed.
     pub(crate) folders_removed: Vec<FolderPath>,
+    /// Every schema violation its force let through: empty for a plan that
+    /// is not forced, and for a forced plan whose every result is valid.
+    pub(crate) forced: Vec<SchemaViolation>,
 }
 
 /// A refused plan, with the plan resolved afresh.
@@ -90,6 +94,8 @@ pub(crate) struct Interrupted {
     pub(crate) landed: Vec<DocumentPath>,
     /// What stopped publication.
     pub(crate) cause: InterruptionCause,
+    /// Every schema violation its force let through in a target that landed.
+    pub(crate) forced: Vec<SchemaViolation>,
     /// Whether the landed subset committed, or the entry owes a heal. The wire
     /// does not carry it; the apply job reads it, through
     /// [`ApplyOutcome::heal`], to arm the heal.
@@ -166,7 +172,8 @@ impl ApplyOutcome {
                 applied.targets,
                 applied.folders_made,
                 applied.folders_removed,
-            )),
+            )
+            .with_forced(applied.forced)),
             ApplyOutcome::Refused(refused) => Err(ErrorEnvelope::new(
                 "a check refused the plan before anything was published",
                 ErrorDetail::plan_refused(
@@ -195,6 +202,7 @@ impl ApplyOutcome {
                     interrupted.plan,
                     interrupted.landed,
                     interrupted.cause,
+                    interrupted.forced,
                 ),
             )),
             ApplyOutcome::WriteFailed { plan, detail } => Err(ErrorEnvelope::new(

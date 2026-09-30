@@ -23,13 +23,29 @@
 //!   what it meets — an edit whose text does not occur exactly once, a create
 //!   or a move onto a document, onto a folder or beneath a document, or any
 //!   operation naming a file whose normalized spelling the store's path
-//!   grammar refuses — does not resolve; it is not a fault in the plan.
+//!   grammar refuses — does not resolve; it is not a fault in the plan. A
+//!   document-local kind — a frontmatter field set, removed, pushed to or
+//!   popped from, a body or a section replaced, text appended or inserted at a
+//!   heading — edits its document where it stands through [`edit`], which
+//!   also names what does not resolve: a push onto a scalar, a pop or a
+//!   remove of what the document does not hold, a heading that is ambiguous,
+//!   missing or inside a container, empty content to append or insert, a
+//!   nested value, and a `where` target not yet expanded. The pop, the
+//!   remove and the empty content are left unresolved where they would
+//!   otherwise land as a silent no-op. An edit that rewrites what its
+//!   document already holds — a field set to the value it holds, a body or a
+//!   section replaced by itself — resolves to a transition whose after-state
+//!   is its before-state, which lands found (ADR 0031's landed rule).
 //! - [`resolve`] — the resolved plan: an operation that does not resolve, or
 //!   whose author's condition the vault no longer meets or names a file the
 //!   store's path grammar refuses, is left out, with
 //!   every operation that touches one of its files or requires it, and what
 //!   remains is one transition per file, the author conditions on files the
-//!   plan does not write, and the root's identity.
+//!   plan does not write, the root's identity and the plan's force. An
+//!   author's condition — a content hash or an expected frontmatter value —
+//!   is judged against the before-state of a file the plan writes, which it
+//!   then says nothing beyond, and against any other file as it stands, which
+//!   travels as a condition on that file's content.
 //! - [`lineage`] — the content cycle the order cannot see: where the resolved
 //!   operations' targets draw on each other's before-states through a name
 //!   nothing stood at, such as two documents exchanging places through a
@@ -66,7 +82,7 @@
 //! through a [`view::VaultView`]: the store holds no document's exact bytes,
 //! and a hash read from it could name bytes nobody composed against. The
 //! request's one snapshot is what an operation that reads derived facts plans
-//! against; none of today's four kinds reads one.
+//! against; none of today's kinds reads one.
 //!
 //! **A create publishes before any removal.** ADR 0031 publishes creates
 //! first and removals last, so a name a removal of this plan vacates still
@@ -76,8 +92,10 @@
 //! after it and resolves.
 //!
 //! **What the planner leaves to the applier.** Whether a composed result
-//! passes the vault schema is checked while every target is staged, as the
-//! architecture's apply seam places it, so a preview answers without it.
+//! passes the vault schema, and whether a forced plan lets a violation
+//! through, is checked while every target is staged, as the architecture's
+//! apply seam places it, and a preview answers from the applier's own
+//! judgment of the plan it resolves.
 //! Publishing a case-only rename's two transitions as one respell is the
 //! applier's, as is checking the plan's conditions again, landed or not.
 //!
@@ -94,6 +112,7 @@
 //! (`crate::apply`).
 
 pub(crate) mod compose;
+pub(crate) mod edit;
 pub(crate) mod forecast;
 pub(crate) mod lineage;
 pub(crate) mod order;

@@ -3274,7 +3274,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
         ("vault/root-changed", vec!["code", "expected", "found"]),
         (
             "vault/plan-interrupted",
-            vec!["code", "plan", "landed", "cause"],
+            vec!["code", "plan", "landed", "cause", "forced"],
         ),
         ("vault/write-failed", vec!["code", "plan", "detail"]),
         ("host/apply-not-run", vec!["code", "cause", "plan"]),

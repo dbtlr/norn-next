@@ -28,6 +28,8 @@ use std::path::Path;
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{Operation, OperationKind};
 
+use super::compose::touches;
+
 /// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Drawn {
@@ -79,15 +81,29 @@ impl Lineage {
         let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
         let mut lineage = Lineage::default();
         for &position in order {
-            match &operations[position].kind {
+            let kind = &operations[position].kind;
+            match kind {
                 OperationKind::CreateDocument { path, .. }
                 | OperationKind::DeleteDocument { path } => {
                     if let Some(file) = identity(path.as_str()) {
                         lineage.at_end.insert(file, None);
                     }
                 }
-                OperationKind::StrReplace { path, .. } => {
-                    if let Some(file) = identity(path.as_str())
+                // An edit in place: a `str_replace` or a document-local kind,
+                // each touching the one document it names.
+                OperationKind::StrReplace { .. }
+                | OperationKind::SetFrontmatter { .. }
+                | OperationKind::RemoveFrontmatter { .. }
+                | OperationKind::PushFrontmatter { .. }
+                | OperationKind::PopFrontmatter { .. }
+                | OperationKind::ReplaceBody { .. }
+                | OperationKind::ReplaceSection { .. }
+                | OperationKind::AppendToSection { .. }
+                | OperationKind::DeleteSection { .. }
+                | OperationKind::InsertBeforeHeading { .. }
+                | OperationKind::InsertAfterHeading { .. } => {
+                    if let Some(path) = touches(kind).next()
+                        && let Some(file) = identity(path.as_str())
                         && let Some(source) = lineage.source(&file)
                     {
                         lineage.edited.insert(position, source.from);
@@ -108,19 +124,6 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
-                // NORN-296: planned in the host PR. Until then a
-                // document-local kind never composes, so no order it stands
-                // in carries content anywhere.
-                OperationKind::SetFrontmatter { .. }
-                | OperationKind::RemoveFrontmatter { .. }
-                | OperationKind::PushFrontmatter { .. }
-                | OperationKind::PopFrontmatter { .. }
-                | OperationKind::ReplaceBody { .. }
-                | OperationKind::ReplaceSection { .. }
-                | OperationKind::AppendToSection { .. }
-                | OperationKind::DeleteSection { .. }
-                | OperationKind::InsertBeforeHeading { .. }
-                | OperationKind::InsertAfterHeading { .. } => {}
             }
         }
         lineage

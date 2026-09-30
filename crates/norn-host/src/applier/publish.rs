@@ -66,7 +66,12 @@ impl Publisher<'_> {
     ) -> (Progress, Option<Stopped>) {
         let mut progress = Progress::default();
         let mut removed: Vec<DocumentPath> = Vec::new();
-        let StagedPlan { targets, stored } = staged;
+        // What the force let through is the apply's to report, not publication's.
+        let StagedPlan {
+            targets,
+            stored,
+            forced: _,
+        } = staged;
         let mut remaining = targets.into_iter();
         while let Some(target) = remaining.next() {
             let unit = target.unit;

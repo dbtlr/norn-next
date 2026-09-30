@@ -554,17 +554,22 @@ impl Fixture {
     /// A vault holding `files` whose store pins the schema `schema`.
     pub(super) fn with_schema(schema: &str, files: &[(&str, &str)]) -> Fixture {
         let mut fixture = Fixture::new(files);
+        fixture.pin(schema);
         fixture
-            .store
+    }
+
+    /// Pin `schema` in the store and derive the vault under it.
+    pub(super) fn pin(&mut self, schema: &str) {
+        self.store
             .begin_request()
             .pin_vault_schema(schema.as_bytes(), "applier-test-schema")
             .expect("the schema pins");
-        heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
-        fixture
+        heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
     }
 }
 
-const TAG_SCHEMA: &str = "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
+pub(super) const TAG_SCHEMA: &str =
+    "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
 
 /// A plan refuses a violation of the vault schema it introduces, and one on
 /// what it writes, and not one that already stood in a target and that it
@@ -967,6 +972,7 @@ fn each_outcome_crosses_under_its_wire_code() {
         targets: Vec::new(),
         folders_made: Vec::new(),
         folders_removed: Vec::new(),
+        forced: Vec::new(),
     })
     .into_wire()
     .expect("an applied plan is answered")
@@ -1015,6 +1021,7 @@ fn each_outcome_crosses_under_its_wire_code() {
             plan: plan.clone(),
             landed: vec![path("a.md")],
             cause: InterruptionCause::io_failure("a sync failed"),
+            forced: Vec::new(),
             changeset: ChangesetOutcome::Committed,
         }))),
         (ReasonCode::VaultPlanInterrupted, true)
@@ -1711,6 +1718,7 @@ fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
         targets: Vec::new(),
         folders_made: Vec::new(),
         folders_removed: Vec::new(),
+        forced: Vec::new(),
     });
     let normalizer = norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
 
@@ -1790,4 +1798,594 @@ fn a_target_unreadable_while_a_resolved_plan_is_checked_previews_as_its_apply_an
 #[test]
 fn a_root_unwalkable_when_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
     previews_as_its_apply_answers_with("");
+}
+
+/// One operation of every document-local kind, each over its own document of
+/// `DOCUMENT_LOCAL_VAULT`.
+fn one_of_each_document_local_kind() -> Vec<Operation> {
+    use norn_wire::{AuthoredValue, WriteTarget};
+    let at = |text: &str| WriteTarget::path(path(text));
+    vec![
+        Operation::new(OperationKind::set_frontmatter(
+            at("set.md"),
+            "status",
+            AuthoredValue::string("done"),
+        )),
+        Operation::new(OperationKind::remove_frontmatter(at("remove.md"), "status")),
+        Operation::new(OperationKind::push_frontmatter(
+            at("push.md"),
+            "tags",
+            AuthoredValue::string("project"),
+        )),
+        Operation::new(OperationKind::pop_frontmatter(
+            at("pop.md"),
+            "tags",
+            AuthoredValue::string("project"),
+        )),
+        Operation::new(OperationKind::replace_body(path("body.md"), "# New\n")),
+        Operation::new(OperationKind::replace_section(
+            path("replace.md"),
+            "Tasks",
+            "fresh\n",
+        )),
+        Operation::new(OperationKind::append_to_section(
+            path("append.md"),
+            "Tasks",
+            "added",
+        )),
+        Operation::new(OperationKind::delete_section(path("delete.md"), "Tasks")),
+        Operation::new(OperationKind::insert_before_heading(
+            path("before.md"),
+            "Tasks",
+            "above",
+        )),
+        Operation::new(OperationKind::insert_after_heading(
+            path("after.md"),
+            "Tasks",
+            "below",
+        )),
+    ]
+}
+
+const DOCUMENT_LOCAL_VAULT: &[(&str, &str)] = &[
+    ("set.md", "---\nstatus: draft\n---\n# Set\n"),
+    ("remove.md", "---\nstatus: draft\n---\n# Remove\n"),
+    ("push.md", "---\ntags:\n  - project\n---\n# Push\n"),
+    ("pop.md", "---\ntags:\n  - project\n  - other\n---\n# Pop\n"),
+    ("body.md", "---\ntitle: Body\n---\n# Old\n"),
+    ("replace.md", "# R\n\n## Tasks\n\none\n"),
+    ("append.md", "# A\n\n## Tasks\n\none\n"),
+    ("delete.md", "# D\n\n## Tasks\n\none\n\n## Keep\n"),
+    ("before.md", "# B\n\n## Tasks\n\none\n"),
+    ("after.md", "# F\n\n## Tasks\n\none\n"),
+];
+
+/// **Every document-local kind previews as its apply applies, and its
+/// resolved plan sent again is landed**: the preview answers the plan its
+/// operations resolved to, the apply writes that same plan, and the plan sent
+/// once more finds every target at its after-state and writes nothing.
+#[test]
+fn each_document_local_kind_previews_as_it_applies_and_a_re_send_is_found() {
+    for operation in one_of_each_document_local_kind() {
+        let name = operation.kind.name();
+        let mut fixture = Fixture::new(DOCUMENT_LOCAL_VAULT);
+        let plan = fixture.plan(vec![operation]);
+        assert_eq!(plan.transitions.len(), 1, "{name}");
+        let (previewed, _) = fixture
+            .preview(plan.clone())
+            .unwrap_or_else(|refusal| panic!("{name} previews: {refusal:?}"));
+        assert_eq!(previewed, plan, "{name}");
+        let landed = applied(fixture.apply(plan.clone()));
+        assert_eq!(landed.plan, previewed, "{name}");
+        assert_eq!(
+            landed.targets.iter().map(|t| t.result).collect::<Vec<_>>(),
+            vec![TargetResult::Wrote],
+            "{name}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+        let again = applied(fixture.apply(plan));
+        assert_eq!(
+            again.targets.iter().map(|t| t.result).collect::<Vec<_>>(),
+            vec![TargetResult::Found],
+            "{name}"
+        );
+    }
+}
+
+/// **A resolved plan carrying an expected value applies as its conditions
+/// were planned, and is found when sent again**: the condition on the
+/// document it writes is that document's before-state, and the one on a
+/// document it does not write travels as a condition on its content, which
+/// another writer's change then breaks.
+#[test]
+fn a_plan_carrying_expected_values_applies_and_refuses_once_the_observed_document_changes() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField, WriteTarget};
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let operations = vec![
+        Operation::new(OperationKind::set_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "status",
+            AuthoredValue::string("new"),
+        ))
+        .with_conditions(vec![
+            AuthorCondition::expected_value(path("a.md"), "status", ExpectedField::absent()),
+            AuthorCondition::expected_value(
+                path("c.md"),
+                "status",
+                ExpectedField::present(AuthoredValue::string("ready")),
+            ),
+        ]),
+    ];
+    let plan = fixture.plan(operations.clone());
+    assert_eq!(plan.conditions.len(), 1);
+    applied(fixture.apply(plan.clone()));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntitle: A\nstatus: new\n---\n")
+    );
+    let again = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&again),
+        vec![("a.md".to_string(), TargetResult::Found)]
+    );
+
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let plan = fixture.plan(operations);
+    fixture.foreign("c.md", "---\nstatus: held\n---\n");
+    let refused = refused(fixture.apply(plan));
+    assert!(
+        matches!(
+            refused.checks.as_slice(),
+            [norn_wire::RefusedCheck::ConditionFailed { .. }]
+        ),
+        "{:?}",
+        refused.checks
+    );
+    assert!(refused.plan.operations.is_empty());
+    assert_eq!(refused.unresolved.len(), 1, "{:?}", refused.unresolved);
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntitle: A\n---\n")
+    );
+}
+
+/// **A resolved plan whose recorded state does not hold its own operation's
+/// expected value is not what its operations do**: an expectation edited
+/// after planning on the document it writes, or a plan dropping the content
+/// condition an expectation on another document travels as, is
+/// `request/plan-invalid` naming the document, and nothing is published.
+#[test]
+fn a_plan_whose_state_does_not_hold_its_expected_value_is_invalid() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField, WriteTarget};
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\ntitle: A\n---\n"),
+        ("c.md", "---\nstatus: ready\n---\n"),
+    ]);
+    let set = Operation::new(OperationKind::set_frontmatter(
+        WriteTarget::path(path("a.md")),
+        "status",
+        AuthoredValue::string("new"),
+    ));
+    let mut edited = fixture.plan(vec![set.clone().with_conditions(vec![
+        AuthorCondition::expected_value(path("a.md"), "status", ExpectedField::absent()),
+    ])]);
+    edited.operations[0].conditions = vec![AuthorCondition::expected_value(
+        path("a.md"),
+        "title",
+        ExpectedField::present(AuthoredValue::string("B")),
+    )];
+    assert_eq!(fixture.refuses_disagreeing(edited), vec![path("a.md")]);
+    let mut dropped = fixture.plan(vec![set.with_conditions(vec![
+        AuthorCondition::expected_value(
+            path("c.md"),
+            "status",
+            ExpectedField::present(AuthoredValue::string("ready")),
+        ),
+    ])]);
+    dropped.conditions.clear();
+    assert_eq!(fixture.refuses_disagreeing(dropped), vec![path("c.md")]);
+}
+
+/// **A frontmatter write over a document another writer then edits refuses
+/// and refreshes against what the document holds now**: the set is resolved
+/// again over the foreign edit, and the push appends to the list the
+/// document holds now rather than writing a list computed before the edit.
+#[test]
+fn a_frontmatter_write_over_a_drifted_document_refreshes_against_its_content_now() {
+    use norn_wire::{AuthoredValue, WriteTarget};
+    let mut fixture = Fixture::new(&[("a.md", "---\nstatus: draft\ntags:\n  - x\n---\n")]);
+    let plan = fixture.plan(vec![
+        Operation::new(OperationKind::set_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "status",
+            AuthoredValue::string("done"),
+        )),
+        Operation::new(OperationKind::push_frontmatter(
+            WriteTarget::path(path("a.md")),
+            "tags",
+            AuthoredValue::string("y"),
+        )),
+    ]);
+    let foreign = "---\nstatus: draft\ntags:\n  - x\n  - z\n---\n";
+    fixture.foreign("a.md", foreign);
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("a.md"),
+            present(foreign)
+        )]
+    );
+    assert!(refused.unresolved.is_empty(), "{:?}", refused.unresolved);
+    let refreshed = "---\nstatus: done\ntags:\n  - x\n  - z\n  - y\n---\n";
+    assert_eq!(
+        refused.plan.transitions,
+        vec![norn_wire::Transition::new(
+            path("a.md"),
+            present(foreign),
+            present(refreshed)
+        )]
+    );
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("a.md").as_deref(), Some(refreshed));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A forced plan refused for drift answers a fresh plan that is forced
+/// too**, so the plan the caller sends back applies as the one it previewed.
+#[test]
+fn a_refused_forced_plan_refreshes_forced() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    plan.force = true;
+    fixture.foreign("a.md", "draft, edited\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(refused.plan.operations.len(), 1);
+    assert!(refused.plan.force);
+}
+
+/// A push of the tag `stray`, which `TAG_SCHEMA` does not declare, into
+/// `a.md`.
+fn pushing_a_stray_tag() -> Operation {
+    Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("a.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("stray"),
+    ))
+}
+
+/// **A forced plan lets a schema violation through, loudly**: unforced the
+/// push refuses on the undeclared tag; forced, its preview lists the
+/// violation in the forecast's `forced`, and its apply writes it and lists
+/// the same violation in the applied report, as the wire carries it.
+#[test]
+fn a_forced_plan_previews_the_violation_it_lets_through_and_applies_the_same() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: [project]\n---\n")]);
+    let plan = fixture.plan(vec![pushing_a_stray_tag()]);
+    let unforced = refused_for(fixture.apply(plan.clone()));
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = unforced.as_slice() else {
+        panic!("the unforced plan refuses on the schema: {unforced:?}");
+    };
+    assert_eq!(violation.kind, norn_wire::FindingKind::UndeclaredTag);
+    assert_eq!(violation.target.as_deref(), Some("stray"));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project]\n---\n")
+    );
+
+    let mut forced = plan;
+    forced.force = true;
+    let (previewed, forecast) = fixture
+        .preview(forced.clone())
+        .unwrap_or_else(|refusal| panic!("the forced plan previews: {refusal:?}"));
+    assert_eq!(previewed, forced);
+    assert_eq!(forecast.forced, vec![violation.clone()]);
+    let landed = applied(fixture.apply(forced));
+    assert_eq!(landed.forced, vec![violation.clone()]);
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project, stray]\n---\n")
+    );
+    let report = ApplyOutcome::Applied(landed)
+        .into_wire()
+        .expect("an applied plan is answered")
+        .expect("an applied plan is a report");
+    let norn_wire::ApplyReport::Applied { forced, .. } = report else {
+        panic!("an applied report: {report:?}");
+    };
+    assert_eq!(forced, vec![violation.clone()]);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A forced plan whose results are all valid lists nothing.**
+#[test]
+fn a_forced_plan_whose_results_are_valid_lists_nothing() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: []\n---\n")]);
+    let mut plan = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("a.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("project"),
+    ))]);
+    plan.force = true;
+    let (_, forecast) = fixture.preview(plan.clone()).expect("the plan previews");
+    assert!(forecast.forced.is_empty());
+    assert!(applied(fixture.apply(plan)).forced.is_empty());
+}
+
+/// **A force bypasses the schema check and nothing else**: a forced plan
+/// over a drifted target, or with a condition another writer broke, refuses
+/// as an unforced one does.
+#[test]
+fn a_force_does_not_bypass_drift_or_a_failing_condition() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[("a.md", "---\ntags: [project]\n---\n"), ("c.md", "seen\n")],
+    );
+    let seen = crate::planner::compose::content_hash(b"seen\n");
+    let mut drifting = fixture.plan(vec![pushing_a_stray_tag()]);
+    drifting.force = true;
+    let mut conditioned = fixture.plan(vec![pushing_a_stray_tag().with_conditions(vec![
+        norn_wire::AuthorCondition::content_hash(path("c.md"), seen),
+    ])]);
+    conditioned.force = true;
+    fixture.foreign("c.md", "changed\n");
+    assert!(matches!(
+        refused_for(fixture.apply(conditioned)).as_slice(),
+        [norn_wire::RefusedCheck::ConditionFailed { .. }]
+    ));
+    fixture.foreign("a.md", "---\ntags: [project, other]\n---\n");
+    assert!(matches!(
+        refused_for(fixture.apply(drifting)).as_slice(),
+        [norn_wire::RefusedCheck::Drifted { .. }]
+    ));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [project, other]\n---\n")
+    );
+}
+
+/// A set of `field` in `at` to `value`.
+fn setting(at: &str, field: &str, value: norn_wire::AuthoredValue) -> Operation {
+    Operation::new(OperationKind::set_frontmatter(
+        norn_wire::WriteTarget::path(path(at)),
+        field,
+        value,
+    ))
+}
+
+/// The tags `names`, as a written list value.
+fn tag_list(names: &[&str]) -> norn_wire::AuthoredValue {
+    norn_wire::AuthoredValue::List(
+        names
+            .iter()
+            .map(|name| norn_wire::AuthoredValue::string(*name))
+            .collect(),
+    )
+}
+
+/// **An unforced write keeps no schema violation standing on the field it
+/// rewrites**: a set or a push of `tags` that leaves an undeclared tag in
+/// the field refuses on it, though the tag stood before; forced, the set
+/// applies and lists it. A violation on no field the plan writes still does
+/// not refuse: an undeclared tag in the body beside a rewritten `tags`, and
+/// one in `tags` beside a rewritten `status`.
+#[test]
+fn an_unforced_write_keeps_no_violation_standing_on_the_field_it_rewrites() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[
+            ("a.md", "---\ntags: [stray]\n---\n# A\n"),
+            ("b.md", "---\ntags: [stray]\n---\n# B\n"),
+            ("c.md", "---\ntags: []\n---\n# C\n#stray\n"),
+            ("d.md", "---\ntags: [stray]\n---\n# D\n"),
+        ],
+    );
+    let set = fixture.plan(vec![setting(
+        "a.md",
+        "tags",
+        tag_list(&["stray", "project"]),
+    )]);
+    let checks = refused_for(fixture.apply(set.clone()));
+    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("the set refuses on the tag its field keeps: {checks:?}");
+    };
+    assert_eq!(violation.path, path("a.md"));
+    assert_eq!(violation.kind, norn_wire::FindingKind::UndeclaredTag);
+    assert_eq!(violation.target.as_deref(), Some("stray"));
+    let pushed = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
+        norn_wire::WriteTarget::path(path("b.md")),
+        "tags",
+        norn_wire::AuthoredValue::string("project"),
+    ))]);
+    assert!(matches!(
+        refused_for(fixture.apply(pushed)).as_slice(),
+        [norn_wire::RefusedCheck::SchemaViolation { .. }]
+    ));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [stray]\n---\n# A\n")
+    );
+
+    let mut forced = set;
+    forced.force = true;
+    let (_, forecast) = fixture
+        .preview(forced.clone())
+        .expect("the forced set previews");
+    assert_eq!(forecast.forced, vec![violation.clone()]);
+    assert_eq!(
+        applied(fixture.apply(forced)).forced,
+        vec![violation.clone()]
+    );
+
+    let elsewhere = applied(fixture.apply(fixture.plan(vec![
+        setting("c.md", "tags", tag_list(&["project"])),
+        setting("d.md", "status", norn_wire::AuthoredValue::string("done")),
+    ])));
+    assert!(elsewhere.forced.is_empty());
+    assert_eq!(
+        fixture.read("c.md").as_deref(),
+        Some("---\ntags: [project]\n---\n# C\n#stray\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **Every fresh plan a forced plan's refusal answers with is forced**, one
+/// whose operations no longer plan included: a chain of moves re-resolved
+/// over a document another writer put in its way is a content cycle, and
+/// the empty fresh plan still carries the force.
+#[test]
+fn a_refused_forced_plan_whose_operations_no_longer_plan_refreshes_forced() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let first = norn_wire::OperationId::new("first").expect("an identifier");
+    let mut plan = fixture.plan(vec![
+        moving("a.md", "b.md").with_id(first.clone()),
+        moving("b.md", "c.md").with_requires(vec![first]),
+    ]);
+    plan.force = true;
+    fixture.foreign("b.md", "# B, foreign\n");
+    let refused = refused(fixture.apply(plan));
+    assert!(refused.plan.operations.is_empty(), "{:?}", refused.plan);
+    assert_eq!(refused.unresolved.len(), 2, "{:?}", refused.unresolved);
+    assert!(refused.plan.force);
+}
+
+/// **A refused forced plan's fresh forecast lists the violations its fresh
+/// plan lets through**, exactly as a preview of that fresh plan lists them.
+#[test]
+fn a_refused_forced_plan_forecasts_what_its_fresh_plan_forces() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: [project]\n---\n")]);
+    let mut plan = fixture.plan(vec![pushing_a_stray_tag()]);
+    plan.force = true;
+    fixture.foreign("a.md", "---\ntags: [project]\ntitle: foreign\n---\n");
+    let refused = refused(fixture.apply(plan));
+    let (_, previewed) = fixture
+        .preview(refused.plan.clone())
+        .expect("the fresh plan previews");
+    assert_eq!(previewed.forced.len(), 1, "{:?}", previewed.forced);
+    assert_eq!(refused.forecast.forced, previewed.forced);
+}
+
+/// **A hand-authored plan creating a document it expects a value in is not
+/// what its operations do**: an expected value on the document a create
+/// writes names a document that did not stand before the plan, so it does
+/// not hold, and the plan answers `request/plan-invalid` naming the
+/// document, writing nothing.
+#[test]
+fn a_create_carrying_an_expected_value_on_its_own_document_is_invalid() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField};
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let content = "---\nstatus: x\n---\n";
+    let plan = fixture.by_hand(
+        vec![
+            creating("n.md", content).with_conditions(vec![AuthorCondition::expected_value(
+                path("n.md"),
+                "status",
+                ExpectedField::present(AuthoredValue::string("x")),
+            )]),
+        ],
+        vec![norn_wire::Transition::new(
+            path("n.md"),
+            norn_wire::FileState::absent(),
+            present(content),
+        )],
+    );
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
+    assert_eq!(fixture.read("n.md"), None);
+}
+
+/// **An absent expectation holds on a frontmatter block holding no
+/// mapping at all**: an empty block, and one holding only a comment, carry
+/// no field.
+#[test]
+fn an_absent_expectation_holds_on_an_empty_frontmatter_block() {
+    use norn_wire::{AuthorCondition, AuthoredValue, ExpectedField};
+    let mut fixture = Fixture::new(&[("a.md", "---\n---\n"), ("b.md", "---\n# c\n---\n")]);
+    let guarded = |at: &str| {
+        setting(at, "status", AuthoredValue::string("new")).with_conditions(vec![
+            AuthorCondition::expected_value(path(at), "status", ExpectedField::absent()),
+        ])
+    };
+    let plan = fixture.plan(vec![guarded("a.md"), guarded("b.md")]);
+    applied(fixture.apply(plan));
+    assert!(
+        fixture
+            .read("a.md")
+            .is_some_and(|content| content.contains("status: new")),
+        "{:?}",
+        fixture.read("a.md")
+    );
+    assert!(
+        fixture
+            .read("b.md")
+            .is_some_and(|content| content.contains("status: new")),
+        "{:?}",
+        fixture.read("b.md")
+    );
+}
+
+/// **A force does not bypass create exclusivity or the root's identity**: a
+/// forced create over a name another writer took refuses and leaves the
+/// other writer's document, and a forced plan for another root is refused
+/// with no plan.
+#[test]
+fn a_force_does_not_bypass_create_exclusivity_or_root_identity() {
+    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "# A\n")]);
+    let mut creating_stray = fixture.plan(vec![creating("n.md", "# N\n#stray\n")]);
+    creating_stray.force = true;
+    let mut elsewhere = creating_stray.clone();
+    elsewhere.root = RootIdentity::from_device_and_inode(1, 2);
+    assert!(matches!(
+        fixture.apply(elsewhere),
+        ApplyOutcome::RootChanged { .. }
+    ));
+    assert_eq!(fixture.read("n.md"), None);
+    fixture.foreign("n.md", "# N, foreign\n");
+    let checks = refused_for(fixture.apply(creating_stray));
+    assert!(
+        matches!(
+            checks.as_slice(),
+            [norn_wire::RefusedCheck::Drifted { path: at, .. }
+                | norn_wire::RefusedCheck::NameTaken { path: at, .. }] if *at == path("n.md")
+        ),
+        "{checks:?}"
+    );
+    assert_eq!(fixture.read("n.md").as_deref(), Some("# N, foreign\n"));
+}
+
+/// **An edit whose result is what the document already holds lands as a
+/// no-change transition, answered found**: a field set to the value it
+/// holds and a body replaced by itself resolve, their after-state is their
+/// before-state, and the apply writes nothing and reports each found, never
+/// wrote (ADR 0031's landed rule).
+#[test]
+fn an_edit_to_what_the_document_already_holds_lands_found() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "---\nstatus: draft\n---\n# A\n"),
+        ("b.md", "---\ntitle: B\n---\n# B\nbody\n"),
+    ]);
+    let plan = fixture.plan(vec![
+        setting("a.md", "status", norn_wire::AuthoredValue::string("draft")),
+        Operation::new(OperationKind::replace_body(path("b.md"), "# B\nbody\n")),
+    ]);
+    for transition in &plan.transitions {
+        assert_eq!(transition.after, transition.before, "{transition:?}");
+    }
+    let landed = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&landed),
+        vec![
+            ("a.md".to_string(), TargetResult::Found),
+            ("b.md".to_string(), TargetResult::Found),
+        ]
+    );
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "nothing written"
+    );
 }

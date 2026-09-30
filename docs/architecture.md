@@ -2399,6 +2399,35 @@ preconditions are checked against the states and conditions the plan carries, no
 the snapshot a planner read through
 ([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
 
+Beside the four kinds that place, edit, move and remove whole documents, a plan carries
+document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
+replaced, and a section replaced, deleted, appended to, or written before or after its
+heading. Each composes as a pure function of its one document's bytes through `norn-text`,
+which proves every splice by reading it back, and addresses a section through the one
+shared heading resolver a read and a wikilink anchor use. An edit that cannot be made
+leaves its operation unresolved: a push onto a scalar or a map, a pop or a removal of what
+the document does not hold, a heading that is ambiguous, missing or inside a container,
+empty content to append or insert, a refusal `norn-text` makes, and a nested value, which
+is not written until nested frontmatter values land. An edit that rewrites what the
+document already holds — a field set to its value, a body or a section replaced by
+itself — resolves to a transition whose after-state is its before-state, and lands found.
+A resolved plan carries only path targets. Planning does not yet expand a frontmatter
+operation's `where` target into the documents it matches: it leaves the operation
+unresolved, and an empty `where` names no document at all.
+An author's condition — a content hash, or an expected frontmatter value that is absent or
+reads as exactly one value — is checked at planning, against the document as it stood
+before the plan: on a file the plan writes it becomes that target's before-state, and on
+any other file it travels as a condition on the file's content, which the applier checks
+as any condition. An expected value on another file is therefore a whole-file content-hash
+condition: any change to that file refuses the apply, one that leaves the field as
+observed included, and the refusal's fresh plan judges the field again. A schema violation
+that stood before the plan still refuses where it stands on a field a frontmatter kind
+writes: an undeclared tag the rewritten `tags` field keeps, which a body tag is not. A
+plan's `force` lets through the schema violations its results introduce and lists each, in
+the shape a refusal carries, on the preview's forecast, the applied report, and an
+interruption for the targets that landed; it bypasses no other check, and a refusal's
+fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
+
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
 reply rides in the job. The seam holds these invariants; which gate hold carries each is
@@ -2456,7 +2485,8 @@ bound by the applier's lifecycle tests.
   entry nothing will serve.
 - **The outcome.** `PendingApply::wait` blocks until the outcome, with no host-level bound:
   applied, which names whether its changeset committed or the entry is healing from what the
-  paths hold; interrupted, naming the targets that landed; refused by a check, with a fresh
+  paths hold; interrupted, naming the targets that landed and what a force let through in
+  them; refused by a check, with a fresh
   resolved plan, or with none where the vault's root identity does not match; not applied,
   with a lifecycle cause or the I/O failure that stopped it before any target landed; or
   unknown. Every outcome given after planning carries the resolved plan, so a caller that

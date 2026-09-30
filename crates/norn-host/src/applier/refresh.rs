@@ -12,7 +12,8 @@ use norn_wire::{
 
 use super::observe::{TargetState, identity, observe, units};
 use super::outcome::{ApplyOutcome, Refused};
-use super::stage::drifted_checks;
+use super::stage::{check, drifted_checks};
+use crate::derivation::Declared;
 use crate::planner::compose::touches;
 use crate::planner::resolve::{PlanningFailure, resolve};
 use crate::planner::view::{TreeView, VaultView};
@@ -41,11 +42,16 @@ enum Fate {
 /// operations on one file stand or fall together — are listed as unresolved,
 /// never resolved again or dropped. Every drifted target is marked in the
 /// forecast, because a hash cannot tell whether it already carries this
-/// plan's change. Nothing is rebased: applying the fresh plan is the
-/// caller's decision.
+/// plan's change. Every fresh plan carries the refused plan's footnote and
+/// its force, an empty one whose operations no longer plan included, and a
+/// forced fresh plan's forecast lists the schema violations its force lets
+/// through, judged under `declared` by the applier's one judgment, so it is
+/// what a preview of the fresh plan lists. Nothing is rebased: applying the
+/// fresh plan is the caller's decision.
 pub(super) fn refuse_and_refresh(
     plan: ResolvedPlan,
     view: &TreeView,
+    declared: &Declared,
     mut checks: Vec<RefusedCheck>,
 ) -> ApplyOutcome {
     let normalizer = view.normalizer();
@@ -96,6 +102,9 @@ pub(super) fn refuse_and_refresh(
             .collect(),
     );
     authored.footnote = plan.footnote.clone();
+    // The fresh plan is forced as the refused one was, so sending it back
+    // applies it the way the refused plan would have applied.
+    authored.force = plan.force;
     let mut unresolved: Vec<(usize, UnresolvedOperation)> = Vec::new();
     for (position, fate) in fates.into_iter().enumerate() {
         if let Fate::Unresolved(reason) = fate {
@@ -132,16 +141,16 @@ pub(super) fn refuse_and_refresh(
                     ),
                 ));
             }
-            (
-                ResolvedPlan::new(
-                    plan.vault.clone(),
-                    plan.root.clone(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-                Forecast::new(Vec::new(), Vec::new(), Vec::new()),
-            )
+            let mut empty = ResolvedPlan::new(
+                plan.vault.clone(),
+                plan.root.clone(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            empty.footnote = plan.footnote.clone();
+            empty.force = plan.force;
+            (empty, Forecast::new(Vec::new(), Vec::new(), Vec::new()))
         }
         Err(PlanningFailure::View(error)) => {
             return ApplyOutcome::WriteFailed {
@@ -151,12 +160,30 @@ pub(super) fn refuse_and_refresh(
         }
     };
     unresolved.sort_by_key(|(position, _)| *position);
+    let forced = forced_through(&fresh, view, declared);
     ApplyOutcome::Refused(Box::new(Refused {
         plan: fresh,
-        forecast: Forecast::new(drifted, forecast.folders_made, forecast.folders_removed),
+        forecast: Forecast::new(drifted, forecast.folders_made, forecast.folders_removed)
+            .with_forced(forced),
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
     }))
+}
+
+/// The schema violations the forced `fresh` plan lets through, as a preview
+/// of it would list them: the applier's one judgment ([`check`]), run over
+/// the vault the plan was just resolved against. None for a plan that is not
+/// forced, and none where the fresh plan fails its own checks, which its
+/// preview answers as a refusal rather than a forecast.
+fn forced_through(
+    fresh: &ResolvedPlan,
+    view: &TreeView,
+    declared: &Declared,
+) -> Vec<norn_wire::SchemaViolation> {
+    if !fresh.force {
+        return Vec::new();
+    }
+    check(fresh, view, declared).map_or_else(|_| Vec::new(), |checked| checked.forced)
 }
 
 /// The target a drifted or a taken-name check names.

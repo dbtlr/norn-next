@@ -17,7 +17,8 @@
 //!   ([`recompose`]) — which must give back exactly the plan's transitions, so
 //!   a plan whose transitions say anything its operations do not is refused
 //!   before anything is staged — every composed result against the vault
-//!   schema ([`schema`]), judged against the document its content came from
+//!   schema ([`schema`]), which a forced plan lets through and lists on its
+//!   forecast and applied report, judged against the document its content came from
 //!   (the planner's one [`lineage`](crate::planner::lineage), followed in the
 //!   plan's recorded order, which also refuses a content cycle), and a shadow
 //!   for every written target, a create included.
@@ -81,11 +82,12 @@ use norn_fs::{OwnWrites, Published, ShadowHome};
 use norn_store::{IncrementProvenance, Store};
 use norn_wire::{
     AppliedTarget, ChangesetOutcome, DocumentPath, FolderPath, Forecast, InterruptionCause,
-    RefusedCheck, ResolvedPlan, RootIdentity, TargetResult,
+    RefusedCheck, ResolvedPlan, RootIdentity, SchemaViolation, TargetResult,
 };
 
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
+use crate::derivation::Declared;
 use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};
@@ -157,7 +159,7 @@ impl Applier<'_> {
             Ok(declared) => declared,
             Err(failure) => return write_failed(plan, format!("{failure:?}")),
         };
-        let staged = match stage::check_and_stage(
+        let mut staged = match stage::check_and_stage(
             self.anchor,
             self.root,
             self.shadows,
@@ -166,12 +168,13 @@ impl Applier<'_> {
             &declared,
         ) {
             Ok(staged) => staged,
-            Err(Stop::Refused(checks)) => return self.refuse(plan, checks),
+            Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
         };
         drop(view);
+        let forced = std::mem::take(&mut staged.forced);
         if !(self.publishing)() {
             stage::discard_all(self.anchor, self.shadows, staged.targets);
             return ApplyOutcome::StoodDown;
@@ -183,15 +186,18 @@ impl Applier<'_> {
             own_writes: self.own_writes,
         };
         let (progress, stopped) = publisher.publish(&plan, staged);
-        self.answer(plan, progress, stopped, store)
+        self.answer(plan, progress, stopped, forced, &declared, store)
     }
 
-    /// The outcome of a publication that ran as far as `progress`.
+    /// The outcome of a publication that ran as far as `progress`, whose
+    /// force let `forced` through, under the declaration `declared`.
     fn answer(
         &self,
         plan: ResolvedPlan,
         progress: Progress,
         stopped: Option<Stopped>,
+        forced: Vec<SchemaViolation>,
+        declared: &Declared,
         store: &mut Store,
     ) -> ApplyOutcome {
         let changeset = if progress.effects.is_empty() {
@@ -236,6 +242,7 @@ impl Applier<'_> {
                 targets,
                 folders_made: folder_paths(&progress.folders_made),
                 folders_removed: folder_paths(&progress.folders_removed),
+                forced,
             });
         };
         if !progress.effects.is_empty() {
@@ -247,27 +254,42 @@ impl Applier<'_> {
                 }
                 Stopped::Io(detail) => InterruptionCause::io_failure(detail),
             };
+            // What the force let through in a target that did not land is
+            // not written; a re-send that lands it lists it then.
+            let forced = forced
+                .into_iter()
+                .filter(|violation| landed.contains(&violation.path))
+                .collect();
             return ApplyOutcome::Interrupted(Box::new(Interrupted {
                 plan,
                 landed,
                 cause,
+                forced,
                 changeset,
             }));
         }
         match stopped {
             Stopped::ForeignEdit { path, holds } => {
-                self.refuse(plan, vec![RefusedCheck::drifted(path, holds)])
+                self.refuse(plan, declared, vec![RefusedCheck::drifted(path, holds)])
             }
-            Stopped::NameTaken { path } => self.refuse(plan, vec![RefusedCheck::name_taken(path)]),
+            Stopped::NameTaken { path } => {
+                self.refuse(plan, declared, vec![RefusedCheck::name_taken(path)])
+            }
             Stopped::RootReplaced => self.root_replaced(plan),
             Stopped::Io(detail) => write_failed(plan, detail),
         }
     }
 
-    /// Refuse `plan` for `checks`, answering with a fresh plan.
-    fn refuse(&self, plan: ResolvedPlan, checks: Vec<RefusedCheck>) -> ApplyOutcome {
+    /// Refuse `plan` for `checks`, answering with a fresh plan judged under
+    /// `declared`.
+    fn refuse(
+        &self,
+        plan: ResolvedPlan,
+        declared: &Declared,
+        checks: Vec<RefusedCheck>,
+    ) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions) {
-            Ok(view) => refresh::refuse_and_refresh(plan, &view, checks),
+            Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks),
             Err(error) => write_failed(plan, error.to_string()),
         }
     }
@@ -308,7 +330,7 @@ pub(crate) fn preview(
     anchor: &Path,
     root: norn_fs::Identity,
     exclusions: &[PathBuf],
-    declared: &crate::derivation::Declared,
+    declared: &Declared,
 ) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
@@ -322,11 +344,11 @@ pub(crate) fn preview(
         Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
     };
     let outcome = match stage::check(&plan, &view, declared) {
-        Ok(_) => match forecast(&plan.transitions, &view) {
-            Ok(forecast) => return Ok((plan, forecast)),
+        Ok(checked) => match forecast(&plan.transitions, &view) {
+            Ok(forecast) => return Ok((plan, forecast.with_forced(checked.forced))),
             Err(error) => write_failed(plan, error.to_string()),
         },
-        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, checks),
+        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, declared, checks),
         Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
         Err(Unfit::Failed(detail)) => write_failed(plan, detail),
     };

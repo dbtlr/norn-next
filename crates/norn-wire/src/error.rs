@@ -71,7 +71,9 @@ use crate::finding_row::{CandidateHead, Hint};
 use crate::name::VaultName;
 use crate::plan::document::ResolvedPlan;
 use crate::plan::forecast::Forecast;
-use crate::plan::outcome::{InterruptionCause, PlanFault, RefusedCheck, UnresolvedOperation};
+use crate::plan::outcome::{
+    InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
+};
 use crate::plan::root::RootIdentity;
 use crate::reading::Rung;
 use crate::reload::ReloadFailure;
@@ -800,8 +802,8 @@ pub enum ErrorDetail {
         found: RootIdentity,
     },
     /// The detail of `vault/plan-interrupted`: the plan, the targets that
-    /// landed, and what stopped publication. Sending the plan again finishes
-    /// it.
+    /// landed, what stopped publication, and what its force let through in
+    /// what landed. Sending the plan again finishes it.
     #[serde(rename = "vault/plan-interrupted")]
     #[non_exhaustive]
     PlanInterrupted {
@@ -811,6 +813,10 @@ pub enum ErrorDetail {
         landed: Vec<DocumentPath>,
         /// What stopped publication.
         cause: InterruptionCause,
+        /// Every schema violation a landed target carries that the plan's
+        /// force let through. Empty for a plan that is not forced, and for a
+        /// forced plan whose every landed result is valid.
+        forced: Vec<SchemaViolation>,
     },
     /// The detail of `vault/write-failed`: the plan, and the failure that
     /// stopped it before any target landed.
@@ -1048,16 +1054,19 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/plan-interrupted`, for the `plan`, the targets
-    /// `landed`, and the `cause` that stopped it.
+    /// `landed`, the `cause` that stopped it, and the violations its force let
+    /// through in what landed, `forced`.
     pub const fn plan_interrupted(
         plan: ResolvedPlan,
         landed: Vec<DocumentPath>,
         cause: InterruptionCause,
+        forced: Vec<SchemaViolation>,
     ) -> Self {
         ErrorDetail::PlanInterrupted {
             plan,
             landed,
             cause,
+            forced,
         }
     }
 
@@ -1407,6 +1416,7 @@ mod tests {
                 a_plan(),
                 vec![a_path()],
                 InterruptionCause::io_failure("the disk is full"),
+                Vec::new(),
             ),
             ReasonCode::VaultWriteFailed => ErrorDetail::write_failed(a_plan(), "the disk is full"),
             ReasonCode::RequestOutOfBound => {
