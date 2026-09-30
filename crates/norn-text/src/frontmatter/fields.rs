@@ -673,7 +673,7 @@ fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mu
 /// it carries; a plain one still carries whatever tag was written in front of
 /// it, because a tag is no part of a key's name and nothing has removed it yet.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum KeySpelling {
+pub(crate) enum KeySpelling {
     Plain,
     Quoted,
 }
@@ -685,7 +685,7 @@ enum KeySpelling {
 ///
 /// Recognized structurally, with no identifier allowlist: plain keys, single-
 /// and double-quoted keys, numeric-leading keys, and the merge key (`<<`).
-fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
+pub(crate) fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
     if line.starts_with('#') {
         return None;
     }

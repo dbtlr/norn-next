@@ -63,6 +63,7 @@
 use std::fmt;
 
 use crate::body::BodyScan;
+use crate::frontmatter::extract::BOM;
 use crate::heading::Heading;
 use crate::span::split_lines_inclusive;
 
@@ -254,12 +255,17 @@ pub fn resolve_section(
 /// A heading inside a container starts past the container's prefix on its
 /// line — `> ## Q`, `- # L` — and that prefix is the container's, which the
 /// next section holds, so the section the heading ends stops at the line.
-fn line_start(body: &str, at: usize) -> usize {
+///
+/// A byte-order mark opening the body is the document's, not its first
+/// line's, so that line starts just past it and no edit at a line start
+/// moves or removes the mark.
+pub(crate) fn line_start(body: &str, at: usize) -> usize {
     let at = at.min(body.len());
+    let first_line = if body.starts_with(BOM) { BOM.len() } else { 0 };
     body.as_bytes()[..at]
         .iter()
         .rposition(|byte| matches!(byte, b'\n' | b'\r'))
-        .map_or(0, |found| found + 1)
+        .map_or(first_line.min(at), |found| found + 1)
 }
 
 /// The section body with its leading and trailing blank lines excluded.

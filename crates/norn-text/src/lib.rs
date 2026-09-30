@@ -119,7 +119,8 @@
 //!
 //! # Where to start
 //!
-//! - [`Document`] — read a document, then edit one field or one section.
+//! - [`Document`] — read a document, then edit a field, a list field, a
+//!   section or the body.
 //! - [`BodyScan`] — headings, sections, links, tags and block ids, in one
 //!   pass.
 //! - [`render_document`] — write a whole document from scratch.

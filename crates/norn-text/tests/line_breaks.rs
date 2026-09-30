@@ -486,6 +486,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../src/frontmatter/fields.rs"),
     ),
     (
+        "src/frontmatter/list.rs",
+        include_str!("../src/frontmatter/list.rs"),
+    ),
+    (
         "src/frontmatter/mod.rs",
         include_str!("../src/frontmatter/mod.rs"),
     ),

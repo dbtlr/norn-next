@@ -3,6 +3,7 @@
 
 pub(crate) mod extract;
 pub(crate) mod fields;
+pub(crate) mod list;
 pub(crate) mod render;
 
 pub use extract::{BlockRefusal, FRONTMATTER_MAX_BYTES};

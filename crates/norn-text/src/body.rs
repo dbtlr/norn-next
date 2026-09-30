@@ -51,10 +51,12 @@
 //! bare URL in prose is the stated exception: nothing recognizes one, so
 //! `see https://x/#setup` carries the tag `setup`.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
+use crate::frontmatter::extract::BOM;
 use crate::heading::{Heading, SlugCounter};
 use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
@@ -136,7 +138,15 @@ impl<'a> BodyScan<'a> {
         // angle-bracket form and outside it, so `dest_url` spans no break in
         // the first place. What is left is a code span's text, where a `\r`
         // the copy holds as `\n` is a line ending either way.
-        let source = lf_normalized(body);
+        //
+        // A byte-order mark opening the body is blanked to three spaces in
+        // the same copy, for the same reason: the parse reads the mark as
+        // text, so `\u{feff}# A` on a document's first line is a paragraph
+        // rather than the heading every other reader sees. Three spaces is the
+        // mark's own length, so offsets still index `body`, and it is the
+        // indent CommonMark lets any block opener carry, so what the first
+        // line opens is what it opens without the mark.
+        let source = without_byte_order_mark(lf_normalized(body));
 
         for (event, range) in Parser::new(&source).into_offset_iter() {
             // Every link, image and span of raw HTML the parse recognizes is
@@ -237,7 +247,11 @@ impl<'a> BodyScan<'a> {
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     if let Some(active) = active_heading.take() {
-                        let text = active.text.trim_matches(is_ascii_space).to_string();
+                        let text = without_unparsed_closer(
+                            active.text.trim_matches(is_ascii_space),
+                            &body[active.start..range.end.min(body.len())],
+                        )
+                        .to_string();
                         headings.push(Heading {
                             level: active.level,
                             slug: slugs.issue(&text),
@@ -655,6 +669,38 @@ fn strip_list_marker(rest: &str) -> Option<&str> {
 }
 
 /// A heading being accumulated across the events that make it up.
+/// `source` with a leading byte-order mark blanked to three spaces, the mark's
+/// own length in bytes.
+fn without_byte_order_mark(source: Cow<'_, str>) -> Cow<'_, str> {
+    match source.strip_prefix(BOM) {
+        Some(rest) => Cow::Owned(format!("   {rest}")),
+        None => source,
+    }
+}
+
+/// An ATX heading's `text` without the closing sequence the parse left in it.
+///
+/// CommonMark lets spaces or tabs trail a closing `#` run, and the parse
+/// recognizes the run only where spaces alone trail it, so `## A ##\t` arrives
+/// as the text `A ##`. `raw` is the heading's source line; where it ends —
+/// trailing spaces and tabs aside — in a `#` run preceded by a space or tab,
+/// that run is a closer, and it is cut from the text when the text still ends
+/// with it. A `#` joined to the text before it (`## C#`) or escaped
+/// (`## A \##`) is not preceded by a space or tab in the source, and stays.
+fn without_unparsed_closer<'t>(text: &'t str, raw: &str) -> &'t str {
+    let line = raw
+        .split(['\n', '\r'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '\t']);
+    let before = line.trim_end_matches('#');
+    if !line.trim_start_matches(' ').starts_with('#') || !before.ends_with([' ', '\t']) {
+        return text;
+    }
+    text.strip_suffix(&line[before.len()..])
+        .map_or(text, |rest| rest.trim_end_matches(is_ascii_space))
+}
+
 struct ActiveHeading {
     level: u8,
     text: String,

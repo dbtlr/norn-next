@@ -11,14 +11,17 @@ use crate::frontmatter::extract::{
 use crate::frontmatter::fields::{
     Field, SplitRefusal, ValueStyle, classify_value, field_spans, reparse,
 };
+use crate::frontmatter::list::{
+    BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
+};
 use crate::frontmatter::render::{
-    RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
-    render_scalar_in_span, render_sequence_entry,
+    RenderError, ScalarStyle, render_block_item, render_flow_sequence, render_key,
+    render_scalar_entry, render_scalar_in_span, render_sequence_entry,
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::link::{Link, parse_wikilinks_in_text};
-use crate::section::{SectionAddress, SectionError, SectionSpan};
+use crate::section::{SectionAddress, SectionError, SectionSpan, line_start};
 use crate::span::{LineCursor, split_lines_inclusive, trailing_break};
 use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{KeyIndex, Mapping, Value};
@@ -70,6 +73,23 @@ pub enum EditError {
     FieldAbsent {
         field: String,
     },
+    /// A list edit addressed a field holding something other than a list.
+    FieldNotAList {
+        field: String,
+        kind: &'static str,
+    },
+    /// A list edit would have to rewrite the field whole, and the field's
+    /// entry carries a comment that rewrite would drop. Nothing is written: a
+    /// comment is the author's, and no edit loses one silently.
+    CommentWouldBeLost {
+        field: String,
+    },
+    /// A pop named a value the field's list does not hold. A pop that changes
+    /// nothing is refused rather than reported as done.
+    ListValueAbsent {
+        field: String,
+        value: Value,
+    },
     Render(RenderError),
     Section(SectionError),
     /// The addressed heading sits inside a blockquote or a list item, whose
@@ -101,6 +121,10 @@ pub enum EditError {
     SectionPostImageMismatch {
         heading: String,
     },
+    /// The document a body replace produced does not read back with the same
+    /// frontmatter and the given body — the new body opens with something
+    /// that reads as a block. Nothing is returned.
+    BodyPostImageMismatch,
 }
 
 impl fmt::Display for EditError {
@@ -123,6 +147,16 @@ impl fmt::Display for EditError {
                 write!(f, "the field {field:?} cannot be edited in place")
             }
             EditError::FieldAbsent { field } => write!(f, "the field {field:?} is not present"),
+            EditError::FieldNotAList { field, kind } => {
+                write!(f, "the field {field:?} holds a {kind}, not a list")
+            }
+            EditError::CommentWouldBeLost { field } => write!(
+                f,
+                "the list {field:?} carries a comment this edit would drop, so it was refused"
+            ),
+            EditError::ListValueAbsent { field, value } => {
+                write!(f, "the list {field:?} holds no element equal to {value:?}")
+            }
             EditError::Render(error) => write!(f, "{error}"),
             EditError::Section(error) => write!(f, "{error}"),
             EditError::SectionInContainer { heading } => write!(
@@ -139,6 +173,10 @@ impl fmt::Display for EditError {
                 f,
                 "the edited document does not read back with the section {heading:?} as intended, \
                  so the edit was refused"
+            ),
+            EditError::BodyPostImageMismatch => f.write_str(
+                "the edited document does not read back with its frontmatter and the new body as \
+                 intended, so the edit was refused",
             ),
             EditError::FrontmatterPastBound { bytes, bound } => write!(
                 f,
@@ -634,13 +672,7 @@ impl<'a> Document<'a> {
         content: &str,
     ) -> Result<String, EditError> {
         let address = address.into();
-        let scan = self.scan_body();
-        let span = scan.resolve_section(address)?;
-        if scan.headings()[span.heading].inside_container {
-            return Err(EditError::SectionInContainer {
-                heading: address.heading.to_string(),
-            });
-        }
+        let (scan, span) = self.editable_section(address)?;
         let start = self.body_start + span.content_start;
         let end = self.body_start + span.content_end;
 
@@ -686,6 +718,250 @@ impl<'a> Document<'a> {
         Ok(edited)
     }
 
+    /// Append `content` to the end of a section, returning the whole edited
+    /// document.
+    ///
+    /// The content lands below the section's last non-blank line — below its
+    /// subsections, which are the section's too — and above the blank lines
+    /// separating it from the next heading, so the document's blank structure
+    /// stands. An empty section is written as [`Document::replace_section`]
+    /// writes one, between its separators. Empty `content` changes nothing.
+    ///
+    /// Every line written carries the document's terminator, as a replace's
+    /// do. The result is re-read before it is returned, and refuses unless
+    /// the body's headings are exactly the ones it had with the content's own
+    /// headings at the end of the section — an underline that makes the
+    /// section's last line a heading returns nothing — and the section still
+    /// ends with `content`, which content opening a heading at the section's
+    /// level or above does not.
+    pub fn append_to_section(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        let address = address.into();
+        let (scan, span) = self.editable_section(address)?;
+        if span.content_start == span.content_end {
+            return self.replace_section(address, content);
+        }
+        if content.is_empty() {
+            return Ok(self.source.to_string());
+        }
+        let edited = self.proven_insert(&scan, address, span.content_end, content)?;
+        let had = &self.body[span.content_start..span.content_end];
+        let expected = format!("{}\n{content}", had.trim_end_matches(['\n', '\r']));
+        self.verify_section(
+            &edited,
+            address,
+            &expected,
+            scan.headings(),
+            span.content_end..span.content_end,
+        )?;
+        Ok(edited)
+    }
+
+    /// Replace the body — everything after the frontmatter block — with
+    /// `content`, returning the whole edited document.
+    ///
+    /// The block stays byte-identical. A document without one is all body and
+    /// is rewritten whole, except a byte-order mark, which stays its first
+    /// bytes. Every line written carries the document's terminator, and empty
+    /// `content` leaves the block alone with no body below it.
+    ///
+    /// A closing delimiter that ends the file without a terminator gains one,
+    /// so the body starts on a line of its own.
+    ///
+    /// A block that cannot be read refuses: where its closing delimiter is
+    /// missing, nothing separates its fields from the body. The result is
+    /// re-read before it is returned, and refuses unless the block reads as it
+    /// did — the same block, as readable as it was — and the body reads as
+    /// `content`: content opening with a delimiter would otherwise make the
+    /// body a block, closed or not.
+    pub fn replace_body(&self, content: &str) -> Result<String, EditError> {
+        if self.frontmatter_broken() {
+            return Err(EditError::FrontmatterUnreadable);
+        }
+        let start = if self.byte_order_mark {
+            self.body_start.max(BOM.len())
+        } else {
+            self.body_start
+        };
+        let mut edited = self.source[..start].to_string();
+        edited.push_str(self.break_before(start));
+        let written = edited.len();
+        append_with_terminator(&mut edited, content, self.line_ending);
+        let reread = Document::parse(&edited);
+        if !self.same_block(&reread) || !same_lines(&edited[written..], content) {
+            return Err(EditError::BodyPostImageMismatch);
+        }
+        Ok(edited)
+    }
+
+    /// The terminator a write at the source offset `at` needs first so that
+    /// it starts a line: none where `at` already starts one, and none at the
+    /// document's first line, which a byte-order mark does not end.
+    fn break_before(&self, at: usize) -> &'static str {
+        let first_line = if self.byte_order_mark { BOM.len() } else { 0 };
+        if at > first_line && trailing_break(&self.source[..at]).is_none() {
+            self.line_ending.as_str()
+        } else {
+            ""
+        }
+    }
+
+    /// Whether `reread` — this document after a body or section write —
+    /// carries the frontmatter block this one does: the same value, from the
+    /// same bytes, read or refused the same way. A body or section write never
+    /// creates, removes or breaks a block, and a block broken by the write
+    /// reads as `None` exactly as a missing one does, so the value alone
+    /// cannot tell.
+    fn same_block(&self, reread: &Document<'_>) -> bool {
+        reread.frontmatter() == self.frontmatter()
+            && reread.frontmatter_range() == self.frontmatter_range()
+            && reread.frontmatter_refusal() == self.frontmatter_refusal()
+            && reread.frontmatter_broken() == self.frontmatter_broken()
+    }
+
+    /// Insert `content` directly above a heading's line, returning the whole
+    /// edited document.
+    ///
+    /// The blank lines above the heading stay above the content, and nothing
+    /// is added between the content and the heading: separators the caller
+    /// wants are the caller's to write. Empty `content` changes nothing. Every
+    /// line written carries the document's terminator.
+    ///
+    /// The result is re-read before it is returned, and refuses unless the
+    /// body's headings are the ones it had with the content's own headings
+    /// between them, in order — a line written above a setext heading joins
+    /// its title and returns nothing.
+    pub fn insert_before_heading(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        self.insert_at_heading(address.into(), content, |body, span| {
+            line_start(body, span.heading_start)
+        })
+    }
+
+    /// Insert `content` directly below a heading's line — below a setext
+    /// heading's underline — returning the whole edited document.
+    ///
+    /// The blank lines between the heading and the section's content stay
+    /// below the inserted content. Otherwise it writes, and refuses, as
+    /// [`Document::insert_before_heading`] does.
+    pub fn insert_after_heading(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        self.insert_at_heading(address.into(), content, |_, span| span.body_start)
+    }
+
+    /// Insert `content` as whole lines at the body offset `point` picks out
+    /// of the addressed section, and prove the headings came through.
+    fn insert_at_heading(
+        &self,
+        address: SectionAddress<'a>,
+        content: &str,
+        point: impl Fn(&str, &SectionSpan) -> usize,
+    ) -> Result<String, EditError> {
+        let (scan, span) = self.editable_section(address)?;
+        if content.is_empty() {
+            return Ok(self.source.to_string());
+        }
+        self.proven_insert(&scan, address, point(self.body, &span), content)
+    }
+
+    /// Insert `content` as whole lines at the body offset `at`, and refuse
+    /// unless the result keeps the frontmatter block and its headings are
+    /// exactly the body's own with the content's headings at `at`: the one
+    /// proof every insert makes, an append included.
+    fn proven_insert(
+        &self,
+        scan: &BodyScan<'_>,
+        address: SectionAddress<'_>,
+        at: usize,
+        content: &str,
+    ) -> Result<String, EditError> {
+        let edited = self.insert_lines(at, content);
+        let (above, below): (Vec<&Heading>, Vec<&Heading>) = scan
+            .headings()
+            .iter()
+            .partition(|heading| heading.span.byte_offset < at);
+        let inserted = BodyScan::new(content).headings().to_vec();
+        let expected = above
+            .into_iter()
+            .chain(&inserted)
+            .chain(below)
+            .map(heading_key)
+            .collect();
+        self.verify_headings(&edited, address, expected)?;
+        Ok(edited)
+    }
+
+    /// Delete a section — its heading line and everything it owns, its
+    /// subsections included — returning the whole edited document.
+    ///
+    /// The blank lines below the section go with it, because they sit inside
+    /// its range; the ones above its heading are the section before's and
+    /// stay. The result is re-read before it is returned, and refuses unless
+    /// the body's headings are exactly the ones it had, less the deleted
+    /// ones, in order: a delete that fuses the text above it into the heading
+    /// below changes that heading and returns nothing.
+    pub fn delete_section(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+    ) -> Result<String, EditError> {
+        let address = address.into();
+        let (scan, span) = self.editable_section(address)?;
+        let deleted = line_start(self.body, span.heading_start)..span.end;
+        let edited = splice(
+            self.source,
+            self.body_start + deleted.start..self.body_start + deleted.end,
+            "",
+        );
+        let expected = scan
+            .headings()
+            .iter()
+            .filter(|heading| !deleted.contains(&heading.span.byte_offset))
+            .map(heading_key)
+            .collect();
+        self.verify_headings(&edited, address, expected)?;
+        Ok(edited)
+    }
+
+    /// The section `address` names, with the scan it was resolved over,
+    /// refused where its heading sits inside a container: every section write
+    /// resolves through here, so they agree about where a section is and
+    /// which ones they may touch.
+    fn editable_section(
+        &self,
+        address: SectionAddress<'a>,
+    ) -> Result<(BodyScan<'a>, SectionSpan), EditError> {
+        let scan = self.scan_body();
+        let span = scan.resolve_section(address)?;
+        if scan.headings()[span.heading].inside_container {
+            return Err(EditError::SectionInContainer {
+                heading: address.heading.to_string(),
+            });
+        }
+        Ok((scan, span))
+    }
+
+    /// The document with `content` inserted as whole lines at `at`, a body
+    /// offset, every line carrying the document's terminator.
+    ///
+    /// A point that does not start a line — the end of a last line with no
+    /// terminator — gains one first, so the content never welds onto the line
+    /// above. A byte-order mark is the start of the first line, not a line.
+    fn insert_lines(&self, at: usize, content: &str) -> String {
+        let at = self.body_start + at;
+        let mut lines = self.break_before(at).to_string();
+        append_with_terminator(&mut lines, content, self.line_ending);
+        splice(self.source, at..at, &lines)
+    }
+
     /// The section a heading owns, in source coordinates.
     pub fn resolve_section(
         &self,
@@ -703,10 +979,152 @@ impl<'a> Document<'a> {
         })
     }
 
+    /// Append `value` to the list `field` holds, returning the whole edited
+    /// document.
+    ///
+    /// A value the list already holds is appended again. A field holding a
+    /// scalar or a map refuses with [`EditError::FieldNotAList`]: turning it
+    /// into a list is a set.
+    ///
+    /// **Every byte the push does not change stays.** A block list whose
+    /// items each sit on a line of their own gains one item line below its
+    /// last item, at that item's indent and with its line terminator;
+    /// comments, the other items' quoting and the key's spelling are not
+    /// touched. Every other list — a flow list, a block list with a multi-line
+    /// item — and an absent or null field, which becomes a one-element list,
+    /// are written whole by [`Document::set_field`], and only where the entry
+    /// carries no comment: a comment the rewrite would drop refuses with
+    /// [`EditError::CommentWouldBeLost`] instead. Either way the result is
+    /// re-read and proven as a set is.
+    pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
+        let mut items = self.list_items(field)?.unwrap_or_default();
+        let lines = self
+            .field(field)
+            .and_then(|located| block_item_lines(self.source, located, &items));
+        let Some(last) = lines.as_ref().and_then(|lines| lines.last()) else {
+            items.push(value.clone());
+            return self.rewrite_list(field, items);
+        };
+        let terminator =
+            trailing_break(&self.source[last.line.clone()]).unwrap_or(self.line_ending.as_str());
+        let line = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
+        let edited = splice(self.source, last.line.end..last.line.end, &line);
+        refuse_past_bound(&edited)?;
+        items.push(value.clone());
+        self.verified_list(edited, field, items)
+    }
+
+    /// Write `items` over `field` whole, as [`Document::set_field`] does, where
+    /// the field's entry carries no comment the rewrite would drop.
+    fn rewrite_list(&self, field: &str, items: Vec<Value>) -> Result<String, EditError> {
+        if let Some(located) = self.field(field)
+            && entry_carries_comment(self.source, located)
+        {
+            return Err(EditError::CommentWouldBeLost {
+                field: field.to_string(),
+            });
+        }
+        self.set_field(field, &Value::Sequence(items))
+    }
+
+    /// `edited`, where it re-reads with `field` holding exactly `items` and
+    /// every other field untouched.
+    fn verified_list(
+        &self,
+        edited: String,
+        field: &str,
+        items: Vec<Value>,
+    ) -> Result<String, EditError> {
+        let mut expected = self.mapping()?.unwrap_or_default();
+        expected.insert(field, Value::Sequence(items));
+        self.verify(&edited, field, &expected)?;
+        Ok(edited)
+    }
+
+    /// Remove every element equal to `value` from the list `field` holds,
+    /// returning the whole edited document.
+    ///
+    /// Popping the last element leaves the field holding an empty list; the
+    /// field stays. Nothing is silently left as it was: a value the list does
+    /// not hold refuses with [`EditError::ListValueAbsent`], an absent field
+    /// with [`EditError::FieldAbsent`], and a field holding a scalar or a map
+    /// with [`EditError::FieldNotAList`].
+    ///
+    /// **Every byte the pop does not change stays.** From a block list whose
+    /// items each sit on a line of their own, the lines of the matching items
+    /// are deleted and nothing else; popping its last item writes `[]` on the
+    /// key line, before any comment there, because a key with nothing under
+    /// it reads as null and `[]` reads back as the empty list. A comment
+    /// trailing a matching item on its own line goes with that line: it
+    /// annotates the item being removed. Comments on every other line stay.
+    /// Every other list is written whole by [`Document::set_field`], only
+    /// where its entry carries no comment; a comment that rewrite would drop
+    /// refuses with [`EditError::CommentWouldBeLost`]. Either way the result
+    /// is re-read and proven as a set is.
+    pub fn pop_from_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
+        let Some(items) = self.list_items(field)? else {
+            return Err(EditError::FieldAbsent {
+                field: field.to_string(),
+            });
+        };
+        let kept: Vec<Value> = items
+            .iter()
+            .filter(|item| *item != value)
+            .cloned()
+            .collect();
+        if kept.len() == items.len() {
+            return Err(EditError::ListValueAbsent {
+                field: field.to_string(),
+                value: value.clone(),
+            });
+        }
+        let Some((located, lines)) = self.field(field).and_then(|located| {
+            block_item_lines(self.source, located, &items).map(|lines| (located, lines))
+        }) else {
+            return self.rewrite_list(field, kept);
+        };
+        let popped: Vec<&BlockItem> = lines
+            .iter()
+            .zip(&items)
+            .filter(|(_, item)| *item == value)
+            .map(|(line, _)| line)
+            .collect();
+        let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
+        if kept.is_empty() {
+            let Some(point) = key_line_value_point(self.source, located.line_range.start) else {
+                return self.rewrite_list(field, kept);
+            };
+            edits.push((point, " []"));
+        }
+        edits.extend(popped.iter().map(|line| (line.line.clone(), "")));
+        self.verified_list(splice_all(self.source, &edits), field, kept)
+    }
+
+    /// The items of the list `field` holds — none for a field written with no
+    /// value — or `None` where the block has no such field. A field holding
+    /// anything else refuses.
+    fn list_items(&self, field: &str) -> Result<Option<Vec<Value>>, EditError> {
+        match self.mapping_ref()?.and_then(|map| map.get(field)) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(Vec::new())),
+            Some(Value::Sequence(items)) => Ok(Some(items.clone())),
+            Some(other) => Err(EditError::FieldNotAList {
+                field: field.to_string(),
+                kind: other.kind(),
+            }),
+        }
+    }
+
     /// The frontmatter mapping, or `None` for an absent or null block.
     fn mapping(&self) -> Result<Option<Mapping>, EditError> {
+        Ok(self.mapping_ref()?.cloned())
+    }
+
+    /// The frontmatter mapping, borrowed, or `None` for an absent or null
+    /// block.
+    fn mapping_ref(&self) -> Result<Option<&Mapping>, EditError> {
         match (&self.frontmatter, &self.frontmatter_range) {
-            (Some(Value::Map(map)), _) => Ok(Some(map.clone())),
+            (Some(Value::Map(map)), _) => Ok(Some(map)),
             (Some(Value::Null), _) | (None, None) if !self.frontmatter_broken() => Ok(None),
             (Some(other), _) => Err(EditError::FrontmatterNotAMapping { kind: other.kind() }),
             _ => Err(EditError::FrontmatterUnreadable),
@@ -787,11 +1205,23 @@ impl<'a> Document<'a> {
 
     fn splice_existing(&self, located: &Field, value: &Value) -> Result<String, EditError> {
         // A sequence replaces the whole entry, keeping the author's flow or
-        // block spelling. A stubbed field — `tags:` with nothing after it —
-        // becomes a block sequence.
+        // block spelling. A stubbed field — `tags:` with nothing after it, or
+        // null however it is spelled (`null`, `~`, `Null`) — becomes a block
+        // sequence: a null holds no scalar a sequence would restyle.
+        let stubbed = located.style == ValueStyle::EmptyValue
+            || matches!(&self.frontmatter, Some(Value::Map(map))
+                if map.get(&located.name) == Some(&Value::Null));
         if let Value::Sequence(items) = value
-            && (located.style.is_sequence() || located.style == ValueStyle::EmptyValue)
+            && (located.style.is_sequence() || stubbed)
         {
+            // Replacing a stub's whole entry takes its key line with it, so a
+            // comment there — `tags: # c`, `tags: null # c` — would be dropped
+            // silently. It refuses instead.
+            if stubbed && entry_carries_comment(self.source, located) {
+                return Err(EditError::CommentWouldBeLost {
+                    field: located.name.clone(),
+                });
+            }
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(
                     "{}: {}{}",
@@ -879,7 +1309,7 @@ impl<'a> Document<'a> {
             heading: address.heading.to_string(),
         };
         let reread = Document::parse(edited);
-        if reread.frontmatter() != self.frontmatter() {
+        if !self.same_block(&reread) {
             return Err(refuse());
         }
         let scan = reread.scan_body();
@@ -905,6 +1335,44 @@ impl<'a> Document<'a> {
         }
         Ok(())
     }
+
+    /// Re-read the bytes a structural section edit produced and refuse unless
+    /// the frontmatter is the one that was there and the body's headings are
+    /// exactly `expected`, by level and text, in document order.
+    ///
+    /// An insert or a delete names every heading the result should have: the
+    /// ones the body had, less what was deleted, plus what the inserted
+    /// content carries at the point it went in. A heading swallowed by an
+    /// unclosed fence, fused into a setext title, or conjured by an underline
+    /// all break that sequence.
+    fn verify_headings(
+        &self,
+        edited: &str,
+        address: SectionAddress<'_>,
+        expected: Vec<(u8, String)>,
+    ) -> Result<(), EditError> {
+        let reread = Document::parse(edited);
+        let headings: Vec<(u8, String)> = reread
+            .scan_body()
+            .headings()
+            .iter()
+            .map(heading_key)
+            .collect();
+        if self.same_block(&reread) && headings == expected {
+            Ok(())
+        } else {
+            Err(EditError::SectionPostImageMismatch {
+                heading: address.heading.to_string(),
+            })
+        }
+    }
+}
+
+/// A heading as a structural edit's post-image check compares it: its level
+/// and its text. Position is not part of it, because an edit moves the bytes
+/// below it.
+fn heading_key(heading: &Heading) -> (u8, String) {
+    (heading.level, heading.text.clone())
 }
 
 /// Where `text` begins inside the `written` bytes that produced it, when those
@@ -959,6 +1427,20 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
     out.push_str(&source[..range.start]);
     out.push_str(replacement);
     out.push_str(&source[range.end..]);
+    out
+}
+
+/// `source` with each range in `edits` replaced by its text. The ranges are in
+/// document order and do not overlap.
+fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        out.push_str(&source[copied..range.start]);
+        out.push_str(replacement);
+        copied = range.end;
+    }
+    out.push_str(&source[copied..]);
     out
 }
 

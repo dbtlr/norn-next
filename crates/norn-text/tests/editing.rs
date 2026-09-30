@@ -1362,7 +1362,7 @@ fn an_edit_that_grows_the_block_past_the_bound_names_the_bound() {
 /// post-image check has no way to notice because the block still reads back as
 /// intended.
 #[test]
-fn a_stub_with_a_comment_takes_a_scalar_and_takes_a_sequence_with_the_comment() {
+fn a_stub_with_a_comment_takes_a_scalar_and_refuses_a_sequence() {
     let source = "---\ntags: # what goes here\nother: x\n---\n";
     assert_eq!(
         set(source, "tags", Value::String("draft".into())),
@@ -1370,7 +1370,9 @@ fn a_stub_with_a_comment_takes_a_scalar_and_takes_a_sequence_with_the_comment() 
     );
     assert_eq!(
         set(source, "tags", Value::Sequence(vec!["a".into()])),
-        Ok("---\ntags:\n  - a\nother: x\n---\n".to_string())
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
     );
 }
 
@@ -1583,4 +1585,348 @@ fn an_edit_moves_only_the_bytes_of_the_construct_it_addresses() {
             );
         }
     }
+}
+
+// ── Replacing the body ───────────────────────────────────────────────────
+
+/// **A body replace rewrites everything after the frontmatter block and
+/// leaves the block byte-identical**, its comments, quoting and blank lines
+/// included; the content's lines carry the document's terminator.
+#[test]
+fn a_body_replace_leaves_the_frontmatter_block_byte_identical() {
+    let block = "---\r\n# kept\r\ntitle: 'Quoted'\r\n\r\ntags: [a, b]\r\n---\r\n";
+    let source = format!("{block}## Old\r\n\r\nold body\r\n");
+    assert_eq!(
+        Document::parse(&source).replace_body("# New\n\nnew body"),
+        Ok(format!("{block}# New\r\n\r\nnew body\r\n"))
+    );
+}
+
+/// **A document without a frontmatter block is all body**, so a body replace
+/// rewrites the whole of it — except a byte-order mark, which stays the
+/// document's first bytes.
+#[test]
+fn a_body_replace_without_a_block_rewrites_the_whole_document() {
+    assert_eq!(
+        Document::parse("old\n\nlines\n").replace_body("new"),
+        Ok("new\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("\u{feff}old\n").replace_body("new"),
+        Ok("\u{feff}new\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntitle: t\n---\nold\n").replace_body(""),
+        Ok("---\ntitle: t\n---\n".to_string())
+    );
+}
+
+/// **A body replace refuses where the block cannot be read, or where the new
+/// body would read as a block**: the first would overwrite an unclosed
+/// block's fields as body, and the second would change what the frontmatter
+/// says.
+#[test]
+fn a_body_replace_refuses_to_touch_what_the_frontmatter_says() {
+    assert_eq!(
+        Document::parse("---\ntitle: t\nno close\n").replace_body("new"),
+        Err(EditError::FrontmatterUnreadable)
+    );
+    assert_eq!(
+        Document::parse("old\n").replace_body("---\ntitle: forged\n---\nbody"),
+        Err(EditError::BodyPostImageMismatch)
+    );
+}
+
+/// **A body replace never opens a block that cannot be read**: content
+/// opening with a delimiter it never closes would leave a document whose
+/// every later field edit refuses as unreadable.
+#[test]
+fn a_body_replace_never_opens_an_unreadable_block() {
+    for content in ["---\n\nx", "---\nt: 2\n\n# H", "---"] {
+        assert_eq!(
+            Document::parse("old\n").replace_body(content),
+            Err(EditError::BodyPostImageMismatch),
+            "for {content:?}"
+        );
+    }
+}
+
+/// **A body replace lands under a block whose closing delimiter ends the
+/// file without a terminator**, starting the body on a line of its own.
+#[test]
+fn a_body_replace_under_an_unterminated_closing_delimiter_starts_a_new_line() {
+    assert_eq!(
+        Document::parse("---\nt: 1\n---").replace_body("new"),
+        Ok("---\nt: 1\n---\nnew\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\r\nt: 1\r\n---").replace_body("new"),
+        Ok("---\r\nt: 1\r\n---\r\nnew\r\n".to_string())
+    );
+}
+
+// ── Pushing to and popping from a list field ─────────────────────────────
+
+fn string(text: &str) -> Value {
+    Value::String(text.into())
+}
+
+/// **A push appends the value to the field's list, keeping the list's block or
+/// flow spelling**, and a value the list already holds is appended again.
+#[test]
+fn a_push_appends_to_a_list_and_allows_duplicates() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b\n---\nbody\n").push_to_list("tags", &string("a")),
+        Ok("---\ntags:\n  - a\n  - b\n  - a\n---\nbody\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a, b]\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags: [a, b, c]\n---\n".to_string())
+    );
+}
+
+/// **A push to a block list writes one item line below the last item and
+/// moves no other byte**: comments inside and after the list, the other
+/// items' quoting and the key's spelling all stand.
+#[test]
+fn a_push_to_a_block_list_splices_one_item_and_keeps_every_other_byte() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a # c1\n  # standalone\n  - b\n# after\n---\n")
+            .push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a # c1\n  # standalone\n  - b\n  - c\n# after\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\n\"yes\": # the list\n  - 'a'\n  - \"b\"\n---\n")
+            .push_to_list("yes", &string("c")),
+        Ok("---\n\"yes\": # the list\n  - 'a'\n  - \"b\"\n  - c\n---\n".to_string())
+    );
+}
+
+/// **A push that would rewrite a commented list whole refuses**: a flow list
+/// is rewritten whole, so a comment after it or inside a multi-line one would
+/// be lost, and so would one on a null field's line. A flow list with no
+/// comment still takes the push.
+#[test]
+fn a_push_that_would_drop_a_comment_refuses() {
+    for source in [
+        "---\ntags: [a] # keep\n---\n",
+        "---\ntags: [a,\n  # inside\n  b]\n---\n",
+        "---\ntags: null # later\n---\n",
+        "---\ntags: # later\n---\n",
+    ] {
+        assert_eq!(
+            Document::parse(source).push_to_list("tags", &string("c")),
+            Err(EditError::CommentWouldBeLost {
+                field: "tags".into()
+            }),
+            "for {source:?}"
+        );
+    }
+    assert_eq!(
+        Document::parse("---\ntags: ['a #b']\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags: ['a #b', c]\n---\n".to_string())
+    );
+}
+
+/// **A block list whose items are not one per line is rewritten whole only
+/// where it carries no comment**: a multi-line item cannot be spliced around,
+/// so the list is written as a set writes it, or refused where that would
+/// drop a comment.
+#[test]
+fn a_block_list_with_a_multi_line_item_is_rewritten_only_without_comments() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - \"two\n    lines\"\n---\n")
+            .push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a\n  - two lines\n  - c\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\n  # why\n  - \"two\n    lines\"\n---\n")
+            .push_to_list("tags", &string("c")),
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
+    );
+}
+
+/// **A pushed item takes the list's own indent and line terminator**: a list
+/// written at zero indent stays at zero indent, and a CRLF list gains a CRLF
+/// line.
+#[test]
+fn a_pushed_item_takes_the_lists_indent_and_terminator() {
+    assert_eq!(
+        Document::parse("---\ntags:\n- a\n---\n").push_to_list("tags", &string("b")),
+        Ok("---\ntags:\n- a\n- b\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\r\ntags:\r\n    - a\r\n---\r\n").push_to_list("tags", &string("b")),
+        Ok("---\r\ntags:\r\n    - a\r\n    - b\r\n---\r\n".to_string())
+    );
+}
+
+/// **A push to an absent field, or to one written with no value, writes a
+/// one-element list.**
+#[test]
+fn a_push_to_an_absent_field_writes_a_one_element_list() {
+    assert_eq!(
+        Document::parse("---\ntitle: t\n---\n").push_to_list("tags", &string("a")),
+        Ok("---\ntitle: t\ntags:\n  - a\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\ntitle: t\n---\n").push_to_list("tags", &string("a")),
+        Ok("---\ntags:\n  - a\ntitle: t\n---\n".to_string())
+    );
+}
+
+/// **A push to a field holding null, however the null is spelled, writes a
+/// one-element list**: `null`, `~` and their case variants say the same as
+/// a field written with no value.
+#[test]
+fn a_push_to_a_null_field_in_any_spelling_writes_a_one_element_list() {
+    for null in ["null", "~", "Null", "NULL"] {
+        assert_eq!(
+            Document::parse(&format!("---\ntags: {null}\ntitle: t\n---\n"))
+                .push_to_list("tags", &string("a")),
+            Ok("---\ntags:\n  - a\ntitle: t\n---\n".to_string()),
+            "for {null:?}"
+        );
+    }
+}
+
+/// **A list set over a stubbed or null field that carries a comment
+/// refuses**: the whole entry is replaced, so the comment would be dropped
+/// silently.
+#[test]
+fn a_list_set_over_a_commented_stub_or_null_refuses() {
+    for entry in ["x: # c", "x: null # c", "x: ~ # c"] {
+        assert_eq!(
+            Document::parse(&format!("---\n{entry}\n---\n"))
+                .set_field("x", &Value::Sequence(vec![string("v")])),
+            Err(EditError::CommentWouldBeLost { field: "x".into() }),
+            "for {entry:?}"
+        );
+    }
+}
+
+/// **A push to a field holding a scalar or a map refuses**, naming what the
+/// field holds: turning a value into a list is a set, not a push.
+#[test]
+fn a_push_to_a_scalar_or_map_field_refuses() {
+    let source = "---\ntitle: t\nmeta:\n  k: v\n---\n";
+    for (field, kind) in [("title", "string"), ("meta", "map")] {
+        assert_eq!(
+            Document::parse(source).push_to_list(field, &string("a")),
+            Err(EditError::FieldNotAList {
+                field: field.into(),
+                kind
+            }),
+            "for {field}"
+        );
+    }
+}
+
+/// **A pop removes every element equal to the value**, and popping the last
+/// one leaves the field holding an empty list rather than removing it.
+#[test]
+fn a_pop_removes_every_equal_element() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b\n  - a\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  - b\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a]\n---\n").pop_from_list("tags", &string("a")),
+        Ok("---\ntags: []\n---\n".to_string())
+    );
+}
+
+/// **A pop from a block list deletes the lines of every matching item and
+/// moves no other byte**: the comments between them, the other items'
+/// quoting and the key's spelling stand.
+#[test]
+fn a_pop_from_a_block_list_deletes_only_the_matching_item_lines() {
+    assert_eq!(
+        Document::parse("---\n\"yes\":\n- a\n# one\n- 'b'\n  # two\n- a\n- \"c\" # c\n---\n")
+            .pop_from_list("yes", &string("a")),
+        Ok("---\n\"yes\":\n# one\n- 'b'\n  # two\n- \"c\" # c\n---\n".to_string())
+    );
+}
+
+/// **Popping a block list's last item writes `[]` on its key line**, before
+/// any comment there: a key with nothing under it reads as null, and `[]` is
+/// what reads back as the empty list the pop leaves. The comments the list
+/// held stay below it.
+#[test]
+fn popping_a_block_lists_last_item_writes_an_empty_flow_list_on_its_key_line() {
+    assert_eq!(
+        Document::parse("---\ntags: # my tags\n  - a\n  # kept\n  - a\ntitle: t\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags: [] # my tags\n  # kept\ntitle: t\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n---\n").pop_from_list("tags", &string("a")),
+        Ok("---\ntags: []\n---\n".to_string())
+    );
+}
+
+/// **A popped item's own trailing comment goes with its line, and every
+/// other comment stays**: the comment annotates the item being removed. A
+/// commented flow list would be rewritten whole, so its pop refuses.
+#[test]
+fn a_popped_items_own_comment_goes_with_it_and_every_other_comment_stays() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a # why\n  # standalone\n  - b # keep\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  # standalone\n  - b # keep\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntags: [a, b] # keep\n---\n").pop_from_list("tags", &string("a")),
+        Err(EditError::CommentWouldBeLost {
+            field: "tags".into()
+        })
+    );
+    // A comment on an item the pop keeps is not in the way.
+    assert_eq!(
+        Document::parse("---\ntags:\n  - a\n  - b # why\n---\n")
+            .pop_from_list("tags", &string("a")),
+        Ok("---\ntags:\n  - b # why\n---\n".to_string())
+    );
+}
+
+/// **A pop of a value the list does not hold, or from a field the block does
+/// not have, refuses** rather than succeeding with nothing changed.
+#[test]
+fn a_pop_of_an_absent_value_or_from_an_absent_field_refuses() {
+    let source = "---\ntags: [a]\ntitle: t\n---\n";
+    assert_eq!(
+        Document::parse(source).pop_from_list("tags", &string("z")),
+        Err(EditError::ListValueAbsent {
+            field: "tags".into(),
+            value: string("z")
+        })
+    );
+    assert_eq!(
+        Document::parse(source).pop_from_list("aliases", &string("a")),
+        Err(EditError::FieldAbsent {
+            field: "aliases".into()
+        })
+    );
+    assert_eq!(
+        Document::parse(source).pop_from_list("title", &string("t")),
+        Err(EditError::FieldNotAList {
+            field: "title".into(),
+            kind: "string"
+        })
+    );
+}
+
+/// **Removing a field the block does not have refuses as absent** rather than
+/// succeeding with nothing changed.
+#[test]
+fn removing_an_absent_field_refuses_as_absent() {
+    assert_eq!(
+        remove("---\ntitle: t\n---\n", "status"),
+        Err(EditError::FieldAbsent {
+            field: "status".into()
+        })
+    );
 }

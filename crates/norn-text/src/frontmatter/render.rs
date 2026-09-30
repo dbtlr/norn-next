@@ -187,11 +187,20 @@ pub(crate) fn render_block_items(
 ) -> Result<String, RenderError> {
     let mut out = String::new();
     for item in items {
-        out.push_str("  - ");
-        out.push_str(&render_scalar(item, RANK_PLAIN, ScalarContext::Block)?);
-        out.push_str(line_ending.as_str());
+        out.push_str(&render_block_item(item, "  ", line_ending.as_str())?);
     }
     Ok(out)
+}
+
+/// One block-list item line — `{indent}- item{terminator}` — at the least
+/// quoting that reads back as `item`.
+pub(crate) fn render_block_item(
+    item: &Value,
+    indent: &str,
+    terminator: &str,
+) -> Result<String, RenderError> {
+    let rendered = render_scalar(item, RANK_PLAIN, ScalarContext::Block)?;
+    Ok(format!("{indent}- {rendered}{terminator}"))
 }
 
 /// A whole `field: <scalar>` entry, its terminator included.

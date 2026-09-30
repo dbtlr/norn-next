@@ -42,6 +42,50 @@ fn inline_markup_in_a_heading_is_flattened_into_its_text() {
     assert_eq!(scan.headings()[0].text, "Use norn now");
 }
 
+/// **A heading on the first line of a document that opens with a byte-order
+/// mark is a heading**, and a write over its section leaves the mark the
+/// document's first bytes.
+#[test]
+fn a_heading_right_after_a_byte_order_mark_is_a_heading() {
+    let source = "\u{feff}# A\ntext\n\n# B\nb\n";
+    let document = Document::parse(source);
+    assert_eq!(document.headings()[0].text, "A");
+    assert_eq!(
+        document.replace_section("A", "new"),
+        Ok("\u{feff}# A\nnew\n\n# B\nb\n".to_string())
+    );
+    assert_eq!(
+        document.delete_section("A"),
+        Ok("\u{feff}# B\nb\n".to_string())
+    );
+    assert_eq!(
+        document.insert_before_heading("A", "lead"),
+        Ok("\u{feff}lead\n# A\ntext\n\n# B\nb\n".to_string())
+    );
+}
+
+/// **An ATX closing sequence followed by a tab is a closing sequence**, as one
+/// followed by a space is: CommonMark lets either trail it, so `## A ##\t`
+/// is the heading `A`.
+#[test]
+fn a_closing_sequence_followed_by_a_tab_is_not_heading_text() {
+    for source in ["## A ##\t\nb\n", "## A ## \t \nb\n", "## A\t#\t\nb\n"] {
+        let scan = BodyScan::new(source);
+        assert_eq!(scan.headings()[0].text, "A", "for {source:?}");
+        assert_eq!(
+            Document::parse(source).replace_section("A", "new"),
+            Ok(format!(
+                "{}new\n",
+                &source[..source.find('\n').unwrap() + 1]
+            )),
+            "for {source:?}"
+        );
+    }
+    // A hash that is not preceded by space or tab is the heading's text.
+    assert_eq!(BodyScan::new("## C#\t\n").headings()[0].text, "C#");
+    assert_eq!(BodyScan::new("## A \\##\t\n").headings()[0].text, "A ##");
+}
+
 #[test]
 fn a_hash_inside_a_fence_is_not_a_heading() {
     let scan = BodyScan::new("## Real\n```\n## Fake\n```\n");
@@ -1071,4 +1115,288 @@ fn a_heading_chain_matches_on_its_last_heading() {
             "for {anchor:?}"
         );
     }
+}
+
+// ── Section write verbs: append, delete, insert around a heading ──────────
+
+/// **An append lands at the end of the section's content, above the blank
+/// lines that separate it from the next heading.** The section's subsections
+/// are its content, so the append follows them.
+#[test]
+fn an_append_lands_below_the_sections_content_and_above_its_separator() {
+    let source = "---\ntitle: t\n---\n## Alpha\n\na1\n\n### Sub\ns1\n\n## Beta\nb1\n";
+    assert_eq!(
+        Document::parse(source).append_to_section("Alpha", "added"),
+        Ok("---\ntitle: t\n---\n## Alpha\n\na1\n\n### Sub\ns1\nadded\n\n## Beta\nb1\n".to_string())
+    );
+}
+
+/// **An append into a CRLF document writes CRLF lines**, whatever breaks the
+/// content arrived with.
+#[test]
+fn an_append_into_a_crlf_document_is_all_crlf() {
+    let source = "## Alpha\r\n\r\na1\r\n\r\n## Beta\r\n";
+    assert_eq!(
+        Document::parse(source).append_to_section("Alpha", "one\ntwo"),
+        Ok("## Alpha\r\n\r\na1\r\none\r\ntwo\r\n\r\n## Beta\r\n".to_string())
+    );
+}
+
+/// **An append to a last line with no terminator starts a new line** rather
+/// than welding onto it, and an append to an empty section lands between its
+/// separators as a replace does.
+#[test]
+fn an_append_starts_its_own_line_and_fills_an_empty_section_between_separators() {
+    assert_eq!(
+        Document::parse("## Alpha\na1").append_to_section("Alpha", "added"),
+        Ok("## Alpha\na1\nadded\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("## Alpha\n\n\n## Beta\n").append_to_section("Alpha", "added"),
+        Ok("## Alpha\n\n\nadded\n\n## Beta\n".to_string())
+    );
+}
+
+/// **A delete removes the heading line and everything the section owns** —
+/// its subsections and the separator below it — and leaves the blank lines
+/// above the heading, which are the section before's.
+#[test]
+fn a_delete_removes_the_heading_and_its_body_and_keeps_the_blank_lines_above() {
+    let source = "---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n### Sub\ns1\n\n## Beta\nb1\n";
+    assert_eq!(
+        Document::parse(source).delete_section("Alpha"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Beta\nb1\n".to_string())
+    );
+    assert_eq!(
+        Document::parse(source).delete_section("Beta"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n### Sub\ns1\n\n".to_string())
+    );
+}
+
+/// **A delete that would fuse the text above into the heading below
+/// refuses**: without the deleted section between them, a paragraph line
+/// becomes the first line of a setext heading's title.
+#[test]
+fn a_delete_that_rewrites_a_surviving_heading_refuses() {
+    let source = "para\n## Alpha\na1\nBeta\n====\n";
+    assert_eq!(
+        Document::parse(source).delete_section("Alpha"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Alpha".into()
+        })
+    );
+}
+
+/// **An insert before a heading lands directly above its line, below the
+/// blank lines that separate it from the section before.**
+#[test]
+fn an_insert_before_a_heading_lands_directly_above_its_line() {
+    let source = "---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n";
+    assert_eq!(
+        Document::parse(source).insert_before_heading("Alpha", "## Before\nb"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Before\nb\n## Alpha\n\na1\n".to_string())
+    );
+}
+
+/// **An insert after a heading lands directly below its line, above the blank
+/// lines that separate it from the section's content**, and a heading that
+/// ends the file without a terminator gains one first.
+#[test]
+fn an_insert_after_a_heading_lands_directly_below_its_line() {
+    let source = "## Alpha\n\na1\n\n## Beta\n";
+    assert_eq!(
+        Document::parse(source).insert_after_heading("Alpha", "lead"),
+        Ok("## Alpha\nlead\n\na1\n\n## Beta\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("## Alpha").insert_after_heading("Alpha", "lead"),
+        Ok("## Alpha\nlead\n".to_string())
+    );
+    // A setext heading's line is its title and its underline together.
+    assert_eq!(
+        Document::parse("Alpha\n=====\n\na1\n").insert_after_heading("Alpha", "lead"),
+        Ok("Alpha\n=====\nlead\n\na1\n".to_string())
+    );
+}
+
+/// **An insert that rewrites the heading it is placed against refuses**: a
+/// line written directly above a setext heading becomes part of its title.
+#[test]
+fn an_insert_that_rewrites_a_heading_refuses() {
+    assert_eq!(
+        Document::parse("intro\n\nAlpha\n=====\n").insert_before_heading("Alpha", "lead"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Alpha".into()
+        })
+    );
+}
+
+/// **A section write never creates a frontmatter block, readable or not**:
+/// content inserted above a document's first line that opens with a
+/// delimiter would turn the body into a block.
+#[test]
+fn a_section_write_never_creates_a_frontmatter_block() {
+    for content in ["---\nt: 2", "---\nt: 2\n---", "---"] {
+        assert_eq!(
+            Document::parse("# A\nx\n").insert_before_heading("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
+
+/// Each section write verb, applied to `source` at `heading` with `content`
+/// where the verb takes content.
+fn every_section_verb(
+    source: &str,
+    heading: &'static str,
+    content: &str,
+) -> Vec<(&'static str, Result<String, EditError>)> {
+    let document = Document::parse(source);
+    vec![
+        ("append", document.append_to_section(heading, content)),
+        ("delete", document.delete_section(heading)),
+        ("before", document.insert_before_heading(heading, content)),
+        ("after", document.insert_after_heading(heading, content)),
+    ]
+}
+
+/// **The same heading text twice refuses every section write, whatever levels
+/// the two headings are at**: an ambiguous address is a question, not an edit.
+#[test]
+fn a_heading_duplicated_across_levels_refuses_every_section_write() {
+    let source = "# Notes\na\n### Notes\nb\n";
+    for (verb, result) in every_section_verb(source, "Notes", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::Section(SectionError::HeadingAmbiguous {
+                heading: "Notes".into(),
+                count: 2
+            })),
+            "for {verb}"
+        );
+    }
+}
+
+/// **A heading inside fenced code is never addressed by a section write**: the
+/// only real heading with that text is the one outside the fence, and where
+/// there is none the address is not found.
+#[test]
+fn a_heading_inside_a_fence_never_matches_a_section_write() {
+    let fenced = "## Real\n```\n## Fake\n```\n";
+    for (verb, result) in every_section_verb(fenced, "Fake", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::Section(SectionError::HeadingNotFound {
+                heading: "Fake".into()
+            })),
+            "for {verb}"
+        );
+    }
+    let beside = "```\n## Alpha\n```\n\n## Alpha\na1\n";
+    assert_eq!(
+        Document::parse(beside).delete_section("Alpha"),
+        Ok("```\n## Alpha\n```\n\n".to_string())
+    );
+}
+
+/// **A heading inside a blockquote or list item refuses every section write**,
+/// as it refuses a replace: its bytes are the container's first.
+#[test]
+fn a_heading_inside_a_container_refuses_every_section_write() {
+    let source = "> ## Quoted\n> body\n\nafter\n";
+    for (verb, result) in every_section_verb(source, "Quoted", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::SectionInContainer {
+                heading: "Quoted".into()
+            }),
+            "for {verb}"
+        );
+    }
+}
+
+/// **Every section write keeps a CRLF document CRLF**, the lines it writes
+/// included, and leaves every blank line it does not own standing.
+#[test]
+fn every_section_write_keeps_crlf_and_the_blank_lines_around_headings() {
+    let source = "intro\r\n\r\n## Alpha\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n";
+    let expected = [
+        (
+            "append",
+            "intro\r\n\r\n## Alpha\r\n\r\na1\r\nx\r\ny\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+        ("delete", "intro\r\n\r\n## Beta\r\nb1\r\n"),
+        (
+            "before",
+            "intro\r\n\r\nx\r\ny\r\n## Alpha\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+        (
+            "after",
+            "intro\r\n\r\n## Alpha\r\nx\r\ny\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+    ];
+    for ((verb, result), (_, want)) in every_section_verb(source, "Alpha", "x\ny")
+        .into_iter()
+        .zip(expected)
+    {
+        assert_eq!(result, Ok(want.to_string()), "for {verb}");
+    }
+}
+
+/// **An append whose content swallows the document below it refuses**: an
+/// unclosed fence turns the next heading into code, and a setext underline
+/// turns the section's last line into a heading.
+#[test]
+fn an_append_that_swallows_structure_refuses() {
+    let source = "## Alpha\na1\n\n## Beta\nb1\n";
+    for content in ["```", "==="] {
+        assert_eq!(
+            Document::parse(source).append_to_section("Alpha", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "Alpha".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
+
+/// **An append that turns a line the section already had into a heading
+/// refuses**: a setext underline written below the last line makes that line
+/// a heading nobody wrote, whatever level it lands at.
+#[test]
+fn an_append_that_makes_an_existing_line_a_heading_refuses() {
+    let source = "# A\ntext\n\n# B\nb\n";
+    for content in ["---", "-", "==="] {
+        assert_eq!(
+            Document::parse(source).append_to_section("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+}
+
+/// **An append whose content opens a heading at the section's level or above
+/// refuses**: the content would start a section of its own rather than end
+/// the addressed one. A deeper heading is the section's subsection, and lands.
+#[test]
+fn an_append_that_would_leave_the_section_refuses() {
+    let source = "## A\ntext\n\n## B\nb\n";
+    for content in ["## C", "# C", "x\n## C\ny"] {
+        assert_eq!(
+            Document::parse(source).append_to_section("A", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "A".into()
+            }),
+            "for {content:?}"
+        );
+    }
+    assert_eq!(
+        Document::parse(source).append_to_section("A", "### C\nc"),
+        Ok("## A\ntext\n### C\nc\n\n## B\nb\n".to_string())
+    );
 }
