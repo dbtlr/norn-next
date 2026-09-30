@@ -719,6 +719,71 @@ impl<'a> Document<'a> {
         Ok(edited)
     }
 
+    /// Insert `content` directly above a heading's line, returning the whole
+    /// edited document.
+    ///
+    /// The blank lines above the heading stay above the content, and nothing
+    /// is added between the content and the heading: separators the caller
+    /// wants are the caller's to write. Empty `content` changes nothing. Every
+    /// line written carries the document's terminator.
+    ///
+    /// The result is re-read before it is returned, and refuses unless the
+    /// body's headings are the ones it had with the content's own headings
+    /// between them, in order — a line written above a setext heading joins
+    /// its title and returns nothing.
+    pub fn insert_before_heading(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        self.insert_at_heading(address.into(), content, |body, span| {
+            line_start(body, span.heading_start)
+        })
+    }
+
+    /// Insert `content` directly below a heading's line — below a setext
+    /// heading's underline — returning the whole edited document.
+    ///
+    /// The blank lines between the heading and the section's content stay
+    /// below the inserted content. Otherwise it writes, and refuses, as
+    /// [`Document::insert_before_heading`] does.
+    pub fn insert_after_heading(
+        &self,
+        address: impl Into<SectionAddress<'a>>,
+        content: &str,
+    ) -> Result<String, EditError> {
+        self.insert_at_heading(address.into(), content, |_, span| span.body_start)
+    }
+
+    /// Insert `content` as whole lines at the body offset `point` picks out
+    /// of the addressed section, and prove the headings came through.
+    fn insert_at_heading(
+        &self,
+        address: SectionAddress<'a>,
+        content: &str,
+        point: impl Fn(&str, &SectionSpan) -> usize,
+    ) -> Result<String, EditError> {
+        let (scan, span) = self.editable_section(address)?;
+        if content.is_empty() {
+            return Ok(self.source.to_string());
+        }
+        let at = point(self.body, &span);
+        let edited = self.insert_lines(at, content);
+        let (above, below): (Vec<&Heading>, Vec<&Heading>) = scan
+            .headings()
+            .iter()
+            .partition(|heading| heading.span.byte_offset < at);
+        let inserted = BodyScan::new(content).headings().to_vec();
+        let expected = above
+            .into_iter()
+            .chain(&inserted)
+            .chain(below)
+            .map(heading_key)
+            .collect();
+        self.verify_headings(&edited, address, expected)?;
+        Ok(edited)
+    }
+
     /// Delete a section — its heading line and everything it owns, its
     /// subsections included — returning the whole edited document.
     ///

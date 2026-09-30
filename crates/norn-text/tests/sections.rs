@@ -1143,6 +1143,149 @@ fn a_delete_that_rewrites_a_surviving_heading_refuses() {
     );
 }
 
+/// **An insert before a heading lands directly above its line, below the
+/// blank lines that separate it from the section before.**
+#[test]
+fn an_insert_before_a_heading_lands_directly_above_its_line() {
+    let source = "---\ntitle: t\n---\nintro\n\n## Alpha\n\na1\n";
+    assert_eq!(
+        Document::parse(source).insert_before_heading("Alpha", "## Before\nb"),
+        Ok("---\ntitle: t\n---\nintro\n\n## Before\nb\n## Alpha\n\na1\n".to_string())
+    );
+}
+
+/// **An insert after a heading lands directly below its line, above the blank
+/// lines that separate it from the section's content**, and a heading that
+/// ends the file without a terminator gains one first.
+#[test]
+fn an_insert_after_a_heading_lands_directly_below_its_line() {
+    let source = "## Alpha\n\na1\n\n## Beta\n";
+    assert_eq!(
+        Document::parse(source).insert_after_heading("Alpha", "lead"),
+        Ok("## Alpha\nlead\n\na1\n\n## Beta\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("## Alpha").insert_after_heading("Alpha", "lead"),
+        Ok("## Alpha\nlead\n".to_string())
+    );
+    // A setext heading's line is its title and its underline together.
+    assert_eq!(
+        Document::parse("Alpha\n=====\n\na1\n").insert_after_heading("Alpha", "lead"),
+        Ok("Alpha\n=====\nlead\n\na1\n".to_string())
+    );
+}
+
+/// **An insert that rewrites the heading it is placed against refuses**: a
+/// line written directly above a setext heading becomes part of its title.
+#[test]
+fn an_insert_that_rewrites_a_heading_refuses() {
+    assert_eq!(
+        Document::parse("intro\n\nAlpha\n=====\n").insert_before_heading("Alpha", "lead"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Alpha".into()
+        })
+    );
+}
+
+/// Each section write verb, applied to `source` at `heading` with `content`
+/// where the verb takes content.
+fn every_section_verb(
+    source: &str,
+    heading: &'static str,
+    content: &str,
+) -> Vec<(&'static str, Result<String, EditError>)> {
+    let document = Document::parse(source);
+    vec![
+        ("append", document.append_to_section(heading, content)),
+        ("delete", document.delete_section(heading)),
+        ("before", document.insert_before_heading(heading, content)),
+        ("after", document.insert_after_heading(heading, content)),
+    ]
+}
+
+/// **The same heading text twice refuses every section write, whatever levels
+/// the two headings are at**: an ambiguous address is a question, not an edit.
+#[test]
+fn a_heading_duplicated_across_levels_refuses_every_section_write() {
+    let source = "# Notes\na\n### Notes\nb\n";
+    for (verb, result) in every_section_verb(source, "Notes", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::Section(SectionError::HeadingAmbiguous {
+                heading: "Notes".into(),
+                count: 2
+            })),
+            "for {verb}"
+        );
+    }
+}
+
+/// **A heading inside fenced code is never addressed by a section write**: the
+/// only real heading with that text is the one outside the fence, and where
+/// there is none the address is not found.
+#[test]
+fn a_heading_inside_a_fence_never_matches_a_section_write() {
+    let fenced = "## Real\n```\n## Fake\n```\n";
+    for (verb, result) in every_section_verb(fenced, "Fake", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::Section(SectionError::HeadingNotFound {
+                heading: "Fake".into()
+            })),
+            "for {verb}"
+        );
+    }
+    let beside = "```\n## Alpha\n```\n\n## Alpha\na1\n";
+    assert_eq!(
+        Document::parse(beside).delete_section("Alpha"),
+        Ok("```\n## Alpha\n```\n\n".to_string())
+    );
+}
+
+/// **A heading inside a blockquote or list item refuses every section write**,
+/// as it refuses a replace: its bytes are the container's first.
+#[test]
+fn a_heading_inside_a_container_refuses_every_section_write() {
+    let source = "> ## Quoted\n> body\n\nafter\n";
+    for (verb, result) in every_section_verb(source, "Quoted", "x") {
+        assert_eq!(
+            result,
+            Err(EditError::SectionInContainer {
+                heading: "Quoted".into()
+            }),
+            "for {verb}"
+        );
+    }
+}
+
+/// **Every section write keeps a CRLF document CRLF**, the lines it writes
+/// included, and leaves every blank line it does not own standing.
+#[test]
+fn every_section_write_keeps_crlf_and_the_blank_lines_around_headings() {
+    let source = "intro\r\n\r\n## Alpha\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n";
+    let expected = [
+        (
+            "append",
+            "intro\r\n\r\n## Alpha\r\n\r\na1\r\nx\r\ny\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+        ("delete", "intro\r\n\r\n## Beta\r\nb1\r\n"),
+        (
+            "before",
+            "intro\r\n\r\nx\r\ny\r\n## Alpha\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+        (
+            "after",
+            "intro\r\n\r\n## Alpha\r\nx\r\ny\r\n\r\na1\r\n\r\n## Beta\r\nb1\r\n",
+        ),
+    ];
+    for ((verb, result), (_, want)) in every_section_verb(source, "Alpha", "x\ny")
+        .into_iter()
+        .zip(expected)
+    {
+        assert_eq!(result, Ok(want.to_string()), "for {verb}");
+    }
+}
+
 /// **An append whose content swallows the document below it refuses**: an
 /// unclosed fence turns the next heading into code, and a setext underline
 /// turns the section's last line into a heading.
