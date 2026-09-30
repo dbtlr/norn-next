@@ -7455,6 +7455,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::content_cycle(vec![0, 1]),
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
         PlanFault::unexpanded_target(vec![1]),
+        PlanFault::where_target_ordered(vec![2]),
     ]
 }
 
@@ -8783,6 +8784,44 @@ fn a_resolved_plan_with_a_where_target_is_a_fault() {
     assert_eq!(
         wire(&PlanFault::unexpanded_target(vec![2, 3])),
         r#"{"kind":"unexpanded_target","positions":[2,3]}"#
+    );
+}
+
+/// **An operation with a `where` target carries no identifier and requires
+/// nothing.** It expands into one operation per matched document, so it
+/// names no one operation another could require, and what it would require
+/// could not change what it matches: an authored plan names each such
+/// operation by its position in the fault it answers with, and one whose
+/// `where` operations carry neither has no such fault.
+#[test]
+fn an_authored_where_operation_carrying_an_id_or_a_requirement_is_a_fault() {
+    let set = |target| {
+        Operation::new(OperationKind::set_frontmatter(
+            target,
+            "status",
+            AuthoredValue::string("done"),
+        ))
+    };
+    let mut plan = AuthoredPlan::new(
+        VaultAddress::name(name("notes")),
+        vec![
+            set(WriteTarget::path(path("notes/a.md"))).with_id(operation_id("first")),
+            set(WriteTarget::matching(drafts())),
+        ],
+    );
+    assert_eq!(plan.ordered_where_targets(), None);
+    plan.operations
+        .push(set(WriteTarget::matching(drafts())).with_id(operation_id("bulk")));
+    plan.operations.push(
+        set(WriteTarget::matching(drafts())).with_requires(vec![operation_id("first")]),
+    );
+    assert_eq!(
+        plan.ordered_where_targets(),
+        Some(PlanFault::where_target_ordered(vec![2, 3]))
+    );
+    assert_eq!(
+        wire(&PlanFault::where_target_ordered(vec![2, 3])),
+        r#"{"kind":"where_target_ordered","positions":[2,3]}"#
     );
 }
 

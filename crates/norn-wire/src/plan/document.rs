@@ -313,6 +313,28 @@ impl AuthoredPlan {
         self.footnote = Some(footnote.into());
         self
     }
+
+    /// The fault of a plan whose operations with a `where` target carry an
+    /// identifier or a requirement, naming each such operation by its
+    /// position; `None` where none does.
+    ///
+    /// **A `where` operation is expanded before anything orders it**: into
+    /// one operation per document the vault matches before the plan, so an
+    /// identifier on it would name several operations, and a requirement
+    /// would order it after an operation whose result it never matches.
+    pub fn ordered_where_targets(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| {
+                matches!(operation.kind.target(), Some(WriteTarget::Where(_)))
+                    && (operation.id.is_some() || !operation.requires.is_empty())
+            })
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::where_target_ordered(positions))
+    }
 }
 
 /// A plan resolved against what the vault held: its operations, one transition

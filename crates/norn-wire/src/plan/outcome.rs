@@ -328,6 +328,17 @@ pub enum PlanFault {
         /// The positions of the operations carrying a `where` target.
         positions: Vec<usize>,
     },
+    /// An authored operation with a `where` target carries an identifier or
+    /// requires another operation. Planning expands it into one operation
+    /// per document the vault matches before the plan, so it names no one
+    /// operation another could require, and nothing it requires changes what
+    /// it matches. Split the plan, or name its documents by path.
+    #[non_exhaustive]
+    WhereTargetOrdered {
+        /// The positions of the `where` operations carrying an identifier
+        /// or a requirement.
+        positions: Vec<usize>,
+    },
 }
 
 impl PlanFault {
@@ -335,6 +346,12 @@ impl PlanFault {
     /// may not.
     pub const fn unexpanded_target(positions: Vec<usize>) -> Self {
         PlanFault::UnexpandedTarget { positions }
+    }
+
+    /// The `where` operations at `positions` carry an identifier or a
+    /// requirement, which an authored plan's `where` operations may not.
+    pub const fn where_target_ordered(positions: Vec<usize>) -> Self {
+        PlanFault::WhereTargetOrdered { positions }
     }
 
     /// The operations at `positions` all carry `id`.
