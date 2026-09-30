@@ -191,6 +191,47 @@ fn a_cursor_continues_exactly_against_the_snapshot_it_was_minted_on() {
     }
 }
 
+/// **Every row a find answers carries, beside it and off the wire, the
+/// content hash its document was indexed under**, in every order and in both
+/// a field order's sections, one per row in row order.
+#[test]
+fn every_found_row_carries_the_content_hash_its_document_was_indexed_under() {
+    let seeded = Seeded::new("find-indexed-hash");
+    let indexed = |at: &str| match at {
+        "notes/a.md" => "hash-a",
+        "notes/B.md" => "hash-b",
+        "notes/c.md" => "hash-c",
+        "other/glossary.md" => "hash-g",
+        "other/v1.2.md" => "hash-v",
+        other => panic!("the fixture holds no {other}"),
+    };
+    let snapshot = seeded.snapshot();
+    for params in orders() {
+        let mut after: Option<Cursor> = None;
+        loop {
+            let mut page = params.clone().with_limit(2);
+            if let Some(cursor) = after.take() {
+                page = page.with_after(cursor);
+            }
+            let found = snapshot.find(&page, &declared()).expect("a page");
+            let carried: Vec<(String, String)> = found
+                .rows
+                .iter()
+                .map(|row| row.path.as_str().to_string())
+                .zip(found.content_hashes.iter().cloned())
+                .collect();
+            assert_eq!(found.content_hashes.len(), found.rows.len(), "{params:?}");
+            for (at, hash) in carried {
+                assert_eq!(hash, indexed(&at), "{params:?}: {at}");
+            }
+            match found.next {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
+        }
+    }
+}
+
 /// **A continuation after a write reports the generation moved, and resumes
 /// after its own position.** A document written before the position is not
 /// read again and one written after it is.

@@ -225,6 +225,14 @@ pub(crate) struct FindPosition {
     pub(crate) path: String,
 }
 
+/// A key a page statement handed back, with the content hash its document was
+/// indexed under.
+#[derive(Clone, Debug)]
+pub(crate) struct PagedKey {
+    key: FoundKey,
+    content_hash: String,
+}
+
 /// One document a page found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FoundKey {
@@ -296,6 +304,13 @@ pub struct Found {
     pub snapshot: norn_wire::Snapshot,
     /// What the find read.
     pub work: FindWork,
+    /// The content hash each row's document was indexed under, one per row
+    /// and in row order: what the store took in when it last derived that
+    /// document. **Store-internal, never on the wire**:
+    /// [`Found::into_report`] drops it. A writer matching documents through a
+    /// find compares it with the bytes it composes from, so a match resting
+    /// on facts the store has not taken in yet is seen as such.
+    pub content_hashes: Vec<String>,
 }
 
 impl Found {
@@ -554,7 +569,12 @@ impl Snapshot {
         let fields = self.projected_keys(&projection, declared, lookups, &mut compiled.reports)?;
 
         let mut work = FindWork::default();
-        let (keys, next) = self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
+        let (paged, next) =
+            self.page_keys(&compiled, limit, resume.as_ref(), lookups, &mut work)?;
+        let (keys, content_hashes): (Vec<FoundKey>, Vec<String>) = paged
+            .into_iter()
+            .map(|paged| (paged.key, paged.content_hash))
+            .unzip();
         let order = compiled.field_order();
         let snapshot = self.reading_facts(order, lookups)?;
         let next = next.map(|at| {
@@ -576,6 +596,7 @@ impl Snapshot {
                 advisories,
                 snapshot,
                 work,
+                content_hashes,
             },
             keys,
         })
@@ -772,7 +793,7 @@ impl Snapshot {
         at: Option<&FindPosition>,
         lookups: &mut Lookups,
         work: &mut FindWork,
-    ) -> Result<(Vec<FoundKey>, Option<FindPosition>), StoreError> {
+    ) -> Result<(Vec<PagedKey>, Option<FindPosition>), StoreError> {
         let sections = if compiled.matches_nothing {
             Vec::new()
         } else {
@@ -796,16 +817,22 @@ impl Snapshot {
         )?;
         work.keys_read = page.read;
         work.page_stepped(page.stepped);
-        Ok((page.rows, page.next.as_ref().map(FoundKey::position)))
+        Ok((
+            page.rows,
+            page.next.as_ref().map(|paged| paged.key.position()),
+        ))
     }
 
     /// Run one page section.
-    fn read_keys(&self, record: &mut Vec<Ran>, section: Ran) -> Result<Vec<FoundKey>, StoreError> {
+    fn read_keys(&self, record: &mut Vec<Ran>, section: Ran) -> Result<Vec<PagedKey>, StoreError> {
         self.run_statement(record, section, |row| {
-            Ok(FoundKey {
-                document: row.get(0)?,
-                path: row.get(1)?,
-                sort: row.get(2)?,
+            Ok(PagedKey {
+                key: FoundKey {
+                    document: row.get(0)?,
+                    path: row.get(1)?,
+                    sort: row.get(2)?,
+                },
+                content_hash: row.get(3)?,
             })
         })
         .map_err(|problem| error::sql("reading a page of found documents", problem))
