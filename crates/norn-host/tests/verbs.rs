@@ -487,6 +487,19 @@ fn a_set_guarded_by_an_absent_field_writes_only_where_it_is_absent() {
     assert_eq!(read(&vault, "owned.md"), owned);
 }
 
+/// `count` documents under `folder`, each carrying `wave: flip`, named so
+/// their path order is their number's.
+fn flips(folder: &str, count: usize) -> Vec<(String, String)> {
+    (0..count)
+        .map(|at| {
+            (
+                format!("{folder}/{at:05}.md"),
+                "---\nwave: flip\n---\n".to_string(),
+            )
+        })
+        .collect()
+}
+
 /// A set flipping every `wave: flip` document to `wave: flipped`.
 fn flipping(vault: &attach::Vault, mode: ApplyMode) -> SetParams {
     SetParams::new(
@@ -556,4 +569,33 @@ fn a_matching_document_the_intake_derived_is_matched_by_the_next_apply() {
     assert_eq!(changeset, ChangesetOutcome::Committed);
     assert_eq!(targets, wrote(&["wave/a.md", "wave/b.md"]));
     assert_eq!(read(&vault, "wave/b.md"), "---\nwave: flipped\n---\n");
+}
+
+/// **A `where` matching more documents than one page holds expands to every
+/// one of them**, preview and apply alike: the match is paged to its end, so
+/// the documents past the first page are written with the rest.
+#[test]
+fn a_where_matching_past_one_page_expands_to_every_matched_document() {
+    let count = norn_store::MAX_PAGE + 3;
+    let files = flips("many", count);
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(at, content)| (at.as_str(), content.as_str()))
+        .collect();
+    let (_sandbox, vault) = a_vault("host-verbs-set-where-pages", &borrowed);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.set(flipping(&vault, ApplyMode::Preview)));
+    assert_eq!(plan.transitions.len(), count, "the preview stopped short");
+    let (landed, changeset, targets) = applied(host.set(flipping(&vault, ApplyMode::Apply)));
+    assert_eq!(
+        landed, plan,
+        "the apply matched another set than its preview"
+    );
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(targets.len(), count, "the apply stopped short");
+    for (at, _) in &files {
+        assert_eq!(read(&vault, at), "---\nwave: flipped\n---\n", "{at}");
+    }
 }
