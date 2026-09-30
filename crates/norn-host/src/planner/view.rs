@@ -379,6 +379,15 @@ pub(crate) mod memory {
             vault
         }
 
+        /// A vault holding `files` as raw bytes, which need not be text.
+        pub(crate) fn with_bytes(files: &[(&str, &[u8])]) -> Self {
+            let mut vault = MemoryVault::default();
+            for (path, content) in files {
+                vault.files.insert((*path).to_string(), Arc::from(*content));
+            }
+            vault
+        }
+
         /// This vault on a root that folds ASCII case.
         pub(crate) fn folding_case(mut self) -> Self {
             self.normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);

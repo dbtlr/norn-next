@@ -94,6 +94,7 @@
 //! (`crate::apply`).
 
 pub(crate) mod compose;
+pub(crate) mod edit;
 pub(crate) mod forecast;
 pub(crate) mod lineage;
 pub(crate) mod order;

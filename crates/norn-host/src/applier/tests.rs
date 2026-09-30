@@ -1791,3 +1791,95 @@ fn a_target_unreadable_while_a_resolved_plan_is_checked_previews_as_its_apply_an
 fn a_root_unwalkable_when_a_resolved_plan_is_checked_previews_as_its_apply_answers() {
     previews_as_its_apply_answers_with("");
 }
+
+/// One operation of every document-local kind, each over its own document of
+/// `DOCUMENT_LOCAL_VAULT`.
+fn one_of_each_document_local_kind() -> Vec<Operation> {
+    use norn_wire::{AuthoredValue, WriteTarget};
+    let at = |text: &str| WriteTarget::path(path(text));
+    vec![
+        Operation::new(OperationKind::set_frontmatter(
+            at("set.md"),
+            "status",
+            AuthoredValue::string("done"),
+        )),
+        Operation::new(OperationKind::remove_frontmatter(at("remove.md"), "status")),
+        Operation::new(OperationKind::push_frontmatter(
+            at("push.md"),
+            "tags",
+            AuthoredValue::string("project"),
+        )),
+        Operation::new(OperationKind::pop_frontmatter(
+            at("pop.md"),
+            "tags",
+            AuthoredValue::string("project"),
+        )),
+        Operation::new(OperationKind::replace_body(path("body.md"), "# New\n")),
+        Operation::new(OperationKind::replace_section(
+            path("replace.md"),
+            "Tasks",
+            "fresh\n",
+        )),
+        Operation::new(OperationKind::append_to_section(
+            path("append.md"),
+            "Tasks",
+            "added",
+        )),
+        Operation::new(OperationKind::delete_section(path("delete.md"), "Tasks")),
+        Operation::new(OperationKind::insert_before_heading(
+            path("before.md"),
+            "Tasks",
+            "above",
+        )),
+        Operation::new(OperationKind::insert_after_heading(
+            path("after.md"),
+            "Tasks",
+            "below",
+        )),
+    ]
+}
+
+const DOCUMENT_LOCAL_VAULT: &[(&str, &str)] = &[
+    ("set.md", "---\nstatus: draft\n---\n# Set\n"),
+    ("remove.md", "---\nstatus: draft\n---\n# Remove\n"),
+    ("push.md", "---\ntags:\n  - project\n---\n# Push\n"),
+    ("pop.md", "---\ntags:\n  - project\n  - other\n---\n# Pop\n"),
+    ("body.md", "---\ntitle: Body\n---\n# Old\n"),
+    ("replace.md", "# R\n\n## Tasks\n\none\n"),
+    ("append.md", "# A\n\n## Tasks\n\none\n"),
+    ("delete.md", "# D\n\n## Tasks\n\none\n\n## Keep\n"),
+    ("before.md", "# B\n\n## Tasks\n\none\n"),
+    ("after.md", "# F\n\n## Tasks\n\none\n"),
+];
+
+/// **Every document-local kind previews as its apply applies, and its
+/// resolved plan sent again is landed**: the preview answers the plan its
+/// operations resolved to, the apply writes that same plan, and the plan sent
+/// once more finds every target at its after-state and writes nothing.
+#[test]
+fn each_document_local_kind_previews_as_it_applies_and_a_re_send_is_found() {
+    for operation in one_of_each_document_local_kind() {
+        let name = operation.kind.name();
+        let mut fixture = Fixture::new(DOCUMENT_LOCAL_VAULT);
+        let plan = fixture.plan(vec![operation]);
+        assert_eq!(plan.transitions.len(), 1, "{name}");
+        let (previewed, _) = fixture
+            .preview(plan.clone())
+            .unwrap_or_else(|refusal| panic!("{name} previews: {refusal:?}"));
+        assert_eq!(previewed, plan, "{name}");
+        let landed = applied(fixture.apply(plan.clone()));
+        assert_eq!(landed.plan, previewed, "{name}");
+        assert_eq!(
+            landed.targets.iter().map(|t| t.result).collect::<Vec<_>>(),
+            vec![TargetResult::Wrote],
+            "{name}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+        let again = applied(fixture.apply(plan));
+        assert_eq!(
+            again.targets.iter().map(|t| t.result).collect::<Vec<_>>(),
+            vec![TargetResult::Found],
+            "{name}"
+        );
+    }
+}

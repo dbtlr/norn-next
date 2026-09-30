@@ -418,29 +418,24 @@ mod tests {
             .collect()
     }
 
-    // NORN-296: the host PR plans these and replaces this test.
-    /// **A document-local kind or an expected value is left unresolved until
-    /// it is planned**, naming why, rather than acting or being dropped: the
-    /// operations on its document fall with it, and a forced plan carries
-    /// its force.
+    /// **A document-local kind resolves to one transition on its document,
+    /// and a forced plan carries its force**, while a `where` target that
+    /// reaches planning unexpanded is left unresolved, naming why, and the
+    /// operations on its document do not fall with it, since it touches none.
     #[test]
-    fn a_document_local_write_is_unresolved_until_it_is_planned() {
-        let vault = MemoryVault::with(&[("a.md", "draft"), ("b.md", "B")]);
+    fn a_document_local_write_resolves_and_an_unexpanded_where_does_not() {
+        let vault = MemoryVault::with(&[("a.md", "---\nstatus: draft\n---\n")]);
         let operations = vec![
-            Operation::new(OperationKind::str_replace(path("a.md"), "draft", "final")),
-            Operation::new(OperationKind::replace_body(path("a.md"), "body")),
+            Operation::new(OperationKind::set_frontmatter(
+                norn_wire::WriteTarget::path(path("a.md")),
+                "status",
+                norn_wire::AuthoredValue::string("done"),
+            )),
             Operation::new(OperationKind::set_frontmatter(
                 norn_wire::WriteTarget::matching(Vec::new()),
                 "status",
                 norn_wire::AuthoredValue::Bool(true),
             )),
-            Operation::new(OperationKind::delete_document(path("b.md"))).with_conditions(vec![
-                AuthorCondition::expected_value(
-                    path("b.md"),
-                    "status",
-                    norn_wire::ExpectedField::absent(),
-                ),
-            ]),
         ];
         let resolution = match resolve(
             authored(operations.clone()).with_force(true),
@@ -451,22 +446,16 @@ mod tests {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),
         };
-        let mut positions = unresolved_positions(&resolution, &operations);
-        positions.sort_unstable();
-        assert_eq!(positions, vec![0, 1, 2, 3]);
-        assert!(resolution.plan.transitions.is_empty());
+        assert_eq!(unresolved_positions(&resolution, &operations), vec![1]);
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![transition(
+                "a.md",
+                present("---\nstatus: draft\n---\n"),
+                present("---\nstatus: done\n---\n")
+            )]
+        );
         assert!(resolution.plan.force);
-        let details: Vec<String> = resolution
-            .unresolved
-            .iter()
-            .map(|unresolved| format!("{:?}", unresolved.reason))
-            .collect();
-        for named in ["replace_body", "set_frontmatter", "expected_value"] {
-            assert!(
-                details.iter().any(|detail| detail.contains(named)),
-                "no reason names `{named}`: {details:?}"
-            );
-        }
     }
 
     #[test]

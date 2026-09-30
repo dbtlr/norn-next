@@ -29,12 +29,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{
-    AuthorCondition, DocumentPath, FileState, OperationKind, PlanCondition, PlanFault, ResolvedPlan,
-};
+use norn_wire::{AuthorCondition, DocumentPath, FileState, PlanCondition, PlanFault, ResolvedPlan};
 
 use super::observe::{TargetState, identity};
-use crate::planner::compose::{Composition, compose, content_hash, touches};
+use crate::planner::compose::{Composition, compose, content_hash, edits_in_place, touches};
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
@@ -109,7 +107,7 @@ pub(super) fn recompose<V: VaultView>(
     let mut disagreeing: Vec<DocumentPath> = Vec::new();
     for unresolvable in &composition.unresolvable {
         let operation = &plan.operations[unresolvable.position];
-        let stood_in = matches!(operation.kind, OperationKind::StrReplace { .. })
+        let stood_in = edits_in_place(&operation.kind)
             && lineage.edited(unresolvable.position).is_some_and(unseen);
         if !stood_in {
             disagreeing.extend(touches(&operation.kind).cloned());

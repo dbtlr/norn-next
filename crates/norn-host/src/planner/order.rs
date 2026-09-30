@@ -232,8 +232,8 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { to, .. } => Some(to),
         OperationKind::CreateDocument { path, .. } => Some(path),
         OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
-        // NORN-296: planned in the host PR. A document-local kind edits a
-        // document where it stands, putting none at a name.
+        // A document-local kind edits a document where it stands, putting
+        // none at a name.
         OperationKind::SetFrontmatter { .. }
         | OperationKind::RemoveFrontmatter { .. }
         | OperationKind::PushFrontmatter { .. }
@@ -253,8 +253,8 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { from, .. } => Some(from),
         OperationKind::DeleteDocument { path } => Some(path),
         OperationKind::CreateDocument { .. } | OperationKind::StrReplace { .. } => None,
-        // NORN-296: planned in the host PR. A document-local kind edits a
-        // document where it stands, leaving no name empty.
+        // A document-local kind edits a document where it stands, leaving no
+        // name empty.
         OperationKind::SetFrontmatter { .. }
         | OperationKind::RemoveFrontmatter { .. }
         | OperationKind::PushFrontmatter { .. }
