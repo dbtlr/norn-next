@@ -35,9 +35,8 @@
 //!   also names what does not resolve: a push onto a scalar, a pop or a
 //!   remove of what the document does not hold, a heading that is ambiguous,
 //!   missing or inside a container, empty content to append or insert, a
-//!   nested value, and a `where` target
-//!   [`expand`] did not expand. The pop, the
-//!   remove and the empty content are left unresolved where they would
+//!   nested value, and a `where` target [`expand`] did not expand. The pop,
+//!   the remove and the empty content are left unresolved where they would
 //!   otherwise land as a silent no-op. An edit that rewrites what its
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
