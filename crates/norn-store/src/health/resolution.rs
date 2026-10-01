@@ -64,6 +64,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use norn_db::rusqlite::types::Value;
+use norn_wire::Resolves;
 
 use super::run::{OnSnapshot, ResolutionStatement, Runner};
 use super::{Held, Key, LINK_HEALTH_CHUNK, Pages, occupied_keys, statement};
@@ -72,7 +73,7 @@ use crate::facts::{LinkFact, StoredPathOrder};
 use crate::fields::ContentModel;
 use crate::link::{keys_naming, link_keys};
 use crate::path::{DocumentPath, SuffixKey};
-use crate::read::{Lookups, PageRefusal};
+use crate::read::{Lookups, PageRefusal, wire_path};
 use crate::request::unreadable;
 use crate::resolve::AmbiguityIgnore;
 use crate::store::Snapshot;
@@ -139,17 +140,6 @@ pub struct ProbedLink {
     pub written: bool,
 }
 
-/// What one link resolves to on one side of a plan.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Resolved {
-    /// No document: the link is broken.
-    None,
-    /// Exactly this document.
-    One(DocumentPath),
-    /// More than one document: the link is ambiguous.
-    Several,
-}
-
 /// One link a plan reaches, and what it resolves to on each side.
 #[derive(Clone, Debug)]
 pub struct LinkChange {
@@ -158,11 +148,11 @@ pub struct LinkChange {
     /// The link as the after-state holds it.
     pub link: LinkFact,
     /// What it resolves to from its before-holder, with every target at its
-    /// before-state.
-    pub before: Resolved,
+    /// before-state, in the vocabulary a plan records it in.
+    pub before: Resolves,
     /// What it resolves to from its holder, with every target at its
     /// after-state.
-    pub after: Resolved,
+    pub after: Resolves,
     /// Whether the plan writes the link's text ([`ProbedLink::written`]).
     pub written: bool,
     /// Whether what the link names moved under it: its two holders give it
@@ -410,8 +400,8 @@ impl<'a, R: Runner> Judging<'a, R> {
         self.resolve(&held)?;
         for judged in chunk {
             self.work.links_evaluated += 1;
-            let before = self.resolution(&judged.before, |target| target.before);
-            let after = self.resolution(&judged.after, |target| target.after);
+            let before = self.resolution(&judged.before, |target| target.before)?;
+            let after = self.resolution(&judged.after, |target| target.after)?;
             let members_moved = judged.before != judged.after
                 || judged.before.iter().chain(&judged.after).any(|key| {
                     self.members(key)
@@ -454,28 +444,28 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// What a link held under `keys` resolves to, on the side `present`
     /// reads each target's presence from.
-    fn resolution(&self, keys: &[Key], present: impl Fn(&Overlaid) -> bool) -> Resolved {
+    fn resolution(
+        &self,
+        keys: &[Key],
+        present: impl Fn(&Overlaid) -> bool,
+    ) -> Result<Resolves, StoreError> {
         let mut total = 0usize;
-        let mut one = None;
+        let mut one: Option<&str> = None;
         for key in keys {
             let held = &self.resolved[key];
             let targets: Vec<&Overlaid> = self.members(key).filter(|t| present(t)).collect();
             total += held.stored.len() + targets.len();
             if total > 1 {
-                return Resolved::Several;
+                return Ok(Resolves::several());
             }
             one = one
-                .or_else(|| {
-                    held.stored
-                        .first()
-                        .and_then(|path| DocumentPath::new(path).ok())
-                })
-                .or_else(|| targets.first().map(|target| target.path.clone()));
+                .or_else(|| held.stored.first().map(String::as_str))
+                .or_else(|| targets.first().map(|target| target.path.as_str()));
         }
-        match (total, one) {
-            (1, Some(path)) => Resolved::One(path),
-            _ => Resolved::None,
-        }
+        Ok(match one {
+            Some(path) if total == 1 => Resolves::one(wire_path(path)?),
+            _ => Resolves::none(),
+        })
     }
 
     /// Resolve every key of `keys` not yet resolved: the head of what the

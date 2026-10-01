@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{LinkChange, PathOverlay, ProbedLink, Resolved};
+use norn_store::{LinkChange, PathOverlay, ProbedLink};
 use norn_wire::{
     DocumentPath, FileState, LinkAdvisory, LinkFamily, LinkKey, Operation, OperationKind,
     PlanCondition, Resolves, Transition,
@@ -183,8 +183,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             ))
             .or_insert_with(|| Judged {
                 key,
-                before: wire_resolves(&change.before),
-                after: wire_resolves(&change.after),
+                before: change.before,
+                after: change.after,
                 written: false,
                 members_moved: false,
             });
@@ -311,14 +311,6 @@ fn family_name(family: LinkFamily) -> Option<&'static str> {
         LinkFamily::Wikilink => Some(norn_store::LinkFamily::Wikilink.as_str()),
         LinkFamily::Markdown => Some(norn_store::LinkFamily::Markdown.as_str()),
         _ => None,
-    }
-}
-
-fn wire_resolves(resolved: &Resolved) -> Resolves {
-    match resolved {
-        Resolved::None => Resolves::none(),
-        Resolved::One(path) => Resolves::one(wire_path(path)),
-        Resolved::Several => Resolves::several(),
     }
 }
 

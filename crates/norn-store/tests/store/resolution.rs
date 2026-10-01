@@ -8,9 +8,9 @@
 
 use norn_store::{
     ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionWork,
-    Resolved, Snapshot, Store, StoredPathOrder,
+    Snapshot, Store, StoredPathOrder,
 };
-use norn_wire::Pattern;
+use norn_wire::{Pattern, Resolves};
 
 use crate::common::{Scratch, path};
 use crate::health::derived;
@@ -122,11 +122,11 @@ fn read(change: &LinkChange) -> Judged {
     )
 }
 
-fn resolved(resolved: &Resolved) -> String {
+fn resolved(resolved: &Resolves) -> String {
     match resolved {
-        Resolved::None => "none".to_string(),
-        Resolved::One(path) => format!("one:{}", path.as_str()),
-        Resolved::Several => "several".to_string(),
+        Resolves::None {} => "none".to_string(),
+        Resolves::One { path } => format!("one:{}", path.as_str()),
+        Resolves::Several {} => "several".to_string(),
     }
 }
 
