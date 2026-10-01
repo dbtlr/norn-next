@@ -43,14 +43,17 @@
 //! before the plan, whatever its spelling, is retargeted; where `old` names
 //! none, every broken wikilink filed under exactly `old`'s keys as the root
 //! reads them is
-//! ([`selecting`](super::links::selecting)). A wikilink already naming `new`'s document after the
+//! ([`selecting`]). A wikilink already naming `new`'s document after the
 //! plan is left alone, one resolving to several documents is never rewritten
 //! and the forecast says so, and a Markdown link is no wikilink. An `old`
 //! naming several documents, a `new` naming none or several, the two naming
 //! one document, and no wikilink to retarget each leave the rewrite
 //! unresolved, the ambiguous ones with the head of their candidates. A
 //! wikilink a rewrite retargets is that rewrite's, whatever a move or a
-//! delete of the plan would do with it: its author said what it names. A
+//! delete of the plan would do with it: its author said what it names. Two
+//! rewrites selecting one wikilink are not both planned: the earlier in plan
+//! order retargets it, and the later is left unresolved naming the earlier
+//! ([`overlaps`]). A
 //! backlink of a document a delete forbidding them removes is one the
 //! rewrite clears only by respelling it; one it leaves as written still
 //! leaves the delete unresolved.
@@ -116,7 +119,7 @@ use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
     Decider, EntryKey, LinkIndex, Named, RetargetNaming, Target, WrittenLinks, address, decider,
     family_name, reach, reaching, removed_by, respells, retarget_namings, rewrite_targets,
-    stored_path, wire_family,
+    selecting, stored_path, wire_family,
 };
 use crate::derivation::document_links;
 
@@ -159,7 +162,8 @@ pub(crate) struct Generated {
 ///   ([`retarget_destination`]); where they do, every wikilink naming `old`
 ///   that does not already name `new` after the plan ([`respells`]) is
 ///   respelled to name it, by the same spellings, and a rewrite retargeting
-///   none is left unresolved ([`unmatched`]).
+///   none is left unresolved ([`unmatched`]), as is one selecting a wikilink
+///   an earlier rewrite selects ([`overlaps`]).
 ///
 /// Empty, and the index never asked, where no move carries a document, no
 /// delete forbids or rewrites the links naming its own, and no wikilink
@@ -260,7 +264,24 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let mut forbidden: BTreeMap<usize, Vec<norn_store::DocumentPath>> = BTreeMap::new();
     let mut contested: Vec<(usize, norn_store::DocumentPath, Option<EntryKey>)> = Vec::new();
     let mut retargeting: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut overlapping: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
+        // A wikilink two rewrites select is the earlier one's, and the later
+        // one is left out naming it.
+        if let [earlier, later @ ..] = &selecting(
+            &change.link,
+            Named::of(&change),
+            lineage,
+            &cascade.namings,
+            normalizer,
+        )[..]
+        {
+            for retarget in later {
+                overlapping
+                    .entry(retarget.position)
+                    .or_insert_with(|| overlaps(&change, earlier));
+            }
+        }
         let Some(destination) = cascade.final_document(&change.link, Named::of(&change)) else {
             return;
         };
@@ -309,6 +330,9 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         });
     })?;
 
+    for (position, reason) in overlapping {
+        unresolved.entry(position).or_insert(reason);
+    }
     for retarget in lineage.retargets() {
         if !retargeting.contains_key(&retarget.position) {
             unresolved
@@ -524,6 +548,23 @@ fn unmatched(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
             "no broken wikilink is filed under `old` `{old}`, so the rewrite changes nothing"
         ),
     })
+}
+
+/// Why a wikilink rewrite selecting `change`'s link does not resolve, the
+/// rewrite `earlier`, before it in plan order, selecting it too: a wikilink
+/// is retargeted by one rewrite, and which of the two the author meant is
+/// not known. The earlier is named by its identifier where it carries one,
+/// else by its position.
+fn overlaps(change: &norn_store::LinkChange, earlier: &Retarget) -> UnresolvedReason {
+    let named = match &earlier.id {
+        Some(id) => format!("`{id}`"),
+        None => format!("at position {}", earlier.position),
+    };
+    UnresolvedReason::no_longer_resolves(format!(
+        "it would retarget the wikilink `{}` in `{}`, which the earlier wikilink rewrite {named} retargets, and one wikilink is retargeted by one rewrite",
+        address(&change.link),
+        change.holder.as_str(),
+    ))
 }
 
 /// Why a delete forbidding the links naming its document does not resolve,

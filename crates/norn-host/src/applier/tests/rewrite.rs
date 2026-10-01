@@ -5,7 +5,7 @@
 
 use norn_wire::{
     AmbiguousEnd, Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite,
-    Operation, OperationKind, PlanCondition, RefusedCheck, ResolutionTarget, Resolves,
+    Operation, OperationId, OperationKind, PlanCondition, RefusedCheck, ResolutionTarget, Resolves,
     UnresolvedOperation, UnresolvedReason,
 };
 
@@ -217,6 +217,37 @@ fn a_rewrite_ambiguous_at_both_ends_is_answered_for_its_old() {
     };
     assert_eq!(*end, AmbiguousEnd::Old);
     assert_eq!(candidates.candidates()[0].path, path("x/a.md"));
+}
+
+/// **Two wikilink rewrites selecting one wikilink are not both planned.**
+/// `a` and `a.md` name one document, so both rewrites would retarget
+/// `[[a]]`: the earlier in plan order retargets it, and the later is left
+/// unresolved naming the earlier, by its identifier where it carries one and
+/// else by its position, rather than saying it retargets nothing.
+#[test]
+fn a_later_wikilink_rewrite_selecting_an_earlier_ones_wikilink_is_unresolved_naming_it() {
+    let fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("d.md", "D\n"),
+        ("h.md", "[[a]]\n"),
+    ]);
+    let unnamed = fixture.planned(vec![retargeting("a", "c"), retargeting("a.md", "d")]);
+    assert_eq!(
+        unnamed.plan.operations[0].cascade,
+        [wikilink("h.md", "a", "c")]
+    );
+    let detail = unresolved_detail(&unnamed);
+    assert!(detail.contains("at position 0"), "{detail}");
+    assert!(!detail.contains("no wikilink"), "{detail}");
+
+    let first = OperationId::new("first").expect("an identifier");
+    let named = fixture.planned(vec![
+        retargeting("a", "c").with_id(first),
+        retargeting("a.md", "d"),
+    ]);
+    let detail = unresolved_detail(&named);
+    assert!(detail.contains("`first`"), "{detail}");
 }
 
 /// **A `new` must name one document where the plan leaves the vault.**

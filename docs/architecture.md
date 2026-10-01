@@ -2601,7 +2601,9 @@ naming several documents is never rewritten and the forecast says so. Each is re
 `new`'s document by the spellings a move's cascade writes, its embed marker, title and
 anchor kept, and rides the rewrite as its cascade, one operation with it, composed,
 regenerated on refresh and recomposed by the applier as a move's is; a wikilink the rewrite
-retargets is its own, whatever a move or a delete of the same plan would do with it. An
+retargets is its own, whatever a move or a delete of the same plan would do with it, and
+is retargeted by one rewrite: where two select it, the earlier in plan order retargets it
+and the later is left unresolved, naming the earlier by its identifier or its position. An
 `old` naming several documents leaves the rewrite unresolved with the head of them before
 the plan, its ambiguous end named `old`, a `new` naming several with the head of them after
 it, its end named `target` — both ambiguous, it is answered for `old` — and a `new` naming none,

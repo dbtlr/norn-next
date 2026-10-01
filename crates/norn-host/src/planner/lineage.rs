@@ -27,7 +27,7 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
-use norn_wire::{Backlinks, Operation, OperationKind, Resolves};
+use norn_wire::{Backlinks, Operation, OperationId, OperationKind, Resolves};
 
 use super::compose::touches;
 
@@ -90,6 +90,8 @@ pub(crate) struct Lineage {
 pub(crate) struct Retarget {
     /// The rewrite's position.
     pub(crate) position: usize,
+    /// The identifier other operations require it by, where it carries one.
+    pub(crate) id: Option<OperationId>,
     /// The address of what the retargeted wikilinks name before the plan.
     pub(crate) old: String,
     /// The address of the document they name after it.
@@ -217,6 +219,7 @@ impl Lineage {
                 OperationKind::RewriteWikilink { old, new } => {
                     lineage.retargets.push(Retarget {
                         position,
+                        id: operations[position].id.clone(),
                         old: old.address().to_string(),
                         new: new.address().to_string(),
                     });
