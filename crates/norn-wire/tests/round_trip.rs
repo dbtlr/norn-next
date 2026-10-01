@@ -9626,6 +9626,33 @@ fn a_move_request_compiles_to_the_move_its_source_names() {
     }
 }
 
+/// **A trailing slash does not change what a `move` moves.** Its leaf is
+/// judged with the slash removed, so a source whose last segment carries the
+/// document extension names a document, slash or not: moved to a folder's
+/// name it is refused, as it is without the slash, rather than read as a
+/// move of a folder named `a.md`. A folder's own trailing slash leaves it a
+/// folder.
+#[test]
+fn a_trailing_slash_does_not_turn_a_document_into_a_folder() {
+    for (from, to) in [("a.md/", "b/"), ("notes/a.md/", "archive"), ("a/", "b.md/")] {
+        assert!(
+            MoveSubject::new(from, to).is_err(),
+            "moving `{from}` to `{to}` read as a move"
+        );
+    }
+    assert!(
+        serde_json::from_str::<MoveParams>(
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","from":"a.md/","to":"b/"}"#
+        )
+        .is_err(),
+        "a document's name with a trailing slash read as a folder move"
+    );
+    assert_eq!(
+        MoveSubject::new("notes/", "archive/").ok(),
+        Some(MoveSubject::folder(folder("notes/"), folder("archive/")))
+    );
+}
+
 /// **A `delete` compiles to one `delete_document` saying what its request
 /// says of the links naming its document**: rewritten to `rewrite_to`, left
 /// broken, or — saying neither — neither, and saying both is refused.

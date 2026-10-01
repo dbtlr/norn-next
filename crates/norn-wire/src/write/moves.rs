@@ -4,10 +4,12 @@
 //! extension is the document extension, `md` in any ASCII case, so a `from`
 //! whose last segment carries it names a document and compiles to
 //! `move_document`, and any other `from` names a folder and compiles to
-//! `move_folder`. `to` names the same: a document moved to a name that is not
-//! a document's, or a folder to one that is, is refused at the read. A folder
-//! whose own name carries the extension is not moved by this verb; a plan's
-//! `move_folder` names one.
+//! `move_folder`. The last segment is judged with any trailing slash
+//! removed, so a slash never turns a document's name into a folder's. `to`
+//! names the same: a document moved to a name that is not a document's, or a
+//! folder to one that is, is refused at the read. A folder whose own name
+//! carries the extension is not moved by this verb; a plan's `move_folder`
+//! names one.
 //!
 //! **A move carries its link cascade, and nothing turns it off.** Planning
 //! rewrites every link naming what is moved, or leaves one as written with
@@ -64,8 +66,9 @@ pub enum MoveSubject {
 
 impl MoveSubject {
     /// What moving `from` to `to` moves, read from `from`: a document where
-    /// its last segment carries the document extension, and a folder
-    /// otherwise; or why the two ends name no one move.
+    /// its last segment, any trailing slash removed, carries the document
+    /// extension, and a folder otherwise; or why the two ends name no one
+    /// move.
     pub fn new(from: impl AsRef<str>, to: impl AsRef<str>) -> Result<Self, IllegalMove> {
         let (from, to) = (from.as_ref(), to.as_ref());
         let refused = |problem: String| IllegalMove {
@@ -110,10 +113,11 @@ impl MoveSubject {
     }
 }
 
-/// Whether `path` names a document: its last segment carries the document
-/// extension, in any ASCII case — the rule the vault reads its documents by.
+/// Whether `path` names a document: its last segment, with any trailing
+/// slash removed, carries the document extension, in any ASCII case — the
+/// rule the vault reads its documents by.
 fn names_a_document(path: &str) -> bool {
-    leaf_extension(path).is_some_and(is_document_extension)
+    leaf_extension(path.trim_end_matches('/')).is_some_and(is_document_extension)
 }
 
 /// Two ends that name no one move: a path either grammar refuses, or a
@@ -230,8 +234,9 @@ struct MoveKeys {
     /// Whether to preview the write or apply it. There is no default.
     mode: ApplyMode,
     /// Where the document or folder stands, relative to the vault root. A
-    /// path whose last segment carries the document extension `.md`, in any
-    /// case, names a document; any other names a folder.
+    /// path whose last segment, any trailing slash removed, carries the
+    /// document extension `.md`, in any case, names a document; any other
+    /// names a folder.
     #[schemars(length(min = 1))]
     from: String,
     /// Where it is moved to: a path carrying the document extension for a
