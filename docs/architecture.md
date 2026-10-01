@@ -2452,7 +2452,7 @@ before-state already carries that edit, so the write guard alone would let a sta
 overwrite it. The indexed hash rides the find builder's page rows, never the wire, and a
 preview and an apply judge it alike. A document the store does not list yet is not matched,
 as a `find` at that instant would not list it. An authored `where` operation carrying an identifier or
-a requirement is `request/plan-invalid` (`where_target_ordered`): it expands to several
+a requirement is `request/plan-invalid` (`expanded_target_ordered`): it expands to several
 operations, from the vault as it stands before the plan.
 An author's condition — a content hash, or an expected frontmatter value that is absent or
 reads as exactly one value — is checked at planning, against the document as it stood

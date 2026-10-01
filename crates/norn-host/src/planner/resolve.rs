@@ -834,18 +834,28 @@ mod tests {
     }
 
     /// **A link cascade is left unresolved until it is planned (NORN-297).**
-    /// A folder move, a link rewrite, a wikilink rewrite and a delete saying
-    /// what becomes of the links naming its document are each left
-    /// unresolved, naming the limit, and write nothing — never planned as
-    /// something they do not say, such as a delete that silently breaks
-    /// links its author asked to rewrite.
+    /// A link rewrite, a wikilink rewrite and a delete saying what becomes
+    /// of the links naming its document are each left unresolved, naming the
+    /// limit, and write nothing — never planned as something they do not
+    /// say, such as a delete that silently breaks links its author asked to
+    /// rewrite. A folder move reaching planning unexpanded is left
+    /// unresolved too, saying it is planned only as its document moves.
     #[test]
     fn a_link_cascade_is_left_unresolved_until_it_is_planned() {
         let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
         let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
         let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+        let unexpanded = planned(
+            &vault,
+            vec![Operation::new(OperationKind::move_folder(
+                folder("notes"),
+                folder("archive"),
+            ))],
+        );
+        let detail = unresolved_detail(&unexpanded);
+        assert!(detail.contains("not expanded"), "{detail}");
+        assert!(unexpanded.plan.transitions.is_empty());
         for kind in [
-            OperationKind::move_folder(folder("notes"), folder("archive")),
             OperationKind::rewrite_link(
                 path("notes/a.md"),
                 norn_wire::LinkFamily::Wikilink,

@@ -50,16 +50,16 @@
 //! the order the matcher answers, which is path order, at the original's
 //! place in the plan. An authored `where` operation carrying an identifier or
 //! a requirement is a fault in the plan's shape
-//! ([`AuthoredPlan::ordered_where_targets`]), so no expansion is ever
+//! ([`AuthoredPlan::ordered_expanded_targets`]), so no expansion is ever
 //! required by, or orders after, another operation. A fault found in the
 //! expanded plan names the authored positions of the operations it concerns.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use norn_wire::{
-    AuthoredPlan, DocumentPath, Operation, OperationKind, PlanFault, Predicate, RootIdentity,
-    UnresolvedReason, WriteTarget,
+    AuthoredPlan, DocumentPath, FilePath, FolderPath, Operation, OperationKind, PlanFault,
+    Predicate, RootIdentity, UnresolvedReason, WriteTarget,
 };
 
 use super::links::LinkIndex;
@@ -119,7 +119,7 @@ where
     I: LinkIndex<Error = M::Error> + ?Sized,
 {
     if let Some(fault) = authored
-        .ordered_where_targets()
+        .ordered_expanded_targets()
         .or_else(|| authored.misplaced_cascades())
     {
         return Err(ExpandingFailure::Planning(PlanningFailure::Fault(fault)));
@@ -137,7 +137,25 @@ where
     let mut expanded = Vec::with_capacity(operations.len());
     let mut origin = Vec::with_capacity(operations.len());
     let mut left_out = BTreeMap::new();
+    let mut left_behind = Vec::new();
     for (position, operation) in operations.into_iter().enumerate() {
+        if let OperationKind::MoveFolder { from, to } = &operation.kind {
+            let moved = folder_moves(&operation, from, to, view)
+                .map_err(|error| ExpandingFailure::Planning(PlanningFailure::View(error)))?;
+            match moved {
+                Ok((moves, left)) => {
+                    origin.extend(std::iter::repeat_n(position, moves.len()));
+                    expanded.extend(moves);
+                    left_behind.extend(left);
+                }
+                Err(detail) => {
+                    left_out.insert(expanded.len(), UnresolvedReason::no_longer_resolves(detail));
+                    expanded.push(operation);
+                    origin.push(position);
+                }
+            }
+            continue;
+        }
         let Some(WriteTarget::Where(predicates)) = operation.kind.target() else {
             expanded.push(operation);
             origin.push(position);
@@ -183,17 +201,107 @@ where
     let mut authored = AuthoredPlan::new(vault, expanded).with_force(force);
     authored.plan = plan;
     authored.footnote = footnote;
-    resolve_leaving_out(authored, root, &BTreeSet::new(), view, links, left_out).map_err(
-        |failure| match failure {
-            PlanningFailure::Fault(fault) => ExpandingFailure::Planning(PlanningFailure::Fault(
-                at_authored_positions(fault, &origin),
-            )),
-            PlanningFailure::View(error) => {
-                ExpandingFailure::Planning(PlanningFailure::View(error))
-            }
-            PlanningFailure::Links(refused) => ExpandingFailure::Snapshot(refused),
-        },
-    )
+    let mut resolution =
+        resolve_leaving_out(authored, root, &BTreeSet::new(), view, links, left_out).map_err(
+            |failure| match failure {
+                PlanningFailure::Fault(fault) => ExpandingFailure::Planning(
+                    PlanningFailure::Fault(at_authored_positions(fault, &origin)),
+                ),
+                PlanningFailure::View(error) => {
+                    ExpandingFailure::Planning(PlanningFailure::View(error))
+                }
+                PlanningFailure::Links(refused) => ExpandingFailure::Snapshot(refused),
+            },
+        )?;
+    resolution.forecast = resolution.forecast.with_left_behind(left_behind);
+    Ok(resolution)
+}
+
+/// What a folder move expanded into: its document moves, and every file it
+/// leaves behind.
+type FolderMoved = (Vec<Operation>, Vec<FilePath>);
+
+/// The document moves the folder move `operation`, from `from` to `to`,
+/// expands into — one per document `view` lists beneath `from`, in path
+/// order, each to the same place beneath `to` and carrying what `operation`
+/// carries beyond its kind — and every file it leaves behind; or why it
+/// expands into none, in words.
+///
+/// **What a folder move does not plan.** A folder moved onto itself names no
+/// change; one moved to another spelling of itself is a folder's change of
+/// case, which is not planned; one moved beneath itself would move each
+/// document under a name inside the folder being emptied; and one naming no
+/// folder, or a folder holding no document, moves nothing. Each leaves the
+/// operation unresolved. A destination beneath which documents already stand
+/// is merged into: each document's own destination must still be vacant, or
+/// vacated by the plan, as any move's is.
+fn folder_moves<V: VaultView>(
+    operation: &Operation,
+    from: &FolderPath,
+    to: &FolderPath,
+    view: &V,
+) -> Result<Result<FolderMoved, String>, V::Error> {
+    let normalizer = view.normalizer();
+    let (from_folder, to_folder) = match (
+        normalizer.normalize(Path::new(from.as_str())),
+        normalizer.normalize(Path::new(to.as_str())),
+    ) {
+        (Ok(from_folder), Ok(to_folder)) => (from_folder, to_folder),
+        (Err(error), _) => {
+            return Ok(Err(format!(
+                "`{from}` names no folder in the vault: {error}"
+            )));
+        }
+        (_, Err(error)) => return Ok(Err(format!("`{to}` names no folder in the vault: {error}"))),
+    };
+    if from_folder == to_folder {
+        let spelled = |path: &FolderPath| {
+            normalizer
+                .normalize(Path::new(path.as_str()))
+                .map(|folder| folder.as_path().to_owned())
+                .ok()
+        };
+        return Ok(Err(if spelled(from) == spelled(to) {
+            format!("the folder `{from}` would be moved onto itself")
+        } else {
+            format!(
+                "`{to}` differs from `{from}` only in case, and a folder's change of case is not planned"
+            )
+        }));
+    }
+    if to_folder.as_path().starts_with(from_folder.as_path()) {
+        return Ok(Err(format!(
+            "`{to}` lies inside `{from}`, and a folder cannot be moved into itself"
+        )));
+    }
+    let Some(contents) = view.folder_contents(&from_folder)? else {
+        return Ok(Err(format!("no folder stands at `{from}`")));
+    };
+    if contents.documents.is_empty() {
+        return Ok(Err(format!("the folder `{from}` holds no document")));
+    }
+    let depth = from_folder.as_path().components().count();
+    let mut moves = Vec::with_capacity(contents.documents.len());
+    for document in contents.documents {
+        let rest: PathBuf = Path::new(document.as_str())
+            .components()
+            .skip(depth)
+            .collect();
+        let Some(destination) = to_folder.as_path().join(rest).to_str().map(str::to_string) else {
+            return Ok(Err(format!(
+                "`{to}` names no folder a document can be moved to"
+            )));
+        };
+        let Ok(destination) = DocumentPath::new(destination) else {
+            return Ok(Err(format!(
+                "`{to}` names no folder a document can be moved to"
+            )));
+        };
+        let mut moved = operation.clone();
+        moved.kind = OperationKind::move_document(document, destination);
+        moves.push(moved);
+    }
+    Ok(Ok((moves, contents.left)))
 }
 
 /// Why `document`'s expanded operation is left unresolved where the file
@@ -588,7 +696,7 @@ mod tests {
 
         assert_eq!(
             failure,
-            ExpandingFailure::Planning(PlanningFailure::Fault(PlanFault::where_target_ordered(
+            ExpandingFailure::Planning(PlanningFailure::Fault(PlanFault::expanded_target_ordered(
                 vec![0]
             )))
         );
@@ -676,5 +784,156 @@ mod tests {
             failure,
             ExpandingFailure::Snapshot("the store refused".to_string())
         );
+    }
+
+    fn folder(text: &str) -> FolderPath {
+        FolderPath::new(text).expect("a legal folder path")
+    }
+
+    fn moving_folder(from: &str, to: &str) -> Operation {
+        Operation::new(OperationKind::move_folder(folder(from), folder(to)))
+    }
+
+    fn moving(from: &str, to: &str) -> Operation {
+        Operation::new(OperationKind::move_document(path(from), path(to)))
+    }
+
+    /// The one operation of `resolution` left unresolved, and its words.
+    fn left_in_words(resolution: &Resolution) -> String {
+        match &resolution.unresolved[..] {
+            [unresolved] => match &unresolved.reason {
+                UnresolvedReason::NoLongerResolves { detail, .. } => detail.clone(),
+                other => panic!("no longer resolves: {other:?}"),
+            },
+            other => panic!("one operation is unresolved: {other:?}"),
+        }
+    }
+
+    /// **A folder move expands into one document move per document the
+    /// folder holds, at any depth, in path order, at its place in the
+    /// plan**: each moves its document to the same place beneath the
+    /// destination and keeps what the folder move carries beyond its kind.
+    /// Every other file the folder holds is left behind, and the forecast
+    /// names it.
+    #[test]
+    fn a_folder_move_expands_per_document_in_path_order() {
+        let vault = MemoryVault::with(&[
+            ("notes/b.md", "b\n"),
+            ("notes/a.md", "a\n"),
+            ("notes/deep/c.MD", "c\n"),
+            ("notes/img.png", "png"),
+            ("other.md", "o\n"),
+        ]);
+        let guard = AuthorCondition::content_hash(path("other.md"), content_hash(b"o\n"));
+        let before = Operation::new(OperationKind::create_document(path("z.md"), "z"));
+        let bulk = moving_folder("notes", "archive/notes")
+            .with_conditions(vec![guard.clone()])
+            .with_footnote("tidy");
+        let resolution = planned(&vault, vec![before.clone(), bulk], &Answering::paths(&[]));
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        let moved = |from: &str, to: &str| {
+            moving(from, to)
+                .with_conditions(vec![guard.clone()])
+                .with_footnote("tidy")
+        };
+        assert_eq!(
+            resolution.plan.operations,
+            vec![
+                before,
+                moved("notes/a.md", "archive/notes/a.md"),
+                moved("notes/b.md", "archive/notes/b.md"),
+                moved("notes/deep/c.MD", "archive/notes/deep/c.MD"),
+            ]
+        );
+        assert_eq!(
+            resolution.forecast.left_behind,
+            vec![FilePath::new("notes/img.png").expect("a file path")]
+        );
+    }
+
+    /// **A folder move with an identifier or a requirement is a fault in the
+    /// plan**, as a `where` operation with one is: it expands into several
+    /// operations, from the vault as it stands before the plan.
+    #[test]
+    fn an_ordered_folder_move_is_a_fault() {
+        let failure = resolve_expanding(
+            authored(vec![
+                moving_folder("notes", "archive").with_id(OperationId::new("all").unwrap()),
+            ]),
+            root(),
+            &MemoryVault::with(&[("notes/a.md", "a\n")]),
+            &Answering::paths(&[]),
+            &Untouched::new(),
+        )
+        .expect_err("an identified folder move is planned");
+        assert_eq!(
+            failure,
+            ExpandingFailure::Planning(PlanningFailure::Fault(PlanFault::expanded_target_ordered(
+                vec![0]
+            )))
+        );
+    }
+
+    /// **A folder's change of case is not planned**: on a root that folds
+    /// case, a folder moved to another spelling of itself is left unresolved,
+    /// in words, and so is one moved onto exactly itself.
+    #[test]
+    fn a_folder_case_change_is_unresolved() {
+        let vault = MemoryVault::with(&[("notes/a.md", "a\n")]).folding_case();
+        let respelled = planned(
+            &vault,
+            vec![moving_folder("notes", "Notes")],
+            &Answering::paths(&[]),
+        );
+        let detail = left_in_words(&respelled);
+        assert!(detail.contains("change of case"), "{detail}");
+        assert!(respelled.plan.transitions.is_empty());
+        let onto_itself = planned(
+            &vault,
+            vec![moving_folder("notes", "notes")],
+            &Answering::paths(&[]),
+        );
+        let detail = left_in_words(&onto_itself);
+        assert!(detail.contains("onto itself"), "{detail}");
+    }
+
+    /// **A folder moved into itself is unresolved**, in words, and moves
+    /// nothing: each document would be moved beneath the folder it is
+    /// emptied from.
+    #[test]
+    fn a_folder_moved_into_itself_is_unresolved() {
+        let vault = MemoryVault::with(&[("notes/a.md", "a\n")]);
+        let resolution = planned(
+            &vault,
+            vec![moving_folder("notes", "notes/sub")],
+            &Answering::paths(&[]),
+        );
+        let detail = left_in_words(&resolution);
+        assert!(detail.contains("into itself"), "{detail}");
+        assert!(resolution.plan.transitions.is_empty());
+    }
+
+    /// **A folder move naming no folder, or a folder holding no document,
+    /// moves nothing**, and is left unresolved saying which.
+    #[test]
+    fn a_folder_move_with_nothing_to_move_is_unresolved() {
+        let vault = MemoryVault::with(&[("files/img.png", "png"), ("a.md", "a\n")]);
+        for (from, words) in [
+            ("missing", "no folder stands"),
+            ("a.md", "no folder stands"),
+            ("files", "holds no document"),
+        ] {
+            let resolution = planned(
+                &vault,
+                vec![moving_folder(from, "archive")],
+                &Answering::paths(&[]),
+            );
+            let detail = left_in_words(&resolution);
+            assert!(detail.contains(words), "{from}: {detail}");
+        }
     }
 }

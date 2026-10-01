@@ -385,6 +385,13 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<std::ffi::OsString>, V::Error> {
         self.view.folder_names(folder)
     }
+
+    fn folder_contents(
+        &self,
+        folder: &NormalizedPath,
+    ) -> Result<Option<crate::planner::view::FolderContents>, V::Error> {
+        self.view.folder_contents(folder)
+    }
 }
 
 /// The bytes standing in for a before-state this apply cannot see. Nothing

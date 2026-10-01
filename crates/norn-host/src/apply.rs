@@ -457,8 +457,15 @@ pub(crate) fn unreadable(name: &VaultName, error: impl std::fmt::Display) -> Err
 /// it, its links judged on `snapshot`: the same plan and its forecast, or the
 /// answer an apply of it would end in — damage the snapshot met included,
 /// which the caller publishes as a read's would be.
+///
+/// **What a folder move leaves behind is planning's to say.** A resolved
+/// plan carries only the document moves a folder move expanded into, so the
+/// applier's judgment cannot see the files the folder kept; the operations'
+/// planning read them, and hands them here as `left_behind` for the forecast
+/// to name. A resolved plan sent directly names none.
 fn preview_resolved(
     plan: norn_wire::ResolvedPlan,
+    left_behind: Vec<norn_wire::FilePath>,
     ground: &PlanGround,
     snapshot: &PlanSnapshot<'_>,
 ) -> Result<ApplyReport, PageRefused> {
@@ -470,7 +477,10 @@ fn preview_resolved(
         &ground.declared,
         snapshot,
     ) {
-        Ok((plan, forecast)) => Ok(ApplyReport::previewed(plan, forecast)),
+        Ok((plan, forecast)) => Ok(ApplyReport::previewed(
+            plan,
+            forecast.with_left_behind(left_behind),
+        )),
         Err(outcome) => match *outcome {
             applier::ApplyOutcome::Unread(refused) => Err(refused),
             outcome => Err(PageRefused::Answered(
@@ -576,11 +586,17 @@ where
             PlanDocument::Operations(authored) => {
                 let resolution =
                     resolve_on(authored, &ground, name, &snapshot).map_err(answered)?;
-                preview_resolved(fully_resolved(resolution)?.plan, &ground, &snapshot)
-                    .map_err(answered)?
+                let resolution = fully_resolved(resolution)?;
+                preview_resolved(
+                    resolution.plan,
+                    resolution.forecast.left_behind,
+                    &ground,
+                    &snapshot,
+                )
+                .map_err(answered)?
             }
             PlanDocument::Resolved(resolved) => {
-                preview_resolved(resolved, &ground, &snapshot).map_err(answered)?
+                preview_resolved(resolved, Vec::new(), &ground, &snapshot).map_err(answered)?
             }
         };
         drop(snapshot);

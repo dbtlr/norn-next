@@ -358,19 +358,27 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: link cascades are vocabulary before they are planned.
-            // Until the planner reads backlinks and expands cascades, a delete
-            // saying what becomes of the links naming its document, a folder
-            // move and both link rewrites are left unresolved in words rather
-            // than planned as something they do not say.
+            // NORN-297: a delete's own link cascade and both link rewrites are
+            // vocabulary before they are planned. Until the planner plans a
+            // delete's backlinks and an authored rewrite, a delete saying what
+            // becomes of the links naming its document and both link rewrites
+            // are left unresolved in words rather than planned as something
+            // they do not say.
             OperationKind::DeleteDocument { path, .. } => Err(format!(
                 "a delete rewriting or breaking the links naming `{path}` is not planned yet: link cascades are not planned yet"
             )),
-            OperationKind::MoveFolder { .. }
-            | OperationKind::RewriteLink { .. }
-            | OperationKind::RewriteWikilink { .. } => Err(format!(
-                "a `{}` operation is not planned yet: link cascades are not planned yet",
-                kind.name()
+            OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
+                Err(format!(
+                    "a `{}` operation is not planned yet: link cascades are not planned yet",
+                    kind.name()
+                ))
+            }
+            // Planning expands a folder move into the document moves it
+            // makes before anything composes (`super::expand`), so only a
+            // plan resolved without expansion meets one here, which the
+            // applier refuses first as an unexpanded target.
+            OperationKind::MoveFolder { from, .. } => Err(format!(
+                "the folder move from `{from}` is planned only as the document moves it expands into, and was not expanded"
             )),
             OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }

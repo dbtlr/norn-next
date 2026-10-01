@@ -7746,7 +7746,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::content_cycle(vec![0, 1]),
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
         PlanFault::unexpanded_target(vec![1]),
-        PlanFault::where_target_ordered(vec![2]),
+        PlanFault::expanded_target_ordered(vec![2]),
         PlanFault::misplaced_cascade(vec![0]),
     ]
 }
@@ -9333,9 +9333,10 @@ fn a_resolved_plan_with_a_folder_move_is_a_fault() {
 /// **An operation with a `where` target carries no identifier and requires
 /// nothing.** It expands into one operation per matched document, so it
 /// names no one operation another could require, and what it would require
-/// could not change what it matches: an authored plan names each such
-/// operation by its position in the fault it answers with, and one whose
-/// `where` operations carry neither has no such fault.
+/// could not change what it matches; a folder move expands as one does, so
+/// it is held to the same rule. An authored plan names each such operation
+/// by its position in the fault it answers with, and one whose expanded
+/// operations carry neither has no such fault.
 #[test]
 fn an_authored_where_operation_carrying_an_id_or_a_requirement_is_a_fault() {
     let set = |target| {
@@ -9352,18 +9353,25 @@ fn an_authored_where_operation_carrying_an_id_or_a_requirement_is_a_fault() {
             set(WriteTarget::matching(drafts())),
         ],
     );
-    assert_eq!(plan.ordered_where_targets(), None);
+    assert_eq!(plan.ordered_expanded_targets(), None);
     plan.operations
         .push(set(WriteTarget::matching(drafts())).with_id(operation_id("bulk")));
     plan.operations
         .push(set(WriteTarget::matching(drafts())).with_requires(vec![operation_id("first")]));
-    assert_eq!(
-        plan.ordered_where_targets(),
-        Some(PlanFault::where_target_ordered(vec![2, 3]))
+    plan.operations.push(
+        Operation::new(OperationKind::move_folder(
+            FolderPath::new("notes").expect("a folder path"),
+            FolderPath::new("archive").expect("a folder path"),
+        ))
+        .with_id(operation_id("folder")),
     );
     assert_eq!(
-        wire(&PlanFault::where_target_ordered(vec![2, 3])),
-        r#"{"kind":"where_target_ordered","positions":[2,3]}"#
+        plan.ordered_expanded_targets(),
+        Some(PlanFault::expanded_target_ordered(vec![2, 3, 4]))
+    );
+    assert_eq!(
+        wire(&PlanFault::expanded_target_ordered(vec![2, 3])),
+        r#"{"kind":"expanded_target_ordered","positions":[2,3]}"#
     );
 }
 

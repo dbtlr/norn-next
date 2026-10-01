@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use norn_fs::{NormalizedPath, PathKind, PathNormalizer, Reach, Refusal, SkipReason, WalkError};
-use norn_wire::{ContentHash, DocumentPath};
+use norn_wire::{ContentHash, DocumentPath, FilePath};
 
 /// The vault as the planner reads it.
 ///
@@ -40,6 +40,54 @@ pub(crate) trait VaultView {
     /// a document, a folder, or anything else that keeps it from being
     /// empty. Nothing where no folder stands.
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, Self::Error>;
+
+    /// Everything beneath `folder`, at any depth, as a folder move takes it
+    /// ([`FolderContents`]); `None` where no folder stands there.
+    fn folder_contents(
+        &self,
+        folder: &NormalizedPath,
+    ) -> Result<Option<FolderContents>, Self::Error>;
+}
+
+/// What a folder holds, at any depth, as a folder move takes it: the
+/// documents it moves, and what it leaves behind.
+///
+/// **A document is what the vault derives one from**: a file whose extension
+/// is the document extension, in any ASCII case, at a path the store's index
+/// can hold. Every other file — an attachment, a file the vault does not
+/// read, a document file at a path the index refuses — and every place
+/// beneath the folder the vault's walk does not enter — a link, a special
+/// file, an excluded root — is left behind, named at the spelling the tree
+/// lists it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FolderContents {
+    /// Every document beneath the folder, at the spelling the tree lists, in
+    /// path order.
+    pub(crate) documents: Vec<DocumentPath>,
+    /// Every other file and every place not entered beneath it, in path
+    /// order.
+    pub(crate) left: Vec<FilePath>,
+}
+
+impl FolderContents {
+    /// Take the file at `path`: a document where it is one, left behind
+    /// otherwise.
+    fn take(&mut self, path: &Path) {
+        let spelled = path.to_string_lossy();
+        match document_path(path)
+            .filter(|at| crate::production::is_markdown(path) && unholdable(at).is_none())
+        {
+            Some(document) => self.documents.push(document),
+            None => self.leave(&spelled),
+        }
+    }
+
+    /// Leave behind what stands at `spelled`.
+    fn leave(&mut self, spelled: &str) {
+        if let Ok(left) = FilePath::new(spelled) {
+            self.left.push(left);
+        }
+    }
 }
 
 /// What stands at one name.
@@ -153,6 +201,10 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, V::Error> {
         self.view.folder_names(folder)
     }
+
+    fn folder_contents(&self, folder: &NormalizedPath) -> Result<Option<FolderContents>, V::Error> {
+        self.view.folder_contents(folder)
+    }
 }
 
 /// The vault on disk, read through `norn-fs`'s anchored descent: no link is
@@ -160,6 +212,7 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
 /// root that folds case a name stands only at the spelling its folder lists.
 pub(crate) struct TreeView {
     root: PathBuf,
+    exclusions: Vec<PathBuf>,
     vault: norn_fs::Vault,
 }
 
@@ -196,6 +249,7 @@ impl TreeView {
         let vault = norn_fs::Vault::open(root, exclusions).map_err(TreeViewError::Walk)?;
         Ok(TreeView {
             root: root.to_owned(),
+            exclusions: exclusions.to_vec(),
             vault,
         })
     }
@@ -327,6 +381,31 @@ impl VaultView for TreeView {
             .folder_names(folder.as_path())
             .map_err(TreeViewError::Walk)?
             .unwrap_or_default())
+    }
+
+    /// **The vault's own walk, narrowed to the folder**: it follows no link,
+    /// enters no place the vault's walk does not, and yields what it finds
+    /// in path order at the spelling the tree lists, each place it does not
+    /// enter stated as a skip, which is left behind.
+    fn folder_contents(
+        &self,
+        folder: &NormalizedPath,
+    ) -> Result<Option<FolderContents>, TreeViewError> {
+        if !self.folder_stands(folder)? {
+            return Ok(None);
+        }
+        let walk = norn_fs::walk_subtree(&self.root, folder.as_path(), &self.exclusions)
+            .map_err(TreeViewError::Walk)?;
+        let mut contents = FolderContents::default();
+        for fact in walk {
+            match fact.map_err(TreeViewError::Walk)? {
+                norn_fs::WalkFact::File(file) => contents.take(file.path().as_path()),
+                norn_fs::WalkFact::Skipped(skip) => {
+                    contents.leave(&skip.path().as_path().to_string_lossy());
+                }
+            }
+        }
+        Ok(Some(contents))
     }
 }
 
@@ -493,6 +572,25 @@ pub(crate) mod memory {
 
         fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Infallible> {
             Ok(self.folder_spelling(folder).is_some())
+        }
+
+        fn folder_contents(
+            &self,
+            folder: &NormalizedPath,
+        ) -> Result<Option<super::FolderContents>, Infallible> {
+            if !self.folder_stands(folder)? {
+                return Ok(None);
+            }
+            let depth = folder.as_path().components().count();
+            let mut contents = super::FolderContents::default();
+            for name in self.files.keys() {
+                let run: PathBuf = Path::new(name).components().take(depth).collect();
+                let below = Path::new(name).components().count() > depth;
+                if below && self.identity(&run.to_string_lossy()) == *folder {
+                    contents.take(Path::new(name));
+                }
+            }
+            Ok(Some(contents))
         }
 
         fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, Infallible> {
