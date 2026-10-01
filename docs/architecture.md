@@ -1781,11 +1781,11 @@ Concurrent reads serialize against each other on the one reader per entry. The o
 is an apply job that matches a `where` target or reads its plan's links: it reads on a read
 handle the store mints for the job alone — its own connection, never the entry's reader — so
 no read waits behind it and it waits behind no read. The job mints that handle inside the
-entry's claim the first time it reads the store, holds it from there through planning, the
-applier's check, staging and publication, and gives it back just before the apply's changeset
-commits. No store write lands while it is held: the job
-holds the claim, its store is the one writer, and the changeset is the job's first write after
-its intake. So the snapshot pins the write-ahead log across the apply's own file work and never
+entry's claim the first time a `where` match or a link resolution reads through it, holds it
+from there through planning, the applier's check, staging and publication, and gives it back
+just before the apply's changeset commits. No store write lands while it is held: the job holds
+the claim, its store is the one writer, and the changeset is the job's first write after its
+intake. So the snapshot pins the write-ahead log across the apply's own file work and never
 across a commit, a pin inside the price
 [ADR 0029](decisions/0029-a-read-waits-for-the-facts-it-met.md) restates from ADR 0028 — a held
 snapshot pinning the log against a passive checkpoint, here for as long as the plan's own
