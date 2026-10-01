@@ -1,15 +1,41 @@
-//! Rewriting a document's links: every link of one family whose target is one
-//! text, respelled to another — the pure text half of a link cascade. See
-//! [`Document::rewrite_links`].
+//! Rewriting a document's links: for each address a batch names, every link
+//! of its family whose address it is, respelled to its own target — the pure
+//! text half of a link cascade. See [`Document::rewrite_links`].
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use crate::document::{Document, splice_all};
-use crate::link::{
-    Link, LinkFamily, RewriteSkip, addresses_the_vault, parse_wikilinks_in_text, respelled,
-    splice_tokens, split_protocol,
-};
-use crate::span::LineCursor;
+use crate::link::{Link, LinkFamily, RewriteSkip, addresses_the_vault, respelled, split_protocol};
+
+/// One address a link rewrite respells: in the document rewritten, every link
+/// of `family` whose address is `from` is respelled `to`.
+///
+/// It is the document-local half of a cascade's per-document rewrite — the
+/// wire's `LinkRewrite` adds the path of the document holding the links — and
+/// is named for the address it keys links by, so the two never share a name
+/// in a module that holds both.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AddressRewrite {
+    /// The family of the links respelled.
+    pub family: LinkFamily,
+    /// The address a respelled link is written with, protocol prefix and all.
+    pub from: String,
+    /// The address it is written with after, protocol prefix and all.
+    pub to: String,
+}
+
+impl AddressRewrite {
+    /// Every link of `family` whose address is `from`, respelled `to`.
+    pub fn new(family: LinkFamily, from: impl Into<String>, to: impl Into<String>) -> Self {
+        AddressRewrite {
+            family,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
 
 /// What [`Document::rewrite_links`] produced: the whole rewritten document,
 /// how many links it respelled, and each matching link it left alone.
@@ -18,7 +44,7 @@ pub struct RewrittenLinks {
     /// The whole document, rewritten. Byte-identical to the input when nothing
     /// was rewritten.
     pub text: String,
-    /// How many links now read `to` that read `from`.
+    /// How many links now read their rewrite's `to` that read its `from`.
     pub rewritten: usize,
     /// Every matching link left as written, in document order, each with why.
     pub skipped: Vec<SkippedLink>,
@@ -33,15 +59,32 @@ pub struct SkippedLink {
 }
 
 impl Document<'_> {
-    /// Respell every link of `family` whose target is `from` to `to`, and
-    /// return the whole rewritten document.
+    /// Respell, for each [`AddressRewrite`] in `rewrites`, every link of its
+    /// family whose address is its `from` to its `to`, and return the whole
+    /// rewritten document.
     ///
     /// A move, a redirecting delete or a wikilink rewrite expands, per
     /// document holding an affected link, into *in this document, every link
-    /// of this family whose target is `from` is respelled `to`*, and this is
-    /// what composes that document's after-bytes — for the planner that
-    /// previews them and for the applier that writes them alike, so the two
-    /// cannot disagree.
+    /// of this family whose address is `from` is respelled `to`* — one such
+    /// rewrite per address the document holds an affected link under — and
+    /// this is what composes that document's after-bytes from all of them at
+    /// once, for the planner that previews them and for the applier that
+    /// writes them alike, so the two cannot disagree. A single rewrite is a
+    /// batch of one.
+    ///
+    /// # One pass over one parse
+    ///
+    /// Every link is matched against this document as it is, by the address
+    /// it is written with here, and respelled to the `to` of the rewrite that
+    /// names that address. No link is matched against bytes another rewrite in
+    /// the batch wrote, so a rewrite whose `to` is another's `from` never
+    /// chains: `../index.md → index.md` and `index.md → e/index.md` respell a
+    /// link written `../index.md` to `index.md` and one written `index.md` to
+    /// `e/index.md`, and two rewrites swapping `a` and `b` swap them.
+    ///
+    /// A batch names each address — a family, a protocol and a target — once.
+    /// Naming one twice with the same `to` says the same thing twice and is
+    /// one rewrite.
     ///
     /// # The match is the index's
     ///
@@ -84,16 +127,20 @@ impl Document<'_> {
     /// how a link is addressed: a `to` whose protocol is not the matched
     /// link's is [`RewriteSkip::Unrepresentable`] there. So is a Markdown `to`
     /// holding `|`, which would end a table cell this crate does not read
-    /// tables to see. A matching link that
-    /// cannot carry `to` is left exactly as written and reported in
+    /// tables to see. Two links of one batch whose stems nest — a wikilink
+    /// written in a Markdown destination — cannot both be respelled, since
+    /// either rewrites the other's bytes, so the inner one is unrepresentable
+    /// and the outer one is proven like any other. A matching link that
+    /// cannot carry its `to` is left exactly as written and reported in
     /// [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that says why; it
-    /// is never forced. A rewrite that respells nothing returns the document's
+    /// is never forced. A batch that respells nothing returns the document's
     /// own bytes.
     ///
     /// The result is proven by reading it back: everything the index derives
     /// from the document reads as it did, where its bytes moved to, with only
-    /// the rewritten targets changed — the same links in the same order, and
-    /// the same headings, tags and code. A heading or a link title whose own
+    /// the rewritten targets changed, each to its own rewrite's `to` — the
+    /// same links in the same order, and the same headings, tags and code. A
+    /// heading or a link title whose own
     /// text holds a rewritten wikilink reads exactly as it did with that
     /// link's old token replaced by its new one, so a target whose bytes would
     /// read as markup there — a `*` pairing with a literal one later in the
@@ -103,100 +150,45 @@ impl Document<'_> {
     /// text reads a Markdown link as its bracket text alone, so one holding a
     /// rewritten Markdown link reads exactly as it did. An edit that does not
     /// read back is skipped where it stands rather than returned.
-    pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
-        let (from, to) = (Address::of(from), Address::of(to));
-        let to = &to;
+    pub fn rewrite_links(&self, rewrites: &[AddressRewrite]) -> RewrittenLinks {
+        let rules = Rules::of(rewrites);
         let mut edits = Vec::new();
         let mut skipped = Vec::new();
-        if family == LinkFamily::Wikilink {
-            self.frontmatter_edits(&from, to, &mut edits, &mut skipped);
-        }
-        for link in self.links() {
-            if link.family != family || !from.names(&link) {
+        let frontmatter = self
+            .frontmatter_wikilinks()
+            .into_iter()
+            .map(|link| (link, true));
+        let body = self.links().into_iter().map(|link| (link, false));
+        for (link, in_frontmatter) in frontmatter.chain(body) {
+            let Some(rule) = rules.for_link(&link) else {
                 continue;
-            }
-            match to.respell(&link) {
-                Ok(token) => edits.push(Edit {
-                    range: link.range(),
-                    replacement: token,
-                    links: vec![link],
-                    in_frontmatter: false,
+            };
+            match rule.and_then(|to| Ok((to.respell(&link)?, to.target.clone()))) {
+                Ok(((range, token), to)) => edits.push(Edit {
+                    range,
+                    to,
+                    token,
+                    link,
+                    in_frontmatter,
                 }),
                 Err(reason) => skipped.push(SkippedLink { link, reason }),
             }
         }
+        let mut edits = disjoint(edits, &mut skipped);
 
         let mut text = self.spliced(&edits);
         if !edits.is_empty() {
             let before = Reading::of(self);
-            if !self.reads_as_rewritten(&before, &text, &edits, to) {
-                edits = self.kept_in_order(&before, edits, to, &mut skipped);
+            if !self.reads_as_rewritten(&before, &text, &edits) {
+                edits = self.kept_in_order(&before, edits, &mut skipped);
                 text = self.spliced(&edits);
             }
         }
         skipped.sort_by_key(|skip| skip.link.span.byte_offset);
         RewrittenLinks {
             text,
-            rewritten: edits.iter().map(|edit| edit.links.len()).sum(),
+            rewritten: edits.len(),
             skipped,
-        }
-    }
-
-    /// One edit per frontmatter string holding a link to rewrite.
-    ///
-    /// A string is rewritten whole or not at all: every matching link in it
-    /// carries the same `to` in the same quoting, so where the string's
-    /// grammar refuses one — a quote character inside a scalar quoted with it,
-    /// an escape, a `: ` a plain scalar reads as a mapping — it refuses all of
-    /// them. The block's byte bound is the exception to that symmetry, since
-    /// each respelled link grows the block: one link may fit where two in the
-    /// same string do not, and the string is still skipped whole. Like every
-    /// edit, a string is proven by reading the document back
-    /// ([`Document::reads_as_rewritten`]), so what a plain scalar can carry is
-    /// the YAML reader's answer rather than a list of hazards somebody
-    /// maintains.
-    fn frontmatter_edits(
-        &self,
-        from: &Address,
-        to: &Address,
-        edits: &mut Vec<Edit>,
-        skipped: &mut Vec<SkippedLink>,
-    ) {
-        let mut cursor = LineCursor::new(self.source());
-        for literal in self.literal_texts() {
-            let mut links = Vec::new();
-            let text = splice_tokens(
-                literal.text,
-                &parse_wikilinks_in_text(literal.text),
-                |token| {
-                    let link = Link {
-                        span: cursor.span_at(literal.start + token.span.byte_offset),
-                        ..token.clone()
-                    };
-                    if !from.names(&link) {
-                        return None;
-                    }
-                    match to.respell(&link) {
-                        Ok(respelled) => {
-                            links.push(link);
-                            Some(respelled)
-                        }
-                        Err(reason) => {
-                            skipped.push(SkippedLink { link, reason });
-                            None
-                        }
-                    }
-                },
-            );
-            if links.is_empty() {
-                continue;
-            }
-            edits.push(Edit {
-                range: literal.start..literal.start + literal.text.len(),
-                replacement: text,
-                links,
-                in_frontmatter: true,
-            });
         }
     }
 
@@ -207,37 +199,33 @@ impl Document<'_> {
     /// compared with what this document's own [`Reading`] becomes under the
     /// edits ([`Reading::respelled`]): the links of both families, frontmatter
     /// ones included, in the same order, with only the rewritten ones' targets
-    /// changed; the headings and the tags of both sources as they were, a
-    /// heading or link title holding a rewritten wikilink with only that
-    /// link's token changed; and the code ranges, which decide which bytes can be any
-    /// of those. Each is compared where its bytes moved to, so a fact that
-    /// survives one byte further on is a fact that moved, and the proof fails.
+    /// changed, each to its own edit's; the headings and the tags of both
+    /// sources as they were, a heading or link title holding a rewritten
+    /// wikilink with only that link's token changed; and the code ranges,
+    /// which decide which bytes can be any of those. Each is compared where
+    /// its bytes moved to, so a fact that survives one byte further on is a
+    /// fact that moved, and the proof fails.
     ///
     /// This is the proof every rewrite returns under, and it is about the whole
     /// document because what a target's bytes mean depends on what surrounds
     /// them: a backtick in a wikilink stem can pair with one later in the
     /// paragraph and turn the text between into code, a backslash can escape
     /// the bracket closing the Markdown link around it, a space ends a bare
-    /// destination, and `<!--` opens a comment that hides every tag after it.
-    fn reads_as_rewritten(
-        &self,
-        before: &Reading,
-        text: &str,
-        edits: &[Edit],
-        to: &Address,
-    ) -> bool {
-        let respelling = Respelling::of(edits, &to.target, before);
+    /// destination, `<!--` opens a comment that hides every tag after it, and
+    /// a quote ends the frontmatter scalar quoted with it.
+    fn reads_as_rewritten(&self, before: &Reading, text: &str, edits: &[Edit]) -> bool {
+        let respelling = Respelling::of(edits, before);
         before
             .respelled(&respelling)
             .is_some_and(|expected| Reading::of(&Document::parse(text)) == expected)
     }
 
     /// The edits kept greedily in document order: each is kept when it reads
-    /// back alongside the ones kept before it, and every other edit's links
-    /// are skipped.
+    /// back alongside the ones kept before it, and every other edit's link is
+    /// skipped.
     ///
     /// The answer depends on that order. Two edits that each read back alone
-    /// may not read back together — two frontmatter strings that each fit the
+    /// may not read back together — two frontmatter links that each fit the
     /// block's byte bound, a backtick in one stem pairing with one in another
     /// — and then the first is kept and the second skipped, though the
     /// opposite choice would have read back as well. Document order is the
@@ -252,57 +240,120 @@ impl Document<'_> {
         &self,
         before: &Reading,
         edits: Vec<Edit>,
-        to: &Address,
         skipped: &mut Vec<SkippedLink>,
     ) -> Vec<Edit> {
         let mut kept = Vec::with_capacity(edits.len());
         for edit in edits {
             kept.push(edit);
-            if !self.reads_as_rewritten(before, &self.spliced(&kept), &kept, to) {
+            if !self.reads_as_rewritten(before, &self.spliced(&kept), &kept) {
                 let refused = kept.pop().expect("the edit just kept");
                 let reason = if refused.in_frontmatter {
                     RewriteSkip::WouldCorruptFrontmatter
                 } else {
                     RewriteSkip::Unrepresentable
                 };
-                skipped.extend(refused.skipped(reason));
+                skipped.push(SkippedLink {
+                    link: refused.link,
+                    reason,
+                });
             }
         }
         kept
     }
 
-    /// This document's source with each edit's range replaced. The edits are
-    /// in document order and do not overlap.
+    /// This document's source with each edit's stem written as its target.
+    /// The edits are in document order and do not overlap.
     fn spliced(&self, edits: &[Edit]) -> String {
         let runs: Vec<(Range<usize>, &str)> = edits
             .iter()
-            .map(|edit| (edit.range.clone(), edit.replacement.as_str()))
+            .map(|edit| (edit.range.clone(), edit.to.as_str()))
             .collect();
         splice_all(self.source(), &runs)
     }
 }
 
-/// One run of source bytes a rewrite replaces, and the links it respells
-/// there: one body token, or one frontmatter string holding one or more,
-/// whose range is exactly the string's text.
+/// One link a rewrite respells: the source bytes its stem stands at, the
+/// target written over them, and the link's whole token once they are.
+///
+/// An edit is the stem alone, so `[[a]](b)` — a wikilink and a Markdown link
+/// sharing their outer brackets — is two edits that do not touch. A
+/// frontmatter link is an edit of its own like a body one: a string's text is
+/// its source bytes, so a stem in it is written where it stands, and each link
+/// in one string, carrying its own rewrite's `to`, is proven and skipped on
+/// its own.
 struct Edit {
     range: Range<usize>,
-    replacement: String,
-    links: Vec<Link>,
+    to: String,
+    token: String,
+    link: Link,
     in_frontmatter: bool,
 }
 
-impl Edit {
-    /// This edit's links, each skipped for `reason`.
-    fn skipped(self, reason: RewriteSkip) -> impl Iterator<Item = SkippedLink> {
-        self.links
-            .into_iter()
-            .map(move |link| SkippedLink { link, reason })
+/// `edits` in document order, each whose stem lies inside one before it
+/// skipped as unrepresentable.
+///
+/// Stems nest where one link is written inside another's: `[t]([[b]])` is a
+/// Markdown link whose destination holds a wikilink. Respelling the outer
+/// stem rewrites the inner link's bytes, so the two cannot both be written;
+/// the outer one is kept here and stands or falls by the read-back, which
+/// finds the inner link it rewrote.
+fn disjoint(mut edits: Vec<Edit>, skipped: &mut Vec<SkippedLink>) -> Vec<Edit> {
+    edits.sort_by_key(|edit| edit.range.start);
+    let mut kept: Vec<Edit> = Vec::with_capacity(edits.len());
+    for edit in edits {
+        if kept
+            .last()
+            .is_some_and(|last| edit.range.start < last.range.end)
+        {
+            skipped.push(SkippedLink {
+                link: edit.link,
+                reason: RewriteSkip::Unrepresentable,
+            });
+        } else {
+            kept.push(edit);
+        }
+    }
+    kept
+}
+
+/// A batch's rewrites keyed by the address each matches: its family, its
+/// protocol and its target. An address named twice with two `to`s is a
+/// conflict rather than either.
+struct Rules(HashMap<(LinkFamily, Option<String>, String), Result<Address, RewriteSkip>>);
+
+impl Rules {
+    fn of(rewrites: &[AddressRewrite]) -> Self {
+        let mut rules = HashMap::with_capacity(rewrites.len());
+        for rewrite in rewrites {
+            let from = Address::of(&rewrite.from);
+            let to = Address::of(&rewrite.to);
+            match rules.entry((rewrite.family, from.protocol, from.target)) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Ok(to));
+                }
+                Entry::Occupied(_) => {}
+            }
+        }
+        Rules(rules)
+    }
+
+    /// The address `link` is respelled to, why the batch cannot say, or
+    /// `None` where no rewrite names it — never for an empty target or a link
+    /// addressed outside the vault.
+    fn for_link(&self, link: &Link) -> Option<Result<&Address, RewriteSkip>> {
+        if link.target.is_empty() || !addresses_the_vault(link) {
+            return None;
+        }
+        let key = (link.family, link.protocol.clone(), link.target.clone());
+        self.0
+            .get(&key)
+            .map(|rule| rule.as_ref().map_err(|&reason| reason))
     }
 }
 
 /// A link's address as a rewrite is handed it: written whole, with any
 /// `protocol://` prefix, and read by the one splitter a link's own is.
+#[derive(PartialEq)]
 struct Address {
     protocol: Option<String>,
     target: String,
@@ -314,25 +365,21 @@ impl Address {
         Address { protocol, target }
     }
 
-    /// Whether this address is `link`'s: the same protocol, or none on both,
-    /// and the same target — never an empty one, and never a link addressed
-    /// outside the vault.
-    fn names(&self, link: &Link) -> bool {
-        !self.target.is_empty()
-            && link.protocol == self.protocol
-            && link.target == self.target
-            && addresses_the_vault(link)
-    }
-
-    /// `link`'s bytes with this address's target over its stem, or why it
+    /// The source bytes `link`'s stem stands at and `link`'s token with this
+    /// address's target written over them ([`respelled`]), or why the link
     /// cannot carry it. A rewrite never changes how a link is addressed, so a
     /// protocol other than the link's own is unrepresentable there.
-    fn respell(&self, link: &Link) -> Result<String, RewriteSkip> {
+    fn respell(&self, link: &Link) -> Result<(Range<usize>, String), RewriteSkip> {
         let token = respelled(link, &self.target)?;
         if link.protocol != self.protocol {
             return Err(RewriteSkip::Unrepresentable);
         }
-        Ok(token)
+        let stem = link
+            .stem_range
+            .clone()
+            .expect("a link respelled names its stem");
+        let at = link.span.byte_offset;
+        Ok((at + stem.start..at + stem.end, token))
     }
 }
 
@@ -436,7 +483,7 @@ impl Reading {
     }
 
     /// What this reading becomes under `respelling`: every fact where its
-    /// bytes moved to, each respelled link targeting `to`, and each heading or
+    /// bytes moved to, each respelled link targeting its own `to`, and each heading or
     /// link title holding a respelled wikilink with that link's token
     /// respelled ([`Respelling::carried`]). `None` where such a text does not
     /// hold the wikilink as written, so what it should read as is unknown.
@@ -452,11 +499,10 @@ impl Reading {
                     None => None,
                 };
                 Some(LinkReading {
-                    target: if respelling.respells(link) {
-                        respelling.to.to_string()
-                    } else {
-                        link.target.clone()
-                    },
+                    target: respelling
+                        .target_of(link)
+                        .unwrap_or(&link.target)
+                        .to_string(),
                     title,
                     at: moved(&link.at),
                     ..link.clone()
@@ -508,44 +554,39 @@ impl LinkReading {
 /// edits replace, so where every other byte moves to follows.
 struct Respelling<'t> {
     stems: Vec<RespelledStem<'t>>,
-    to: &'t str,
 }
 
 /// One link a respelling rewrites: its family and the byte its token begins
-/// at, which name it; the source bytes its stem stands at; and the text a
-/// heading or link title holding it reads it as, before and after
-/// ([`Respelling::carried`]).
+/// at, which name it; the source bytes its stem stands at and the target
+/// written over them; and the text a heading or link title holding it reads
+/// it as, before and after ([`Respelling::carried`]).
 struct RespelledStem<'t> {
     family: LinkFamily,
     at: usize,
     stem: Range<usize>,
-    read_as: Option<(&'t str, String)>,
+    to: &'t str,
+    read_as: Option<(&'t str, &'t str)>,
 }
 
 impl<'t> Respelling<'t> {
-    /// The links `edits` respell to `to`, each read against `before`, the
-    /// document's reading before the edits.
-    fn of(edits: &'t [Edit], to: &'t str, before: &Reading) -> Self {
+    /// The links `edits` respell, each to its own edit's target, each read
+    /// against `before`, the document's reading before the edits.
+    fn of(edits: &'t [Edit], before: &Reading) -> Self {
         let stems = edits
             .iter()
-            .flat_map(|edit| &edit.links)
-            .filter_map(|link| {
-                let at = link.span.byte_offset;
-                let stem = link.stem_range.clone()?;
-                let new = format!("{}{to}{}", &link.raw[..stem.start], &link.raw[stem.end..]);
-                Some(RespelledStem {
-                    family: link.family,
-                    at,
-                    stem: at + stem.start..at + stem.end,
-                    read_as: Self::read_as(link, new, before),
-                })
+            .map(|edit| RespelledStem {
+                family: edit.link.family,
+                at: edit.link.span.byte_offset,
+                stem: edit.range.clone(),
+                to: &edit.to,
+                read_as: Self::read_as(&edit.link, &edit.token, before),
             })
             .collect();
-        Respelling { stems, to }
+        Respelling { stems }
     }
 
     /// What a heading or link title holding `link` reads it as, before and
-    /// once respelled to `new`.
+    /// once respelled to the token `new`.
     ///
     /// Such a text is flattened: a Markdown link reads as its bracket text
     /// alone, so its destination — the only bytes a rewrite changes — never
@@ -553,7 +594,7 @@ impl<'t> Respelling<'t> {
     /// reads as its token, except where it is the bracket text of a Markdown
     /// link beginning at the same byte — `[[a]](b)` — and the two share the
     /// outer brackets: the text holds the token inside them, `[a]`.
-    fn read_as(link: &'t Link, new: String, before: &Reading) -> Option<(&'t str, String)> {
+    fn read_as(link: &'t Link, new: &'t str, before: &Reading) -> Option<(&'t str, &'t str)> {
         if link.family == LinkFamily::Markdown {
             return None;
         }
@@ -568,26 +609,26 @@ impl<'t> Respelling<'t> {
         fn inside(token: &str) -> Option<&str> {
             token.get(1..token.len().checked_sub(1)?)
         }
-        let new = inside(&new)?.to_string();
-        Some((inside(&link.raw)?, new))
+        Some((inside(&link.raw)?, inside(new)?))
     }
 
-    /// Whether `link` is one this respelling rewrites.
-    fn respells(&self, link: &LinkReading) -> bool {
+    /// The target `link` is respelled to, where this respelling rewrites it.
+    fn target_of(&self, link: &LinkReading) -> Option<&'t str> {
         self.stems
             .iter()
-            .any(|stem| (stem.family, stem.at) == (link.family, link.at.start))
+            .find(|stem| (stem.family, stem.at) == (link.family, link.at.start))
+            .map(|stem| stem.to)
     }
 
     /// Where the source byte at `at` stands once every stem ending at or
-    /// before it is written as `to`.
+    /// before it is written as its target.
     fn moved(&self, at: usize) -> usize {
         let (grown, shrunk) = self
             .stems
             .iter()
             .filter(|respelled| respelled.stem.end <= at)
             .fold((0, 0), |(grown, shrunk), respelled| {
-                (grown + self.to.len(), shrunk + respelled.stem.len())
+                (grown + respelled.to.len(), shrunk + respelled.stem.len())
             });
         at + grown - shrunk
     }

@@ -120,8 +120,8 @@
 //! # Where to start
 //!
 //! - [`Document`] — read a document, then edit a field, a list field, a
-//!   section or the body, or rewrite its links to one target
-//!   ([`Document::rewrite_links`]).
+//!   section or the body, or rewrite its links from their addresses to new
+//!   ones in one pass ([`Document::rewrite_links`]).
 //! - [`BodyScan`] — headings, sections, links, tags and block ids, in one
 //!   pass.
 //! - [`render_document`] — write a whole document from scratch.
@@ -149,7 +149,7 @@ pub use frontmatter::{
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
 pub use link::{BlockId, Link, LinkFamily, Resolution, RewriteSkip, parse_wikilinks_in_text};
-pub use rewrite::{RewrittenLinks, SkippedLink};
+pub use rewrite::{AddressRewrite, RewrittenLinks, SkippedLink};
 pub use section::{
     AnchorReadings, Duplicates, SectionAddress, SectionError, SectionSpan, anchor_readings,
     heading_reading, resolve_section,
