@@ -104,8 +104,8 @@ pub(crate) struct Target<'a> {
 /// about the links it reaches.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct ChangeSet {
-    /// One condition per entry, in the order of the link's key: its holder,
-    /// its syntax, then its address.
+    /// One condition per entry, in the order of its [`EntryKey`]: its
+    /// holder, its syntax, then its address.
     pub(crate) entries: Vec<PlanCondition>,
     /// What the plan does to a link a caller should look at, in the same
     /// order.
@@ -168,27 +168,21 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         }
     }
 
-    let mut judged: BTreeMap<(String, &'static str, String), Judged> = BTreeMap::new();
+    let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
             wire_family(change.link.family),
             address(&change.link),
         );
-        let held = judged
-            .entry((
-                key.holder.as_str().to_string(),
-                change.link.family.as_str(),
-                key.address.clone(),
-            ))
-            .or_insert_with(|| Judged {
-                key,
-                address: change.address,
-                before: change.before,
-                after: change.after,
-                written: false,
-                members_moved: false,
-            });
+        let held = judged.entry(entry_key(&key)).or_insert_with(|| Judged {
+            key,
+            address: change.address,
+            before: change.before,
+            after: change.after,
+            written: false,
+            members_moved: false,
+        });
         held.written |= change.written;
         held.members_moved |= change.members_moved;
     })?;
@@ -207,6 +201,21 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         }
     }
     Ok(set)
+}
+
+/// What a link-resolution entry is ordered and matched by: its holder, its
+/// syntax as the store names it — `None` for a syntax the store holds no link
+/// of — then its address.
+pub(crate) type EntryKey = (String, Option<&'static str>, String);
+
+/// `link`'s [`EntryKey`]: the one key a plan's set is ordered by and the
+/// applier's comparison of it matches a recorded entry to a computed one by.
+pub(crate) fn entry_key(link: &LinkKey) -> EntryKey {
+    (
+        link.holder.as_str().to_string(),
+        family_name(link.syntax),
+        link.address.clone(),
+    )
 }
 
 /// One link the change set judged, keyed as the plan leaves it.

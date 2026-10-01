@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
 use norn_wire::{
-    DocumentPath, FileState, LinkAdvisory, LinkKey, PlanCondition, PlanFault, RefusedCheck,
-    ResolvedPlan, SchemaViolation, Transition,
+    DocumentPath, FileState, LinkAdvisory, PlanCondition, PlanFault, RefusedCheck, ResolvedPlan,
+    SchemaViolation, Transition,
 };
 
 use super::observe::{
@@ -23,7 +23,7 @@ use super::shape::shape_disagrees;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
 use crate::planner::lineage::Lineage;
-use crate::planner::links::{LinkIndex, Target, change_set};
+use crate::planner::links::{LinkIndex, Target, change_set, entry_key};
 use crate::planner::view::{TreeView, VaultView, wire_hash};
 use crate::refusal::PageRefused;
 
@@ -456,18 +456,13 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// refuses the plan, and the refusal's fresh plan records the set as it
 /// stands now.
 fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<RefusedCheck> {
-    let key = |link: &LinkKey| {
-        (
-            link.holder.as_str().to_string(),
-            format!("{:?}", link.syntax),
-            link.address.clone(),
-        )
-    };
     let entries = |conditions: &[PlanCondition]| -> BTreeMap<_, PlanCondition> {
         conditions
             .iter()
             .filter_map(|condition| match condition {
-                PlanCondition::LinkResolution { link, .. } => Some((key(link), condition.clone())),
+                PlanCondition::LinkResolution { link, .. } => {
+                    Some((entry_key(link), condition.clone()))
+                }
                 PlanCondition::ContentHash { .. } => None,
             })
             .collect()
@@ -478,7 +473,7 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
         .iter()
         .filter(|condition| match condition {
             PlanCondition::LinkResolution { link, .. } => {
-                computed.get(&key(link)) != Some(*condition)
+                computed.get(&entry_key(link)) != Some(*condition)
             }
             PlanCondition::ContentHash { .. } => false,
         })
