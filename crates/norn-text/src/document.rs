@@ -44,21 +44,9 @@ pub struct FieldText<'a> {
     pub range: Option<Range<usize>>,
 }
 
-/// A [`FieldText`] and which value of its field it is.
-struct PlacedText<'a> {
-    text: FieldText<'a>,
-    /// The item of the field's sequence this string is, or `None` for the
-    /// field's own scalar value.
-    item: Option<usize>,
-}
-
 /// A frontmatter string written literally in the source: its text is a
 /// substring of the document, starting at `start`.
 pub(crate) struct LiteralText<'a> {
-    pub(crate) field: &'a str,
-    /// The item of the field's sequence this string is, or `None` for the
-    /// field's own scalar value.
-    pub(crate) item: Option<usize>,
     pub(crate) text: &'a str,
     pub(crate) start: usize,
 }
@@ -397,16 +385,6 @@ impl<'a> Document<'a> {
     /// the ranges come from the field layer, so an escaped or line-continued
     /// value reports the bytes it was written as rather than nothing.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
-        self.placed_texts()
-            .into_iter()
-            .map(|placed| placed.text)
-            .collect()
-    }
-
-    /// [`Document::field_texts`], each with the item of its field's sequence
-    /// it is — `None` for the field's own scalar value — so a caller that
-    /// changes one string can say which value of the mapping it changed.
-    fn placed_texts(&self) -> Vec<PlacedText<'_>> {
         let Some(Value::Map(map)) = &self.frontmatter else {
             return Vec::new();
         };
@@ -423,25 +401,19 @@ impl<'a> Document<'a> {
         let mut texts = Vec::new();
         for field in &self.fields {
             match parsed_keys.get(&field.name) {
-                Some(Value::String(text)) => texts.push(PlacedText {
-                    text: FieldText {
-                        field: &field.name,
-                        text,
-                        range: field.value_range.clone(),
-                    },
-                    item: None,
+                Some(Value::String(text)) => texts.push(FieldText {
+                    field: &field.name,
+                    text,
+                    range: field.value_range.clone(),
                 }),
                 Some(Value::Sequence(items)) => {
                     let ranges = self.sequence_item_ranges(field, items);
-                    for (index, (item, range)) in items.iter().zip(ranges).enumerate() {
+                    for (item, range) in items.iter().zip(ranges) {
                         if let Value::String(text) = item {
-                            texts.push(PlacedText {
-                                text: FieldText {
-                                    field: &field.name,
-                                    text,
-                                    range,
-                                },
-                                item: Some(index),
+                            texts.push(FieldText {
+                                field: &field.name,
+                                text,
+                                range,
                             });
                         }
                     }
@@ -459,15 +431,13 @@ impl<'a> Document<'a> {
     /// what [`Document::frontmatter_wikilinks`] reports and what a link
     /// rewrite writes into; see the former for which shapes are and are not.
     pub(crate) fn literal_texts(&self) -> Vec<LiteralText<'_>> {
-        self.placed_texts()
+        self.field_texts()
             .into_iter()
-            .filter_map(|placed| {
-                let range = placed.text.range?;
-                let offset = literal_text_offset(&self.source[range.clone()], placed.text.text)?;
+            .filter_map(|text| {
+                let range = text.range?;
+                let offset = literal_text_offset(&self.source[range.clone()], text.text)?;
                 Some(LiteralText {
-                    field: placed.text.field,
-                    item: placed.item,
-                    text: placed.text.text,
+                    text: text.text,
                     start: range.start + offset,
                 })
             })
@@ -1453,7 +1423,7 @@ fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
 }
 
 /// The frontmatter value `source` holds, without locating its fields.
-pub(crate) fn frontmatter_of(source: &str) -> Option<Value> {
+fn frontmatter_of(source: &str) -> Option<Value> {
     extract(source, &mut Vec::new()).value
 }
 

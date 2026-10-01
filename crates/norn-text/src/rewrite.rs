@@ -4,13 +4,12 @@
 
 use std::ops::Range;
 
-use crate::document::{Document, frontmatter_of, splice_all};
+use crate::document::{Document, splice_all};
 use crate::link::{
     Link, LinkFamily, RewriteSkip, addresses_the_vault, parse_wikilinks_in_text, respelled,
     splice_tokens, split_protocol,
 };
 use crate::span::LineCursor;
-use crate::value::{Mapping, Value};
 
 /// What [`Document::rewrite_links`] produced: the whole rewritten document,
 /// how many links it respelled, and each matching link it left alone.
@@ -91,11 +90,11 @@ impl Document<'_> {
     ///
     /// The result is proven by reading it back: everything the index derives
     /// from the document reads as it did, where its bytes moved to, with only
-    /// the rewritten targets changed — the frontmatter but for the rewritten
-    /// strings, the same links in the same order, and the same headings, tags,
-    /// block ids and code. A heading or a link title whose own text holds a
-    /// rewritten link reads that link's new spelling. An edit that does not
-    /// read back is skipped where it stands rather than returned.
+    /// the rewritten targets changed — the same links in the same order, and
+    /// the same headings, tags and code. A heading or a link title whose own
+    /// text holds a rewritten link reads that link's new spelling. An edit
+    /// that does not read back is skipped where it stands rather than
+    /// returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
         let (from, to) = (Address::of(from), Address::of(to));
         let to = &to;
@@ -113,7 +112,7 @@ impl Document<'_> {
                     range: link.range(),
                     replacement: token,
                     links: vec![link],
-                    slot: None,
+                    in_frontmatter: false,
                 }),
                 Err(reason) => skipped.push(SkippedLink { link, reason }),
             }
@@ -135,24 +134,24 @@ impl Document<'_> {
         }
     }
 
-    /// One edit per frontmatter string holding a link to rewrite, each proven
-    /// by re-reading the block it would produce.
+    /// One edit per frontmatter string holding a link to rewrite.
     ///
     /// A string is rewritten whole or not at all: every matching link in it
-    /// carries the same `to` in the same quoting, so a value that cannot hold
-    /// one cannot hold any, and each is skipped as
-    /// [`RewriteSkip::WouldCorruptFrontmatter`]. The proof is the block read
-    /// back with only that string changed, compared against the mapping it
-    /// came from with only that string's value changed — the same proof every
-    /// frontmatter edit here makes, so what a plain scalar can carry is the
-    /// YAML reader's answer rather than a list of hazards somebody maintains.
-    /// A string that would grow the block past its byte bound reads back as
-    /// nothing, and is skipped the same way.
-    fn frontmatter_edits<'d>(
-        &'d self,
+    /// carries the same `to` in the same quoting, so where the string's
+    /// grammar refuses one — a quote character inside a scalar quoted with it,
+    /// an escape, a `: ` a plain scalar reads as a mapping — it refuses all of
+    /// them. The block's byte bound is the exception to that symmetry, since
+    /// each respelled link grows the block: one link may fit where two in the
+    /// same string do not, and the string is still skipped whole. Like every
+    /// edit, a string is proven by reading the document back
+    /// ([`Document::reads_as_rewritten`]), so what a plain scalar can carry is
+    /// the YAML reader's answer rather than a list of hazards somebody
+    /// maintains.
+    fn frontmatter_edits(
+        &self,
         from: &Address,
         to: &Address,
-        edits: &mut Vec<Edit<'d>>,
+        edits: &mut Vec<Edit>,
         skipped: &mut Vec<SkippedLink>,
     ) {
         let mut cursor = LineCursor::new(self.source());
@@ -184,33 +183,26 @@ impl Document<'_> {
             if links.is_empty() {
                 continue;
             }
-            let edit = Edit {
+            edits.push(Edit {
                 range: literal.start..literal.start + literal.text.len(),
                 replacement: text,
                 links,
-                slot: Some((literal.field, literal.item)),
-            };
-            let alone = std::slice::from_ref(&edit);
-            if frontmatter_of(&self.spliced(alone)) == self.frontmatter_after(alone) {
-                edits.push(edit);
-            } else {
-                skipped.extend(edit.skipped(RewriteSkip::WouldCorruptFrontmatter));
-            }
+                in_frontmatter: true,
+            });
         }
     }
 
     /// Whether `text` — this document with `edits` spliced in — reads as this
     /// document with exactly those edits' links respelled.
     ///
-    /// Everything the index derives from a document is read back from `text`
-    /// and compared with what this document's own reading becomes under the
-    /// edits ([`Reading::respelled`]): the frontmatter with only the rewritten
-    /// strings changed; the links of both families, in the same order, with
-    /// only the rewritten ones' targets changed; the headings, the tags of
-    /// both sources and the block ids as they were; and the code ranges, which
-    /// decide which bytes can be any of those. Each is compared where its
-    /// bytes moved to, so a fact that survives one byte further on is a fact
-    /// that moved, and the proof fails.
+    /// What the index derives from a document is read back from `text` and
+    /// compared with what this document's own [`Reading`] becomes under the
+    /// edits ([`Reading::respelled`]): the links of both families, frontmatter
+    /// ones included, in the same order, with only the rewritten ones' targets
+    /// changed; the headings and the tags of both sources as they were; and
+    /// the code ranges, which decide which bytes can be any of those. Each is
+    /// compared where its bytes moved to, so a fact that survives one byte
+    /// further on is a fact that moved, and the proof fails.
     ///
     /// This is the proof every rewrite returns under, and it is about the whole
     /// document because what a target's bytes mean depends on what surrounds
@@ -222,12 +214,12 @@ impl Document<'_> {
         &self,
         before: &Reading,
         text: &str,
-        edits: &[Edit<'_>],
+        edits: &[Edit],
         to: &Address,
     ) -> bool {
         let respelling = Respelling::of(edits, &to.target);
         let carried = before.carrying(&respelling);
-        let expected = before.respelled(&respelling, self.frontmatter_after(edits), &carried);
+        let expected = before.respelled(&respelling, &carried);
         let mut actual = Reading::of(&Document::parse(text));
         actual.forget(&carried);
         actual == expected
@@ -241,21 +233,22 @@ impl Document<'_> {
     /// edit that cannot be proven is one whose target bytes read as something
     /// else where they were written, so a frontmatter one is skipped as
     /// corrupting its value and a body one as unrepresentable there.
-    fn provable_alone<'d>(
-        &'d self,
+    fn provable_alone(
+        &self,
         before: &Reading,
-        edits: Vec<Edit<'d>>,
+        edits: Vec<Edit>,
         to: &Address,
         skipped: &mut Vec<SkippedLink>,
-    ) -> Vec<Edit<'d>> {
+    ) -> Vec<Edit> {
         let mut kept = Vec::with_capacity(edits.len());
         for edit in edits {
             kept.push(edit);
             if !self.reads_as_rewritten(before, &self.spliced(&kept), &kept, to) {
                 let refused = kept.pop().expect("the edit just kept");
-                let reason = match refused.slot {
-                    Some(_) => RewriteSkip::WouldCorruptFrontmatter,
-                    None => RewriteSkip::Unrepresentable,
+                let reason = if refused.in_frontmatter {
+                    RewriteSkip::WouldCorruptFrontmatter
+                } else {
+                    RewriteSkip::Unrepresentable
                 };
                 skipped.extend(refused.skipped(reason));
             }
@@ -263,23 +256,9 @@ impl Document<'_> {
         kept
     }
 
-    /// The frontmatter this document would read as with `edits`' strings
-    /// written into it.
-    fn frontmatter_after(&self, edits: &[Edit<'_>]) -> Option<Value> {
-        let mut value = self.frontmatter().cloned();
-        if let Some(Value::Map(map)) = value.as_mut() {
-            for edit in edits {
-                if let Some((field, item)) = edit.slot {
-                    with_text(map, field, item, &edit.replacement);
-                }
-            }
-        }
-        value
-    }
-
     /// This document's source with each edit's range replaced. The edits are
     /// in document order and do not overlap.
-    fn spliced(&self, edits: &[Edit<'_>]) -> String {
+    fn spliced(&self, edits: &[Edit]) -> String {
         let runs: Vec<(Range<usize>, &str)> = edits
             .iter()
             .map(|edit| (edit.range.clone(), edit.replacement.as_str()))
@@ -289,19 +268,16 @@ impl Document<'_> {
 }
 
 /// One run of source bytes a rewrite replaces, and the links it respells
-/// there: one body token, or one frontmatter string holding one or more.
-struct Edit<'d> {
+/// there: one body token, or one frontmatter string holding one or more,
+/// whose range is exactly the string's text.
+struct Edit {
     range: Range<usize>,
     replacement: String,
     links: Vec<Link>,
-    /// For a frontmatter string, the field holding it and the item of that
-    /// field's sequence it is, `None` for the field's own value. A
-    /// frontmatter edit's range is exactly the string's text, so its
-    /// replacement is the string's new value.
-    slot: Option<(&'d str, Option<usize>)>,
+    in_frontmatter: bool,
 }
 
-impl Edit<'_> {
+impl Edit {
     /// This edit's links, each skipped for `reason`.
     fn skipped(self, reason: RewriteSkip) -> impl Iterator<Item = SkippedLink> {
         self.links
@@ -345,24 +321,33 @@ impl Address {
     }
 }
 
-/// Everything the index derives from one document — its frontmatter, its
-/// links of both families, its headings, its tags from both sources and its
-/// block ids — and the code ranges that decide which bytes can be any of
-/// them, each placed by the bytes it stands at in the source.
+/// What the index derives from one document — its links of both families,
+/// its headings and its tags from both sources — and the code ranges that
+/// decide which bytes can be any of them, each placed by the bytes it stands
+/// at in the source. A rewrite is proven by comparing two of these, one fact
+/// once.
 ///
 /// A position is a byte offset alone: a rewrite writes no line break and
 /// removes none, so where a fact's line and column land follows from where
-/// its byte does. A heading's slug is not read either, because it is the
-/// heading texts' own function, in order, and they are read.
+/// its byte does. Three derived facts are read through others rather than
+/// compared again:
+///
+/// - A heading's slug is the heading texts' own function, in order.
+/// - The frontmatter's value. A frontmatter link is reported only where its
+///   string reads as exactly the bytes it is written with, so a rewritten
+///   string that read as anything else — or a block that stopped reading, or
+///   a structure that changed around the string — loses the link the
+///   rewrite placed there.
+/// - Block ids. A definition is the last word on its line outside code, and
+///   a stem is never the last bytes on its line, since `]]` or `)` follows
+///   it, so a rewrite changes a definition only by changing what is code.
 #[derive(Debug, PartialEq)]
 struct Reading {
-    frontmatter: Option<Value>,
     links: Vec<LinkReading>,
     headings: Vec<HeadingReading>,
     /// Frontmatter tags first, then body ones, as the index orders them; a
     /// frontmatter tag whose entry names no bytes has no position.
     tags: Vec<(String, Option<usize>)>,
-    block_ids: Vec<(String, usize)>,
     code: Vec<Range<usize>>,
 }
 
@@ -432,38 +417,25 @@ impl Reading {
                     .map(|tag| (tag.name, tag.span.map(|span| body + span.byte_offset))),
             )
             .collect();
-        let block_ids = scan
-            .block_ids()
-            .into_iter()
-            .map(|block| (block.id, body + block.span.byte_offset))
-            .collect();
         let code = scan
             .code_ranges()
             .iter()
             .map(|range| body + range.start..body + range.end)
             .collect();
         Reading {
-            frontmatter: document.frontmatter().cloned(),
             links,
             headings,
             tags,
-            block_ids,
             code,
         }
     }
 
     /// What this reading becomes under `respelling`: every fact where its
-    /// bytes moved to, each respelled link targeting `to`, the frontmatter
-    /// read as `frontmatter`, and the `carried` facts' text forgotten.
-    fn respelled(
-        &self,
-        respelling: &Respelling<'_>,
-        frontmatter: Option<Value>,
-        carried: &Carried,
-    ) -> Reading {
+    /// bytes moved to, each respelled link targeting `to`, and the `carried`
+    /// facts' text forgotten.
+    fn respelled(&self, respelling: &Respelling<'_>, carried: &Carried) -> Reading {
         let moved = |at: &Range<usize>| respelling.moved(at.start)..respelling.moved(at.end);
         let mut reading = Reading {
-            frontmatter,
             links: self
                 .links
                 .iter()
@@ -490,11 +462,6 @@ impl Reading {
                 .tags
                 .iter()
                 .map(|(name, at)| (name.clone(), at.map(|at| respelling.moved(at))))
-                .collect(),
-            block_ids: self
-                .block_ids
-                .iter()
-                .map(|(id, at)| (id.clone(), respelling.moved(*at)))
                 .collect(),
             code: self.code.iter().map(moved).collect(),
         };
@@ -558,7 +525,7 @@ struct Respelling<'t> {
 }
 
 impl<'t> Respelling<'t> {
-    fn of(edits: &[Edit<'_>], to: &'t str) -> Self {
+    fn of(edits: &[Edit], to: &'t str) -> Self {
         let stems = edits
             .iter()
             .flat_map(|edit| &edit.links)
@@ -597,18 +564,4 @@ impl<'t> Respelling<'t> {
             .iter()
             .any(|(family, at, _)| range.contains(at) && except != Some((*family, *at)))
     }
-}
-
-/// Set the string at `field` — its own value, or the `item` of its sequence —
-/// to `text`.
-fn with_text(map: &mut Mapping, field: &str, item: Option<usize>, text: &str) {
-    let value = match (map.get(field), item) {
-        (Some(Value::Sequence(items)), Some(index)) => {
-            let mut items = items.clone();
-            items[index] = Value::String(text.to_string());
-            Value::Sequence(items)
-        }
-        _ => Value::String(text.to_string()),
-    };
-    map.insert(field, value);
 }

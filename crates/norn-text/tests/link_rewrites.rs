@@ -602,6 +602,15 @@ fn a_target_that_moves_another_link_is_skipped() {
     assert_skipped_as_unrepresentable("[[a]](dest)\n", LinkFamily::Wikilink, "x\\");
 }
 
+/// `[x]: [[a]]` is a link reference definition, so the `===` under it
+/// underlines nothing. A space in the stem ends the definition's destination
+/// and leaves a line that defines nothing — and the paragraph that line now
+/// is would read as a heading.
+#[test]
+fn a_target_that_makes_a_heading_is_skipped() {
+    assert_skipped_as_unrepresentable("[x]: [[a]]\n===\n", LinkFamily::Wikilink, "b c");
+}
+
 /// What a rewritten link's own bytes are part of changes with them and is not
 /// a change in what the document says: a heading holding the link reads its
 /// new spelling, and every heading, tag and block id after it reads where its
