@@ -8,7 +8,7 @@
 //! single token preserves is `rewrite_fidelity.rs`; what a whole document
 //! preserves, skips and refuses is here.
 
-use norn_text::{Document, LinkFamily, RewriteSkip, RewrittenLinks};
+use norn_text::{Document, FRONTMATTER_MAX_BYTES, LinkFamily, RewriteSkip, RewrittenLinks};
 
 fn rewrite(source: &str, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
     Document::parse(source).rewrite_links(family, from, to)
@@ -151,6 +151,42 @@ fn a_target_the_frontmatter_value_cannot_hold_is_skipped() {
         let skipped = &out.skipped[0].link;
         assert_eq!(&source[skipped.range()], "[[Old]]", "{source:?} to {to:?}");
     }
+}
+
+/// Two frontmatter strings can each hold `to` alone and not together: the
+/// block has a byte bound, and a block past it reads as nothing. The strings
+/// are kept in document order while they read back, so the first is
+/// rewritten and the second skipped as corrupting the frontmatter — and the
+/// skips are reported in document order, the frontmatter's before a body
+/// link refused earlier for its own bytes.
+#[test]
+fn frontmatter_strings_that_fit_alone_but_not_together_keep_the_first() {
+    let to = "b".repeat(200);
+    // The block is `pad: "…"\n` and two `aN: "[[a]]"\n` lines, 32 bytes
+    // around the padding: one respelling leaves it 100 bytes inside the bound,
+    // and a second takes it past.
+    let pad = "x".repeat(FRONTMATTER_MAX_BYTES - 32 - (to.len() - 1) - 100);
+    let source = format!("---\npad: \"{pad}\"\na1: \"[[a]]\"\na2: \"[[a]]\"\n---\n[[a|x\ny]]\n");
+    let out = rewrite(&source, LinkFamily::Wikilink, "a", &to);
+    assert_eq!(
+        out.text,
+        format!("---\npad: \"{pad}\"\na1: \"[[{to}]]\"\na2: \"[[a]]\"\n---\n[[a|x\ny]]\n")
+    );
+    assert_eq!(out.rewritten, 1);
+    assert_eq!(
+        reasons(&out),
+        [
+            RewriteSkip::WouldCorruptFrontmatter,
+            RewriteSkip::LinkNotRewritable
+        ]
+    );
+    let at: Vec<&str> = out
+        .skipped
+        .iter()
+        .map(|skip| &source[skip.link.range()])
+        .collect();
+    assert_eq!(at, ["[[a]]", "[[a|x\ny]]"]);
+    assert!(source[..out.skipped[0].link.span.byte_offset].ends_with("a2: \""));
 }
 
 /// The index holds a frontmatter wikilink only where the value's bytes carry
