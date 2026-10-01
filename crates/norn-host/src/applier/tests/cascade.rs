@@ -611,6 +611,26 @@ fn a_link_left_naming_a_refilled_path_is_recorded_and_advised_on() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **A rewrite onto an address another rewrite vacates keeps no link
+/// behind**: `[[n]]` is respelled `[[m]]` where `n.md` moves, and `[[x]]`
+/// becomes `[[n]]` where `x.md` takes its address, so the `[[n]]` the holder
+/// held is a link a rewrite matched rather than one left under a key the
+/// plan writes, and the forecast has no advisory for it.
+#[test]
+fn a_rewrite_onto_an_address_another_rewrite_vacates_keeps_no_link_behind() {
+    let mut fixture = Fixture::new(&[("x.md", "X\n"), ("n.md", "N\n"), ("h.md", "[[x]] [[n]]\n")]);
+    let resolution = fixture.resolution(vec![moving("n.md", "m.md"), moving("x.md", "n.md")]);
+    assert_eq!(resolution.forecast.links, Vec::<LinkAdvisory>::new());
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]] [[m]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **A backlink another writer adds to a path the plan refills refuses the
 /// plan**, as one to a path the plan vacates does, and the fresh plan's
 /// cascade follows it.
