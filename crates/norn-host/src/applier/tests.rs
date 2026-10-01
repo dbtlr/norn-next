@@ -1179,9 +1179,10 @@ fn a_resolved_plan_carrying_a_where_target_is_invalid() {
     );
 }
 
-/// **A resolved plan carrying a folder move, or a cascade on a kind that
-/// does not cascade, is invalid.** Planning expands a folder move into
-/// document moves and writes a cascade only on a move, a delete rewriting
+/// **A resolved plan carrying a folder move, a creation by rule, or a cascade
+/// on a kind that does not cascade, is invalid.** Planning expands a folder
+/// move into document moves, a creation by rule into a `create_document`, and
+/// writes a cascade only on a move, a delete rewriting
 /// the links naming its document or a wikilink rewrite — never on a delete
 /// forbidding those links or leaving them broken — so each such plan was not
 /// made by planning: it answers `request/plan-invalid` naming the operation,
@@ -1202,6 +1203,15 @@ fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
                 folder("archive"),
             )),
             norn_wire::PlanFault::unexpanded_target(vec![1]),
+        ),
+        (
+            Operation::new(norn_wire::OperationKind::create_by_rule(
+                None,
+                norn_wire::Variables::default(),
+                norn_wire::ValueMap::default(),
+                None,
+            )),
+            norn_wire::PlanFault::unexpanded_rule(vec![1]),
         ),
         (
             editing("a.md", "final", "done").with_cascade(cascade.clone()),

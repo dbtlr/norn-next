@@ -154,6 +154,52 @@ impl ValueMap {
     pub fn into_entries(self) -> Vec<(String, AuthoredValue)> {
         self.0
     }
+
+    /// Whether the map holds no entry.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The variables a creation by rule names, each a string under its name, in
+/// the order they are written, each name once.
+///
+/// On the wire it is the JSON object itself: `{"project":"norn","year":"2026"}`.
+/// A variable's value is text, because a rule substitutes it into a path and a
+/// template; a value that is not a string is refused at the read.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Variables(Vec<(String, String)>);
+
+impl Variables {
+    /// The variables `entries` names, in the order given, or the name
+    /// written twice.
+    pub fn new(entries: impl IntoIterator<Item = (String, String)>) -> Result<Self, DuplicateKey> {
+        let mut variables = Variables(Vec::new());
+        for (name, value) in entries {
+            variables.insert(name, value)?;
+        }
+        Ok(variables)
+    }
+
+    /// Append `value` under `name`, refusing a name the variables already
+    /// hold.
+    fn insert(&mut self, name: String, value: String) -> Result<(), DuplicateKey> {
+        if self.0.iter().any(|(held, _)| *held == name) {
+            return Err(DuplicateKey(name));
+        }
+        self.0.push((name, value));
+        Ok(())
+    }
+
+    /// The variables, in the order they are written.
+    pub fn entries(&self) -> &[(String, String)] {
+        &self.0
+    }
+
+    /// Whether no variable is named.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// A key a written map holds twice, which it refuses rather than keeping
@@ -255,6 +301,56 @@ impl Serialize for ValueMap {
             map.serialize_entry(key, value)?;
         }
         map.end()
+    }
+}
+
+impl Serialize for Variables {
+    /// The variables are written as an object, their names in the order they
+    /// are held.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, value) in &self.0 {
+            map.serialize_entry(name, value)?;
+        }
+        map.end()
+    }
+}
+
+/// Reads variables from an object of strings.
+struct VariablesVisitor;
+
+impl<'de> Visitor<'de> for VariablesVisitor {
+    type Value = Variables;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object of strings by variable name")
+    }
+
+    /// Each name is read as a string and held in the order written; a name
+    /// written twice is refused.
+    fn visit_map<A>(self, mut entries: A) -> Result<Variables, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut variables = Variables::default();
+        while let Some((name, value)) = entries.next_entry::<String, String>()? {
+            variables.insert(name, value).map_err(de::Error::custom)?;
+        }
+        Ok(variables)
+    }
+}
+
+impl<'de> Deserialize<'de> for Variables {
+    /// Variables are read as an object whose every value is a string, a name
+    /// written twice refused.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(VariablesVisitor)
     }
 }
 
@@ -408,6 +504,25 @@ impl JsonSchema for ValueMap {
             "description": "A map of written values by string key, in the order they are written, each key once.",
             "type": "object",
             "additionalProperties": value,
+        })
+    }
+}
+
+impl JsonSchema for Variables {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("Variables")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::Variables")
+    }
+
+    /// An object whose entries are strings.
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "The variables a creation by rule names: a string under each variable's name, in the order they are written, each name once.",
+            "type": "object",
+            "additionalProperties": { "type": "string" },
         })
     }
 }

@@ -451,6 +451,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::MoveFolder { from, .. } => Err(format!(
                 "the folder move from `{from}` is planned only as the document moves it expands into, and was not expanded"
             )),
+            // Creation by a schema's rule is NORN-298's planner to expand
+            // into a `create_document`; until it lands, no rule names a path
+            // or composes content, so the operation is left unresolved.
+            OperationKind::CreateByRule { .. } => Err(
+                "creating a document by a creation rule is not planned yet (NORN-298)".to_string(),
+            ),
             OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }
             | OperationKind::PushFrontmatter { .. }
@@ -687,9 +693,9 @@ pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
 
 /// The files an operation touches: a move touches its source and its
 /// destination, a frontmatter kind with a `where` target none until planning
-/// expands it, a folder move and a wikilink rewrite none — each names its
-/// documents only once planning expands it — and every other kind the one
-/// file it names.
+/// expands it, a folder move, a wikilink rewrite and a creation by rule none —
+/// each names its documents only once planning expands it — and every other
+/// kind the one file it names.
 pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
     let (first, second) = match kind {
         OperationKind::CreateDocument { path, .. }
@@ -707,7 +713,9 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         | OperationKind::PushFrontmatter { target, .. }
         | OperationKind::PopFrontmatter { target, .. } => (target.as_path(), None),
         OperationKind::MoveDocument { from, to } => (Some(from), Some(to)),
-        OperationKind::MoveFolder { .. } | OperationKind::RewriteWikilink { .. } => (None, None),
+        OperationKind::MoveFolder { .. }
+        | OperationKind::RewriteWikilink { .. }
+        | OperationKind::CreateByRule { .. } => (None, None),
     };
     first.into_iter().chain(second)
 }

@@ -418,6 +418,15 @@ pub enum PlanFault {
         /// moving a folder.
         positions: Vec<usize>,
     },
+    /// A resolved plan's operations still carry a creation by rule, which
+    /// planning expands into a `create_document` holding a concrete path and
+    /// the content the rule composes. A resolved plan carrying one was not
+    /// made by planning. Preview its operations again.
+    #[non_exhaustive]
+    UnexpandedRule {
+        /// The positions of the operations creating a document by rule.
+        positions: Vec<usize>,
+    },
     /// An operation carries a link cascade where none may stand: on an
     /// operation of an authored plan, since planning generates a cascade
     /// from what the vault's links hold, or on a kind that does not cascade —
@@ -449,6 +458,12 @@ impl PlanFault {
     /// which a resolved plan's operations may not.
     pub const fn unexpanded_target(positions: Vec<usize>) -> Self {
         PlanFault::UnexpandedTarget { positions }
+    }
+
+    /// The operations at `positions` create a document by rule, which a
+    /// resolved plan's operations may not.
+    pub const fn unexpanded_rule(positions: Vec<usize>) -> Self {
+        PlanFault::UnexpandedRule { positions }
     }
 
     /// The operations at `positions` carry a link cascade they may not.

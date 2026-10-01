@@ -28,22 +28,22 @@ use norn_wire::{
     IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
     LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
-    NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
-    OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams,
-    SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey,
-    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult,
-    TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
+    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
+    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
+    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
     UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
     UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName,
-    VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase,
-    WatcherLossCause, WriteTarget,
+    ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
+    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -6674,6 +6674,12 @@ fn drafts() -> Vec<Predicate> {
 fn operation_kinds() -> Vec<OperationKind> {
     vec![
         OperationKind::create_document(path("notes/new.md"), "# New\n"),
+        OperationKind::create_by_rule(
+            Some("meeting".to_string()),
+            variables(&[("project", "norn")]),
+            a_value_map(),
+            Some("Agenda.\n".to_string()),
+        ),
         OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
         OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
         OperationKind::delete_document(path("notes/b.md")),
@@ -6703,6 +6709,35 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::insert_before_heading(path("notes/a.md"), "Notes", "Intro.\n"),
         OperationKind::insert_after_heading(path("notes/a.md"), "Notes", "First.\n"),
     ]
+}
+
+/// The variables `entries` names, in the order given.
+fn variables(entries: &[(&str, &str)]) -> Variables {
+    Variables::new(
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
+    )
+    .expect("variables each named once")
+}
+
+/// Frontmatter field values with a nested map and list, in a written order.
+fn a_value_map() -> ValueMap {
+    ValueMap::new([
+        ("status".to_string(), AuthoredValue::string("draft")),
+        (
+            "owner".to_string(),
+            AuthoredValue::map([
+                ("name".to_string(), AuthoredValue::string("drew")),
+                (
+                    "tags".to_string(),
+                    AuthoredValue::list([AuthoredValue::string("a"), AuthoredValue::string("b")]),
+                ),
+            ])
+            .expect("a map of distinct keys"),
+        ),
+    ])
+    .expect("a map of distinct keys")
 }
 
 /// Every condition an author writes on an operation, the expected value
@@ -6904,6 +6939,7 @@ fn every_plan_shape_survives_the_round_trip() {
 fn an_operation_is_a_kind_and_its_fields() {
     let pinned = [
         r##"{"kind":"create_document","fields":{"path":"notes/new.md","content":"# New\n"}}"##,
+        r#"{"kind":"create_by_rule","fields":{"rule":"meeting","variables":{"project":"norn"},"fields":{"status":"draft","owner":{"name":"drew","tags":["a","b"]}},"body":"Agenda.\n"}}"#,
         r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
         r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
         r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
@@ -7385,10 +7421,10 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         .expect("an authored plan as JSON");
     for pointer in [
         "",
-        "/operations/17/cascade/0",
-        "/operations/18",
-        "/operations/18/fields",
-        "/operations/18/conditions/0",
+        "/operations/18/cascade/0",
+        "/operations/19",
+        "/operations/19/fields",
+        "/operations/19/conditions/0",
     ] {
         let json = with_surprise(&authored, pointer);
         assert!(
@@ -7812,6 +7848,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::content_cycle(vec![0, 1]),
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
         PlanFault::unexpanded_target(vec![1]),
+        PlanFault::unexpanded_rule(vec![3]),
         PlanFault::expanded_target_ordered(vec![2]),
         PlanFault::misplaced_cascade(vec![0]),
     ]
@@ -8571,6 +8608,7 @@ fn applier_decision(operation: &Operation) -> String {
             to,
         } => format!("in {path}, {syntax:?} {from} to {to}"),
         OperationKind::RewriteWikilink { old, new } => format!("wikilinks to {old} to {new}"),
+        OperationKind::CreateByRule { rule, .. } => format!("create by rule {rule:?}"),
         OperationKind::SetFrontmatter {
             target,
             field,
@@ -8823,7 +8861,11 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         )
     );
     assert_eq!(
-        decisions[4..7],
+        decisions[1],
+        "create by rule Some(\"meeting\") as -, after [], noting -; "
+    );
+    assert_eq!(
+        decisions[5..8],
         [
             "move folder notes to archive/notes as -, after [], noting -; ",
             "in notes/c.md, Wikilink a to archive/a as -, after [], noting -; ",
@@ -8831,7 +8873,7 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         ]
     );
     assert_eq!(
-        decisions[7..11],
+        decisions[8..12],
         [
             "set status of notes/a.md to string done as -, after [], noting -; ",
             "remove due of 1 predicates' matches as -, after [], noting -; ",
@@ -9711,6 +9753,245 @@ fn a_new_request_compiles_to_one_create() {
             "{refused} read as a new request"
         );
     }
+}
+
+/// A `new` request body for `notes`, in preview, carrying `rest` after
+/// `mode`.
+fn new_request(rest: &str) -> String {
+    format!(r#"{{"vault":{{"by":"name","name":"notes"}},"mode":"preview",{rest}}}"#)
+}
+
+/// **A `new` is exactly one of three forms**, and each compiles to its own
+/// operation: a path with its content to one `create_document`, as it always
+/// has; a rule name with optional variables, fields and body, and the inbox
+/// capture naming no rule, each to one `create_by_rule`. The rule crosses as
+/// `as`, and the parts a form does not carry are left out of the bytes.
+#[test]
+fn a_new_request_compiles_each_of_its_three_forms() {
+    let document = NewParams::new(notes(), ApplyMode::Preview, path("inbox/new.md"), "# New\n");
+    round_trip(&document);
+    assert_eq!(
+        document.plan().operations[0].kind,
+        OperationKind::create_document(path("inbox/new.md"), "# New\n")
+    );
+
+    let by_rule = NewParams::for_subject(
+        notes(),
+        ApplyMode::Apply,
+        NewSubject::by_rule(
+            "meeting",
+            variables(&[("project", "norn")]),
+            a_value_map(),
+            Some("Agenda.\n".to_string()),
+        ),
+    )
+    .with_force(true);
+    round_trip(&by_rule);
+    assert_eq!(
+        wire(&by_rule),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","as":"meeting","variables":{"project":"norn"},"fields":{"status":"draft","owner":{"name":"drew","tags":["a","b"]}},"body":"Agenda.\n","force":true}"#
+    );
+    assert_eq!(
+        by_rule.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::create_by_rule(
+                Some("meeting".to_string()),
+                variables(&[("project", "norn")]),
+                a_value_map(),
+                Some("Agenda.\n".to_string()),
+            ))],
+        )
+        .with_force(true)
+    );
+
+    let bare_rule = NewParams::for_subject(
+        notes(),
+        ApplyMode::Preview,
+        NewSubject::by_rule("meeting", Variables::default(), ValueMap::default(), None),
+    );
+    round_trip(&bare_rule);
+    assert_eq!(
+        wire(&bare_rule),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","as":"meeting"}"#
+    );
+
+    let inbox = NewParams::for_subject(
+        notes(),
+        ApplyMode::Preview,
+        NewSubject::inbox(a_value_map(), Some("Call Sam.\n".to_string())),
+    );
+    round_trip(&inbox);
+    assert_eq!(
+        wire(&inbox),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","fields":{"status":"draft","owner":{"name":"drew","tags":["a","b"]}},"body":"Call Sam.\n"}"#
+    );
+    assert_eq!(
+        inbox.plan().operations[0].kind,
+        OperationKind::create_by_rule(
+            None,
+            Variables::default(),
+            a_value_map(),
+            Some("Call Sam.\n".to_string())
+        )
+    );
+
+    let capture = NewParams::for_subject(
+        notes(),
+        ApplyMode::Preview,
+        NewSubject::inbox(ValueMap::default(), None),
+    );
+    round_trip(&capture);
+    assert_eq!(
+        wire(&capture),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"preview"}"#
+    );
+}
+
+/// **A `new` that mixes its forms is refused, naming the rule.** A path with
+/// a rule, content with no path, a path with no content, variables with no
+/// rule, and a path carrying fields or a body each mix two forms or half of
+/// one; none is read as another.
+#[test]
+fn a_new_request_mixing_its_forms_is_refused() {
+    for rest in [
+        r#""path":"a.md","content":"","as":"meeting""#,
+        r#""content":"text""#,
+        r#""path":"a.md""#,
+        r#""variables":{"project":"norn"}"#,
+        r#""path":"a.md","content":"","fields":{"status":"draft"}"#,
+        r#""path":"a.md","content":"","body":"text""#,
+        r#""path":"a.md","content":"","variables":{"project":"norn"}"#,
+        r#""as":"meeting","content":"text""#,
+        r#""path":"a.md","as":"meeting""#,
+    ] {
+        let refused = new_request(rest);
+        let error = serde_json::from_str::<NewParams>(&refused)
+            .expect_err(&format!("{refused} read as a new request"))
+            .to_string();
+        assert!(
+            error.contains("exactly one of three forms"),
+            "{refused} was refused without naming the rule: {error}"
+        );
+    }
+}
+
+/// **A `new` by rule refuses what the vocabulary refuses elsewhere**: a key
+/// it does not name, a variable named twice, a field written twice, and a
+/// variable that is not text.
+#[test]
+fn a_new_request_by_rule_refuses_unknown_and_repeated_keys() {
+    for rest in [
+        r#""as":"meeting","title":"A""#,
+        r#""as":"meeting","variables":{"project":"a","project":"b"}"#,
+        r#""as":"meeting","variables":{"year":2026}"#,
+        r#""as":"meeting","fields":{"status":"a","status":"b"}"#,
+        r#""as":"meeting","as":"other""#,
+        r#""as":null"#,
+        r#""as":"""#,
+    ] {
+        let refused = new_request(rest);
+        assert!(
+            serde_json::from_str::<NewParams>(&refused).is_err(),
+            "{refused} read as a new request"
+        );
+    }
+}
+
+/// **A `create_by_rule` names its rule or leaves it out for the inbox**, and
+/// takes its variables, fields and body each optionally; it reads back
+/// exactly the kind that wrote it, nested field values included.
+#[test]
+fn a_create_by_rule_reads_with_and_without_a_rule() {
+    let inbox: OperationKind =
+        serde_json::from_str(r#"{"kind":"create_by_rule","fields":{"body":"Call Sam.\n"}}"#)
+            .expect("an inbox capture");
+    assert_eq!(
+        inbox,
+        OperationKind::create_by_rule(
+            None,
+            Variables::default(),
+            ValueMap::default(),
+            Some("Call Sam.\n".to_string())
+        )
+    );
+    assert_eq!(
+        wire(&inbox),
+        r#"{"kind":"create_by_rule","fields":{"body":"Call Sam.\n"}}"#
+    );
+    let bare: OperationKind = serde_json::from_str(r#"{"kind":"create_by_rule","fields":{}}"#)
+        .expect("a creation naming nothing");
+    assert_eq!(
+        bare,
+        OperationKind::create_by_rule(None, Variables::default(), ValueMap::default(), None)
+    );
+    round_trip(&bare);
+    for refused in [
+        r#"{"kind":"create_by_rule","fields":{"rule":"a","path":"a.md"}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":"a","variables":{"k":"1","k":"2"}}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":"a","variables":{"k":1}}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":"a","fields":{"k":1,"k":2}}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":null}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":""}}"#,
+        r#"{"kind":"create_document","fields":{"path":"a.md","content":"","rule":"a"}}"#,
+        r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"f","value":1,"body":"a"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(refused).is_err(),
+            "reading {refused} produced an operation"
+        );
+    }
+}
+
+/// **A `create_by_rule` takes the generic envelope.** It expands one for one
+/// into a `create_document`, so an identifier it carries and the operations it
+/// requires are the expanded create's, and it reads and writes them as any
+/// kind does.
+#[test]
+fn a_create_by_rule_takes_an_identifier_and_requirements() {
+    let json = r#"{"kind":"create_by_rule","fields":{"rule":"meeting"},"id":"make-meeting","requires":["make-folder"]}"#;
+    let read: Operation = serde_json::from_str(json).expect("a create_by_rule with an envelope");
+    assert_eq!(
+        read,
+        Operation::new(OperationKind::create_by_rule(
+            Some("meeting".to_string()),
+            Variables::default(),
+            ValueMap::default(),
+            None,
+        ))
+        .with_id(operation_id("make-meeting"))
+        .with_requires(vec![operation_id("make-folder")])
+    );
+    assert_eq!(wire(&read), json);
+}
+
+/// **A resolved plan carries no creation by rule.** Planning expands one into
+/// a `create_document` with a concrete path and content, so a resolved plan
+/// still carrying one names it by position in a fault of its own.
+#[test]
+fn a_resolved_plan_with_a_creation_by_rule_is_a_fault() {
+    let mut plan = a_bare_resolved_plan();
+    assert_eq!(plan.unexpanded_rules(), None);
+    plan.operations
+        .push(Operation::new(OperationKind::create_document(
+            path("notes/new.md"),
+            "# New\n",
+        )));
+    plan.operations
+        .push(Operation::new(OperationKind::create_by_rule(
+            None,
+            Variables::default(),
+            ValueMap::default(),
+            None,
+        )));
+    assert_eq!(
+        plan.unexpanded_rules(),
+        Some(PlanFault::unexpanded_rule(vec![2]))
+    );
+    assert_eq!(
+        wire(&PlanFault::unexpanded_rule(vec![2])),
+        r#"{"kind":"unexpanded_rule","positions":[2]}"#
+    );
 }
 
 /// **A `move` reads what it moves from its source.** A `from` carrying the

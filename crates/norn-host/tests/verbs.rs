@@ -26,9 +26,9 @@ use norn_wire::{
     AuthoredValue, ChangesetOutcome, DeleteParams, DocumentEdit, DocumentPath, EditParams,
     ErrorDetail, ErrorEnvelope, ExpectedField, FieldChange, FilePath, FindParams, FindingKind,
     FolderPath, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, MoveParams, MoveSubject, NewParams,
-    Operation, OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck, ResolutionTarget,
-    ResolvedPlan, RewriteWikilinkParams, SetParams, TargetResult, UnresolvedReason, VaultAddress,
-    WriteTarget,
+    NewSubject, Operation, OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck,
+    ResolutionTarget, ResolvedPlan, RewriteWikilinkParams, SetParams, TargetResult,
+    UnresolvedReason, ValueMap, Variables, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -400,6 +400,40 @@ fn a_new_document_at_an_occupied_name_is_refused() {
         [left] if matches!(left.operation.kind, OperationKind::CreateDocument { .. })
     ));
     assert_eq!(read(&vault, "taken.md"), "other\n");
+}
+
+/// **A new document by a rule, or captured into the inbox, is refused until
+/// a planner expands it**: the host passes the compiled `create_by_rule`
+/// through unchanged, so it is left unresolved, preview and apply alike, and
+/// nothing is written.
+#[test]
+fn a_new_document_by_rule_is_refused_until_it_is_planned() {
+    let (_sandbox, vault) = a_vault("host-verbs-new-by-rule", &[("a.md", "a\n")]);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for subject in [
+        NewSubject::by_rule(
+            "meeting",
+            Variables::default(),
+            ValueMap::default(),
+            Some("Agenda.\n".to_string()),
+        ),
+        NewSubject::inbox(ValueMap::default(), None),
+    ] {
+        for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+            let creating = NewParams::for_subject(address(&vault), mode, subject.clone());
+            let refusal = refused(host.new_document(creating));
+            assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+            let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+                panic!("the refusal carries {:?}", refusal.detail());
+            };
+            assert!(matches!(
+                unresolved.as_slice(),
+                [left] if matches!(left.operation.kind, OperationKind::CreateByRule { .. })
+            ));
+        }
+    }
+    assert_eq!(read(&vault, "a.md"), "a\n");
 }
 
 /// A vault schema declaring the one tag `project` and reporting any other.
