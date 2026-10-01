@@ -197,6 +197,131 @@ fn rooted_name(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The vault paths `link`, held by the document at `holder`, names by path:
+/// the one path a Markdown path or a path read from the root names, each
+/// root path a rooted wikilink's reductions spell, and the holder itself for
+/// an empty target — read by this module's one reading of a link's address.
+/// None for a suffix address, which names documents through the resolver
+/// rather than by path, and none for a link addressed elsewhere or naming no
+/// vault path.
+///
+/// **What a moved document's own path links named.** A move that carries a
+/// document away from its folder respells the relative links it holds so
+/// they name what they named from where it stood; this is how the planner
+/// reads what that was, by the rule a read of the link uses.
+pub fn named_paths(link: &LinkFact, holder: &DocumentPath) -> Vec<String> {
+    match Addressing::of(link, holder) {
+        Addressing::Paths(paths) => paths,
+        Addressing::Elsewhere | Addressing::Suffix(_) => Vec::new(),
+    }
+}
+
+/// `path` spelled as a Markdown destination read from the directory of the
+/// document at `holder`, in the style the destination `written` was written
+/// in; or `None` where no spelling reads back as `path` from there.
+///
+/// **The inverse of the reading, held to it.** The spelling climbs out of
+/// the holder's directory to the deepest folder it shares with `path` and
+/// down from there, one `..` per folder climbed, and is accepted only where
+/// [`joined`] — the one reading every Markdown path link is resolved by —
+/// reads it back as exactly `path` from the holder's directory.
+///
+/// **The style is the written link's.** A destination written with a percent
+/// escape is spelled with every byte outside the unreserved set escaped, so a
+/// link written `my%20note.md` becomes `new%20name.md`; one written without
+/// escapes keeps every byte as itself but the three a destination cannot hold
+/// as themselves — `%`, which would read as an escape, and `?` and `#`, which
+/// would end its path. A leading `./` is kept where the spelling does not
+/// climb, and a query the destination carried, from its first `?`, is kept
+/// as written. Whether the destination's syntax can then carry the spelling
+/// where the link stands — a space outside angle brackets — is the text
+/// layer's to judge.
+pub fn relative_spelling(holder: &DocumentPath, path: &str, written: &str) -> Option<String> {
+    let (written_path, query) = split_query(written);
+    let escaped = holds_an_escape(written_path);
+    let from = directory_of(holder);
+    let to: Vec<&str> = path.split(SEPARATOR).collect();
+    let (folders, _) = to.split_at(to.len() - 1);
+    let shared = from
+        .iter()
+        .zip(folders)
+        .take_while(|(from, to)| from.as_str() == **to)
+        .count();
+    let mut segments: Vec<String> = std::iter::repeat_n("..".to_string(), from.len() - shared)
+        .chain(to[shared..].iter().map(|segment| spelled(segment, escaped)))
+        .collect();
+    if written_path.starts_with("./") && from.len() == shared {
+        segments.insert(0, ".".to_string());
+    }
+    let spelling = segments.join("/");
+    (joined(from, &spelling).as_deref() == Some(path)).then(|| format!("{spelling}{query}"))
+}
+
+/// `path` spelled as a Markdown destination read from the vault root, in the
+/// style the destination `written` was written in — led by a separator where
+/// `written` is, as a root-relative destination is and a `vault://` one is
+/// not — or `None` where no spelling reads back as `path`.
+///
+/// The style is [`relative_spelling`]'s, and so is the proof: the spelling is
+/// accepted only where [`joined`] reads it back from the root as exactly
+/// `path`.
+pub fn rooted_spelling(path: &str, written: &str) -> Option<String> {
+    let (written_path, query) = split_query(written);
+    let escaped = holds_an_escape(written_path);
+    let spelling = path
+        .split(SEPARATOR)
+        .map(|segment| spelled(segment, escaped))
+        .collect::<Vec<_>>()
+        .join("/");
+    let lead = if written_path.starts_with(SEPARATOR) {
+        "/"
+    } else {
+        ""
+    };
+    (joined(Vec::new(), &spelling).as_deref() == Some(path))
+        .then(|| format!("{lead}{spelling}{query}"))
+}
+
+/// `written` cut at its first `?`: the path, and the query from that `?` on,
+/// empty where there is none.
+fn split_query(written: &str) -> (&str, &str) {
+    written
+        .find('?')
+        .map_or((written, ""), |at| written.split_at(at))
+}
+
+/// Whether `text` holds a percent escape: a `%` followed by two hexadecimal
+/// digits.
+fn holds_an_escape(text: &str) -> bool {
+    text.as_bytes()
+        .windows(3)
+        .any(|window| window[0] == b'%' && window[1..].iter().all(u8::is_ascii_hexdigit))
+}
+
+/// One path segment as a destination spells it: every character outside the
+/// unreserved set escaped, byte by byte of its UTF-8, where the style is
+/// `escaped`, and otherwise only the characters a destination cannot hold as
+/// themselves — `%`, `?` and `#`.
+fn spelled(segment: &str, escaped: bool) -> String {
+    let mut spelling = String::with_capacity(segment.len());
+    for character in segment.chars() {
+        let keep = if escaped {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '~')
+        } else {
+            !matches!(character, '%' | '?' | '#')
+        };
+        if keep {
+            spelling.push(character);
+            continue;
+        }
+        let mut buffer = [0; 4];
+        for byte in character.encode_utf8(&mut buffer).bytes() {
+            spelling.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    spelling
+}
+
 /// The segments of the directory holding the document at `holder`.
 fn directory_of(holder: &DocumentPath) -> Vec<String> {
     holder
@@ -408,6 +533,108 @@ mod tests {
         }
         assert_eq!(named(&at("top.md"), "../x.md"), None);
         assert_eq!(named(&at("top.md"), "x.md").as_deref(), Some("x.md"));
+    }
+
+    /// **A relative spelling reads back as the path it names.** From the
+    /// holder's directory it climbs to the deepest folder shared with the path
+    /// and down again, keeps a leading `./` where it does not climb, keeps a
+    /// query as written, and escapes the three characters a destination
+    /// cannot hold as themselves; each spelling is read back through the
+    /// reader a Markdown link is resolved by. A path no spelling reaches —
+    /// one the store's grammar refuses — has none.
+    #[test]
+    fn a_relative_spelling_reads_back_as_the_path_it_names() {
+        let holder = at("a/b/doc.md");
+        for (path, written, spelling) in [
+            ("a/b/c.md", "old.md", "c.md"),
+            ("a/b/c.md", "./old.md", "./c.md"),
+            ("a/b/sub/c.md", "old.md", "sub/c.md"),
+            ("a/x/y.md", "old.md", "../x/y.md"),
+            ("a/x/y.md", "./old.md", "../x/y.md"),
+            ("top.md", "../old.md", "../../top.md"),
+            ("a/b/doc.md", "old.md", "doc.md"),
+            ("a/b/my note.md", "old.md", "my note.md"),
+            ("a/b/q.md", "old.md?x=1", "q.md?x=1"),
+            ("a/b/100%.md", "old.md", "100%25.md"),
+            ("a/b/what?.md", "old.md", "what%3F.md"),
+            ("a/b/c#1.md", "old.md", "c%231.md"),
+            ("a/b/diagram.png", "old.png", "diagram.png"),
+        ] {
+            assert_eq!(
+                relative_spelling(&holder, path, written).as_deref(),
+                Some(spelling),
+                "`{path}` written as `{written}`"
+            );
+            assert_eq!(
+                named(&holder, spelling).as_deref(),
+                Some(path),
+                "`{spelling}` reads back"
+            );
+        }
+        assert_eq!(
+            relative_spelling(&holder, "a/b/back\\slash.md", "x.md"),
+            None
+        );
+        assert_eq!(
+            relative_spelling(&at("top.md"), "x/y.md", "old.md").as_deref(),
+            Some("x/y.md")
+        );
+    }
+
+    /// **The written link's escaping style is kept.** A destination written
+    /// with a percent escape is spelled with every byte outside the
+    /// unreserved set escaped, a non-ASCII character by its UTF-8 bytes; one
+    /// written without escapes keeps its characters as themselves. A path
+    /// from the root keeps the leading separator a root-relative destination
+    /// carries and a `vault://` one does not.
+    #[test]
+    fn percent_encoding_style_is_kept() {
+        let holder = at("a/b/doc.md");
+        for (path, written, spelling) in [
+            ("a/b/new name.md", "my%20old.md", "new%20name.md"),
+            ("a/b/new name.md", "old.md", "new name.md"),
+            ("a/b/café.md", "my%20old.md", "caf%C3%A9.md"),
+            ("a/b/café.md", "old.md", "café.md"),
+            ("a/b/(x).md", "a%20b.md", "%28x%29.md"),
+        ] {
+            assert_eq!(
+                relative_spelling(&holder, path, written).as_deref(),
+                Some(spelling),
+                "`{path}` written as `{written}`"
+            );
+            assert_eq!(named(&holder, spelling).as_deref(), Some(path));
+        }
+        for (path, written, spelling) in [
+            ("x/new name.md", "/my%20old.md", "/x/new%20name.md"),
+            ("x/new name.md", "/old.md?q", "/x/new name.md?q"),
+            ("x/new.md", "notes/old.md", "x/new.md"),
+        ] {
+            assert_eq!(
+                rooted_spelling(path, written).as_deref(),
+                Some(spelling),
+                "`{path}` written as `{written}`"
+            );
+        }
+    }
+
+    /// **A link names by path what its address reads to**: a relative or
+    /// rooted Markdown destination its one path, a rooted wikilink each path
+    /// its reductions spell, and a suffix wikilink none, since the resolver
+    /// names its documents.
+    #[test]
+    fn named_paths_are_the_paths_a_link_reads_to() {
+        use crate::facts::LinkFamily::{Markdown, Wikilink};
+        let holder = at("a/b/doc.md");
+        assert_eq!(
+            named_paths(&written(Markdown, None, "../x.md"), &holder),
+            ["a/x.md"]
+        );
+        assert_eq!(
+            named_paths(&written(Wikilink, Some("vault"), "v1.2"), &holder),
+            ["v1.2.md", "v1.md"]
+        );
+        assert!(named_paths(&written(Wikilink, None, "x"), &holder).is_empty());
+        assert!(named_paths(&written(Markdown, Some("https"), "x.md"), &holder).is_empty());
     }
 
     /// A document is named by each segment-aligned prefix of its suffix key
