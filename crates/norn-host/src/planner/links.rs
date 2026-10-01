@@ -61,7 +61,11 @@
 //! refills reads as left behind from its new address — and said even where a
 //! cascade respelled another link of the holder to the same address, so the
 //! two share a key ([`Kept`]). Both are read here, from the plan alone, so
-//! the planner and the applier forecast alike.
+//! the planner and the applier forecast alike for every holder not yet
+//! landed. For a holder an interrupted apply already landed, its bytes cannot
+//! tell a kept link from a written one, so a re-sent plan's forecast can omit
+//! or mislabel that holder's skip advisory, while the condition entries the
+//! applier checks stay exact.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

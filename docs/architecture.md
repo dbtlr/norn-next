@@ -2533,8 +2533,11 @@ text layer's reason, unrepresentable where no spelling read back, or ambiguous â
 what its resolution alone would say; the link keeps its entry. It says so even where the
 cascade respelled another link of the same holder and syntax to the same address, so the
 two share one key: which links of a key a holder's batch left as written is read off the
-batch itself, by planning and by the applier's recomposition alike, since every link
-under a key a rewrite writes reads as written. The applier recomposes a
+batch itself, by planning and by the applier's recomposition alike for every holder not
+yet landed, since every link under a key a rewrite writes reads as written. For a holder an
+interrupted apply already landed, its bytes cannot tell a kept link from a written one, so a
+re-sent plan's forecast can omit or mislabel that holder's skip advisory, while the
+condition entries the applier checks stay exact. The applier recomposes a
 plan's cascades and never generates one: a backlink another writer adds after planning is
 an entry the set computed again holds and the plan does not record, which refuses the
 plan, and the refusal's fresh plan generates the cascade afresh from the links standing
