@@ -458,31 +458,6 @@ fn unescaped_index(text: &str, needle: char) -> Option<usize> {
     None
 }
 
-/// `text` with each of `links` that `replace` answers for replaced by its
-/// answer, and every other byte as written. The links are `text`'s own, in
-/// document order and not overlapping, as one family's tokens always are.
-pub(crate) fn splice_tokens(
-    text: &str,
-    links: &[Link],
-    mut replace: impl FnMut(&Link) -> Option<String>,
-) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for link in links {
-        let range = link.range();
-        let Some(replacement) = replace(link) else {
-            continue;
-        };
-        // Matches are non-overlapping and left-to-right, so spans ascend and
-        // the cursor advances monotonically.
-        out.push_str(&text[cursor..range.start]);
-        out.push_str(&replacement);
-        cursor = range.end;
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
 /// Split a recognized protocol prefix off an addressed target, returning the
 /// protocol and the stem that follows it.
 ///
@@ -601,7 +576,9 @@ pub enum RewriteSkip {
     /// back as `to`: it is no target this family can spell, its protocol is
     /// not the link's, or the bytes it would put there change what the
     /// document reads — the link itself, or a link, heading, tag or code span
-    /// around it.
+    /// around it. A link written inside the stem of another link the batch
+    /// respells — a wikilink in a Markdown destination — is one too, since
+    /// respelling either rewrites the other's bytes.
     Unrepresentable,
     /// The link is written in a frontmatter value that cannot hold `to` and
     /// still read as the same YAML with only the target changed — the quote
@@ -614,6 +591,9 @@ pub enum RewriteSkip {
     /// references, whose target is not the bytes it was written as, or one
     /// whose destination could not be located in the token at all.
     LinkNotRewritable,
+    /// The batch names the link's address twice, with two different `to`s,
+    /// and which one the link should carry is not this crate's to choose.
+    ConflictingRewrites,
 }
 
 /// `link`'s own bytes with `to` written over its stem, or why the link cannot

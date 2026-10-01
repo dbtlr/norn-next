@@ -2,7 +2,7 @@
 //! with wikilinks, the resolution that tells them apart, and the fence around
 //! the forms that stay characterized rather than implemented.
 
-use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution};
+use norn_text::{AddressRewrite, BodyScan, Document, Link, LinkFamily, Resolution};
 
 fn markdown_links(body: &str) -> Vec<Link> {
     BodyScan::new(body)
@@ -373,7 +373,11 @@ fn a_markdown_link_is_not_rewritten_as_a_wikilink() {
     assert_eq!(link.stem_range, Some(4..12));
 
     let body = "[t](./old.md) and [[./old.md]]\n";
-    let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, "./old.md", "new");
+    let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
+        LinkFamily::Wikilink,
+        "./old.md",
+        "new",
+    )]);
     assert_eq!(out.text, "[t](./old.md) and [[new]]\n");
 }
 

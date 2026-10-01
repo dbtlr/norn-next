@@ -490,8 +490,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         };
         let file = self.target(&spelling);
         let bytes = file.after.as_ref().expect("a document stands");
-        let (rewritten, skipped) =
-            edit::rewritten(bytes, rewrite.syntax, &rewrite.from, &rewrite.to);
+        let (rewritten, skipped) = edit::rewritten(bytes, [rewrite]);
         file.after = Some(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),

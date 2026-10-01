@@ -1,5 +1,6 @@
 //! Rewriting a document's links: every link of one family whose address is
-//! `from` is respelled `to`, and nothing else in the document moves.
+//! `from` is respelled `to`, for each rewrite of a batch read against the one
+//! parse of the document as it was, and nothing else in the document moves.
 //!
 //! This is the one seam a link cascade composes a document's after-bytes
 //! through. A cascade keys each of its per-document operations by a family,
@@ -9,10 +10,21 @@
 //! single token preserves is `rewrite_fidelity.rs`; what a whole document
 //! preserves, skips and refuses is here.
 
-use norn_text::{Document, FRONTMATTER_MAX_BYTES, LinkFamily, RewriteSkip, RewrittenLinks};
+use norn_text::{
+    AddressRewrite, Document, FRONTMATTER_MAX_BYTES, LinkFamily, RewriteSkip, RewrittenLinks,
+};
 
+/// A batch of one: the single rewrite most behaviors here are stated through.
 fn rewrite(source: &str, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
-    Document::parse(source).rewrite_links(family, from, to)
+    batch(source, &[(family, from, to)])
+}
+
+fn batch(source: &str, rewrites: &[(LinkFamily, &str, &str)]) -> RewrittenLinks {
+    let rewrites: Vec<AddressRewrite> = rewrites
+        .iter()
+        .map(|&(family, from, to)| AddressRewrite::new(family, from, to))
+        .collect();
+    Document::parse(source).rewrite_links(&rewrites)
 }
 
 fn reasons(rewritten: &RewrittenLinks) -> Vec<RewriteSkip> {
@@ -497,7 +509,8 @@ fn a_rewritten_document_reads_back_with_to_at_every_rewritten_link() {
     let source = "---\nup: '[[Old]]'\nsee: '[[Other]]'\n---\n\
                   # Head\n[[Old#Head|t]] [t](Old) [[#Head]] ![[Old]] [[Other]]\n";
     let before = Document::parse(source);
-    let out = before.rewrite_links(LinkFamily::Wikilink, "Old", "Sub/New");
+    let to_new = [AddressRewrite::new(LinkFamily::Wikilink, "Old", "Sub/New")];
+    let out = before.rewrite_links(&to_new);
     assert_eq!(out.rewritten, 3);
 
     let after = Document::parse(&out.text);
@@ -531,7 +544,7 @@ fn a_rewritten_document_reads_back_with_to_at_every_rewritten_link() {
         );
     }
 
-    let again = after.rewrite_links(LinkFamily::Wikilink, "Old", "Sub/New");
+    let again = after.rewrite_links(&to_new);
     assert_eq!(again.text, out.text);
     assert_eq!(again.rewritten, 0);
 }
@@ -823,4 +836,206 @@ fn a_crlf_document_keeps_its_breaks_and_mark() {
         "\u{feff}---\r\nup: \"[[New]]\"\r\n---\r\n[[New]] [t](Old)\r\n"
     );
     assert_eq!(out.rewritten, 2);
+}
+
+// ── A batch is one pass over one parse ───────────────────────────────────
+
+/// A moved document's relative links change by where each one points from:
+/// `../index.md` becomes `index.md` and `index.md` becomes `e/index.md`. Every
+/// link is matched by the address the document held before the batch, so the
+/// link the first rewrite respelled `index.md` is not the second's to respell
+/// again, in whichever order the batch names them.
+#[test]
+fn a_rewrite_whose_to_is_another_rewrites_from_never_chains() {
+    let source = "[p](../index.md) and [s](index.md)\n";
+    let up = (LinkFamily::Markdown, "../index.md", "index.md");
+    let down = (LinkFamily::Markdown, "index.md", "e/index.md");
+    for rewrites in [[up, down], [down, up]] {
+        let out = batch(source, &rewrites);
+        assert_eq!(
+            out.text, "[p](index.md) and [s](e/index.md)\n",
+            "{rewrites:?}"
+        );
+        assert_eq!(out.rewritten, 2, "{rewrites:?}");
+        assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+    }
+}
+
+/// Two moves swapping two names: `a` becomes `b` and `b` becomes `a`. Each
+/// link is respelled to its own rewrite's `to` — in the body and in one
+/// frontmatter string alike — so the two links still name two documents.
+#[test]
+fn two_rewrites_swapping_names_respell_each_link_once() {
+    let source = "---\nup: '[[a]] [[b]]'\n---\n[[a]] [[b]]\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Wikilink, "a", "b"),
+            (LinkFamily::Wikilink, "b", "a"),
+        ],
+    );
+    assert_eq!(out.text, "---\nup: '[[b]] [[a]]'\n---\n[[b]] [[a]]\n");
+    assert_eq!(out.rewritten, 4);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
+/// A cycle of three is the general case: whatever chain of `to` and `from` a
+/// batch spells, each link moves exactly one step, and the read-back proof
+/// holds each link to its own new target.
+#[test]
+fn a_cycle_of_rewrites_moves_each_link_one_step() {
+    let out = batch(
+        "[[a]] [[b]] [[c]] [[d]]\n",
+        &[
+            (LinkFamily::Wikilink, "a", "b"),
+            (LinkFamily::Wikilink, "b", "c"),
+            (LinkFamily::Wikilink, "c", "a"),
+        ],
+    );
+    assert_eq!(out.text, "[[b]] [[c]] [[a]] [[d]]\n");
+    assert_eq!(out.rewritten, 3);
+}
+
+/// One batch may name both families and both spellings of an address; each
+/// rewrite reaches only the links keyed as it is.
+#[test]
+fn one_batch_rewrites_each_key_independently() {
+    let source = "[[Old]] [[vault://Old]] [t](Old) [u](vault://Old)\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Wikilink, "Old", "W"),
+            (LinkFamily::Wikilink, "vault://Old", "vault://V"),
+            (LinkFamily::Markdown, "Old", "m.md"),
+            (LinkFamily::Markdown, "vault://Old", "vault://v.md"),
+        ],
+    );
+    assert_eq!(
+        out.text,
+        "[[W]] [[vault://V]] [t](m.md) [u](vault://v.md)\n"
+    );
+    assert_eq!(out.rewritten, 4);
+}
+
+/// An empty batch respells nothing and returns the document's own bytes.
+#[test]
+fn an_empty_batch_returns_the_input_unchanged() {
+    let source = "---\nup: '[[a]]'\n---\n[[a]] [t](a)\n";
+    let out = Document::parse(source).rewrite_links(&[]);
+    assert_eq!(out.text, source);
+    assert_eq!(out.rewritten, 0);
+    assert!(out.skipped.is_empty());
+}
+
+/// Each link of a frontmatter string carries its own rewrite's `to` and is
+/// proven alone: a target the string's quoting refuses skips its own link and
+/// leaves the other link in the same string rewritten.
+#[test]
+fn a_frontmatter_string_refusing_one_links_target_keeps_the_others() {
+    let source = "---\nup: '[[a]] [[b]]'\n---\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Wikilink, "a", "it's"),
+            (LinkFamily::Wikilink, "b", "c"),
+        ],
+    );
+    assert_eq!(out.text, "---\nup: '[[a]] [[c]]'\n---\n");
+    assert_eq!(out.rewritten, 1);
+    assert_eq!(reasons(&out), [RewriteSkip::WouldCorruptFrontmatter]);
+    assert_eq!(&source[out.skipped[0].link.range()], "[[a]]");
+}
+
+// ── Two rewrites of one address ──────────────────────────────────────────
+
+/// A batch naming one address twice with the same `to` says one thing twice:
+/// each link is respelled once.
+#[test]
+fn a_rewrite_repeated_in_a_batch_respells_each_link_once() {
+    let out = batch(
+        "[[a]] and [[a|t]]\n",
+        &[
+            (LinkFamily::Wikilink, "a", "b"),
+            (LinkFamily::Wikilink, "a", "b"),
+        ],
+    );
+    assert_eq!(out.text, "[[b]] and [[b|t]]\n");
+    assert_eq!(out.rewritten, 2);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
+/// A batch naming one address twice with two `to`s contradicts itself, and no
+/// choice between them is the caller's: every link keyed by that address — in
+/// the frontmatter and the body, whatever else would have refused it — is
+/// left as written and skipped as conflicting, and the rest of the batch is
+/// rewritten.
+#[test]
+fn two_rewrites_of_one_address_to_different_targets_skip_its_links() {
+    let source = "---\nup: '[[a]]'\n---\n[[a]] [[c]] [[a|x\ny]] [t](a)\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Wikilink, "a", "b"),
+            (LinkFamily::Wikilink, "c", "d"),
+            (LinkFamily::Markdown, "a", "m.md"),
+            (LinkFamily::Wikilink, "a", "e"),
+        ],
+    );
+    assert_eq!(
+        out.text,
+        "---\nup: '[[a]]'\n---\n[[a]] [[d]] [[a|x\ny]] [t](m.md)\n"
+    );
+    assert_eq!(out.rewritten, 2);
+    assert_eq!(reasons(&out), [RewriteSkip::ConflictingRewrites; 3]);
+    let at: Vec<&str> = out
+        .skipped
+        .iter()
+        .map(|skip| &source[skip.link.range()])
+        .collect();
+    assert_eq!(at, ["[[a]]", "[[a]]", "[[a|x\ny]]"]);
+}
+
+// ── Links sharing bytes ──────────────────────────────────────────────────
+
+/// `[[a]](b)` is a wikilink and a Markdown link sharing their outer brackets,
+/// and their stems do not touch: one batch respells both, and the Markdown
+/// link's text reads the wikilink's new token.
+#[test]
+fn a_batch_respells_both_links_sharing_brackets() {
+    let out = batch(
+        "[[a]](b)\n",
+        &[
+            (LinkFamily::Wikilink, "a", "x"),
+            (LinkFamily::Markdown, "b", "y"),
+        ],
+    );
+    assert_eq!(out.text, "[[x]](y)\n");
+    assert_eq!(out.rewritten, 2);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
+/// `[t]([[b]])` is a Markdown link whose destination holds a wikilink, so the
+/// wikilink's stem lies inside the Markdown one's. Respelling the destination
+/// rewrites the wikilink's bytes and respelling the wikilink rewrites the
+/// destination, so neither reads back as its rewrite alone: both are skipped
+/// as unrepresentable and the document is returned as it was.
+#[test]
+fn links_whose_stems_nest_are_skipped_rather_than_spliced_twice() {
+    let source = "[t]([[b]])\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Markdown, "[[b]]", "c.md"),
+            (LinkFamily::Wikilink, "b", "d"),
+        ],
+    );
+    assert_eq!(out.text, source);
+    assert_eq!(out.rewritten, 0);
+    assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable; 2]);
+    let at: Vec<&str> = out
+        .skipped
+        .iter()
+        .map(|skip| &source[skip.link.range()])
+        .collect();
+    assert_eq!(at, ["[t]([[b]])", "[[b]]"]);
 }

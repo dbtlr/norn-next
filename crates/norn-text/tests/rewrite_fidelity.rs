@@ -7,7 +7,10 @@
 //! rename. Preserving the title, the padding and the protocol is structural
 //! here rather than tested-for: those bytes are never inside the edited range.
 
-use norn_text::{Document, Link, LinkFamily, RewriteSkip, RewrittenLinks, parse_wikilinks_in_text};
+use norn_text::{
+    AddressRewrite, Document, Link, LinkFamily, RewriteSkip, RewrittenLinks,
+    parse_wikilinks_in_text,
+};
 
 fn only(text: &str) -> Link {
     let mut links = parse_wikilinks_in_text(text).into_iter();
@@ -28,7 +31,11 @@ fn respelled(raw: &str, stem: &str) -> RewrittenLinks {
         Some(protocol) => format!("{protocol}://{stem}"),
         None => stem.to_string(),
     };
-    Document::parse(raw).rewrite_links(LinkFamily::Wikilink, &address(&link.target), &address(stem))
+    Document::parse(raw).rewrite_links(&[AddressRewrite::new(
+        LinkFamily::Wikilink,
+        address(&link.target),
+        address(stem),
+    )])
 }
 
 /// [`respelled`]'s text, asserting the one link was rewritten.
@@ -203,7 +210,11 @@ fn a_rewrite_to_an_unrepresentable_target_leaves_the_document_alone() {
         "> quoted [[old]] here\n> still quoted\n",
     ] {
         for bad in ["a\nb", "", " padded "] {
-            let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, "old", bad);
+            let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
+                LinkFamily::Wikilink,
+                "old",
+                bad,
+            )]);
             assert_eq!(out.text, body, "rewriting {body:?} to {bad:?}");
             assert_eq!(out.rewritten, 0, "rewriting {body:?} to {bad:?}");
         }

@@ -6,7 +6,7 @@
 //! routes or validates anything, and no protocol is ever supplied or removed.
 
 use norn_text::{
-    BodyScan, Document, Link, LinkFamily, Resolution, RewriteSkip, RewrittenLinks,
+    AddressRewrite, BodyScan, Document, Link, LinkFamily, Resolution, RewriteSkip, RewrittenLinks,
     parse_wikilinks_in_text,
 };
 
@@ -23,7 +23,7 @@ fn only(text: &str) -> Link {
 /// `raw` rewritten through the one link rewrite, wikilinks addressed `from`
 /// respelled `to`.
 fn rewrite(raw: &str, from: &str, to: &str) -> RewrittenLinks {
-    Document::parse(raw).rewrite_links(LinkFamily::Wikilink, from, to)
+    Document::parse(raw).rewrite_links(&[AddressRewrite::new(LinkFamily::Wikilink, from, to)])
 }
 
 fn only_markdown(body: &str) -> Link {

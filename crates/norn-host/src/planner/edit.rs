@@ -29,9 +29,9 @@
 
 use std::sync::Arc;
 
-use norn_text::{Document, EditError, Mapping, SectionError, SkippedLink, Value};
+use norn_text::{AddressRewrite, Document, EditError, Mapping, SectionError, SkippedLink, Value};
 use norn_wire::{
-    AuthoredValue, DocumentPath, ExpectedField, LinkFamily, OperationKind, WriteTarget,
+    AuthoredValue, DocumentPath, ExpectedField, LinkFamily, LinkRewrite, OperationKind, WriteTarget,
 };
 
 use super::compose::Unresolved;
@@ -168,32 +168,46 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         .map_err(|error| refusal(&error))
 }
 
-/// `bytes`, every link of `syntax` whose address is `from` respelled `to`
-/// through `norn-text`'s link rewriter, and each matching link the rewriter
-/// left as written, with why — one unit of a link cascade.
+/// `bytes` with every one of `rewrites` composed at once — each link of a
+/// rewrite's syntax whose address is its `from` respelled its `to` — through
+/// `norn-text`'s link rewriter, and each matching link the rewriter left as
+/// written, with why: everything a plan's link cascades write in one
+/// document.
+///
+/// **One batch over one parse.** Every link is matched against `bytes` as
+/// they are, so a rewrite whose `to` is another's `from` never respells a
+/// link the first one wrote: `[[a]]` respelled `b` while `[[b]]` is respelled
+/// `z` reads `[[b]] [[z]]`.
 ///
 /// **A rewrite never fails.** A rewrite matching no link composes its
 /// document unchanged: the applier recomposes a cascade over the stand-in for
 /// a holder already holding its change, where nothing matches, and a link a
 /// foreign edit took away since planning is the change set's to notice, not
 /// composition's. Bytes that are not UTF-8 hold no link the index derives, so
-/// they are returned as they are, and so are they for a syntax the text layer
-/// reads no link of.
-pub(crate) fn rewritten(
+/// they are returned as they are, and a rewrite of a syntax the text layer
+/// reads no link of matches nothing.
+pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
-    syntax: LinkFamily,
-    from: &str,
-    to: &str,
+    rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
 ) -> (Arc<[u8]>, Vec<SkippedLink>) {
-    let family = match syntax {
-        LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
-        LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
-        _ => return (bytes.clone(), Vec::new()),
-    };
+    let batch: Vec<AddressRewrite> = rewrites
+        .into_iter()
+        .filter_map(|rewrite| {
+            let family = match rewrite.syntax {
+                LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
+                LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
+                _ => return None,
+            };
+            Some(AddressRewrite::new(family, &rewrite.from, &rewrite.to))
+        })
+        .collect();
     let Ok(text) = std::str::from_utf8(bytes) else {
         return (bytes.clone(), Vec::new());
     };
-    let rewritten = Document::parse(text).rewrite_links(family, from, to);
+    if batch.is_empty() {
+        return (bytes.clone(), Vec::new());
+    }
+    let rewritten = Document::parse(text).rewrite_links(&batch);
     if rewritten.rewritten == 0 {
         return (bytes.clone(), rewritten.skipped);
     }

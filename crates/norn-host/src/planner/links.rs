@@ -428,9 +428,16 @@ impl Judged {
 
 /// The advisory on `link`, which the text layer left as written for
 /// `reason`.
+///
+/// A link two rewrites of one batch name with two different targets cannot
+/// carry one new address, and is unrepresentable: planning writes one
+/// rewrite per holder, syntax and address, so only a plan no planning wrote
+/// meets it.
 fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
     match reason {
-        RewriteSkip::Unrepresentable => LinkAdvisory::skipped_unrepresentable(link),
+        RewriteSkip::Unrepresentable | RewriteSkip::ConflictingRewrites => {
+            LinkAdvisory::skipped_unrepresentable(link)
+        }
         RewriteSkip::WouldCorruptFrontmatter => {
             LinkAdvisory::skipped_would_corrupt_frontmatter(link)
         }
