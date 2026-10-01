@@ -199,6 +199,114 @@ fn a_set_over_a_commented_map_field_refuses() {
     }
 }
 
+// ── Telling a comment from content ───────────────────────────────────────
+
+fn comment_lost(field: &str) -> Result<String, EditError> {
+    Err(EditError::CommentWouldBeLost {
+        field: field.into(),
+    })
+}
+
+/// **A comment after a quote that opens nothing is still a comment.** Inside
+/// a plain scalar or a block scalar a quote is a literal character, so a
+/// later `# comment` holding a matching quote is a comment all the same, and
+/// a whole-entry rewrite that would drop it refuses.
+#[test]
+fn a_comment_after_a_literal_quote_refuses_a_whole_entry_rewrite() {
+    for (source, field, value) in [
+        (
+            "---\nname: Lovelace, 'Ada # don't rename\nn: 1\n---\n",
+            "name",
+            map([("given", "Ada".into())]),
+        ),
+        (
+            "---\nk: a - 'b # c'\nn: 1\n---\nbody\n",
+            "k",
+            list(["x".into()]),
+        ),
+        (
+            "---\nk: a ? 'b # c'\nn: 1\n---\nbody\n",
+            "k",
+            list(["x".into()]),
+        ),
+        (
+            "---\nk: a\n  'b # c'\nn: 1\n---\n",
+            "k",
+            map([("x", Value::Int(1))]),
+        ),
+        (
+            "---\nmeta:\n  k: |\n    \"hello\n  # keep this \"\n  n: 1\nafter: x\n---\nbody\n",
+            "meta",
+            map([("n", Value::Int(2))]),
+        ),
+        (
+            "---\nmeta:\n  k: hello - 'world # keep '\n  n: 1\n---\n",
+            "meta",
+            map([("n", Value::Int(2))]),
+        ),
+    ] {
+        assert_eq!(
+            set(source, field, &value),
+            comment_lost(field),
+            "for {source:?}"
+        );
+    }
+}
+
+/// **A push or a pop that rewrites a flow list whole refuses for a comment
+/// after a literal quote**, as a set does.
+#[test]
+fn a_flow_list_rewrite_refuses_for_a_comment_after_a_literal_quote() {
+    let document = Document::parse("---\nk: [x, a - 'b] # c'\n---\n");
+    assert_eq!(document.push_to_list("k", &"y".into()), comment_lost("k"));
+    assert_eq!(document.pop_from_list("k", &"x".into()), comment_lost("k"));
+}
+
+/// **A block list that falls back to a whole rewrite refuses for a comment
+/// a block scalar's quote hides**: an alias keeps its items from being
+/// spliced one by one, and the comment below the block scalar is the
+/// entry's.
+#[test]
+fn a_block_list_rewrite_refuses_for_a_comment_below_a_block_scalar() {
+    let document = Document::parse(
+        "---\nrows:\n  - &x\n    k: |\n      \"hello\n    # keep this \"\n    n: 1\n  - *x\n---\n",
+    );
+    assert_eq!(
+        document.push_to_list("rows", &map([("n", Value::Int(2))])),
+        comment_lost("rows")
+    );
+    assert_eq!(
+        document.pop_from_list(
+            "rows",
+            &map([("k", "\"hello\n".into()), ("n", Value::Int(1))])
+        ),
+        comment_lost("rows")
+    );
+}
+
+/// **A `#` that is content is not a comment**: inside a quoted scalar, on a
+/// block scalar's content line, or with no space before it. A whole-entry
+/// rewrite over it lands.
+#[test]
+fn a_hash_that_is_content_does_not_refuse_a_whole_entry_rewrite() {
+    let value = map([("x", Value::Int(1))]);
+    for source in [
+        "---\nk: 'a # b'\nn: 1\n---\n",
+        "---\nk: \"a # b\"\nn: 1\n---\n",
+        "---\nk: 'it''s # here'\nn: 1\n---\n",
+        "---\nk: [a#b, 'c # d']\nn: 1\n---\n",
+        "---\nk: |\n  a\n  # not a comment\nn: 1\n---\n",
+        "---\nk: a#b\nn: 1\n---\n",
+        "---\nk:\n  - 'x '' # y'\nn: 1\n---\n",
+    ] {
+        assert_eq!(
+            set(source, "k", &value),
+            Ok("---\nk:\n  x: 1\nn: 1\n---\n".to_string()),
+            "for {source:?}"
+        );
+    }
+}
+
 /// **A scalar set over a map, and a map set over a scalar, each rewrite the
 /// field's whole entry.**
 #[test]

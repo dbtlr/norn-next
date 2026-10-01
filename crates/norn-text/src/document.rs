@@ -1062,7 +1062,7 @@ impl<'a> Document<'a> {
     /// the field's entry carries no comment the rewrite would drop.
     fn rewrite_list(&self, field: &str, items: Vec<Value>) -> Result<String, EditError> {
         if let Some(located) = self.field(field)
-            && entry_carries_comment(self.source, located)
+            && self.entry_carries_comment(located)
         {
             return Err(EditError::CommentWouldBeLost {
                 field: field.to_string(),
@@ -1200,6 +1200,16 @@ impl<'a> Document<'a> {
         }
     }
 
+    /// Whether `located`'s entry carries a comment a whole-entry rewrite would
+    /// drop, on [`entry_carries_comment`]'s reading. A located field always
+    /// sits in a block; were one ever to sit in none, nothing could prove it
+    /// comment-free, so it would carry one.
+    fn entry_carries_comment(&self, located: &Field) -> bool {
+        self.frontmatter_range
+            .clone()
+            .is_none_or(|block| entry_carries_comment(self.source, block, located))
+    }
+
     /// The edited bytes, before they are proven.
     fn spliced_set(&self, field: &str, value: &Value) -> Result<String, EditError> {
         if self.frontmatter_broken() {
@@ -1295,7 +1305,7 @@ impl<'a> Document<'a> {
         // collection — or writes a nested value, and replaces the whole entry,
         // the collection in block style. A comment anywhere in the entry, its
         // key line included, would be dropped silently, so it refuses instead.
-        if entry_carries_comment(self.source, located) {
+        if self.entry_carries_comment(located) {
             return Err(EditError::CommentWouldBeLost {
                 field: located.name.clone(),
             });
