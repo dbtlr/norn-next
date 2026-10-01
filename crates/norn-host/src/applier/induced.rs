@@ -17,7 +17,7 @@ use norn_wire::{
     ApplyReport, ErrorDetail, ErrorEnvelope, InterruptionCause, Operation, ResolvedPlan,
 };
 
-use super::tests::{Fixture, applied, creating, deleting, editing, moving, path};
+use super::tests::{Fixture, applied, breaking, creating, deleting, editing, moving, path};
 
 const CHILD: &str = "NORN_APPLIER_CHILD";
 const VAULT: &str = "NORN_APPLIER_VAULT";
@@ -537,10 +537,12 @@ fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
 /// is then not synced, stops publication** as one this apply wrote would: the
 /// removal the foreign writer made is found, its folder sync fails, and the
 /// apply is interrupted naming it, with the later removal left unpublished.
+/// `inbox/m.md` links `e.md`, so its delete says the link may be left
+/// broken.
 #[test]
 fn a_target_found_inside_its_publication_whose_folder_is_not_synced_interrupts_the_apply() {
     let (fixture, _) = every_position();
-    let plan = fixture.plan(vec![deleting("e.md"), deleting("gone.md")]);
+    let plan = fixture.plan(vec![breaking("e.md"), deleting("gone.md")]);
     let child = run_child(&fixture, &plan, "foreign@1=remove,parent-sync@1=fails");
     assert!(child.lived);
     assert!(child.hits.contains("stage=foreign"), "{}", child.hits);
