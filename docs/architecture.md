@@ -2054,12 +2054,14 @@ standing, adds nothing.
 
 The read account also keeps what each preview spent judging its plan's links on the
 store's resolution door: every judgment its planning and the applier's check of it ran — a
-cascade's backlink pass and spelling probe, a delete's naming of its `rewrite_to`, the change
-set, and the change set computed again — with what each judgment reported and the statements
-and steps its snapshot counted while it ran, added where the preview answers, whatever it
-answered. The move-cascade bar and the delete bar read these, so what they hold to size
-independence is what a preview really ran: the delete bar a hub's delete refused for its
-in-links, the same delete leaving them broken, and a delete no link names.
+cascade's backlink pass and spelling probe, a delete's naming of its `rewrite_to`, a wikilink
+rewrite's naming of its two ends, the change set, and the change set computed again — with
+what each judgment reported and the statements and steps its snapshot counted while it ran,
+added where the preview answers, whatever it answered. The move-cascade bar, the delete bar
+and the wikilink-rewrite bar read these, so what they hold to size independence is what a
+preview really ran: the delete bar a hub's delete refused for its in-links, the same delete
+leaving them broken, and a delete no link names; the wikilink-rewrite bar a rewrite of a
+hub's name retargeting its in-links.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
@@ -2384,8 +2386,10 @@ enters the one `apply` path: `Host::set` (frontmatter changes to a path or a `wh
 target), `Host::edit` (section, body and text edits to one document),
 `Host::new_document` (a document created at a path, its folders made),
 `Host::move_path` (`move`: a document or every document a folder holds, with the link
-cascade that follows) and `Host::delete` (one document, the links naming it forbidden,
-rewritten or left broken) each compile their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
+cascade that follows), `Host::delete` (one document, the links naming it forbidden,
+rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming one
+document, or every broken one filed under a name, retargeted to another) each compile
+their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
@@ -2571,6 +2575,36 @@ writer adds after planning is an entry the plan does not record: the apply is re
 the fresh plan rewrites the new backlink too or, for a delete saying neither flag, is left
 unresolved naming its holder.
 
+**A wikilink rewrite reads the wikilinks naming its `old` the same way.** Its `old` is read
+through the same door as the vault stands before the plan — the side every link's own
+resolution is judged from, so the document meant is the one its author saw, wherever the
+plan carries it — and its `new` where the plan leaves the vault, as a delete's `rewrite_to`
+is. Where `old` names one document, the door reaches every link naming that document though
+the plan changes nothing there, and every wikilink resolving before the plan to exactly it,
+whatever its spelling and in body or frontmatter, is retargeted; where `old` names none,
+every wikilink resolving to nothing, broken as link health judges it, and filed under one
+of the keys `old` is held under with ASCII case folded is, on either kind of root, so
+`[[Old Note]]` and `[[old note]]` are both repaired. A wikilink already naming `new`'s
+document after the plan needs nothing, a Markdown link is no wikilink, and a wikilink
+naming several documents is never rewritten and the forecast says so. Each is respelled to
+`new`'s document by the spellings a move's cascade writes, its embed marker, title and
+anchor kept, and rides the rewrite as its cascade, one operation with it, composed,
+regenerated on refresh and recomposed by the applier as a move's is; a wikilink the rewrite
+retargets is its own, whatever a move or a delete of the same plan would do with it. An
+`old` naming several documents leaves the rewrite unresolved with the head of them before
+the plan, a `new` naming several with the head of them after it, and a `new` naming none,
+an `old` and a `new` naming one document, and a rewrite retargeting no wikilink each leave
+it unresolved in words, so a rewrite of nothing never lands. Every wikilink the rewrite
+would retarget that its cascade leaves as written is an entry of the change set, though
+nothing it names changes, so a wikilink another writer adds after planning that the rewrite
+would retarget is an entry the plan does not record: the apply is refused, and the fresh
+plan's cascade rewrites it too. An authored `rewrite_link` names its document where the plan
+leaves it and joins that document's batch with every cascade rewrite naming it, so no
+rewrite respells a link another wrote; one matching no link of its syntax written `from`
+there is left unresolved in words, as an edit whose text does not occur is, while one
+matching a link the text layer leaves as written, or respelling one to what it already
+holds, lands, its document found, and the forecast advises on what the text layer left.
+
 **The resolution change set runs for every plan.**
 Planning records the set: every link whose resolution the plan changes, and every link a
 rewrite of the plan writes — a `rewrite_link`'s or one of a cascade's — each with what its
@@ -2582,14 +2616,15 @@ in a target the plan landed reads the same two vaults. A document the plan write
 from the bytes planning composed, and a moved document's links from where it stood before
 the plan, so a relative link a move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target
-whose presence the plan changes or whose document it replaces, and each distinct key a
-chunk of links holds is resolved
+whose presence the plan changes or whose document it replaces, or the document a wikilink
+rewrite's `old` names, or that `old` is filed under with case folded, and each distinct key
+a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
 with one limit link health's head statement carries too: a head is read past every member
 of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
-plan that changes no document's presence and writes no link records nothing and reads no
-snapshot. A link a move's cascade leaves naming a path the plan vacates and refills is an
+plan that changes no document's presence, writes no link and carries no wikilink rewrite
+records nothing and reads no snapshot. A link a move's cascade leaves naming a path the plan vacates and refills is an
 entry too, naming that path on both sides, since the document there is not the one it
 named. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment
@@ -2597,11 +2632,8 @@ that comes to resolve to no document is recorded and not advised broken. The app
 snapshot after its intake, and refuses on any difference: an entry the plan records that
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
-The planner leaves both link rewrites unresolved, naming that limit. The applier refuses a
-resolved plan carrying either as `request/plan-invalid`, as an operation that does not act,
-which refuses the plan even where it touches no file. The host serves `move` through
-`Host::move_path` and `delete` through `Host::delete`; it serves no `rewrite_wikilink` verb:
-that request compiles to a plan a caller sends through `apply`.
+The host serves `move` through `Host::move_path`, `delete` through `Host::delete` and
+`rewrite_wikilink` through `Host::rewrite_wikilink`.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
@@ -2641,7 +2673,8 @@ bound by the applier's lifecycle tests.
   snapshot is the job's one read handle. Planning mints it the first time a `where` target
   is matched or the plan's resolution change set reads the link index, and hands it to the
   applier; a resolved plan sent back plans nothing, so the job mints it just before the
-  applier's check where the plan changes some document's presence or rewrites a link — the
+  applier's check where the plan changes some document's presence or rewrites a link, as a
+  link rewrite, a wikilink rewrite or a cascade — the
   one predicate the change set's own answer-without-reading path reads — and a plan doing
   neither mints none. Planning matches and records the set on it, the applier computes the
   set again on it, and it is given back before the changeset commits. No commit

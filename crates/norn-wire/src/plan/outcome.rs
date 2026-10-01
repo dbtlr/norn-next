@@ -199,12 +199,11 @@ pub enum UnresolvedReason {
         total: u64,
     },
     /// A target it reads resolves to more than one document: a wikilink
-    /// rewrite's `old`, so which links name the document meant is not known,
-    /// or a delete's `rewrite_to` where the plan leaves the vault, so which
-    /// document the links naming the removed one should name is not known.
-    // NORN-297: a wikilink rewrite is not planned yet, so only a delete's
-    // `rewrite_to` answers this so far; a wikilink rewrite is left unresolved
-    // in words, naming the limit.
+    /// rewrite's `old` before the plan, so which links name the document
+    /// meant is not known, or a wikilink rewrite's `new` or a delete's
+    /// `rewrite_to` where the plan leaves the vault, so which document the
+    /// links should name is not known. A wikilink rewrite whose two ends are
+    /// both ambiguous is answered for its `old`.
     #[non_exhaustive]
     AmbiguousTarget {
         /// The documents the target resolves to, in the resolution ladder's

@@ -219,7 +219,9 @@ pub enum Verb {
     Move,
     /// Remove one document, saying what becomes of the links naming it.
     Delete,
-    /// Respell every wikilink naming one document to name another.
+    /// Respell every wikilink naming one document — or every broken one
+    /// filed under one name — to name another, each in its own form, and
+    /// saying of each wikilink left as written why.
     RewriteWikilink,
     /// Register a vault under a name.
     VaultRegister,
