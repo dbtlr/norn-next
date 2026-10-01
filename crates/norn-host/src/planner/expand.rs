@@ -240,8 +240,9 @@ type FolderMoved = (Vec<Operation>, Vec<FilePath>);
 ///
 /// **What a folder move does not plan.** A folder moved onto itself names no
 /// change; one moved to another spelling of itself is a folder's change of
-/// case, which is not planned; one moved beneath itself would move each
-/// document under a name inside the folder being emptied; and one naming no
+/// case, which is not planned; one moved beneath itself — beneath any
+/// spelling the root takes for the same folder — would move each document
+/// under a name inside the folder being emptied; and one naming no
 /// folder, or a folder holding no document, moves nothing. Each leaves the
 /// operation unresolved. A destination beneath which documents already stand
 /// is merged into: each document's own destination must still be vacant, or
@@ -280,7 +281,16 @@ fn folder_moves<V: VaultView>(
             )
         }));
     }
-    if to_folder.as_path().starts_with(from_folder.as_path()) {
+    // Inside is a matter of identity, as onto is: a folder above `to` that
+    // is `from` under the root's case rule, whole components only.
+    let inside = to_folder
+        .as_path()
+        .ancestors()
+        .skip(1)
+        .filter(|above| !above.as_os_str().is_empty())
+        .filter_map(|above| normalizer.normalize(above).ok())
+        .any(|above| above == from_folder);
+    if inside {
         return Ok(Err(format!(
             "`{to}` lies inside `{from}`, and a folder cannot be moved into itself"
         )));
@@ -914,18 +924,60 @@ mod tests {
 
     /// **A folder moved into itself is unresolved**, in words, and moves
     /// nothing: each document would be moved beneath the folder it is
-    /// emptied from.
+    /// emptied from. Whether the destination lies inside is the root's own
+    /// question of identity, so on a root that folds case a destination
+    /// beneath another spelling of the folder lies inside it too.
     #[test]
     fn a_folder_moved_into_itself_is_unresolved() {
-        let vault = MemoryVault::with(&[("notes/a.md", "a\n")]);
-        let resolution = planned(
-            &vault,
-            vec![moving_folder("notes", "notes/sub")],
-            &Answering::paths(&[]),
-        );
-        let detail = left_in_words(&resolution);
-        assert!(detail.contains("into itself"), "{detail}");
-        assert!(resolution.plan.transitions.is_empty());
+        let sensitive = MemoryVault::with(&[("notes/a.md", "a\n")]);
+        let folding = MemoryVault::with(&[("notes/a.md", "a\n")]).folding_case();
+        for (vault, to) in [
+            (&sensitive, "notes/sub"),
+            (&folding, "notes/sub"),
+            (&folding, "Notes/sub"),
+            (&folding, "NOTES/deep/sub"),
+        ] {
+            let resolution = planned(
+                vault,
+                vec![moving_folder("notes", to)],
+                &Answering::paths(&[]),
+            );
+            let detail = left_in_words(&resolution);
+            assert!(detail.contains("into itself"), "{to}: {detail}");
+            assert!(resolution.plan.transitions.is_empty(), "{to}");
+        }
+    }
+
+    /// **A destination is inside a folder only beneath the same folder**: on
+    /// a case-sensitive root `Notes/sub` lies in another folder than
+    /// `notes`, and on either root a sibling sharing the folder's name as a
+    /// prefix lies beside it, so each is an ordinary folder move.
+    #[test]
+    fn a_destination_beside_the_folder_is_moved_into() {
+        let sensitive = MemoryVault::with(&[("notes/a.md", "a\n")]);
+        let folding = MemoryVault::with(&[("notes/a.md", "a\n")]).folding_case();
+        for (vault, to) in [
+            (&sensitive, "Notes/sub"),
+            (&sensitive, "notesy/x"),
+            (&folding, "notesy/x"),
+            (&folding, "Notesy/x"),
+        ] {
+            let resolution = planned(
+                vault,
+                vec![moving_folder("notes", to)],
+                &Answering::paths(&[]),
+            );
+            assert!(
+                resolution.unresolved.is_empty(),
+                "{to}: {:?}",
+                resolution.unresolved
+            );
+            assert_eq!(
+                resolution.plan.operations,
+                vec![moving("notes/a.md", &format!("{to}/a.md"))],
+                "{to}"
+            );
+        }
     }
 
     /// **A folder move naming no folder, or a folder holding no document,
