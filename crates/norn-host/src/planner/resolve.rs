@@ -856,23 +856,11 @@ mod tests {
     /// of the links naming its document are each left unresolved, naming the
     /// limit, and write nothing — never planned as something they do not
     /// say, such as a delete that silently breaks links its author asked to
-    /// rewrite. A folder move reaching planning unexpanded is left
-    /// unresolved too, saying it is planned only as its document moves.
+    /// rewrite.
     #[test]
     fn a_link_cascade_is_left_unresolved_until_it_is_planned() {
         let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
         let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
-        let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
-        let unexpanded = planned(
-            &vault,
-            vec![Operation::new(OperationKind::move_folder(
-                folder("notes"),
-                folder("archive"),
-            ))],
-        );
-        let detail = unresolved_detail(&unexpanded);
-        assert!(detail.contains("not expanded"), "{detail}");
-        assert!(unexpanded.plan.transitions.is_empty());
         for kind in [
             OperationKind::rewrite_link(
                 path("notes/a.md"),
@@ -889,6 +877,25 @@ mod tests {
             assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
             assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
         }
+    }
+
+    /// **A folder move reaching planning unexpanded is left unresolved**,
+    /// saying it is planned only as the document moves it expands into, and
+    /// writes nothing: only a plan resolved without expansion meets one here.
+    #[test]
+    fn an_unexpanded_folder_move_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
+        let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+        let unexpanded = planned(
+            &vault,
+            vec![Operation::new(OperationKind::move_folder(
+                folder("notes"),
+                folder("archive"),
+            ))],
+        );
+        let detail = unresolved_detail(&unexpanded);
+        assert!(detail.contains("not expanded"), "{detail}");
+        assert!(unexpanded.plan.transitions.is_empty());
     }
 
     /// **An expected value of absent on a document the plan writes is judged

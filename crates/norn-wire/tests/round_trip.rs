@@ -9330,15 +9330,16 @@ fn a_resolved_plan_with_a_folder_move_is_a_fault() {
     );
 }
 
-/// **An operation with a `where` target carries no identifier and requires
-/// nothing.** It expands into one operation per matched document, so it
-/// names no one operation another could require, and what it would require
-/// could not change what it matches; a folder move expands as one does, so
-/// it is held to the same rule. An authored plan names each such operation
+/// **An operation planning expands carries no identifier and requires
+/// nothing.** A `where` target expands into one operation per matched
+/// document, so it names no one operation another could require, and what it
+/// would require could not change what it matches; a folder move expands
+/// into one document move per document it holds, so it is held to the same
+/// rule. An authored plan names each such operation
 /// by its position in the fault it answers with, and one whose expanded
 /// operations carry neither has no such fault.
 #[test]
-fn an_authored_where_operation_carrying_an_id_or_a_requirement_is_a_fault() {
+fn an_authored_expanded_operation_carrying_an_id_or_a_requirement_is_a_fault() {
     let set = |target| {
         Operation::new(OperationKind::set_frontmatter(
             target,
