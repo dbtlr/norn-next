@@ -323,23 +323,29 @@ fn a_planned_cascade_recomposes_and_its_set_reproduces() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **A cascade is generated anew whenever a plan is planned**: a refused
-/// plan's move, re-resolved carrying the cascade it was planned with, plans
-/// the cascade the links hold now, never the one it carried.
+/// **An operation carrying a cascade into planning is a fault in the plan**:
+/// planning writes every cascade from the links the vault holds, and the one
+/// caller re-resolving a planned operation — a refusal's refresh — hands it
+/// over as its caller authored it, so a cascade arriving here was never
+/// planning's and is not silently dropped.
 #[test]
-fn a_carried_cascade_is_planned_again_rather_than_trusted() {
+fn a_cascade_carried_into_planning_is_a_fault() {
     let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
     let carrying = moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "zzz", "b")]);
-    let resolution = fixture.planned(vec![carrying]);
-    assert!(
-        resolution.unresolved.is_empty(),
-        "{:?}",
-        resolution.unresolved
-    );
-    assert_eq!(
-        resolution.plan.operations,
-        [moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "a", "b")])]
-    );
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let links = fixture.links();
+    let failure = crate::planner::resolve::resolve(
+        AuthoredPlan::new(crate::planner::links::testing::vault(), vec![carrying]),
+        fixture.root_identity(),
+        &BTreeSet::new(),
+        &view,
+        &links.index(),
+    )
+    .expect_err("a carried cascade is no plan");
+    let crate::planner::resolve::PlanningFailure::Fault(fault) = failure else {
+        panic!("a fault in the plan: {failure:?}");
+    };
+    assert_eq!(fault, norn_wire::PlanFault::misplaced_cascade(vec![0]));
 }
 
 /// **A backlink another writer adds after the preview refuses the plan, and
@@ -380,8 +386,9 @@ fn a_backlink_added_after_preview_refuses_and_the_fresh_cascade_holds_it() {
 /// **A landed holder with an unlanded destination is part-landed.** The
 /// holder already reads as the cascade leaves it and the move's destination
 /// does not; another writer then changes the source, so the apply refuses,
-/// and the move — one operation with its cascade — is listed as part-landed,
-/// carrying no cascade a caller would have to strip to send it again.
+/// and the move — one operation with its cascade — is listed as part-landed
+/// as the refused plan carried it, cascade and all, since part of what it
+/// says has landed.
 #[test]
 fn a_landed_holder_with_an_unlanded_destination_is_part_landed() {
     let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
@@ -394,7 +401,10 @@ fn a_landed_holder_with_an_unlanded_destination_is_part_landed() {
         panic!("the move is left unresolved: {:?}", refused.unresolved);
     };
     assert_eq!(left.reason, UnresolvedReason::part_landed());
-    assert_eq!(left.operation, moving("a.md", "b.md"));
+    assert_eq!(
+        left.operation,
+        moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "a", "b")])
+    );
     assert!(refused.plan.operations.is_empty());
     assert_eq!(fixture.read("a.md").as_deref(), Some("A, edited\n"));
 }

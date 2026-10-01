@@ -50,8 +50,16 @@ enum Fate {
 /// what a preview of the fresh plan lists. The fresh plan records its own
 /// resolution change set, judged through `links`, and its forecast advises on
 /// the links that set reaches. Nothing is rebased: applying the fresh plan is
-/// the caller's decision. An operation is listed, and resolved again, as its
-/// caller would author it: with no cascade, which planning writes.
+/// the caller's decision.
+///
+/// **Cascades are stripped here, and only here.** An operation resolved again
+/// goes to planning as its caller would author it, with no cascade, since
+/// planning writes a move's cascade afresh and faults on one it is handed; an
+/// operation planning then leaves unresolved is listed that way too. An
+/// operation listed unresolved from the refused plan itself — part-landed,
+/// drifted, or falling with one — is listed as the refused plan carried it,
+/// cascade and all: it is one operation with its cascade, and what of it has
+/// landed is what that cascade says.
 pub(super) fn refuse_and_refresh(
     plan: ResolvedPlan,
     view: &TreeView,
@@ -99,10 +107,10 @@ pub(super) fn refuse_and_refresh(
         .filter(|(_, fate)| matches!(fate, Fate::Resolved))
         .map(|(position, _)| position)
         .collect();
-    // An operation leaves the refused plan as its caller would author it,
-    // with no cascade: planning generates a move's cascade afresh from the
-    // links the vault holds now, and an authored plan carrying one is no
-    // plan.
+    // An operation resolved again leaves the refused plan as its caller
+    // would author it, with no cascade: planning generates a move's cascade
+    // afresh from the links the vault holds now, and an authored plan
+    // carrying one is no plan.
     let authored_again: Vec<Operation> = plan.operations.iter().map(uncascaded).collect();
     let mut authored = AuthoredPlan::new(
         plan.vault.clone(),
@@ -120,7 +128,7 @@ pub(super) fn refuse_and_refresh(
         if let Fate::Unresolved(reason) = fate {
             unresolved.push((
                 position,
-                UnresolvedOperation::new(authored_again[position].clone(), reason),
+                UnresolvedOperation::new(plan.operations[position].clone(), reason),
             ));
         }
     }

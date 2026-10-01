@@ -94,6 +94,13 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     links: &I,
     mut left_out: BTreeMap<usize, UnresolvedReason>,
 ) -> Result<Resolution, PlanningFailure<V::Error, I::Error>> {
+    // Planning writes every cascade from the links the vault holds now, so
+    // an operation arriving with one is no operation its caller authored: a
+    // refusal's refresh hands planning its operations without the cascades
+    // they carried, and nothing else may hand planning one.
+    if let Some(fault) = authored.misplaced_cascades() {
+        return Err(PlanningFailure::Fault(fault));
+    }
     let AuthoredPlan {
         plan: OperationsTag,
         vault,
@@ -101,12 +108,6 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         force,
         footnote,
     } = authored;
-    // Planning writes every cascade from the links the vault holds now, so
-    // one an operation arrives carrying — a refused plan's, re-resolved — is
-    // generated again rather than trusted.
-    for operation in &mut operations {
-        operation.cascade.clear();
-    }
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
