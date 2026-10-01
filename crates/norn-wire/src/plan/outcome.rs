@@ -14,7 +14,8 @@
 //! operations do, the files involved.
 //!
 //! **An ambiguous target is spelled as a finding spells one.** A wikilink
-//! rewrite whose `old` names several documents carries the same bounded
+//! rewrite whose `old`, or a delete whose `rewrite_to`, names several
+//! documents carries the same bounded
 //! [`CandidateHead`] a link row and the ambiguous-target refusal carry, so a
 //! vault-wide ambiguity class never crosses whole. A delete left unresolved
 //! for its backlinks names every holding document, each once — the documents
@@ -187,13 +188,6 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
-    // Minted with the link-cascade vocabulary before the planner reads a
-    // delete's backlinks (NORN-297): a later change of the same task plans a
-    // delete's backlinks and a wikilink rewrite's `old`, and is what answers
-    // these two. Until then nothing answers either: a delete saying neither flag
-    // plans and lands with no backlink check, leaving every link naming its
-    // document broken, and a wikilink rewrite is left unresolved in words,
-    // naming the limit.
     /// It removes a document links still name, and says neither what to
     /// rewrite them to nor that they may be left broken.
     #[non_exhaustive]
@@ -204,8 +198,13 @@ pub enum UnresolvedReason {
         /// How many links name it, across every holder.
         total: u64,
     },
-    /// It rewrites the wikilinks naming a target that resolves to more than
-    /// one document, so which links name the document meant is not known.
+    /// A target it reads resolves to more than one document: a wikilink
+    /// rewrite's `old`, so which links name the document meant is not known,
+    /// or a delete's `rewrite_to` where the plan leaves the vault, so which
+    /// document the links naming the removed one should name is not known.
+    // NORN-297: a wikilink rewrite is not planned yet, so only a delete's
+    // `rewrite_to` answers this so far; a wikilink rewrite is left unresolved
+    // in words, naming the limit.
     #[non_exhaustive]
     AmbiguousTarget {
         /// The documents the target resolves to, in the resolution ladder's

@@ -2054,10 +2054,12 @@ standing, adds nothing.
 
 The read account also keeps what each preview spent judging its plan's links on the
 store's resolution door: every judgment its planning and the applier's check of it ran — a
-cascade's backlink pass and spelling probe, the change set, and the change set computed
-again — with what each judgment reported and the statements and steps its snapshot counted
-while it ran, added where the preview answers, whatever it answered. The move-cascade bar
-reads these, so what it holds to size independence is what a preview really ran.
+cascade's backlink pass and spelling probe, a delete's naming of its `rewrite_to`, the change
+set, and the change set computed again — with what each judgment reported and the statements
+and steps its snapshot counted while it ran, added where the preview answers, whatever it
+answered. The move-cascade bar and the delete bar read these, so what they hold to size
+independence is what a preview really ran: the delete bar a hub's delete refused for its
+in-links, the same delete leaving them broken, and a delete no link names.
 
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
@@ -2380,9 +2382,10 @@ sequenceDiagram
 A write verb compiles to a plan of its operations, one per change or edit it names, and
 enters the one `apply` path: `Host::set` (frontmatter changes to a path or a `where`
 target), `Host::edit` (section, body and text edits to one document),
-`Host::new_document` (a document created at a path, its folders made) and
+`Host::new_document` (a document created at a path, its folders made),
 `Host::move_path` (`move`: a document or every document a folder holds, with the link
-cascade that follows) each compile their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
+cascade that follows) and `Host::delete` (one document, the links naming it forbidden,
+rewritten or left broken) each compile their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
@@ -2543,7 +2546,32 @@ an entry the set computed again holds and the plan does not record, which refuse
 plan, and the refusal's fresh plan generates the cascade afresh from the links standing
 then.
 
-**The resolution change set runs for every plan; a delete's cascade does not yet.**
+**A document delete reads its backlinks the same way.** A link is a backlink of the document
+a delete removes where it resolves before the plan to exactly that document — wherever the
+plan's moves carried it first — so a link naming several documents is a backlink of none,
+and a link the document holds goes with it. Backlinks are read from the same door, overlay
+and probes, at the plan's after-state: a link in a holder the plan removes or edits away is
+none, and one the plan writes is. A delete saying neither flag that a backlink names is left
+unresolved, its reason naming every holding document once, in path order, and how many
+backlinks there are, so its plan answers `vault/plan-refused`. A delete leaving them broken
+lands, and the forecast advises on each link it leaves broken. A delete rewriting them reads
+its `rewrite_to` through the same door, as a wikilink written with it is held, where the plan
+leaves the vault: naming no document there — the one the delete removes among them — it is
+left unresolved in words, and naming several, with the head of them a store built at the
+after-state would report, the only read of the door past the bound a link's judgment reads.
+Naming one, every backlink not already naming that document after the plan is respelled to
+it in both syntaxes, each in its own form by the spellings a move's cascade writes, its embed
+marker, title and anchor kept — an anchor the new document holds no heading for is a link
+health finding after the delete, not a refusal — and rides the delete as its cascade, one
+operation with it, composed, regenerated on refresh and recomposed by the applier as a move's
+is. An ambiguous link that could name the deleted document is never rewritten, and the
+forecast says it was skipped for its ambiguity. Every link that named a removed document is
+an entry of the change set, even where the path it named is refilled, so a backlink another
+writer adds after planning is an entry the plan does not record: the apply is refused, and
+the fresh plan rewrites the new backlink too or, for a delete saying neither flag, is left
+unresolved naming its holder.
+
+**The resolution change set runs for every plan.**
 Planning records the set: every link whose resolution the plan changes, and every link a
 rewrite of the plan writes — a `rewrite_link`'s or one of a cascade's — each with what its
 key resolves to from its holder's lineage source before the plan and from its holder
@@ -2569,14 +2597,11 @@ that comes to resolve to no document is recorded and not advised broken. The app
 snapshot after its intake, and refuses on any difference: an entry the plan records that
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
-The planner does not read a delete's backlinks yet: a delete saying neither flag plans and
-lands with no cascade and no backlink check, so it leaves the links naming its document
-broken — each such link recorded in the set, and advised on. The planner leaves both link
-rewrites and a delete saying either flag unresolved, naming that limit. The applier
-refuses a resolved plan carrying any of them as `request/plan-invalid`, as an operation
-that does not act, which refuses the plan even where it touches no file. The host serves
-`move` through `Host::move_path`; it serves no `delete` or `rewrite_wikilink` verb: those
-requests compile to plans a caller sends through `apply`.
+The planner leaves both link rewrites unresolved, naming that limit. The applier refuses a
+resolved plan carrying either as `request/plan-invalid`, as an operation that does not act,
+which refuses the plan even where it touches no file. The host serves `move` through
+`Host::move_path` and `delete` through `Host::delete`; it serves no `rewrite_wikilink` verb:
+that request compiles to a plan a caller sends through `apply`.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the

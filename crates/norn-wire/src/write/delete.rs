@@ -8,14 +8,15 @@
 //! is refused at the read. The flag is written only when `true`, as `force`
 //! is, so a request that omits it asks for the strict reading.
 //!
-//! **The strict reading is not held yet (NORN-297).** The planner reads a
-//! move's backlinks to plan its cascade, and does not yet read a delete's,
-//! so a delete saying neither plans and lands as `delete_document` always
-//! has, leaving every
-//! link naming its document broken, and a delete saying either flag is left
-//! unresolved, naming that limit. The host serves no `delete` verb yet
-//! either: the request compiles to its plan, and a caller sends that plan
-//! through `apply`.
+//! **A link naming the document is read where the plan leaves the vault.**
+//! It is a link resolving to the document alone: a link naming several
+//! documents names none of them, and the forecast says what becomes of it; a
+//! link the document holds goes with it. A rewritten link keeps its own
+//! form, its embed marker, its title and its anchor — an anchor the new
+//! document holds no heading for is link health's to report after the
+//! delete, not the delete's to refuse. The host serves the request as
+//! `Host::delete`, and the plan it compiles to previews and applies through
+//! `apply` alike.
 //!
 //! **`rewrite_to` names a document, never a place inside one.** It is read
 //! through the one resolution grammar, and an anchor on it is refused at the
@@ -63,9 +64,8 @@ pub struct DeleteParams {
 
 impl DeleteParams {
     /// A request to `mode` the removal of the document at `path` in `vault`,
-    /// asking for the strict reading of its links — which the planner does
-    /// not yet hold, so the delete lands whatever links name the document —
-    /// with no condition and not forced.
+    /// asking for the strict reading of its links, with no condition and not
+    /// forced.
     pub const fn new(vault: VaultAddress, mode: ApplyMode, path: DocumentPath) -> Self {
         DeleteParams {
             vault,

@@ -1,5 +1,6 @@
-//! Link cascades: the rewrites a plan's document moves generate, so that a
-//! link naming a moved document names it where it lands.
+//! Link cascades: the rewrites a plan's document moves and deletes generate,
+//! so that a link naming a moved document names it where it lands, and one
+//! naming a deleted document names the document its delete rewrites them to.
 //!
 //! **Which links a move breaks is the change set's own question.** A link
 //! follows a move where, before the plan, it resolves to exactly the document
@@ -18,9 +19,25 @@
 //! to several documents before the plan is never rewritten: which it names is
 //! not known, and the forecast says so.
 //!
+//! **A delete reads its backlinks through the same door.** A link is a
+//! deleted document's backlink where it resolves before the plan to exactly
+//! that document ([`removed_by`]): an ambiguous link is a backlink of none, a
+//! link the document holds goes with it, and a link in a holder the plan
+//! removes or edits away is none where the plan leaves the vault, while one
+//! the plan writes is. Saying neither flag, a delete a backlink names is left
+//! unresolved naming every holder and how many links; leaving them broken it
+//! generates nothing. Rewriting them, its `rewrite_to` is read through the
+//! same door where the plan leaves the vault ([`rewrite_targets`]) and must
+//! name one document there, other than the one it removes; every backlink
+//! not already naming that document after the plan ([`rewritten_for`]) is
+//! respelled to it as below, both syntaxes alike. An ambiguous link that
+//! could name the deleted document is never rewritten, and the forecast says
+//! so.
+//!
 //! **A link is respelled in its own style, and only to a spelling that reads
-//! back.** The new address is the shortest spelling of the moved document's
-//! destination the link's syntax and protocol can write: for a bare wikilink
+//! back.** The new address is the shortest spelling of the link's
+//! destination — the file the moved document lands at, or the delete's
+//! target — the link's syntax and protocol can write: for a bare wikilink
 //! the shortest suffix of the destination that names it alone with every
 //! target of the plan at its after-state — at least two segments where the
 //! link was written path-qualified, so it stays so — written with the
@@ -41,11 +58,12 @@
 //! attachment; a spelling still reaching it is kept as written, and an
 //! anchor-only link names its holder wherever it goes.
 //!
-//! **A cascade travels on the move it serves.** Each rewrite is one
+//! **A cascade travels on the operation it serves.** Each rewrite is one
 //! `rewrite_link` per holder, syntax and address, named at the holder's
 //! after-state path, generated once however many ways it is reached and
 //! carried by the move that lands the named document — a moved document's
-//! own relative links by its own move. Composition then writes it on the
+//! own relative links by its own move — or by the delete whose target it
+//! names. Composition then writes it on the
 //! holder's final bytes ([`super::compose::compose`]), the same bytes it was
 //! read from here.
 

@@ -53,10 +53,16 @@
 //!
 //! **What the forecast says of a link a cascade did not follow.** A link
 //! that named a document a move carries away, and does not name it where it
-//! lands, is advised on as the cascade's skip — the text layer's reason, or
-//! unrepresentable where no spelling read back — and an ambiguous link that
-//! could name a moved document as skipped for its ambiguity, each in place
-//! of what its resolution alone would say. Both are read from the links the
+//! lands, or a document a delete removes rewriting the links naming it, and
+//! does not name the delete's target, is advised on as the cascade's skip —
+//! the text layer's reason, or unrepresentable where no spelling read back —
+//! and an ambiguous link that could name such a document as skipped for its
+//! ambiguity, each in place of what its resolution alone would say. A link
+//! that named a document a delete forbidding or breaking its links removes
+//! is advised on as its resolution says: left broken, or retargeted where it
+//! was ambiguous. Every link that named a removed document is an entry,
+//! though the path it resolves to is refilled, so a backlink another writer
+//! adds after planning refuses the plan. Both are read from the links the
 //! plan does not write — a link a cascade respells to a path the plan
 //! refills reads as left behind from its new address — and said even where a
 //! cascade respelled another link of the holder to the same address, so the
