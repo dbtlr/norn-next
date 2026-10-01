@@ -80,3 +80,88 @@ fn a_link_written_inside_code_is_never_rewritten() {
         assert!(out.skipped.is_empty(), "{family:?}");
     }
 }
+
+// ── Frontmatter wikilinks ────────────────────────────────────────────────
+
+/// A wikilink written in a frontmatter value is rewritten where it stands —
+/// in a plain scalar, a single- or double-quoted one, and a block sequence's
+/// items — and every byte outside its stem stays: the quotes, the comments,
+/// the key order, the other links.
+#[test]
+fn a_frontmatter_wikilink_is_respelled_in_place() {
+    let source = "---\n\
+                  title: '[[Old]]'  # kept\n\
+                  up: \"[[Old|Parent]]\"\n\
+                  plain: see [[Old]] and [[Old#Part]] and [[Other]]\n\
+                  related:\n  - \"[[Old]]\"\n  - see [[ Old ]]\n  - '[[Other]]'\n\
+                  ---\n\
+                  body [[Old]]\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
+    assert_eq!(
+        out.text,
+        "---\n\
+         title: '[[New]]'  # kept\n\
+         up: \"[[New|Parent]]\"\n\
+         plain: see [[New]] and [[New#Part]] and [[Other]]\n\
+         related:\n  - \"[[New]]\"\n  - see [[ New ]]\n  - '[[Other]]'\n\
+         ---\n\
+         body [[New]]\n"
+    );
+    assert_eq!(out.rewritten, 7);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
+/// A frontmatter value is read as a wikilink's home and never as a Markdown
+/// link's: a `[title](target)` string in a property is inert text.
+#[test]
+fn a_markdown_rewrite_never_reaches_into_the_frontmatter() {
+    let source = "---\nsee: '[t](old.md)'\n---\n[t](old.md)\n";
+    let out = rewrite(source, LinkFamily::Markdown, "old.md", "new.md");
+    assert_eq!(out.text, "---\nsee: '[t](old.md)'\n---\n[t](new.md)\n");
+    assert_eq!(out.rewritten, 1);
+}
+
+/// A target the value's own spelling cannot hold is never forced into it: a
+/// quote character inside a scalar quoted with it, an escape inside a
+/// double-quoted one, and a `: ` a plain scalar reads as a mapping. The link
+/// stays as written, the rest of the document is still rewritten, and the
+/// skip names the link where the document holds it.
+#[test]
+fn a_target_the_frontmatter_value_cannot_hold_is_skipped() {
+    for (source, to) in [
+        ("---\nup: \"[[Old]]\"\n---\n[[Old]]\n", "a\"b"),
+        ("---\nup: \"[[Old]]\"\n---\n[[Old]]\n", "a\\tb"),
+        ("---\nup: '[[Old]]'\n---\n[[Old]]\n", "it's"),
+        ("---\nup: see [[Old]]\n---\n[[Old]]\n", "a: b"),
+        ("---\nup:\n  - see [[Old]]\n---\n[[Old]]\n", "a: b"),
+    ] {
+        let out = rewrite(source, LinkFamily::Wikilink, "Old", to);
+        let (block, _) = source.split_at(source.find("---\n[[").expect("a body") + 4);
+        assert_eq!(
+            out.text,
+            format!("{block}[[{to}]]\n"),
+            "{source:?} to {to:?}"
+        );
+        assert_eq!(out.rewritten, 1, "{source:?} to {to:?}");
+        assert_eq!(
+            reasons(&out),
+            [RewriteSkip::WouldCorruptFrontmatter],
+            "{source:?} to {to:?}"
+        );
+        let skipped = &out.skipped[0].link;
+        assert_eq!(&source[skipped.range()], "[[Old]]", "{source:?} to {to:?}");
+    }
+}
+
+/// The index holds a frontmatter wikilink only where the value's bytes carry
+/// it literally, and a rewrite reaches exactly what the index holds: a link
+/// inside a flow sequence or an escaped scalar names no bytes, is no link the
+/// index could have keyed a rewrite by, and stays as written.
+#[test]
+fn a_frontmatter_link_with_no_span_is_not_a_rewrite_target() {
+    let source = "---\nflow: [\"[[Old]]\"]\nescaped: \"\\x5B[Old]]\"\n---\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
+    assert_eq!(out.text, source);
+    assert_eq!(out.rewritten, 0);
+    assert!(out.skipped.is_empty());
+}

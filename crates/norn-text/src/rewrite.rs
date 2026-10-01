@@ -37,8 +37,14 @@
 //! never forced. A rewrite that matched nothing returns the document's own
 //! bytes.
 
-use crate::document::Document;
-use crate::link::{Link, LinkFamily, addresses_the_vault, respelled, splice_tokens};
+use std::ops::Range;
+
+use crate::document::{Document, frontmatter_of, splice_all};
+use crate::link::{
+    Link, LinkFamily, addresses_the_vault, parse_wikilinks_in_text, respelled, splice_tokens,
+};
+use crate::span::LineCursor;
+use crate::value::{Mapping, Value};
 
 /// What [`Document::rewrite_links`] produced: the whole rewritten document,
 /// how many links it respelled, and each matching link it left alone.
@@ -89,43 +95,136 @@ impl<'a> Document<'a> {
     /// See [the module](crate::rewrite) for what matches, what is preserved
     /// and why a matching link is skipped rather than written.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
-        let mut rewritten = 0;
+        let mut edits = Vec::new();
         let mut skipped = Vec::new();
-        let body_links: Vec<Link> = self
-            .scan_body()
-            .links()
-            .into_iter()
-            .filter(|link| link.family == family)
-            .collect();
-        let body = splice_tokens(self.body(), &body_links, |link| {
-            if !matches(link, from) {
-                return None;
+        if family == LinkFamily::Wikilink {
+            self.frontmatter_edits(from, to, &mut edits, &mut skipped);
+        }
+        for link in self.links() {
+            if link.family != family || !matches(&link, from) {
+                continue;
             }
-            match respelled(link, to) {
-                Ok(token) => {
-                    rewritten += 1;
-                    Some(token)
-                }
-                Err(reason) => {
-                    skipped.push(SkippedLink {
-                        link: link.clone(),
-                        reason,
-                    });
-                    None
-                }
+            match respelled(&link, to) {
+                Ok(token) => edits.push(Edit {
+                    range: link.range(),
+                    replacement: token,
+                    links: vec![link],
+                }),
+                Err(reason) => skipped.push(SkippedLink { link, reason }),
             }
-        });
-        let mut text = self.source()[..self.body_start()].to_string();
-        text.push_str(&body);
+        }
+        skipped.sort_by_key(|skip| skip.link.span.byte_offset);
         RewrittenLinks {
-            text,
-            rewritten,
+            text: self.spliced(&edits),
+            rewritten: edits.iter().map(|edit| edit.links.len()).sum(),
             skipped,
         }
     }
+
+    /// One edit per frontmatter string holding a link to rewrite, each proven
+    /// by re-reading the block it would produce.
+    ///
+    /// A string is rewritten whole or not at all: every matching link in it
+    /// carries the same `to` in the same quoting, so a value that cannot hold
+    /// one cannot hold any, and each is skipped as
+    /// [`RewriteSkip::WouldCorruptFrontmatter`]. The proof is the block read
+    /// back with only that string changed, compared against the mapping it
+    /// came from with only that string's value changed — the same proof every
+    /// frontmatter edit here makes, so what a plain scalar can carry is the
+    /// YAML reader's answer rather than a list of hazards somebody maintains.
+    fn frontmatter_edits(
+        &self,
+        from: &str,
+        to: &str,
+        edits: &mut Vec<Edit>,
+        skipped: &mut Vec<SkippedLink>,
+    ) {
+        let Some(Value::Map(map)) = self.frontmatter() else {
+            return;
+        };
+        let mut cursor = LineCursor::new(self.source());
+        for literal in self.literal_texts() {
+            let mut links = Vec::new();
+            let text = splice_tokens(
+                literal.text,
+                &parse_wikilinks_in_text(literal.text),
+                |token| {
+                    let link = Link {
+                        span: cursor.span_at(literal.start + token.span.byte_offset),
+                        ..token.clone()
+                    };
+                    if !matches(&link, from) {
+                        return None;
+                    }
+                    match respelled(&link, to) {
+                        Ok(respelled) => {
+                            links.push(link);
+                            Some(respelled)
+                        }
+                        Err(reason) => {
+                            skipped.push(SkippedLink { link, reason });
+                            None
+                        }
+                    }
+                },
+            );
+            if links.is_empty() {
+                continue;
+            }
+            let mut expected = map.clone();
+            with_text(&mut expected, literal.field, literal.item, &text);
+            let edit = Edit {
+                range: literal.start..literal.start + literal.text.len(),
+                replacement: text,
+                links,
+            };
+            if frontmatter_of(&self.spliced(std::slice::from_ref(&edit)))
+                == Some(Value::Map(expected))
+            {
+                edits.push(edit);
+            } else {
+                skipped.extend(edit.links.into_iter().map(|link| SkippedLink {
+                    link,
+                    reason: RewriteSkip::WouldCorruptFrontmatter,
+                }));
+            }
+        }
+    }
+
+    /// This document's source with each edit's range replaced. The edits are
+    /// in document order and do not overlap.
+    fn spliced(&self, edits: &[Edit]) -> String {
+        let runs: Vec<(Range<usize>, &str)> = edits
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.replacement.as_str()))
+            .collect();
+        splice_all(self.source(), &runs)
+    }
+}
+
+/// One run of source bytes a rewrite replaces, and the links it respells
+/// there: one body token, or one frontmatter string holding one or more.
+struct Edit {
+    range: Range<usize>,
+    replacement: String,
+    links: Vec<Link>,
 }
 
 /// Whether `link` is one a rewrite of `from` names.
 fn matches(link: &Link, from: &str) -> bool {
     !from.is_empty() && link.target == from && addresses_the_vault(link)
+}
+
+/// Set the string at `field` — its own value, or the `item` of its sequence —
+/// to `text`.
+fn with_text(map: &mut Mapping, field: &str, item: Option<usize>, text: &str) {
+    let value = match (map.get(field), item) {
+        (Some(Value::Sequence(items)), Some(index)) => {
+            let mut items = items.clone();
+            items[index] = Value::String(text.to_string());
+            Value::Sequence(items)
+        }
+        _ => Value::String(text.to_string()),
+    };
+    map.insert(field, value);
 }

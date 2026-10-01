@@ -44,6 +44,25 @@ pub struct FieldText<'a> {
     pub range: Option<Range<usize>>,
 }
 
+/// A [`FieldText`] and which value of its field it is.
+struct PlacedText<'a> {
+    text: FieldText<'a>,
+    /// The item of the field's sequence this string is, or `None` for the
+    /// field's own scalar value.
+    item: Option<usize>,
+}
+
+/// A frontmatter string written literally in the source: its text is a
+/// substring of the document, starting at `start`.
+pub(crate) struct LiteralText<'a> {
+    pub(crate) field: &'a str,
+    /// The item of the field's sequence this string is, or `None` for the
+    /// field's own scalar value.
+    pub(crate) item: Option<usize>,
+    pub(crate) text: &'a str,
+    pub(crate) start: usize,
+}
+
 /// Why an edit was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditError {
@@ -378,6 +397,16 @@ impl<'a> Document<'a> {
     /// the ranges come from the field layer, so an escaped or line-continued
     /// value reports the bytes it was written as rather than nothing.
     pub fn field_texts(&self) -> Vec<FieldText<'_>> {
+        self.placed_texts()
+            .into_iter()
+            .map(|placed| placed.text)
+            .collect()
+    }
+
+    /// [`Document::field_texts`], each with the item of its field's sequence
+    /// it is — `None` for the field's own scalar value — so a caller that
+    /// changes one string can say which value of the mapping it changed.
+    fn placed_texts(&self) -> Vec<PlacedText<'_>> {
         let Some(Value::Map(map)) = &self.frontmatter else {
             return Vec::new();
         };
@@ -394,19 +423,25 @@ impl<'a> Document<'a> {
         let mut texts = Vec::new();
         for field in &self.fields {
             match parsed_keys.get(&field.name) {
-                Some(Value::String(text)) => texts.push(FieldText {
-                    field: &field.name,
-                    text,
-                    range: field.value_range.clone(),
+                Some(Value::String(text)) => texts.push(PlacedText {
+                    text: FieldText {
+                        field: &field.name,
+                        text,
+                        range: field.value_range.clone(),
+                    },
+                    item: None,
                 }),
                 Some(Value::Sequence(items)) => {
                     let ranges = self.sequence_item_ranges(field, items);
-                    for (item, range) in items.iter().zip(ranges) {
+                    for (index, (item, range)) in items.iter().zip(ranges).enumerate() {
                         if let Value::String(text) = item {
-                            texts.push(FieldText {
-                                field: &field.name,
-                                text,
-                                range,
+                            texts.push(PlacedText {
+                                text: FieldText {
+                                    field: &field.name,
+                                    text,
+                                    range,
+                                },
+                                item: Some(index),
                             });
                         }
                     }
@@ -415,6 +450,28 @@ impl<'a> Document<'a> {
             }
         }
         texts
+    }
+
+    /// Every frontmatter string whose source bytes carry it literally, in
+    /// document order, each with where its text begins in the source.
+    ///
+    /// These are the strings a token can be located in by offset, which is
+    /// what [`Document::frontmatter_wikilinks`] reports and what a link
+    /// rewrite writes into; see the former for which shapes are and are not.
+    pub(crate) fn literal_texts(&self) -> Vec<LiteralText<'_>> {
+        self.placed_texts()
+            .into_iter()
+            .filter_map(|placed| {
+                let range = placed.text.range?;
+                let offset = literal_text_offset(&self.source[range.clone()], placed.text.text)?;
+                Some(LiteralText {
+                    field: placed.text.field,
+                    item: placed.item,
+                    text: placed.text.text,
+                    start: range.start + offset,
+                })
+            })
+            .collect()
     }
 
     /// The source bytes of each item of a block-style sequence field, one
@@ -572,19 +629,13 @@ impl<'a> Document<'a> {
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         let mut cursor = LineCursor::new(self.source);
         let mut links = Vec::new();
-        for text in self.field_texts() {
-            let Some(range) = text.range else {
-                continue;
-            };
-            let Some(offset) = literal_text_offset(&self.source[range.clone()], text.text) else {
-                continue;
-            };
+        for literal in self.literal_texts() {
             // Every token's offset in the entry's text is its offset in the
             // source, one quote apart, so no token is searched for and two
             // identical links in one value are two entries at two offsets.
-            for link in parse_wikilinks_in_text(text.text) {
+            for link in parse_wikilinks_in_text(literal.text) {
                 links.push(Link {
-                    span: cursor.span_at(range.start + offset + link.span.byte_offset),
+                    span: cursor.span_at(literal.start + link.span.byte_offset),
                     ..link
                 });
             }
@@ -1402,7 +1453,7 @@ fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
 }
 
 /// The frontmatter value `source` holds, without locating its fields.
-fn frontmatter_of(source: &str) -> Option<Value> {
+pub(crate) fn frontmatter_of(source: &str) -> Option<Value> {
     extract(source, &mut Vec::new()).value
 }
 
@@ -1437,7 +1488,7 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
 
 /// `source` with each range in `edits` replaced by its text. The ranges are in
 /// document order and do not overlap.
-fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String {
+pub(crate) fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String {
     let mut out = String::with_capacity(source.len());
     let mut copied = 0;
     for (range, replacement) in edits {
