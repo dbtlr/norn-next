@@ -187,9 +187,10 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// document unchanged: the applier recomposes a cascade over the stand-in for
 /// a holder already holding its change, where nothing matches, and a link a
 /// foreign edit took away since planning is the change set's to notice, not
-/// composition's. Bytes that are not UTF-8 hold no link the index derives, so
-/// they are returned as they are, and a rewrite of a syntax the text layer
-/// reads no link of matches nothing.
+/// composition's. Bytes that do not decode as a vault document
+/// ([`document_source`]) hold no link the index derives, so they are returned
+/// as they are, and a rewrite of a syntax the text layer reads no link of
+/// matches nothing.
 pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
     rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
@@ -205,7 +206,7 @@ pub(crate) fn rewritten<'r>(
             Some(AddressRewrite::new(family, &rewrite.from, &rewrite.to))
         })
         .collect();
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return (bytes.clone(), Vec::new());
     };
     if batch.is_empty() {
