@@ -439,3 +439,64 @@ fn a_link_written_twice_is_one_rewrite() {
         Some("[[b]] then [[b|again]]\n")
     );
 }
+
+/// **A holder's rewrites land as one batch, never one over another**: `[[a]]`
+/// respelled `b` is not respelled again by the rewrite the plan writes for
+/// the `[[b]]` the holder already held, whichever move the plan names first,
+/// so each link names the document it named where that document lands.
+#[test]
+fn rewrites_on_one_holder_never_chain_whatever_the_order_of_the_moves() {
+    for operations in [
+        vec![moving("a.md", "r/b.md"), moving("p/b.md", "q/z.md")],
+        vec![moving("p/b.md", "q/z.md"), moving("a.md", "r/b.md")],
+    ] {
+        let mut fixture = Fixture::new(&[
+            ("p/b.md", "B\n"),
+            ("a.md", "A\n"),
+            ("h.md", "[[a]] [[b]]\n"),
+        ]);
+        fixture.moved(operations);
+        assert_eq!(fixture.read("h.md").as_deref(), Some("[[b]] [[z]]\n"));
+    }
+}
+
+/// **A moved document's own relative links reach the files they named even
+/// where one's new spelling is another's old one**: `../N2.md` from `a/b/`
+/// names `a/N2.md` and `../../N2.md` the root's, and from `z/` the first is
+/// spelled `../a/N2.md` and the second `../N2.md`.
+#[test]
+fn own_relative_links_whose_spellings_cross_each_reach_the_file_they_named() {
+    let mut fixture = Fixture::new(&[
+        ("N2.md", "root\n"),
+        ("a/N2.md", "under a\n"),
+        ("a/b/m.md", "[p](../N2.md) [q](../../N2.md)\n"),
+    ]);
+    fixture.moved(vec![moving("a/b/m.md", "z/m.md")]);
+    assert_eq!(
+        fixture.read("z/m.md").as_deref(),
+        Some("[p](../a/N2.md) [q](../N2.md)\n")
+    );
+}
+
+/// **A refreshed move's crossing rewrites land as one batch too**: another
+/// writer edits the moved document after the preview, the refusal's fresh
+/// plan generates the cascade again from what it holds now, and each of its
+/// relative links still names the file it named — `x.md` the nested one,
+/// `../x.md` the root's.
+#[test]
+fn a_refreshed_moves_crossing_rewrites_each_name_the_file_they_named() {
+    let mut fixture = Fixture::new(&[
+        ("old/a.md", "[nested](x.md) [root](../x.md)\n"),
+        ("old/x.md", "Nested\n"),
+        ("x.md", "Root\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("old/a.md", "a.md")]);
+    fixture.foreign("old/a.md", "foreign [nested](x.md) [root](../x.md)\n");
+    let refused = super::refused(fixture.apply(plan));
+    applied(fixture.apply(refused.plan));
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("foreign [nested](old/x.md) [root](x.md)\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}

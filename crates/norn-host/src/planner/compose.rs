@@ -76,13 +76,19 @@ pub(crate) struct Unresolvable {
 /// cascade are one operation, but each of the cascade's rewrites is an edit
 /// in place of a holder named at the spelling it holds after the plan, so
 /// the rewrites of every operation that acted compose once all operations
-/// have, in the order the operations do: a holder another operation edits
-/// is rewritten on its final bytes, and a link a moved document holds is
-/// rewritten at its destination. Planning read each link a cascade rewrites
-/// from exactly those bytes, so generating a cascade and composing it are
-/// one function of the same state. A rewrite never fails ([`edit::rewritten`]);
-/// a cascade naming a holder that holds no document leaves its operation
-/// unresolvable whole, since planning names only holders that stand.
+/// have: a holder another operation edits is rewritten on its final bytes,
+/// and a link a moved document holds is rewritten at its destination.
+/// Planning read each link a cascade rewrites from exactly those bytes, so
+/// generating a cascade and composing it are one function of the same state.
+///
+/// **A holder's rewrites compose as one batch.** Every rewrite naming one
+/// holder, whichever operation's cascade carries it, is composed by one call
+/// over the holder's final bytes ([`edit::rewritten`]), each link matched as
+/// those bytes write it, so no rewrite respells a link another one wrote and
+/// the order the operations compose in says nothing about what a holder
+/// reads. A rewrite never fails; a cascade naming a holder that holds no
+/// document leaves its operation unresolvable whole, its rewrites composing
+/// nowhere, since planning names only holders that stand.
 pub(crate) fn compose<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -99,13 +105,19 @@ pub(crate) fn compose<V: VaultView>(
         .iter()
         .map(|unresolvable: &Unresolvable| unresolvable.position)
         .collect();
+    let mut holders: BTreeMap<DocumentPath, Vec<&LinkRewrite>> = BTreeMap::new();
     for &position in order.iter().filter(|position| !failed.contains(position)) {
-        for rewrite in &operations[position].cascade {
-            if let Err(detail) = vault.rewrite(rewrite)? {
-                unresolvable.push(Unresolvable { position, detail });
-                break;
+        match vault.holders(&operations[position].cascade)? {
+            Ok(named) => {
+                for (holder, rewrite) in named {
+                    holders.entry(holder).or_default().push(rewrite);
+                }
             }
+            Err(detail) => unresolvable.push(Unresolvable { position, detail }),
         }
+    }
+    for (holder, rewrites) in holders {
+        vault.rewrite(&holder, &rewrites);
     }
     Ok(Composition {
         targets: vault.targets,
@@ -474,31 +486,47 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         Ok(Ok(()))
     }
 
-    /// Respell, in the document `rewrite` names as it stands so far, every
-    /// link of its syntax whose address is its `from`, recording each
-    /// matching link the text layer leaves as written; or say why no
-    /// document stands there to rewrite.
-    fn rewrite(&mut self, rewrite: &LinkRewrite) -> Result<Result<(), Unresolved>, V::Error> {
-        let spelling = match self.standing(&rewrite.path)? {
-            Ok(spelling) => spelling,
-            Err(detail) => {
-                return Ok(Err(format!(
-                    "its link cascade rewrites `{}`, where it cannot: {detail}",
-                    rewrite.path
-                )));
+    /// The holder each rewrite of `cascade` names, at the spelling it stands
+    /// at so far, or why one of them holds no document to rewrite.
+    fn holders<'c>(
+        &mut self,
+        cascade: &'c [LinkRewrite],
+    ) -> Result<Result<Vec<(DocumentPath, &'c LinkRewrite)>, Unresolved>, V::Error> {
+        let mut named = Vec::with_capacity(cascade.len());
+        for rewrite in cascade {
+            match self.standing(&rewrite.path)? {
+                Ok(spelling) => named.push((spelling, rewrite)),
+                Err(detail) => {
+                    return Ok(Err(format!(
+                        "its link cascade rewrites `{}`, where it cannot: {detail}",
+                        rewrite.path
+                    )));
+                }
             }
-        };
-        let file = self.target(&spelling);
+        }
+        Ok(Ok(named))
+    }
+
+    /// Respell, in the document standing at `spelling`, every link each of
+    /// `rewrites` names, all at once, recording each matching link the text
+    /// layer leaves as written under the address it is still written with.
+    fn rewrite(&mut self, spelling: &DocumentPath, rewrites: &[&LinkRewrite]) {
+        let file = self.target(spelling);
         let bytes = file.after.as_ref().expect("a document stands");
-        let (rewritten, skipped) = edit::rewritten(bytes, [rewrite]);
+        let (rewritten, skipped) = edit::rewritten(bytes, rewrites.iter().copied());
         file.after = Some(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),
-            syntax: rewrite.syntax,
-            address: rewrite.from.clone(),
+            syntax: match skip.link.family {
+                norn_text::LinkFamily::Wikilink => LinkFamily::Wikilink,
+                norn_text::LinkFamily::Markdown => LinkFamily::Markdown,
+            },
+            address: match &skip.link.protocol {
+                Some(protocol) => format!("{protocol}://{}", skip.link.target),
+                None => skip.link.target.clone(),
+            },
             reason: skip.reason,
         }));
-        Ok(Ok(()))
     }
 
     fn target(&mut self, spelling: &DocumentPath) -> &mut ComposedTarget {
@@ -670,6 +698,59 @@ mod tests {
             Some("self [[b]]\n")
         );
         assert_eq!(after_text(&composition, "a.md"), None);
+    }
+
+    /// **A holder's rewrites compose as one batch, whatever operation carries
+    /// each**: `[[a]]` respelled `b` is not respelled again by the rewrite
+    /// meant for the `[[b]]` the holder already held, in either order of the
+    /// two moves, and a moved document's own relative links — one's new
+    /// spelling another's old one — each reach the file they named.
+    #[test]
+    fn a_holders_rewrites_compose_as_one_batch_whatever_the_order() {
+        let vault = MemoryVault::with(&[
+            ("a.md", "A\n"),
+            ("p/b.md", "B\n"),
+            ("h.md", "[[a]] [[b]]\n"),
+            ("a/b/m.md", "[p](../N2.md) [q](../../N2.md)\n"),
+        ]);
+        let first = Operation::new(OperationKind::move_document(path("a.md"), path("r/b.md")))
+            .with_cascade(vec![rewrite("h.md", "a", "b")]);
+        let second = Operation::new(OperationKind::move_document(path("p/b.md"), path("q/z.md")))
+            .with_cascade(vec![rewrite("h.md", "b", "z")]);
+        let own = Operation::new(OperationKind::move_document(
+            path("a/b/m.md"),
+            path("z/m.md"),
+        ))
+        .with_cascade(vec![
+            norn_wire::LinkRewrite::new(
+                path("z/m.md"),
+                norn_wire::LinkFamily::Markdown,
+                "../../N2.md",
+                "../N2.md",
+            ),
+            norn_wire::LinkRewrite::new(
+                path("z/m.md"),
+                norn_wire::LinkFamily::Markdown,
+                "../N2.md",
+                "../a/N2.md",
+            ),
+        ]);
+        for operations in [
+            [first.clone(), second.clone(), own.clone()],
+            [second.clone(), first.clone(), own.clone()],
+        ] {
+            let composition =
+                compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+            assert!(composition.unresolvable.is_empty());
+            assert_eq!(
+                after_text(&composition, "h.md").as_deref(),
+                Some("[[b]] [[z]]\n")
+            );
+            assert_eq!(
+                after_text(&composition, "z/m.md").as_deref(),
+                Some("[p](../a/N2.md) [q](../N2.md)\n")
+            );
+        }
     }
 
     /// **A rewrite matching nothing composes its holder unchanged** and is no

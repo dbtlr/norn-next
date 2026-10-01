@@ -177,7 +177,10 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// **One batch over one parse.** Every link is matched against `bytes` as
 /// they are, so a rewrite whose `to` is another's `from` never respells a
 /// link the first one wrote: `[[a]]` respelled `b` while `[[b]]` is respelled
-/// `z` reads `[[b]] [[z]]`.
+/// `z` reads `[[b]] [[z]]`, whichever operation's cascade carries which. A
+/// holder's rewrites are composed by this one call however many operations'
+/// cascades name the holder ([`super::compose::compose`]), so the order the
+/// operations compose in says nothing about what the holder reads.
 ///
 /// **A rewrite never fails.** A rewrite matching no link composes its
 /// document unchanged: the applier recomposes a cascade over the stand-in for
