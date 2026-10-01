@@ -1143,7 +1143,11 @@ impl<'a> Document<'a> {
             edits.push((point, " []"));
         }
         edits.extend(popped.iter().map(|item| (item.lines.clone(), "")));
-        self.verified_list(splice_all(self.source, &edits), field, kept)
+        // An emptied list is written `[]`, which can outgrow the bare item it
+        // replaces, so a pop is judged against the bound as a push is.
+        let edited = splice_all(self.source, &edits);
+        refuse_past_bound(&edited)?;
+        self.verified_list(edited, field, kept)
     }
 
     /// The items of the list `field` holds — none for a field written with no

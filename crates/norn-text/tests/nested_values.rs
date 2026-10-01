@@ -779,3 +779,27 @@ fn a_rendered_document_refuses_a_block_past_the_bound() {
         Ok("---\na: 1\n---\n")
     );
 }
+
+/// **A pop that empties a list at the bound is refused for the bound.** The
+/// emptied list is written `[]`, which can outgrow the bare item it replaces,
+/// so a pop is judged against the bound as every other growing edit is.
+#[test]
+fn a_pop_that_grows_the_block_past_the_bound_is_refused_for_the_bound() {
+    let tail = "l:\n-\n";
+    let mut block = String::from("pad: '");
+    block.push_str(&"a".repeat(FRONTMATTER_MAX_BYTES - tail.len() - "pad: '".len() - "'\n".len()));
+    block.push_str("'\n");
+    block.push_str(tail);
+    assert_eq!(
+        block.len(),
+        FRONTMATTER_MAX_BYTES,
+        "the block is built to the bound exactly"
+    );
+    let source = format!("---\n{block}---\n");
+
+    assert!(matches!(
+        Document::parse(&source).pop_from_list("l", &Value::Null),
+        Err(EditError::FrontmatterPastBound { bytes, bound })
+            if bytes == FRONTMATTER_MAX_BYTES + 1 && bound == FRONTMATTER_MAX_BYTES
+    ));
+}
