@@ -50,6 +50,14 @@
 //! under names a target the plan changes, and its holder stands where it
 //! stood.
 //!
+//! **A plan may also reach links whose resolution it does not change**, so a
+//! wikilink rewrite reads the links naming what it rewrites through this same
+//! door: every key that could name a document the overlay reaches
+//! ([`PathOverlay::reaching`]) is sought as a changed key is, whether or not
+//! a document stands there, and each link judged says which of the reached
+//! places it could name ([`LinkChange::before_targets`]). A link sought more
+//! than one way is judged once.
+//!
 //! # What a key names, read once
 //!
 //! A link's resolution is the sum over its keys of what each names, the
@@ -87,7 +95,10 @@
 //! they could hold, counted where that read fills, and merged in that order
 //! with the targets standing after; each candidate is named by the first of
 //! its suffix spellings that names it alone after the plan, read the same
-//! way. Only that refusal path reads past the bound a link's judgment reads.
+//! way. A caller asks for the head of the side whose naming several would
+//! refuse it ([`PlanSide`]): a delete's `rewrite_to` after the plan, a wikilink
+//! rewrite's `old` before it. Only that refusal path reads past the bound a
+//! link's judgment reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -113,6 +124,9 @@ use crate::store::Snapshot;
 #[derive(Clone, Debug, Default)]
 pub struct PathOverlay {
     targets: Vec<Overlaid>,
+    /// Each document whose naming links the plan reaches though it changes
+    /// nothing there.
+    reached: Vec<DocumentPath>,
 }
 
 /// One file a plan writes, and whether a document stands there on each side.
@@ -171,11 +185,52 @@ impl PathOverlay {
         self
     }
 
+    /// The same overlay, reaching every link the store holds under a key that
+    /// could name a document at `path`, though the plan changes nothing
+    /// there: each is judged and handed back as the links under a changed
+    /// key are, and one whose keys could name the place, the
+    /// ambiguity-ignore set letting it in, names it among those it could
+    /// name before the plan ([`LinkChange::before_targets`]) — whether or not
+    /// a document stands there. What stands there on either side is read as
+    /// it is without this.
+    ///
+    /// A wikilink rewrite reads the links its `old` names this way: those
+    /// naming the one document it names, whatever each is spelled, or,
+    /// where it names none, the broken links that would name a document
+    /// standing at the place it spells.
+    #[must_use]
+    pub fn reaching(mut self, path: DocumentPath) -> Self {
+        if !self.reached.contains(&path) {
+            self.reached.push(path);
+        }
+        self
+    }
+
     /// Whether some file the overlay names holds a document on one side and
     /// not the other: the one thing that moves a link whose holder and text
     /// stay as they were.
     pub fn changes_presence(&self) -> bool {
         self.targets.iter().any(|held| held.before != held.after)
+    }
+}
+
+/// A side of a plan: the vault with every target at its before-state, or at
+/// its after-state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanSide {
+    /// Every target at its before-state.
+    Before,
+    /// Every target at its after-state.
+    After,
+}
+
+impl PlanSide {
+    /// Whether `target` holds a document on this side.
+    fn holds(self, target: &Overlaid) -> bool {
+        match self {
+            PlanSide::Before => target.before,
+            PlanSide::After => target.after,
+        }
     }
 }
 
@@ -224,12 +279,15 @@ pub struct LinkChange {
     /// holds.
     pub members_moved: bool,
     /// Each of the plan's targets standing before it that the link's keys
-    /// name from its before-holder, the ambiguity-ignore set letting it in,
-    /// once each in key order: which of the documents the plan writes the
-    /// link could name before the plan. A link resolving to several
-    /// documents names one of these only where it is among them, which is
-    /// how a caller tells whether an ambiguous link could name a document
-    /// the plan moves.
+    /// name from its before-holder, then each place the plan reaches
+    /// ([`PathOverlay::reaching`]) they could name, whether or not a document
+    /// stands there, the ambiguity-ignore set letting each in, once each in
+    /// key order: which of the documents the plan writes or reaches the link
+    /// could name before the plan. A link resolving to several documents
+    /// names one of these only where it is among them, which is how a caller
+    /// tells whether an ambiguous link could name a document the plan moves
+    /// or a wikilink rewrite reaches; and a link resolving to none names a
+    /// reached place where it would resolve to a document standing there.
     pub before_targets: Vec<DocumentPath>,
 }
 
@@ -262,16 +320,16 @@ pub struct TargetNaming {
     pub before: Resolves,
     /// What it names with every target at its after-state.
     pub after: Resolves,
-    /// Where it names several documents after the plan, the head of them in
-    /// the resolution ladder's order, each named by its minimal
-    /// disambiguating suffix after the plan, beside how many there are;
-    /// `None` otherwise.
+    /// Where it names several documents on the side the caller asked to be
+    /// headed, the head of them in the resolution ladder's order, each named
+    /// by its minimal disambiguating suffix on that side, beside how many
+    /// there are; `None` otherwise.
     pub candidates: Option<CandidateHead>,
 }
 
 impl TargetNaming {
     /// A target naming `before` before the plan and `after` after it, headed
-    /// by `candidates` where it names several after.
+    /// by `candidates` where it names several on the side asked.
     pub const fn new(before: Resolves, after: Resolves, candidates: Option<CandidateHead>) -> Self {
         TargetNaming {
             before,
@@ -284,8 +342,9 @@ impl TargetNaming {
 impl Snapshot {
     /// Judge every link the plan `overlay` describes reaches, handing each to
     /// `each` with what it resolves to before the plan and after it: the
-    /// links of `probed`, and the links this snapshot holds under a key that
-    /// could name a target the plan changes. A class's members
+    /// links of `probed`, the links this snapshot holds under a key that
+    /// could name a target the plan changes, and the links the overlay
+    /// reaches though the plan changes nothing they name. A class's members
     /// are read less the places `declared`'s ambiguity-ignore set keeps out,
     /// as every surface reads one.
     ///
@@ -321,22 +380,24 @@ impl Snapshot {
 
     /// What the suffix address `address` names over the plan `overlay`, on
     /// each side of it, read as a wikilink written with it is, a class's
-    /// members less the places `declared`'s ambiguity-ignore set keeps out;
-    /// and what reading it cost.
+    /// members less the places `declared`'s ambiguity-ignore set keeps out,
+    /// headed where it names several on the side `headed`; and what reading
+    /// it cost.
     ///
     /// Refused where `declared` is not the declaration this snapshot pins.
     ///
     /// **The work is the address's keys, and where it names several
-    /// documents after the plan, its head and their suffixes**: the keys are
-    /// resolved as a link's are, two rows past the targets each could name;
-    /// only where the target names several after the plan is each key's
+    /// documents on the side headed, its head and their suffixes**: the keys
+    /// are resolved as a link's are, two rows past the targets each could
+    /// name; only where the target names several on that side is each key's
     /// head read [`CANDIDATE_HEAD`] rows past those targets, counted where
     /// it fills, and each candidate's suffix spellings resolved the same way
-    /// until one names it alone.
+    /// until one names it alone there.
     pub fn target_naming(
         &self,
         overlay: &PathOverlay,
         address: &str,
+        headed: PlanSide,
         declared: &ContentModel,
     ) -> Result<(TargetNaming, ResolutionWork), PageRefusal> {
         let mut lookups = Lookups::default();
@@ -347,7 +408,7 @@ impl Snapshot {
             overlay,
             OnSnapshot::new(self),
         );
-        let naming = judging.name(address).map_err(PageRefusal::from)?;
+        let naming = judging.name(address, headed).map_err(PageRefusal::from)?;
         Ok((naming, judging.finished()))
     }
 }
@@ -401,8 +462,12 @@ struct Judging<'a, R> {
     target_keys: BTreeSet<String>,
     /// Each key that could name a target, and the targets it could name.
     naming: BTreeMap<String, Vec<usize>>,
-    /// Each key that could name a target the plan changes.
-    changed: BTreeSet<String>,
+    /// Each key whose links are judged: one that could name a target the
+    /// plan changes or a document it reaches.
+    sought: BTreeSet<String>,
+    /// Each key that could name a document the plan reaches, and the
+    /// documents it could name, by their place in the overlay's list.
+    reaching: BTreeMap<String, Vec<usize>>,
     resolved: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
 }
@@ -416,13 +481,20 @@ impl<'a, R: Runner> Judging<'a, R> {
     ) -> Self {
         let key = SuffixKey::under(order);
         let mut naming: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut changed = BTreeSet::new();
+        let mut sought = BTreeSet::new();
         for (at, target) in overlay.targets.iter().enumerate() {
             for named in keys_naming(&target.path, key) {
                 if target.changes() {
-                    changed.insert(named.clone());
+                    sought.insert(named.clone());
                 }
                 naming.entry(named).or_default().push(at);
+            }
+        }
+        let mut reaching: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (at, document) in overlay.reached.iter().enumerate() {
+            for named in keys_naming(document, key) {
+                sought.insert(named.clone());
+                reaching.entry(named).or_default().push(at);
             }
         }
         Judging {
@@ -437,14 +509,15 @@ impl<'a, R: Runner> Judging<'a, R> {
                 .map(|target| target.path.path_key_in(key).as_str().to_string())
                 .collect(),
             naming,
-            changed,
+            sought,
+            reaching,
             resolved: BTreeMap::new(),
             work: ResolutionWork::default(),
         }
     }
 
     /// Judge the probed links, then the links the store holds under each
-    /// changed key, a chunk at a time.
+    /// sought key, a chunk at a time.
     fn run(
         &mut self,
         probed: &[ProbedLink],
@@ -454,7 +527,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         for probe in probed {
             let before = self.keys_of(&probe.link, &probe.before_holder);
             let after = self.keys_of(&probe.link, &probe.after_holder);
-            if !probe.written && before == after && !self.meets_a_change(&after) {
+            if !probe.written && before == after && !self.is_sought(&after) {
                 continue;
             }
             chunk.push(Judged {
@@ -471,8 +544,8 @@ impl<'a, R: Runner> Judging<'a, R> {
         }
         self.judge(chunk, each)?;
 
-        let changed: Vec<String> = self.changed.iter().cloned().collect();
-        for keys in changed.chunks(LINK_HEALTH_CHUNK) {
+        let sought: Vec<String> = self.sought.iter().cloned().collect();
+        for keys in sought.chunks(LINK_HEALTH_CHUNK) {
             let listed: Vec<&str> = keys.iter().map(String::as_str).collect();
             let occupied = occupied_keys(&self.runner, self.key, &[], &listed)?;
             for key in occupied.paths.into_iter().map(|at| listed[at]) {
@@ -488,11 +561,12 @@ impl<'a, R: Runner> Judging<'a, R> {
                 }
             }
         }
+
         Ok(())
     }
 
-    /// `held`, read under the changed key `key`, as a link to judge — or
-    /// `None` where its holder is a target, or a lesser changed key it is
+    /// `held`, read under the sought key `key`, as a link to judge — or
+    /// `None` where its holder is a target, or a lesser sought key it is
     /// held under owns it.
     fn owned_by(&self, key: &str, held: Held) -> Result<Option<Judged>, StoreError> {
         let holder = DocumentPath::new(&held.holder)
@@ -506,7 +580,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         if held
             .keys
             .iter()
-            .any(|(text, _)| text.as_str() < key && self.changed.contains(text))
+            .any(|(text, _)| text.as_str() < key && self.sought.contains(text))
         {
             return Ok(None);
         }
@@ -544,15 +618,20 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// What the suffix address `address` names on each side of the plan,
-    /// and the head of what it names after where that is several.
-    fn name(&mut self, address: &str) -> Result<TargetNaming, StoreError> {
+    /// and the head of what it names on the side `headed` where that is
+    /// several.
+    fn name(&mut self, address: &str, headed: PlanSide) -> Result<TargetNaming, StoreError> {
         let keys = self.in_space(suffix_keys(address));
         self.resolve(&keys.iter().cloned().collect())?;
         self.work.links_evaluated += 1;
         let before = self.resolution(&keys, |target| target.before)?;
         let after = self.resolution(&keys, |target| target.after)?;
-        let candidates = match after {
-            Resolves::Several {} => Some(self.head_after(&keys)?),
+        let several = match headed {
+            PlanSide::Before => &before,
+            PlanSide::After => &after,
+        };
+        let candidates = match several {
+            Resolves::Several {} => Some(self.head(&keys, headed)?),
             _ => None,
         };
         Ok(TargetNaming {
@@ -562,13 +641,13 @@ impl<'a, R: Runner> Judging<'a, R> {
         })
     }
 
-    /// The head of what `keys` name with every target at its after-state, as
+    /// The head of what `keys` name with every target on the side `side`, as
     /// a store built there would read it: the stored members of each key
     /// less the targets, read [`CANDIDATE_HEAD`] rows past the targets the
     /// key could hold and counted where that read fills, merged in ladder
-    /// order with the targets standing after; each candidate named by its
-    /// minimal suffix after the plan ([`Self::minimal_suffix`]).
-    fn head_after(&mut self, keys: &[Key]) -> Result<CandidateHead, StoreError> {
+    /// order with the targets standing on that side; each candidate named by
+    /// its minimal suffix there ([`Self::minimal_suffix`]).
+    fn head(&mut self, keys: &[Key], side: PlanSide) -> Result<CandidateHead, StoreError> {
         let bound = |judging: &Self, key: &Key| {
             CANDIDATE_HEAD + judging.naming.get(&key.0).map_or(0, Vec::len)
         };
@@ -591,7 +670,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                 filled.push(key);
             }
             named.extend(stored);
-            for target in self.members(key).filter(|target| target.after) {
+            for target in self.members(key).filter(|target| side.holds(target)) {
                 total += 1;
                 let rung = match key.1 {
                     Some(_) => match self.key {
@@ -612,7 +691,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         named.truncate(CANDIDATE_HEAD);
         let mut candidates = Vec::with_capacity(named.len());
         for (_, path) in named {
-            let suffix = self.minimal_suffix(&path)?;
+            let suffix = self.minimal_suffix(&path, side)?;
             candidates.push(Candidate::new(wire_path(&path)?, suffix));
         }
         CandidateHead::new(candidates, total).map_err(|problem| StoreError::Damaged {
@@ -662,22 +741,23 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// The first of `path`'s suffix spellings that names the document there
-    /// alone after the plan, or the path itself where none does.
+    /// alone on the side `side`, or the path itself where none does.
     ///
     /// **Each spelling is resolved through this judgment, not link health's
     /// suffix statement** (`SuffixSpellings`): that statement reads the
     /// classes as the store holds them, by stored document, so it would
     /// count a document the plan removes or carries away and miss one it
     /// creates or lands. Resolving each spelling here reads it over the
-    /// overlay, every target at its after-state, as the head it names is
-    /// read — so a candidate is named as a store built after the plan would
+    /// overlay, every target on the side asked, as the head it names is
+    /// read — so a candidate is named as a store built on that side would
     /// name it, at the cost of a bounded read of each spelling's keys.
-    fn minimal_suffix(&mut self, path: &str) -> Result<String, StoreError> {
+    fn minimal_suffix(&mut self, path: &str, side: PlanSide) -> Result<String, StoreError> {
         let document = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
         for spelling in document.suffix_spellings() {
             let keys = self.in_space(suffix_keys(&spelling));
             self.resolve(&keys.iter().cloned().collect())?;
-            if let Resolves::One { path: one } = self.resolution(&keys, |target| target.after)?
+            if let Resolves::One { path: one } =
+                self.resolution(&keys, |target| side.holds(target))?
                 && one.as_str() == path
             {
                 return Ok(spelling);
@@ -693,9 +773,10 @@ impl<'a, R: Runner> Judging<'a, R> {
         Ok(self.target_keys.contains(at.path_key_in(self.key).as_str()))
     }
 
-    /// Whether one of `keys` could name a target the plan changes.
-    fn meets_a_change(&self, keys: &[Key]) -> bool {
-        keys.iter().any(|(text, _)| self.changed.contains(text))
+    /// Whether one of `keys` is sought: it could name a target the plan
+    /// changes or a document it reaches.
+    fn is_sought(&self, keys: &[Key]) -> bool {
+        keys.iter().any(|(text, _)| self.sought.contains(text))
     }
 
     /// Resolve every key `chunk` holds that is not yet resolved, hand each of
@@ -730,6 +811,11 @@ impl<'a, R: Runner> Judging<'a, R> {
                     before_targets.push(target.path.clone());
                 }
             }
+            for document in judged.before.iter().flat_map(|key| self.reached(key)) {
+                if !before_targets.contains(document) {
+                    before_targets.push(document.clone());
+                }
+            }
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
@@ -760,6 +846,26 @@ impl<'a, R: Runner> Judging<'a, R> {
                 segments.is_none_or(|segments| {
                     self.ignore.admits(
                         target.path.as_str(),
+                        usize::try_from(segments).unwrap_or(usize::MAX),
+                        self.order,
+                    )
+                })
+            })
+    }
+
+    /// The documents the plan reaches that `key` could name, the
+    /// ambiguity-ignore set letting each in.
+    fn reached(&self, key: &Key) -> impl Iterator<Item = &DocumentPath> {
+        let (text, segments) = key;
+        self.reaching
+            .get(text)
+            .into_iter()
+            .flatten()
+            .map(|at| &self.overlay.reached[*at])
+            .filter(move |document| {
+                segments.is_none_or(|segments| {
+                    self.ignore.admits(
+                        document.as_str(),
                         usize::try_from(segments).unwrap_or(usize::MAX),
                         self.order,
                     )

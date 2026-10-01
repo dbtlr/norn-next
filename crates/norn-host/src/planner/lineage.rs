@@ -27,7 +27,7 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
-use norn_wire::{Backlinks, Operation, OperationKind};
+use norn_wire::{Backlinks, LinkFamily, Operation, OperationId, OperationKind};
 
 use super::compose::touches;
 use super::links::rewrite_destination;
@@ -68,7 +68,8 @@ pub(crate) struct Lineage {
     /// nothing.
     at_end: BTreeMap<NormalizedPath, Option<Drawn>>,
     /// Each edit's position, and the file whose before-state the content it
-    /// acted on was drawn from.
+    /// acted on was drawn from: where it stood in the order for an edit, and
+    /// at the end of the plan for an authored link rewrite.
     edited: BTreeMap<usize, NormalizedPath>,
     /// Each file whose before-state ends the plan at another file, and that
     /// file: [`Self::at_end`] read the other way.
@@ -80,6 +81,39 @@ pub(crate) struct Lineage {
     /// the plan's moves carried it first, and that delete's place in
     /// [`Self::removals`].
     removed: BTreeMap<NormalizedPath, usize>,
+    /// Each wikilink rewrite of the plan, in the order it composes.
+    retargets: Vec<Retarget>,
+    /// Each authored link rewrite of the plan, in the order it composes.
+    relinks: Vec<Relink>,
+}
+
+/// An authored link rewrite of the plan: the links it respells, named by
+/// the document holding them where the plan leaves it, their syntax and the
+/// address they are written with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Relink {
+    /// The rewrite's position.
+    pub(crate) position: usize,
+    /// The document holding the links, where the plan leaves it.
+    pub(crate) holder: NormalizedPath,
+    /// The links' syntax.
+    pub(crate) syntax: LinkFamily,
+    /// The address the links are written with.
+    pub(crate) from: String,
+}
+
+/// A wikilink rewrite of the plan: what it retargets the wikilinks naming,
+/// and what it retargets them to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Retarget {
+    /// The rewrite's position.
+    pub(crate) position: usize,
+    /// The identifier other operations require it by, where it carries one.
+    pub(crate) id: Option<OperationId>,
+    /// The address of what the retargeted wikilinks name before the plan.
+    pub(crate) old: String,
+    /// The address of the document they name after it.
+    pub(crate) new: String,
 }
 
 /// A delete of the plan, and what it says of the links naming the document
@@ -118,11 +152,14 @@ impl Removal {
     /// Planning resolves every delete by this rule, leaving one it does not
     /// keep unresolved, and the applier refuses a resolved plan holding one
     /// by it again; neither reads anything more than the links and the
-    /// target it judges. Planning reads `named` before any cascade writes a
-    /// link, and the change set after, reading each link a rewrite writes as
-    /// the text that rewrite matched, from where its holder's content stood,
-    /// so the two read the same backlinks: one a cascade respells — away
-    /// from the document, or from where its moved holder lands — stays one.
+    /// target it judges. Planning reads the backlinks before any cascade
+    /// writes a link and judges each delete once the plan composes with its
+    /// cascades, and the change set reads each link a rewrite writes as the
+    /// text that rewrite matched, from where its holder's content stood, so
+    /// the two read the same backlinks: one a cascade respells — away from
+    /// the document, or from where its moved holder lands — stays one, while
+    /// one an authored link rewrite or a wikilink rewrite respells, whose
+    /// author said what it names, is none.
     pub(crate) fn kept_by(
         &self,
         named: bool,
@@ -149,6 +186,7 @@ impl Lineage {
     ) -> Lineage {
         let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
         let mut lineage = Lineage::default();
+        let mut rewritten: Vec<(usize, NormalizedPath)> = Vec::new();
         for &position in order {
             let kind = &operations[position].kind;
             match kind {
@@ -207,15 +245,43 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
-                // None of these draws content from a before-state. A folder
-                // move arrives expanded into the moves it makes, and a link
-                // rewrite — an authored one or a cascade's — is an edit in
-                // place, drawing on nothing. NORN-297: a wikilink rewrite is
-                // not planned yet; a hand-built resolved plan can still carry
-                // one this far, and recompose refuses it.
-                OperationKind::MoveFolder { .. }
-                | OperationKind::RewriteLink { .. }
-                | OperationKind::RewriteWikilink { .. } => {}
+                // A wikilink rewrite draws on nothing and edits nothing
+                // itself: its cascade's rewrites, which planning generates
+                // from what it names here, are edits in place of their
+                // holders where the plan leaves them.
+                OperationKind::RewriteWikilink { old, new } => {
+                    lineage.retargets.push(Retarget {
+                        position,
+                        id: operations[position].id.clone(),
+                        old: old.address().to_string(),
+                        new: new.address().to_string(),
+                    });
+                }
+                // An authored link rewrite is an edit in place of the
+                // document it names where the plan leaves it, composing after
+                // every operation with its holder's batch, so it acts on what
+                // that document holds at the end of the plan: its source is
+                // read once the walk is done.
+                OperationKind::RewriteLink {
+                    path, syntax, from, ..
+                } => {
+                    if let Some(file) = identity(path.as_str()) {
+                        lineage.relinks.push(Relink {
+                            position,
+                            holder: file.clone(),
+                            syntax: *syntax,
+                            from: from.clone(),
+                        });
+                        rewritten.push((position, file));
+                    }
+                }
+                // A folder move arrives expanded into the moves it makes.
+                OperationKind::MoveFolder { .. } => {}
+            }
+        }
+        for (position, file) in rewritten {
+            if let Some(source) = lineage.source(&file) {
+                lineage.edited.insert(position, source.from);
             }
         }
         lineage.carried = lineage
@@ -239,6 +305,24 @@ impl Lineage {
         Some((file, drawn))
     }
 
+    /// The file the document standing at `from` before the plan stands at
+    /// after it: where the plan's moves carry it, `from` itself where it
+    /// stays — edited in place, or moved away and back — and `None` where no
+    /// file holds it at the end of the plan.
+    ///
+    /// **Which document a name meant.** A name read before the plan and one
+    /// read after it name one document where the first's document lands
+    /// where the second names, so a wikilink rewrite reads here whether its
+    /// two ends name one document across the plan's moves.
+    pub(crate) fn landing(&self, from: &NormalizedPath) -> Option<NormalizedPath> {
+        if let Some((to, _)) = self.carried_to(from) {
+            return Some(to.clone());
+        }
+        self.source(from)
+            .is_some_and(|drawn| drawn.from == *from)
+            .then(|| from.clone())
+    }
+
     /// The delete that removes the document standing at `from` before the
     /// plan — at `from`, or wherever the plan's moves carried it first — and
     /// `None` where no delete of the plan removes it.
@@ -255,6 +339,16 @@ impl Lineage {
     /// document the plan itself created among them.
     pub(crate) fn removals(&self) -> impl Iterator<Item = &Removal> + '_ {
         self.removals.iter()
+    }
+
+    /// Every wikilink rewrite of the plan, in the order it composes.
+    pub(crate) fn retargets(&self) -> impl Iterator<Item = &Retarget> + '_ {
+        self.retargets.iter()
+    }
+
+    /// Every authored link rewrite of the plan, in the order it composes.
+    pub(crate) fn relinks(&self) -> impl Iterator<Item = &Relink> + '_ {
+        self.relinks.iter()
     }
 
     /// The source of what `file` holds at the end of the plan, where its

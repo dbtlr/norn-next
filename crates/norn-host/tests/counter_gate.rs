@@ -1255,7 +1255,7 @@ fn hub_deletes(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
 }
 
 /// `judged`'s counts added to `counters`, each named for the preview
-/// `prefix` names.
+/// `prefix` names, or by its own name alone where `prefix` is empty.
 fn judged_as(counters: &mut Vec<(String, u64)>, prefix: &str, judged: norn_host::LinkJudgmentCost) {
     for (name, value) in [
         ("judgments", judged.judgments),
@@ -1266,7 +1266,14 @@ fn judged_as(counters: &mut Vec<(String, u64)>, prefix: &str, judged: norn_host:
         ("vm_steps", judged.vm_steps),
         ("full_scan_steps", judged.full_scan_steps),
     ] {
-        counters.push((format!("{prefix}_{name}"), value));
+        counters.push((
+            if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}_{name}")
+            },
+            value,
+        ));
     }
 }
 
@@ -1276,6 +1283,137 @@ fn link_entries(plan: &norn_wire::ResolvedPlan) -> u64 {
         .iter()
         .filter(|condition| matches!(condition, norn_wire::PlanCondition::LinkResolution { .. }))
         .count() as u64
+}
+
+/// The stem of the document the wikilink-rewrite bar retargets the hub's
+/// in-links to. No generated document shares it, asserted rather than
+/// assumed.
+const RETARGET_STEM: &str = "hub-gate-retarget";
+
+/// **A wikilink rewrite's cascade over a hub's in-links (NORN-297).** The
+/// Layer 3 mass-delete cost limit binds a vault-wide rewrite as it binds a
+/// move and a delete: retargeting every wikilink naming the hub costs the
+/// links naming it, never the vault around them. A preview of the rewrite
+/// through [`norn_host::Host::rewrite_wikilink`] plans one rewrite per
+/// in-link, records one written entry per rewritten link and advises
+/// nothing, and what its judgments on the store's resolution door cost is
+/// read off the host's read account as the preview really ran them — ten
+/// judgments: naming `old` and `new`, the cascade's pass over the links
+/// naming the hub and its spelling probe, then the planning's change set and
+/// the applier's computation of it again, each naming both ends again: the
+/// same judgments, links evaluated, keys resolved, head rows, statements and
+/// steps, and no table or index stepped end to end, at `ambiguous` (300
+/// documents) exactly as at `realistic` (2000). The bar stands where no
+/// member of a key's class is kept out by the ambiguity-ignore set ahead of
+/// its head (NORN-320); the profiles declare no ignore set.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = hub_rewrite("counter-gate-hub-rewrite-ambiguous", &small);
+    let large_counters = hub_rewrite("counter-gate-hub-rewrite-realistic", &large);
+
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("rewrites", HUB_IN_LINKS as u64),
+            ("entries", HUB_IN_LINKS as u64),
+            ("advised", 0),
+            ("judgments", 10),
+            ("full_scan_steps", 0),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "the hub's wikilink rewrite over `{}` did not read `{name}` as its \
+                 {HUB_IN_LINKS} planted in-links name: {counters:?}",
+                profile.name
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "retargeting the wikilinks naming a hub",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with the hub, [`HUB_IN_LINKS`] in-links and the
+/// document they are retargeted to planted beside it, preview the rewrite
+/// through the host, and read what the preview's link judgments cost off the
+/// host's read account.
+fn hub_rewrite(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_hub_in_links(&vault);
+    std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
+    let retarget_path = format!("hub-gate/{RETARGET_STEM}.md");
+    std::fs::write(vault.path().join(&retarget_path), "the retarget\n")
+        .expect("writing the retarget");
+    let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
+    let mut counters: Vec<(String, u64)> = Vec::new();
+    {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let account = host.read_evidence();
+        let previewed = host
+            .rewrite_wikilink(norn_wire::RewriteWikilinkParams::new(
+                VaultAddress::name(vault.name().clone()),
+                norn_wire::ApplyMode::Preview,
+                target(HUB_STEM),
+                target(RETARGET_STEM),
+            ))
+            .expect("a preview is answered")
+            .wait()
+            .expect("the hub's wikilink rewrite previews");
+        let judged = host.read_evidence().since(account).preview_link_judgments;
+        let norn_wire::ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+            panic!("a preview answered {:?}", previewed.report);
+        };
+        judged_as(&mut counters, "", judged);
+        counters.push((
+            "rewrites".to_string(),
+            plan.operations
+                .iter()
+                .map(|operation| operation.cascade.len() as u64)
+                .sum(),
+        ));
+        counters.push(("entries".to_string(), link_entries(&plan)));
+        counters.push(("advised".to_string(), forecast.links.len() as u64));
+    }
+
+    // The hub and the retarget are each the one document of their stem, so
+    // the hub's in-links name it alone and the retarget's name it alone.
+    let mut store = vault.store();
+    for at in [hub_path(), retarget_path] {
+        let stem = DocumentPath::new(&at)
+            .expect("a document path")
+            .stem()
+            .to_string();
+        let mut sharing = Vec::new();
+        attach::for_each_derived_path(&mut store, |path| {
+            if path.stem() == stem && path.as_str() != at {
+                sharing.push(path.as_str().to_string());
+            }
+        });
+        assert!(
+            sharing.is_empty(),
+            "the rewrite bar's `{at}` has stem `{stem}`, and the attachment derived other \
+             documents at it: {sharing:?}"
+        );
+    }
+    let counters: CounterSnapshot = counters.into_iter().collect();
+    record_the_counters(
+        &format!(
+            "retargeting the wikilinks naming a hub, {HUB_IN_LINKS} in-links over `{}`",
+            profile.name
+        ),
+        &counters,
+    );
+    counters
 }
 
 /// **The size-independence bar over a read.** The vault around a bounded find

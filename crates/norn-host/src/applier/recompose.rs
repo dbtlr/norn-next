@@ -112,8 +112,8 @@ pub(super) fn recompose<V: VaultView>(
     let unseen = |file: &NormalizedPath| before.unseen.contains(file);
     let mut disagreeing: Vec<DocumentPath> = Vec::new();
     // An operation that does not act refuses the plan whatever files it
-    // names: one naming none — a wikilink rewrite without a cascade — would
-    // otherwise add nothing here and be dropped while the rest landed.
+    // names: one naming none would otherwise add nothing here and be dropped
+    // while the rest landed.
     let mut inactive = false;
     for unresolvable in &composition.unresolvable {
         let operation = &plan.operations[unresolvable.position];

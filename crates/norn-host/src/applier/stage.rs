@@ -332,11 +332,12 @@ pub(super) fn check(
     // forbidding the links naming its document that a recorded link names,
     // or one rewriting them to no one document a link can be respelled
     // toward — is one planning leaves unresolved by the same rule
-    // (`Removal::kept_by`), so the plan is not what its operations do. Where the set
-    // moved since planning, the refusal's fresh plan answers for it instead.
-    // NORN-297: a move's or a rewriting delete's cascade omitting a rewrite
-    // planning would generate is not held here; the set records the link it
-    // leaves, and the plan lands as recorded.
+    // (`Removal::kept_by`), so the plan is not what its operations do. Where
+    // the set moved since planning, the refusal's fresh plan answers for it
+    // instead. NORN-297: a move's, a rewriting delete's or a wikilink
+    // rewrite's cascade omitting a rewrite planning would generate is not
+    // held here; the set records the link it leaves, and the plan lands as
+    // recorded.
     if refused_links.is_empty() && !recomputed.unkept.is_empty() {
         return Err(Unfit::Invalid(disagreement(
             recomputed.unkept.iter().filter_map(|&position| {

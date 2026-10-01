@@ -3,19 +3,24 @@
 //!
 //! **`old` need not name a document that stands.** A wikilink rewrite is how
 //! a broken link is repaired, so `old` is read as a resolution target and
-//! never checked against the vault here; planning resolves it, and an `old`
-//! naming several documents leaves the operation unresolved with the head of
-//! its candidates.
+//! never checked against the vault here. Planning reads it as the vault
+//! stands before the plan: naming one document, every wikilink resolving to
+//! that document is retargeted, whatever its spelling; naming none, every
+//! broken wikilink that would name a document standing at the place `old`
+//! spells — `old` with the document extension appended unless it carries it
+//! — is, its case folded only where the root folds ASCII case, so `Old Note`
+//! repairs `[[Old Note]]` and `[[Old Note.md]]` and `v1.2` never repairs
+//! `[[v1]]`; naming
+//! several, the operation is unresolved with the head of its candidates, its
+//! ambiguous end named `old`. `new` must name one document where the plan
+//! leaves the vault, else the operation is unresolved, a `new` naming
+//! several with its ambiguous end named `target`. Each retargeted wikilink is
+//! respelled in its own form, and the rewrites ride the operation as its
+//! link cascade. A Markdown link is no wikilink, and is never rewritten here.
 //!
 //! **Both ends name documents, never places inside them.** Each rewritten
 //! link keeps the anchor it was written with, so an anchor on `old` or `new`
 //! is refused at the read.
-//!
-//! **Not planned yet (NORN-297).** Until a wikilink rewrite's cascade is
-//! planned — a move's is — the planner leaves a wikilink rewrite unresolved,
-//! naming that limit, and the
-//! host serves no `rewrite_wikilink` verb: the request compiles to its plan,
-//! which a caller can preview through `apply` to read the limit.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

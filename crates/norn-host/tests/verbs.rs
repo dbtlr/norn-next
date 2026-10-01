@@ -1,6 +1,6 @@
 //! **The write verbs, end to end**: `Host::set`, `Host::edit`,
-//! `Host::new_document`, `Host::move_path` and `Host::delete` over a real
-//! vault and a real attachment.
+//! `Host::new_document`, `Host::move_path`, `Host::delete` and
+//! `Host::rewrite_wikilink` over a real vault and a real attachment.
 //!
 //! Each verb compiles its request to operations and enters the one `apply`
 //! path, so what is pinned here is what a caller of each verb sees: a
@@ -8,8 +8,9 @@
 //! `where` target expanded into exactly the documents the store matches, a
 //! move carrying the link cascade it plans and a folder move naming what it
 //! leaves behind, a delete refused while links name its document unless it
-//! rewrites them or leaves them broken, and the refusals the planner and the
-//! applier answer for a write.
+//! rewrites them or leaves them broken, a wikilink rewrite carrying the
+//! cascade that retargets every wikilink naming its `old`, and the refusals
+//! the planner and the applier answer for a write.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -26,7 +27,8 @@ use norn_wire::{
     ErrorDetail, ErrorEnvelope, ExpectedField, FieldChange, FilePath, FindParams, FindingKind,
     FolderPath, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, MoveParams, MoveSubject, NewParams,
     Operation, OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck, ResolutionTarget,
-    ResolvedPlan, SetParams, TargetResult, UnresolvedReason, VaultAddress, WriteTarget,
+    ResolvedPlan, RewriteWikilinkParams, SetParams, TargetResult, UnresolvedReason, VaultAddress,
+    WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -911,6 +913,99 @@ fn a_delete_leaving_its_links_broken_lands_and_an_unlinked_delete_lands() {
             .join("delete-gate/kept/delete-gate-target.md")
             .exists()
     );
+}
+
+/// **A wikilink rewrite previews its cascade, then applies the plan it
+/// previewed**: every wikilink naming the subject is retargeted to the
+/// target, in its own form, the embed keeping its anchor, while a Markdown
+/// link naming the subject is no wikilink and stays. An `old` naming several
+/// documents is refused with the head of them, preview and apply alike.
+#[test]
+fn a_wikilink_rewrite_previews_its_cascade_then_applies_it() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-rewrite-wikilink",
+        &[
+            ("rewrite-gate/rewrite-gate-subject.md", "# Subject\n"),
+            ("rewrite-gate/kept/rewrite-gate-target.md", "# Target\n"),
+            (
+                "rewrite-gate/linker.md",
+                "See [[rewrite-gate-subject]] and [s](rewrite-gate-subject.md).\n",
+            ),
+            (
+                "rewrite-gate/holder.md",
+                "Also ![[rewrite-gate/rewrite-gate-subject#Part]].\n",
+            ),
+            ("rewrite-gate/x/rewrite-gate-twin.md", "x\n"),
+            ("rewrite-gate/y/rewrite-gate-twin.md", "y\n"),
+        ],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let target = |text: &str| ResolutionTarget::new(text).expect("a target");
+    let rewriting = |mode| {
+        RewriteWikilinkParams::new(
+            address(&vault),
+            mode,
+            target("rewrite-gate-subject"),
+            target("rewrite-gate-target"),
+        )
+    };
+
+    let plan = previewed(host.rewrite_wikilink(rewriting(ApplyMode::Preview)));
+    assert_eq!(
+        plan.operations[0].cascade,
+        vec![
+            LinkRewrite::new(
+                path("rewrite-gate/holder.md"),
+                LinkFamily::Wikilink,
+                "rewrite-gate/rewrite-gate-subject",
+                "kept/rewrite-gate-target",
+            ),
+            LinkRewrite::new(
+                path("rewrite-gate/linker.md"),
+                LinkFamily::Wikilink,
+                "rewrite-gate-subject",
+                "rewrite-gate-target",
+            ),
+        ]
+    );
+    let (landed, changeset, _) = applied(host.rewrite_wikilink(rewriting(ApplyMode::Apply)));
+    assert_eq!(
+        landed, plan,
+        "the apply landed another plan than it previewed"
+    );
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        read(&vault, "rewrite-gate/linker.md"),
+        "See [[rewrite-gate-target]] and [s](rewrite-gate-subject.md).\n"
+    );
+    assert_eq!(
+        read(&vault, "rewrite-gate/holder.md"),
+        "Also ![[kept/rewrite-gate-target#Part]].\n"
+    );
+
+    let twin = |mode| {
+        RewriteWikilinkParams::new(
+            address(&vault),
+            mode,
+            target("rewrite-gate-twin"),
+            target("rewrite-gate-target"),
+        )
+    };
+    let previewed = refused(host.rewrite_wikilink(twin(ApplyMode::Preview)));
+    let applied = refused(host.rewrite_wikilink(twin(ApplyMode::Apply)));
+    assert_eq!(previewed.code(), &ReasonCode::VaultPlanRefused);
+    assert_eq!(previewed.detail(), applied.detail());
+    let ErrorDetail::PlanRefused { unresolved, .. } = previewed.detail() else {
+        panic!("the refusal carries {:?}", previewed.detail());
+    };
+    let [left] = unresolved.as_slice() else {
+        panic!("one operation is unresolved: {unresolved:?}");
+    };
+    let UnresolvedReason::AmbiguousTarget { candidates, .. } = &left.reason else {
+        panic!("an ambiguous `old`: {:?}", left.reason);
+    };
+    assert_eq!(candidates.total(), 2);
 }
 
 /// Wait until the attachment has derived the document another writer wrote

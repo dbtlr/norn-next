@@ -108,9 +108,18 @@ pub(crate) struct Unresolvable {
 /// over the holder's final bytes ([`edit::rewritten`]), each link matched as
 /// those bytes write it, so no rewrite respells a link another one wrote and
 /// the order the operations compose in says nothing about what a holder
-/// reads. A rewrite never fails; a cascade naming a holder that holds no
-/// document leaves its operation unresolvable whole, its rewrites composing
-/// nowhere, since planning names only holders that stand.
+/// reads. A cascade's rewrite never fails; a cascade naming a holder that
+/// holds no document leaves its operation unresolvable whole, its rewrites
+/// composing nowhere, since planning names only holders that stand.
+///
+/// **An authored link rewrite joins its holder's batch.** A `rewrite_link`
+/// names its document where the plan leaves it, as a cascade's rewrite
+/// does, and composes in the same batch as every cascade rewrite naming that
+/// document. It must match: where no document stands there, or no link of
+/// its syntax there is written `from`, it is unresolvable, as an edit whose
+/// text does not occur is, rather than landing as a change of nothing. One
+/// matching a link the text layer leaves as written, or respelling a link to
+/// what it already holds, acts, and its document may land found.
 pub(crate) fn compose<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -127,8 +136,25 @@ pub(crate) fn compose<V: VaultView>(
         .iter()
         .map(|unresolvable: &Unresolvable| unresolvable.position)
         .collect();
+    let acted = || order.iter().filter(|position| !failed.contains(position));
+    // Each authored link rewrite, as the rewrite it writes into its holder's
+    // batch.
+    let authored: Vec<(usize, LinkRewrite)> = acted()
+        .filter_map(|&position| match &operations[position].kind {
+            OperationKind::RewriteLink {
+                path,
+                syntax,
+                from,
+                to,
+            } => Some((
+                position,
+                LinkRewrite::new(path.clone(), *syntax, from.clone(), to.clone()),
+            )),
+            _ => None,
+        })
+        .collect();
     let mut holders: BTreeMap<DocumentPath, Vec<&LinkRewrite>> = BTreeMap::new();
-    for &position in order.iter().filter(|position| !failed.contains(position)) {
+    for &position in acted() {
         match vault.holders(&operations[position].cascade)? {
             Ok(named) => {
                 for (holder, rewrite) in named {
@@ -136,6 +162,15 @@ pub(crate) fn compose<V: VaultView>(
                 }
             }
             Err(detail) => unresolvable.push(Unresolvable { position, detail }),
+        }
+    }
+    for (position, rewrite) in &authored {
+        match vault.matching(rewrite)? {
+            Ok(holder) => holders.entry(holder).or_default().push(rewrite),
+            Err(detail) => unresolvable.push(Unresolvable {
+                position: *position,
+                detail,
+            }),
         }
     }
     for (holder, rewrites) in holders {
@@ -400,16 +435,15 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::DeleteDocument { path, .. } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: both link rewrites are vocabulary before they are
-            // planned. Until the planner plans an authored rewrite, each is
-            // left unresolved in words rather than planned as something it
-            // does not say.
-            OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
-                Err(format!(
-                    "a `{}` operation is not planned yet: only a move's and a delete's link cascades are planned yet",
-                    kind.name()
-                ))
-            }
+            // A wikilink rewrite touches nothing itself: what it writes is
+            // its cascade, which composes after every operation, and which
+            // wikilinks it retargets is planning's to judge
+            // (`super::cascade`).
+            OperationKind::RewriteWikilink { .. } => Ok(()),
+            // An authored link rewrite composes with its holder's batch,
+            // after every operation, where the plan leaves its document
+            // ([`compose`]).
+            OperationKind::RewriteLink { .. } => Ok(()),
             // Planning expands a folder move into the document moves it
             // makes before anything composes (`super::expand`), so only a
             // plan resolved without expansion meets one here, which the
@@ -532,6 +566,41 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         Ok(Ok(named))
     }
 
+    /// The spelling of the document the authored link rewrite `rewrite`
+    /// names where it stands so far, or why it acts on none there: no
+    /// document stands there, or none of its links of the rewrite's syntax
+    /// is written with its `from`.
+    fn matching(
+        &mut self,
+        rewrite: &LinkRewrite,
+    ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
+        let spelling = match self.standing(&rewrite.path)? {
+            Ok(spelling) => spelling,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        let bytes = self
+            .target(&spelling)
+            .after
+            .as_ref()
+            .expect("a document stands");
+        let matches = document_links(bytes).iter().any(|link| {
+            wire_family(link.family) == rewrite.syntax && links::address(link) == rewrite.from
+        });
+        Ok(if matches {
+            Ok(spelling)
+        } else {
+            let syntax = match rewrite.syntax {
+                LinkFamily::Wikilink => "wikilink",
+                LinkFamily::Markdown => "Markdown link",
+                _ => "link of its syntax",
+            };
+            Err(format!(
+                "no {syntax} in `{}` is written `{}`, so the rewrite changes nothing",
+                rewrite.path, rewrite.from
+            ))
+        })
+    }
+
     /// Respell, in the document standing at `spelling`, every link each of
     /// `rewrites` names, all at once, recording each matching link the text
     /// layer leaves as written under the address it is still written with,
@@ -604,13 +673,14 @@ fn spelled_as_asked(identity: &NormalizedPath) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `kind` edits a document where it stands, changing the content the
-/// file already holds: a `str_replace` and every document-local kind. Such an
-/// edit names no name it fills or empties and carries no content from another
-/// file.
+/// Whether `kind` edits a document in place, changing the content the file
+/// it names already holds: a `str_replace` and every document-local kind,
+/// each where the document stands when it composes, and an authored link
+/// rewrite, where the plan leaves the document it names. Such an edit names
+/// no name it fills or empties and carries no content from another file.
 pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
     match kind {
-        OperationKind::StrReplace { .. } => true,
+        OperationKind::StrReplace { .. } | OperationKind::RewriteLink { .. } => true,
         other => edit::local_target(other).is_some(),
     }
 }

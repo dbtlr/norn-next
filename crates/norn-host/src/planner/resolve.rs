@@ -128,11 +128,18 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // Each move that resolves generates its cascade from the plan as it
         // composes without any, and a holder a left-out operation touches
         // takes the move down with it, as any file two operations share
-        // does; a delete forbidding the links naming its document falls
-        // where one does. What is left composes again, until nothing more
-        // falls.
-        let generated = generate(&composition, &lineage, view.normalizer(), links)
-            .map_err(PlanningFailure::Links)?;
+        // does; a delete its link choice does not keep falls once the plan
+        // composes with its cascades. What is left composes again, until
+        // nothing more falls.
+        let generated = generate(
+            &composition,
+            &lineage,
+            order.iter().map(|&position| &operations[position]),
+            view.normalizer(),
+            links,
+        )
+        .map_err(PlanningFailure::Links)?;
+        let deletes = generated.deletes;
         for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;
         }
@@ -145,8 +152,16 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             // left out in the composition's words, in every build, rather
             // than planned with a transition its cascade does not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-            if composition.unresolvable.is_empty() {
+            // Each delete is decided here, by the one rule its link choice
+            // is held to, from the backlinks the composed plan leaves: one a
+            // wikilink rewrite's cascade was to respell, and composition left
+            // as written, still names the removed document.
+            let unkept = deletes.unkept(&composition.skipped, &lineage, view.normalizer());
+            if composition.unresolvable.is_empty() && unkept.is_empty() {
                 break (order, lineage, composition);
+            }
+            for (position, reason) in unkept {
+                left_out.entry(position).or_insert(reason);
             }
             for unresolvable in &composition.unresolvable {
                 left_out.entry(unresolvable.position).or_insert_with(|| {
@@ -853,30 +868,6 @@ mod tests {
                 other => panic!("no longer resolves: {other:?}"),
             },
             other => panic!("one operation is unresolved: {other:?}"),
-        }
-    }
-
-    /// **A link rewrite is left unresolved until it is planned (NORN-297).**
-    /// A link rewrite and a wikilink rewrite are each left unresolved, naming
-    /// the limit, and write nothing — never planned as something they do not
-    /// say.
-    #[test]
-    fn a_link_rewrite_is_left_unresolved_until_it_is_planned() {
-        let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
-        let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
-        for kind in [
-            OperationKind::rewrite_link(
-                path("notes/a.md"),
-                norn_wire::LinkFamily::Wikilink,
-                "b",
-                "c",
-            ),
-            OperationKind::rewrite_wikilink(target("b"), target("c")),
-        ] {
-            let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
-            let detail = unresolved_detail(&resolution);
-            assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
-            assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
         }
     }
 

@@ -604,7 +604,7 @@ pub use plan::operation::{
     OperationKind,
 };
 pub use plan::outcome::{
-    InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
+    AmbiguousEnd, InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
     UnresolvedReason,
 };
 pub use plan::root::RootIdentity;

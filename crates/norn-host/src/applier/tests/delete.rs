@@ -4,9 +4,9 @@
 //! leaving them broken lands, and the cascade one rewriting them carries.
 
 use norn_wire::{
-    Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, Operation,
-    OperationKind, PlanCondition, ResolutionTarget, ResolvedPlan, Resolves, UnresolvedOperation,
-    UnresolvedReason,
+    AmbiguousEnd, Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite,
+    Operation, OperationKind, PlanCondition, ResolutionTarget, ResolvedPlan, Resolves,
+    UnresolvedOperation, UnresolvedReason,
 };
 
 use super::{Fixture, applied, breaking, creating, deleting, editing, moving, path};
@@ -294,6 +294,7 @@ fn a_delete_whose_target_names_no_one_document_is_unresolved_saying_why() {
         [UnresolvedOperation::new(
             rewriting("a.md", "c"),
             UnresolvedReason::ambiguous_target(
+                AmbiguousEnd::Target,
                 CandidateHead::new(
                     [
                         Candidate::new(path("x/c.md"), "x/c"),

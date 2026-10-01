@@ -74,17 +74,22 @@
 //! operation of an authored plan, or on a kind that does not cascade, is a
 //! fault in the plan's shape rather than a refusal at the read.
 //!
-//! **A move's and a delete's cascades are planned; a rewrite's is vocabulary
-//! ahead of its planner (NORN-297).** Planning generates a
-//! `move_document`'s cascade from the links the vault holds, and expands a
-//! `move_folder` into the document moves it makes. It reads a
-//! `delete_document`'s backlinks the same way: saying neither flag, a delete
-//! any link names is left unresolved, naming every holder; `rewrite_to`
-//! carries the cascade respelling each backlink to name that document; and
-//! `allow_broken_links` lands, the forecast advising on each link it breaks.
-//! Both link rewrites are left unresolved by the planner, naming that limit,
-//! and the applier refuses a resolved plan carrying one. The limit closes
-//! when their cascades are planned.
+//! **Every cascade is planned from the links the vault holds.** Planning
+//! generates a `move_document`'s cascade, and expands a `move_folder` into
+//! the document moves it makes. It reads a `delete_document`'s backlinks the
+//! same way: saying neither flag, a delete any link names is left
+//! unresolved, naming every holder; `rewrite_to` carries the cascade
+//! respelling each backlink to name that document; and `allow_broken_links`
+//! lands, the forecast advising on each link it breaks. A `rewrite_wikilink`
+//! reads its `old` as the vault stands before the plan and carries the
+//! cascade retargeting every wikilink resolving to that one document, or,
+//! where `old` names none, every broken wikilink that would name a document
+//! standing at the place `old` spells — `old` with the document extension
+//! appended unless it carries it — as the root reads it; its `new` must name
+//! one document where the plan leaves the vault.
+//! An authored `rewrite_link` names its document where the plan leaves it
+//! and composes in one batch with every cascade rewrite there, so no rewrite
+//! respells a link another wrote; one matching no link does not resolve.
 //!
 //! **A resolution target here names a document, never a place inside one.**
 //! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
@@ -252,9 +257,10 @@ pub enum OperationKind {
     },
     /// In one document, respell every link of one syntax whose address is
     /// `from` to `to`. Only the address changes: an embed marker, a title
-    /// and an anchor survive.
+    /// and an anchor survive. It must match a link: one matching none does
+    /// not resolve.
     RewriteLink {
-        /// The document holding the links.
+        /// The document holding the links, where the plan leaves it.
         path: DocumentPath,
         /// The syntax of the links rewritten.
         syntax: LinkFamily,
@@ -271,11 +277,14 @@ pub enum OperationKind {
     /// Respell every wikilink in the vault naming one document to name
     /// another.
     RewriteWikilink {
-        /// What the links name now. It need not name a document that
-        /// stands, and naming several does not resolve.
+        /// What the links name now, read before the plan. It need not name a
+        /// document that stands — naming none, the broken wikilinks that
+        /// would name a document at the place it spells are rewritten — and
+        /// naming several does not resolve.
         #[schemars(schema_with = "whole_document_schema")]
         old: ResolutionTarget,
-        /// What they name after.
+        /// What they name after, one document where the plan leaves the
+        /// vault.
         #[schemars(schema_with = "whole_document_schema")]
         new: ResolutionTarget,
     },

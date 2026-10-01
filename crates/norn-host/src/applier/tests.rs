@@ -24,6 +24,7 @@ mod cascade;
 mod delete;
 mod differential;
 mod folder;
+mod rewrite;
 
 pub(super) fn path(text: &str) -> DocumentPath {
     DocumentPath::new(text).expect("a legal document path")
@@ -1236,14 +1237,14 @@ fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
     }
 }
 
-/// **An operation that does not act refuses the plan even where it touches
-/// no file.** A wikilink rewrite names its documents only through its
-/// cascade, and is not planned yet (NORN-297), so a resolved plan carrying
-/// one — beside an edit or alone, with a cascade or without — is
-/// `request/plan-invalid` naming the files its cascade names, and never
-/// applied with the rewrite silently dropped.
+/// **A wikilink rewrite stripped of its cascade is refused, never applied
+/// as a change of nothing.** The rewrite touches no file itself, so a
+/// resolved plan carrying it without the cascade planning gave it — beside an
+/// edit, or alone — recomposes; but the set computed again holds the
+/// wikilink it would retarget, which the plan does not record, so the apply
+/// is refused, and the fresh plan carries the cascade again.
 #[test]
-fn a_resolved_plan_carrying_a_wikilink_rewrite_is_invalid_rather_than_dropped() {
+fn a_wikilink_rewrite_stripped_of_its_cascade_is_refused_rather_than_dropped() {
     let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
     let rewrite = || {
         Operation::new(norn_wire::OperationKind::rewrite_wikilink(
@@ -1251,37 +1252,51 @@ fn a_resolved_plan_carrying_a_wikilink_rewrite_is_invalid_rather_than_dropped() 
             target("y"),
         ))
     };
-    let cascade = vec![norn_wire::LinkRewrite::new(
-        path("b.md"),
-        norn_wire::LinkFamily::Wikilink,
-        "x",
-        "y",
-    )];
-    for (label, alone, operation, named) in [
-        ("beside an edit, no cascade", false, rewrite(), vec![]),
-        (
-            "beside an edit, with its cascade",
-            false,
-            rewrite().with_cascade(cascade.clone()),
-            vec![path("b.md")],
-        ),
-        (
-            "alone, with its cascade",
-            true,
-            rewrite().with_cascade(cascade.clone()),
-            vec![path("b.md")],
-        ),
-    ] {
-        let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[x]]\n")]);
+    for alone in [false, true] {
+        let mut fixture = Fixture::new(&[
+            ("a.md", "draft\n"),
+            ("b.md", "[[x]]\n"),
+            ("x.md", "X\n"),
+            ("y.md", "Y\n"),
+        ]);
         let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
         if alone {
             plan.operations.clear();
             plan.transitions.clear();
         }
-        plan.operations.push(operation);
-        assert_eq!(fixture.refuses_disagreeing(plan), named, "{label}");
-        assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"), "{label}");
-        assert_eq!(fixture.read("b.md").as_deref(), Some("[[x]]\n"), "{label}");
+        plan.operations.push(rewrite());
+        let refused = refused(fixture.apply(plan));
+        assert_eq!(
+            refused.checks,
+            [norn_wire::RefusedCheck::condition_unrecorded(
+                norn_wire::PlanCondition::link_resolution(
+                    norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "x"),
+                    norn_wire::Resolves::one(path("x.md")),
+                    norn_wire::Resolves::one(path("x.md")),
+                )
+            )],
+            "alone: {alone}"
+        );
+        assert_eq!(
+            refused.plan.operations.last(),
+            Some(&rewrite().with_cascade(vec![norn_wire::LinkRewrite::new(
+                path("b.md"),
+                norn_wire::LinkFamily::Wikilink,
+                "x",
+                "y",
+            )])),
+            "alone: {alone}"
+        );
+        assert_eq!(
+            fixture.read("a.md").as_deref(),
+            Some("draft\n"),
+            "alone: {alone}"
+        );
+        assert_eq!(
+            fixture.read("b.md").as_deref(),
+            Some("[[x]]\n"),
+            "alone: {alone}"
+        );
     }
 }
 
