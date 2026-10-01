@@ -9,6 +9,7 @@
 mod address;
 mod applier;
 mod apply;
+mod clock;
 mod derivation;
 mod evidence;
 mod lifecycle;

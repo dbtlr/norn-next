@@ -28,6 +28,11 @@ publish = false
 
 [workspace.dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
+# The local clock reading a plan fills `{{now}}`, `{{date}}` and `{{time}}`
+# from: an instant and the system time zone's offset at it, which the standard
+# library has no reading of. Only `norn-host` reads a clock; `norn-config`
+# fills templates from the reading it is handed.
+jiff = "0.2"
 libc = "0.2"
 # Platform notifications stay behind norn-fs; the crate erases backend event
 # shapes into Norn's own typed invalidation batches.

@@ -1,0 +1,115 @@
+//! The one clock reading a plan's templates are filled from.
+//!
+//! A creation rule's `{{now}}`, `{{date}}` and `{{time}}` are local: they
+//! state the day and the time where the host runs, and the offset that zone
+//! stood at. `norn-config` fills a template from a [`LocalTimestamp`] it is
+//! handed and reads no clock, so the clock is read here, once per plan, and
+//! the reading is what every template of that plan fills from.
+
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+use norn_config::schema::LocalTimestamp;
+
+/// Now, in the system's time zone.
+///
+/// **A dormant carrier.** Its consuming layer is the planner's expansion of a
+/// create-by-rule operation into the document it makes (NORN-298), which
+/// reads the clock once per plan and fills every template of the plan from
+/// this one reading. No operation that creates by rule is planned yet, so
+/// nothing in the call graph reads the clock.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a dormant carrier: the create-by-rule planner is its consumer"
+    )
+)]
+pub(crate) fn local_now() -> LocalTimestamp {
+    local_timestamp(Timestamp::now(), &TimeZone::system())
+}
+
+/// `instant` as the local reading `zone` gives it.
+///
+/// An offset is read to the minute, the precision `{{now}}` writes it in;
+/// every offset a zone holds today is a whole number of minutes, and a
+/// historical one with seconds in it is truncated toward zero.
+fn local_timestamp(instant: Timestamp, zone: &TimeZone) -> LocalTimestamp {
+    let local = instant.to_zoned(zone.clone());
+    let offset_minutes = i16::try_from(local.offset().seconds() / 60)
+        .expect("a zone's offset is less than a day, so its minutes fit");
+    let part = |value: i8| u8::try_from(value).expect("a civil field is not negative");
+    LocalTimestamp::new(
+        local.year().into(),
+        part(local.month()),
+        part(local.day()),
+        part(local.hour()),
+        part(local.minute()),
+        part(local.second()),
+        offset_minutes,
+    )
+    .expect("a zone reads every instant as a day the calendar has and a time inside it")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use norn_config::schema::{Template, TemplateValues};
+
+    use super::*;
+
+    /// `instant` read in `zone`, as `{{now}}` fills it.
+    fn now_in(instant: &str, zone: &TimeZone) -> String {
+        let instant: Timestamp = instant.parse().expect("an instant");
+        Template::parse("{{now}}")
+            .expect("a template")
+            .fill(&TemplateValues::new(
+                BTreeMap::new(),
+                local_timestamp(instant, zone),
+            ))
+            .expect("the template fills")
+    }
+
+    /// **One instant reads as its zone's day, time and offset**, whatever
+    /// zone the machine running the case is in: the zone is named, and it
+    /// moves its offset across a daylight-saving change.
+    #[test]
+    fn an_instant_reads_as_its_zones_day_time_and_offset() {
+        let berlin = TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").expect("a POSIX zone");
+        assert_eq!(
+            now_in("2026-10-01T17:00:00Z", &berlin),
+            "2026-10-01T19:00:00+02:00"
+        );
+        assert_eq!(
+            now_in("2026-12-31T23:30:45Z", &berlin),
+            "2027-01-01T00:30:45+01:00"
+        );
+        let brasilia = TimeZone::fixed(jiff::tz::offset(-3));
+        assert_eq!(
+            now_in("2026-10-01T02:15:09Z", &brasilia),
+            "2026-09-30T23:15:09-03:00"
+        );
+        assert_eq!(
+            now_in("2026-10-01T17:00:00Z", &TimeZone::UTC),
+            "2026-10-01T17:00:00+00:00"
+        );
+    }
+
+    /// A zone whose offset is not whole hours keeps its minutes.
+    #[test]
+    fn an_offset_keeps_its_minutes() {
+        let india = TimeZone::posix("IST-5:30").expect("a POSIX zone");
+        assert_eq!(
+            now_in("2026-10-01T17:00:00Z", &india),
+            "2026-10-01T22:30:00+05:30"
+        );
+    }
+
+    /// **The dormant carrier is covered at its seam**: the system clock, in
+    /// the system's zone, reads as a reading the calendar has rather than
+    /// panicking in the conversion.
+    #[test]
+    fn the_system_clock_reads_as_a_local_timestamp() {
+        let _ = local_now();
+    }
+}

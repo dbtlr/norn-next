@@ -23,7 +23,11 @@ publish.workspace = true
 [features]
 induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
 
+# `jiff` is a registry dependency, implementation rather than contract: it
+# turns the current instant into the local day, time and offset a creation
+# rule's templates are filled from, read once per plan.
 [dependencies]
+jiff = { workspace = true }
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }
 norn-fs = { path = "../norn-fs" }
