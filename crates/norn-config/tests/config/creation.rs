@@ -280,6 +280,90 @@ fn a_target_with_a_backslash_is_refused() {
     assert_eq!(problem, CreationProblem::Backslash);
 }
 
+/// **A `:` is not portable in a file name**: Windows reads it as a drive or
+/// a stream, and macOS's Finder shows it as `/`. A literal `:` anywhere in a
+/// target is refused, and so is `{{now}}` or `{{time}}` standing in one
+/// unfiltered, since each writes the clock with `:` in it.
+#[test]
+fn a_target_that_would_hold_a_colon_is_refused() {
+    for target in ["C:/x.md", "C:x.md", "x/a:b.md"] {
+        let (_, problem, _) = creation_refusal(&task_targeting(target));
+        assert_eq!(problem, CreationProblem::Colon, "{target}");
+    }
+    for (target, token) in [("x/{{now}}.md", "now"), ("x/{{time}}.md", "time")] {
+        let (_, problem, message) = creation_refusal(&task_targeting(target));
+        assert_eq!(
+            problem,
+            CreationProblem::ClockWithColon {
+                token: token.to_string()
+            },
+            "{target}"
+        );
+        assert!(message.contains("|slug"), "{message}");
+    }
+    let (at, problem, _) =
+        creation_refusal(b"version: 1\ninbox:\n  target: \"in/{{now}}-{{seq}}.md\"\n");
+    assert_eq!(
+        (at.as_str(), problem),
+        (
+            "inbox.target",
+            CreationProblem::ClockWithColon {
+                token: "now".to_string()
+            }
+        )
+    );
+}
+
+/// The control: `{{now|slug}}` writes the clock with no `:`, and `{{date}}`
+/// writes none to begin with.
+#[test]
+fn a_target_holding_the_clock_slugged_reads() {
+    for target in [
+        "x/{{now|slug}}-{{seq}}.md",
+        "x/{{time|slug}}.md",
+        "x/{{date}}.md",
+    ] {
+        VaultSchema::parse(&task_targeting(target)).expect(target);
+    }
+}
+
+/// **A target is a path the store can hold.** A file name that is `.` or
+/// `..` once its `.md` is dropped names no document the store keys, and a
+/// control character is a byte no reader can print back; both are judged on
+/// the literal text.
+#[test]
+fn a_target_the_store_cannot_hold_is_refused() {
+    for (target, stem) in [("x/..md", "."), ("x/...md", "..")] {
+        let (_, problem, _) = creation_refusal(&task_targeting(target));
+        assert_eq!(
+            problem,
+            CreationProblem::DotStem {
+                stem: stem.to_string()
+            },
+            "{target}"
+        );
+    }
+    // YAML's own escapes, so the schema bytes carry the character itself.
+    for target in ["x/\\x01{{seq}}.md", "x/\\t{{seq}}.md", "x\\x7f/{{seq}}.md"] {
+        let (_, problem, _) = creation_refusal(&task_targeting(target));
+        assert_eq!(problem, CreationProblem::ControlCharacter, "{target}");
+    }
+}
+
+/// The control: dots before the `.md` beside other text, or beside a token,
+/// make a name like any other.
+#[test]
+fn a_target_file_name_with_dots_beside_other_text_reads() {
+    for target in [
+        "x/.a.md",
+        "x/a...md",
+        "x/..{{seq}}.md",
+        "x/.{{var.project}}.md",
+    ] {
+        VaultSchema::parse(&task_targeting(target)).expect(target);
+    }
+}
+
 // ---- {{seq}} ----
 
 #[test]
@@ -387,6 +471,60 @@ fn a_variable_declared_twice_is_refused() {
             name: "a".to_string()
         }
     );
+}
+
+// ---- frontmatter default keys ----
+
+/// **A default's key is a field name, written as it lands.** An empty key
+/// names no field; `<<` is the merge key norn's own frontmatter reader
+/// expands, so a default written under it would read back as a merge; and a
+/// key is not a template, so one holding `{{` is a mistake. Each is refused at
+/// the map holding it, at the top level and nested.
+#[test]
+fn a_frontmatter_default_key_that_would_not_land_as_written_is_refused() {
+    for (key, problem) in [
+        ("\"\"", CreationProblem::EmptyDefaultKey),
+        ("<<", CreationProblem::MergeDefaultKey),
+        ("\"<<\"", CreationProblem::MergeDefaultKey),
+        (
+            "\"{{var.project}}\"",
+            CreationProblem::TemplatedDefaultKey {
+                key: "{{var.project}}".to_string(),
+            },
+        ),
+    ] {
+        for (extra, at) in [
+            (
+                format!("    frontmatter_defaults:\n      {key}: x\n"),
+                "creatable.task.frontmatter_defaults",
+            ),
+            (
+                format!("    frontmatter_defaults:\n      meta:\n        {key}: x\n"),
+                "creatable.task.frontmatter_defaults.meta",
+            ),
+            (
+                format!("    frontmatter_defaults:\n      list: [{{{key}: x}}]\n"),
+                "creatable.task.frontmatter_defaults.list.0",
+            ),
+        ] {
+            let (refused, refused_problem, _) = creation_refusal(&task_with(&extra));
+            assert_eq!(
+                (refused.as_str(), refused_problem),
+                (at, problem.clone()),
+                "{extra}"
+            );
+        }
+    }
+}
+
+/// The control: a key holding a lone brace, or `<` beside other text, is a
+/// field name like any other.
+#[test]
+fn a_frontmatter_default_key_with_braces_or_angles_beside_other_text_reads() {
+    VaultSchema::parse(&task_with(
+        "    frontmatter_defaults:\n      \"{a}\": x\n      \"<<a\": y\n      \"a}}\": z\n",
+    ))
+    .expect("keys that are field names");
 }
 
 // ---- the inbox ----

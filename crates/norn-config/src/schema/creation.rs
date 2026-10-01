@@ -6,14 +6,19 @@
 //! Both are written in the grammar of [`Template`].
 //!
 //! **Everything about where a token may stand is judged at schema read.** A
-//! target ends in `.md`, is relative, and stays inside the vault — no leading
-//! `/`, no empty, `.` or `..` segment, no `\` — judged on its literal text and
-//! where its tokens stand, since a token's value is not known until a document
-//! is made. `{{seq}}` stands only in a target, at most once, and only in its
-//! file name. A `{{var.NAME}}` anywhere in a rule names a variable the rule
-//! declares. The inbox's target carries `{{seq}}` and names no variable, since
-//! untyped capture is supplied nothing. What a token's value may be is judged
-//! when the rule is filled, which is not this module's.
+//! target ends in `.md`, is relative, stays inside the vault, and is a path the
+//! store can hold — no leading `/`, no empty, `.` or `..` segment, no `\`, no
+//! control character, and no file name that is `.` or `..` once its extension
+//! is dropped — judged on its literal text and where its tokens stand, since a
+//! token's value is not known until a document is made. A target holds no `:`,
+//! which is not portable in a file name, so `{{now}}` and `{{time}}` stand in
+//! one only as `{{now|slug}}` and `{{time|slug}}`. `{{seq}}` stands only in a
+//! target, at most once, and only in its file name. A `{{var.NAME}}` anywhere
+//! in a rule names a variable the rule declares. A frontmatter default's key
+//! is the field name it lands as: not empty, not the merge key `<<`, and
+//! holding no `{{`. The inbox's target carries `{{seq}}` and names no
+//! variable, since untyped capture is supplied nothing. What a token's value
+//! may be is judged when the rule is filled, which is not this module's.
 //!
 //! **A rule derives nothing.** No row a document's derivation writes reads a
 //! creation rule or the inbox, so neither is a term of
@@ -115,27 +120,29 @@ impl Target {
 
     /// `template` as a target, or the reason it is none.
     fn read(template: Template) -> Result<Self, CreationProblem> {
-        if template.as_str().starts_with('/') {
-            return Err(CreationProblem::Absolute);
+        let standing = standing_in(&template);
+        if let Some(problem) = document_path_problem(&standing) {
+            return Err(problem);
         }
-        if template
-            .parts()
-            .iter()
-            .any(|part| matches!(part, Part::Literal(text) if text.contains('\\')))
-        {
-            return Err(CreationProblem::Backslash);
+        if standing.contains(':') {
+            return Err(CreationProblem::Colon);
+        }
+        if let Some(token) = template.parts().iter().find_map(|part| match part {
+            Part::Token(Token {
+                slot: Slot::Now,
+                slug: false,
+            }) => Some("now"),
+            Part::Token(Token {
+                slot: Slot::Time,
+                slug: false,
+            }) => Some("time"),
+            _ => None,
+        }) {
+            return Err(CreationProblem::ClockWithColon {
+                token: token.to_string(),
+            });
         }
         let segments = segments(&template);
-        for segment in &segments {
-            if segment.is_empty() {
-                return Err(CreationProblem::EmptySegment);
-            }
-            if let Some(text) = literal(segment)
-                && (text == "." || text == "..")
-            {
-                return Err(CreationProblem::DotSegment { segment: text });
-            }
-        }
         let file_name = segments.last().expect("splitting yields a segment");
         match file_name.last() {
             Some(Piece::Literal(text)) if text.ends_with(".md") => {}
@@ -157,6 +164,70 @@ impl Target {
         }
         Ok(Target { template })
     }
+}
+
+/// What a token stands as when a target's literal text is judged: a value
+/// that is not empty and holds no `/`, `\`, `:`, `.` or control character,
+/// so the problems the stand-in has are ones every fill of the target has.
+const STAND_IN: &str = "0";
+
+/// The target's text with every token standing as [`STAND_IN`].
+fn standing_in(template: &Template) -> String {
+    template
+        .parts()
+        .iter()
+        .map(|part| match part {
+            Part::Literal(text) => text.as_str(),
+            Part::Token(_) => STAND_IN,
+        })
+        .collect()
+}
+
+/// Why `path` is no path the store holds a document at, or `None` where it is
+/// one.
+///
+/// These are the store's refusals, rule for rule: `segment_problem` and
+/// `DocumentPath::new` in `norn-store`'s `path` module. An empty or absolute
+/// path, a `\`, a control character, an empty, `.` or `..` segment, and a
+/// file name that is `.` or `..` once its extension is dropped. This crate
+/// cannot reach the store, and `norn_wire::DocumentPath` holds only the first
+/// two of them, so they are written here until one grammar the vocabulary owns
+/// holds them all.
+fn document_path_problem(path: &str) -> Option<CreationProblem> {
+    if path.starts_with('/') {
+        return Some(CreationProblem::Absolute);
+    }
+    if path.contains('\\') {
+        return Some(CreationProblem::Backslash);
+    }
+    if path.contains(char::is_control) {
+        return Some(CreationProblem::ControlCharacter);
+    }
+    // An empty path splits into one segment, which is empty.
+    for segment in path.split('/') {
+        match segment {
+            "" => return Some(CreationProblem::EmptySegment),
+            "." | ".." => {
+                return Some(CreationProblem::DotSegment {
+                    segment: segment.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    // The extension is the text after the last dot inside the name: a leading
+    // dot opens a name, not an extension.
+    let stem = match file_name.rfind('.') {
+        Some(dot) if dot > 0 => &file_name[..dot],
+        _ => file_name,
+    };
+    if stem == "." || stem == ".." {
+        return Some(CreationProblem::DotStem {
+            stem: stem.to_string(),
+        });
+    }
+    None
 }
 
 /// One run of a target's path segment: literal text holding no `/`, or a
@@ -267,6 +338,24 @@ pub enum CreationProblem {
     Absolute,
     /// The target's literal text holds `\`.
     Backslash,
+    /// The target's literal text holds `:`, which is not portable in a file
+    /// name: Windows reads it as a drive or a stream.
+    Colon,
+    /// The target holds `{{now}}` or `{{time}}` without `|slug`, and each
+    /// writes the clock with a `:` in it.
+    ClockWithColon {
+        /// The token's name: `now` or `time`.
+        token: String,
+    },
+    /// The target's literal text holds a control character, which the store
+    /// refuses in a path.
+    ControlCharacter,
+    /// The target's file name is `.` or `..` once its extension is dropped,
+    /// which names no document the store keys.
+    DotStem {
+        /// The file name without its extension: `.` or `..`.
+        stem: String,
+    },
     /// The target holds an empty path segment: a `//`, or a `/` at its end.
     EmptySegment,
     /// The target holds a `.` or `..` segment.
@@ -282,6 +371,15 @@ pub enum CreationProblem {
     SeqTwice,
     /// The target holds `{{seq}}` in a folder rather than in its file name.
     SeqOutsideFileName,
+    /// A frontmatter default's key is empty.
+    EmptyDefaultKey,
+    /// A frontmatter default's key is `<<`, which reads back as a merge.
+    MergeDefaultKey,
+    /// A frontmatter default's key holds `{{`, and a key is not a template.
+    TemplatedDefaultKey {
+        /// The key, as written.
+        key: String,
+    },
     /// A template other than a target holds `{{seq}}`.
     SeqOutsideTarget,
     /// The inbox's target holds no `{{seq}}`.
@@ -321,6 +419,21 @@ impl fmt::Display for CreationProblem {
                 formatter,
                 "holds `\\`, and a target separates its folders with `/` alone"
             ),
+            CreationProblem::Colon => {
+                write!(formatter, "holds `:`, which is not portable in a file name")
+            }
+            CreationProblem::ClockWithColon { token } => write!(
+                formatter,
+                "holds `{{{{{token}}}}}`, which writes the clock with `:`, and `:` is not portable in a file name; `{{{{{token}|slug}}}}` writes it without"
+            ),
+            CreationProblem::ControlCharacter => write!(
+                formatter,
+                "holds a control character, which no document path holds"
+            ),
+            CreationProblem::DotStem { stem } => write!(
+                formatter,
+                "names a file that is `{stem}` once its extension is dropped, which no document path names"
+            ),
             CreationProblem::EmptySegment => write!(
                 formatter,
                 "holds an empty path segment, and every segment of a target names something"
@@ -343,6 +456,18 @@ impl fmt::Display for CreationProblem {
             CreationProblem::SeqOutsideFileName => write!(
                 formatter,
                 "holds `{{{{seq}}}}` in a folder, and a sequence number stands only in the file name"
+            ),
+            CreationProblem::EmptyDefaultKey => write!(
+                formatter,
+                "holds a default under an empty key, which names no field"
+            ),
+            CreationProblem::MergeDefaultKey => write!(
+                formatter,
+                "holds a default under `<<`, which a document's frontmatter reads as a merge rather than a field"
+            ),
+            CreationProblem::TemplatedDefaultKey { key } => write!(
+                formatter,
+                "holds a default under `{key}`, and a key is written as it lands, not filled as a template"
             ),
             CreationProblem::SeqOutsideTarget => write!(
                 formatter,
@@ -534,10 +659,34 @@ fn read_default_entries(
             let key = key
                 .as_str()
                 .ok_or_else(|| section_error(at_path, "a mapping keyed by field name", key))?;
+            if let Some(problem) = default_key_problem(key) {
+                return Err(refusal(at_path, problem));
+            }
             let value = read_default(&format!("{at_path}.{key}"), value, uses_declared)?;
             Ok((key.to_string(), value))
         })
         .collect()
+}
+
+/// Why `key` would not land in a document's frontmatter as the field it is
+/// written as, or `None` where it would.
+///
+/// An empty key names no field. `<<` is the merge key, which norn's own
+/// frontmatter reader expands, quoted or not, so a default under it would read
+/// back as a merge. And a key is not a template, so a key holding `{{` is a
+/// template written where none is read.
+fn default_key_problem(key: &str) -> Option<CreationProblem> {
+    if key.is_empty() {
+        Some(CreationProblem::EmptyDefaultKey)
+    } else if key == "<<" {
+        Some(CreationProblem::MergeDefaultKey)
+    } else if key.contains("{{") {
+        Some(CreationProblem::TemplatedDefaultKey {
+            key: key.to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 /// One frontmatter default, which `at_path` names: every string scalar in it
