@@ -516,12 +516,10 @@ fn an_authored_link_rewrite_composes_in_one_batch_with_a_cascade_on_its_holder()
 /// rather than landing as a change of nothing**, as an edit whose text does
 /// not occur is: no link of its syntax is written `from` in its holder —
 /// `[[zzz]]` nowhere, and `a` written as a wikilink and not as a Markdown
-/// link — or no document stands where it names one. One matching a link
-/// respelled to what it already holds lands found, as an edit rewriting what
-/// its document holds does.
+/// link — or no document stands where it names one.
 #[test]
 fn an_authored_link_rewrite_matching_no_link_is_unresolved() {
-    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
     for (operation, says) in [
         (
             relinking("h.md", LinkFamily::Wikilink, "zzz", "a"),
@@ -541,7 +539,15 @@ fn an_authored_link_rewrite_matching_no_link_is_unresolved() {
         assert!(detail.contains(says), "{operation:?}: {detail}");
         assert!(resolution.plan.transitions.is_empty(), "{operation:?}");
     }
+}
 
+/// **An authored link rewrite respelling a link to the text it already holds
+/// lands found**, as an edit rewriting what its document holds does: it
+/// matches a link, so it acts, and its holder's after-state is its
+/// before-state.
+#[test]
+fn an_authored_link_rewrite_to_the_text_its_link_holds_lands_found() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
     let same = fixture.resolution(vec![relinking("h.md", LinkFamily::Wikilink, "a", "a")]);
     assert_eq!(same.plan.transitions.len(), 1);
     assert_eq!(
