@@ -862,13 +862,13 @@ fn deleting_a_quarantined_document_records_no_link_change() {
 }
 
 /// **An apply whose plan read no links refuses with a fresh plan that reads
-/// them.** Deleting a quarantined file changes no document's presence, so
-/// the previewed plan carries no link condition and its apply needs no read
-/// handle before its check; another writer then repairs the file's bytes,
-/// so the check refuses the drift and the operations, resolved afresh,
-/// delete a document `[[apply-quarantined]]` resolves to. The apply answers
-/// `vault/plan-refused` with that fresh plan, carrying the link condition it
-/// now needs, and writes nothing.
+/// them.** Moving a quarantined file changes no document's presence and
+/// deletes none, so the previewed plan carries no link condition and its
+/// apply needs no read handle before its check; another writer then repairs
+/// the file's bytes, so the check refuses the drift and the operations,
+/// resolved afresh, move a document `[[apply-quarantined]]` resolves to. The
+/// apply answers `vault/plan-refused` with that fresh plan, carrying the
+/// link condition it now needs, and writes nothing.
 #[test]
 fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
     let (_sandbox, vault) = a_vault_linking_a_quarantined_file("host-applies-quarantine-repaired");
@@ -879,8 +879,9 @@ fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
             ApplyMode::Preview,
             PlanDocument::operations(AuthoredPlan::new(
                 VaultAddress::name(vault.name().clone()),
-                vec![Operation::new(OperationKind::delete_document(
+                vec![Operation::new(OperationKind::move_document(
                     DocumentPath::new("apply-quarantined.md").expect("a document path"),
+                    DocumentPath::new("elsewhere/apply-quarantined.md").expect("a document path"),
                 ))],
             )),
         ))
@@ -916,6 +917,7 @@ fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
         std::fs::read_to_string(vault.path().join("apply-quarantined.md")).unwrap(),
         "# Repaired\n"
     );
+    assert!(!vault.path().join("elsewhere/apply-quarantined.md").exists());
 }
 
 /// **Moving a quarantined document records no link change**: no document
