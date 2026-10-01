@@ -43,12 +43,14 @@
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
 //!   is its before-state, which lands found (ADR 0031's landed rule).
-//! - [`cascade`] — each document move's link cascade: once every operation
-//!   acts, the links that would stop naming a moved document, read through
-//!   the store's resolution door as the change set reads them, each
+//! - [`cascade`] — each link cascade: once every operation acts, the links
+//!   that would stop naming a moved document, that name a document a delete
+//!   removes rewriting them, or that name a wikilink rewrite's `old`, read
+//!   through the store's resolution door as the change set reads them, each
 //!   respelled in its own style to the shortest spelling that reads back as
-//!   where the document lands, and carried on the move. A cascade's holder
-//!   is a file its move touches, so the two stand or fall together.
+//!   the document it must name, and carried on the operation. A cascade's
+//!   holder is a file its operation touches, so the two stand or fall
+//!   together.
 //! - [`resolve`] — the resolved plan: an operation that does not resolve, or
 //!   whose author's condition the vault no longer meets or names a file the
 //!   store's path grammar refuses, is left out, with

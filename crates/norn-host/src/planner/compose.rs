@@ -400,16 +400,18 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::DeleteDocument { path, .. } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: both link rewrites are vocabulary before they are
-            // planned. Until the planner plans an authored rewrite, each is
-            // left unresolved in words rather than planned as something it
-            // does not say.
-            OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
-                Err(format!(
-                    "a `{}` operation is not planned yet: only a move's and a delete's link cascades are planned yet",
-                    kind.name()
-                ))
-            }
+            // A wikilink rewrite touches nothing itself: what it writes is
+            // its cascade, which composes after every operation, and which
+            // wikilinks it retargets is planning's to judge
+            // (`super::cascade`).
+            OperationKind::RewriteWikilink { .. } => Ok(()),
+            // NORN-297: an authored link rewrite is vocabulary before it is
+            // planned, left unresolved in words rather than planned as
+            // something it does not say.
+            OperationKind::RewriteLink { .. } => Err(format!(
+                "a `{}` operation is not planned yet: only link cascades are planned yet",
+                kind.name()
+            )),
             // Planning expands a folder move into the document moves it
             // makes before anything composes (`super::expand`), so only a
             // plan resolved without expansion meets one here, which the

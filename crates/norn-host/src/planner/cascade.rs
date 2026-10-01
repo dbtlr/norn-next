@@ -1,6 +1,7 @@
-//! Link cascades: the rewrites a plan's document moves and deletes generate,
-//! so that a link naming a moved document names it where it lands, and one
-//! naming a deleted document names the document its delete rewrites them to.
+//! Link cascades: the rewrites a plan's document moves, deletes and wikilink
+//! rewrites generate, so that a link naming a moved document names it where
+//! it lands, one naming a deleted document names the document its delete
+//! rewrites them to, and a wikilink naming a rewrite's `old` names its `new`.
 //!
 //! **Which links a move breaks is the change set's own question.** A link
 //! follows a move where, before the plan, it resolves to exactly the document
@@ -34,10 +35,27 @@
 //! could name the deleted document is never rewritten, and the forecast says
 //! so.
 //!
+//! **A wikilink rewrite reads the wikilinks naming its `old` through the same
+//! door.** Its `old` is read as the vault stands before the plan and its
+//! `new` where the plan leaves it ([`retarget_namings`]). Where `old` names
+//! one document, the door reaches every link naming that document though the
+//! plan changes nothing there, and every wikilink resolving to exactly it
+//! before the plan, whatever its spelling, is retargeted; where `old` names
+//! none, every broken wikilink filed under `old` in any case is
+//! ([`retargeted_by`]). A wikilink already naming `new`'s document after the
+//! plan is left alone, one resolving to several documents is never rewritten
+//! and the forecast says so, and a Markdown link is no wikilink. An `old`
+//! naming several documents, a `new` naming none or several, the two naming
+//! one document, and no wikilink to retarget each leave the rewrite
+//! unresolved, the ambiguous ones with the head of their candidates. A
+//! wikilink a rewrite retargets is that rewrite's, whatever a move or a
+//! delete of the plan would do with it: its author said what it names.
+//!
 //! **A link is respelled in its own style, and only to a spelling that reads
 //! back.** The new address is the shortest spelling of the link's
-//! destination — the file the moved document lands at, or the delete's
-//! target — the link's syntax and protocol can write: for a bare wikilink
+//! destination — the file the moved document lands at, the delete's target,
+//! or the wikilink rewrite's `new` — the link's syntax and protocol can
+//! write: for a bare wikilink
 //! the shortest suffix of the destination that names it alone with every
 //! target of the plan at its after-state — at least two segments where the
 //! link was written path-qualified, so it stays so — written with the
@@ -62,8 +80,9 @@
 //! `rewrite_link` per holder, syntax and address, named at the holder's
 //! after-state path, generated once however many ways it is reached and
 //! carried by the move that lands the named document — a moved document's
-//! own relative links by its own move — or by the delete whose target it
-//! names. Composition then writes it on the
+//! own relative links by its own move — by the delete whose target it
+//! names, or by the wikilink rewrite retargeting it. Composition then writes
+//! it on the
 //! holder's final bytes ([`super::compose::compose`]), the same bytes it was
 //! read from here.
 
@@ -78,21 +97,26 @@ use norn_wire::{
 };
 
 use super::compose::Composition;
+use super::lineage::Retarget;
 use super::lineage::{Lineage, Removal};
 use super::links::{
-    EntryKey, LinkIndex, Target, WrittenLinks, address, family_name, left_behind, reach,
-    removed_by, rewrite_targets, rewritten_for, stored_path, wire_family,
+    EntryKey, LinkIndex, RetargetNaming, Target, WrittenLinks, address, family_name, left_behind,
+    reach, reaching, removed_by, retarget_namings, retargeted_by, rewrite_targets, rewritten_for,
+    stored_path, wire_family,
 };
 use crate::derivation::document_links;
 
-/// What a plan's moves and deletes generate from the links naming what they
-/// carry away or remove.
+/// What a plan's moves, deletes and wikilink rewrites generate from the
+/// links naming what they carry away, remove or retarget.
 #[derive(Debug, Default)]
 pub(crate) struct Generated {
     /// The link cascade of each operation that carries one, by its position.
     pub(crate) cascades: BTreeMap<usize, Vec<LinkRewrite>>,
-    /// Each delete whose backlinks leave it unresolved, by its position, and
-    /// why: one forbidding them, which a link names.
+    /// Each operation the links it reads leave unresolved, by its position,
+    /// and why: a delete whose `rewrite_to` names no one document, or which
+    /// forbids its backlinks while a link names its document; and a wikilink
+    /// rewrite whose ends name no one document each, or which retargets no
+    /// wikilink.
     pub(crate) unresolved: BTreeMap<usize, UnresolvedReason>,
 }
 
@@ -111,9 +135,16 @@ pub(crate) struct Generated {
 /// - **Each delete forbidding the links naming its document** that a link
 ///   names is left unresolved, naming every holder ([`backlinks`]). A delete
 ///   leaving them broken generates nothing.
+/// - **Each wikilink rewrite**: its `old` must name one document or none
+///   before the plan, and its `new` one other document after it
+///   ([`retarget_destination`]); where they do, every wikilink naming `old`
+///   that does not already name `new` after the plan ([`retargeted_by`]) is
+///   respelled to name it, by the same spellings, and a rewrite retargeting
+///   none is left unresolved ([`unmatched`]).
 ///
-/// Empty, and the index never asked, where no move carries a document and no
-/// delete forbids or rewrites the links naming its own.
+/// Empty, and the index never asked, where no move carries a document, no
+/// delete forbids or rewrites the links naming its own, and no wikilink
+/// rewrite stands.
 pub(crate) fn generate<I: LinkIndex + ?Sized>(
     operations: &[Operation],
     composition: &Composition,
@@ -128,7 +159,10 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let reads_backlinks = lineage.removals().any(|removal| {
         choice(removal.position).is_some_and(|choice| *choice != Backlinks::LeftBroken)
     });
-    if lineage.drawing().next().is_none() && !reads_backlinks {
+    if lineage.drawing().next().is_none()
+        && !reads_backlinks
+        && lineage.retargets().next().is_none()
+    {
         return Ok(Generated::default());
     }
     let cascade = Cascade {
@@ -166,13 +200,51 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         }
     }
 
-    // The links the moves leave behind and the links a rewriting delete
-    // respells, each with the file it must name after and the operation that
-    // carries its rewrite; and every backlink of a document a delete
-    // forbidding them removes, by the delete's position.
+    // What each wikilink rewrite's ends name, and the one document its
+    // wikilinks are retargeted to, or why the rewrite is left unresolved;
+    // the links naming its `old` are reached though the plan changes nothing
+    // they name.
+    let retargeted = retarget_namings(lineage, &overlay, index)?;
+    for retarget in lineage.retargets() {
+        match retarget_destination(retarget, &retargeted[&retarget.position], normalizer) {
+            Ok(path) => {
+                if let (Some(file), Some(at)) = (cascade.identity(path.as_str()), stored_path(path))
+                {
+                    destinations.insert(retarget.position, (file, at));
+                }
+            }
+            Err(reason) => {
+                unresolved.insert(retarget.position, reason);
+            }
+        }
+    }
+    let overlay = reaching(overlay, lineage, &retargeted);
+
+    // The links the moves leave behind, the links a rewriting delete
+    // respells and the wikilinks a wikilink rewrite retargets, each with the
+    // file it must name after and the operation that carries its rewrite;
+    // every backlink of a document a delete forbidding them removes, by the
+    // delete's position; and how many wikilinks each wikilink rewrite
+    // retargets.
     let mut breaking: Vec<Breaking> = Vec::new();
     let mut forbidden: BTreeMap<usize, Vec<norn_store::DocumentPath>> = BTreeMap::new();
+    let mut retargeting: BTreeMap<usize, usize> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
+        // A wikilink a rewrite of the plan names is that rewrite's, whatever
+        // else of the plan would respell it: the author said what it names.
+        if let Some(retarget) = retargeted_by(&change, lineage, &retargeted, normalizer) {
+            *retargeting.entry(retarget.position).or_default() += 1;
+            if let Some((to, at)) = destinations.get(&retarget.position) {
+                breaking.push(Breaking {
+                    holder: change.holder,
+                    link: change.link,
+                    to: to.clone(),
+                    at: at.clone(),
+                    owner: retarget.position,
+                });
+            }
+            return;
+        }
         if let Some(removal) = removed_by(&change.before, lineage, normalizer) {
             let position = removal.position;
             match choice(position) {
@@ -217,6 +289,13 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
 
     for (position, holders) in forbidden {
         unresolved.insert(position, backlinks(holders));
+    }
+    for retarget in lineage.retargets() {
+        if !retargeting.contains_key(&retarget.position) {
+            unresolved
+                .entry(retarget.position)
+                .or_insert_with(|| unmatched(retarget, &retargeted[&retarget.position]));
+        }
     }
 
     let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> = cascade.own_relative_links();
@@ -318,6 +397,58 @@ fn unnamed(
         ),
         None => format!(
             "`rewrite_to` `{address}` names no one document where the plan leaves the vault, so the links naming the removed document have nothing to be rewritten to"
+        ),
+    })
+}
+
+/// The document the wikilink rewrite `retarget` retargets its wikilinks to,
+/// its ends naming as `named` says, or why it does not resolve: its `old`
+/// names several documents before the plan, headed there; its `new` names
+/// none or several where the plan leaves the vault, the latter headed; or
+/// the two name one document, so no wikilink would change.
+fn retarget_destination<'n>(
+    retarget: &Retarget,
+    named: &'n RetargetNaming,
+    normalizer: &PathNormalizer,
+) -> Result<&'n DocumentPath, UnresolvedReason> {
+    let (old, new) = (&retarget.old, &retarget.new);
+    if let (Resolves::Several {}, Some(candidates)) = (&named.old.before, &named.old.candidates) {
+        return Err(UnresolvedReason::ambiguous_target(candidates.clone()));
+    }
+    let to = match (&named.new.after, &named.new.candidates) {
+        (Resolves::One { path }, _) => path,
+        (Resolves::Several {}, Some(candidates)) => {
+            return Err(UnresolvedReason::ambiguous_target(candidates.clone()));
+        }
+        _ => {
+            return Err(UnresolvedReason::no_longer_resolves(format!(
+                "`new` `{new}` names no one document where the plan leaves the vault, so the wikilinks naming `{old}` have nothing to be retargeted to"
+            )));
+        }
+    };
+    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    if let Resolves::One { path: from } = &named.old.before
+        && identity(from).is_some()
+        && identity(from) == identity(to)
+    {
+        return Err(UnresolvedReason::no_longer_resolves(format!(
+            "`old` `{old}` and `new` `{new}` name the same document, `{to}`, so no wikilink would change"
+        )));
+    }
+    Ok(to)
+}
+
+/// Why the wikilink rewrite `retarget`, its ends naming as `named` says,
+/// does not resolve where no wikilink is one it retargets: it would change
+/// nothing, and a rewrite of nothing is not landed as though it acted.
+fn unmatched(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
+    let old = &retarget.old;
+    UnresolvedReason::no_longer_resolves(match &named.old.before {
+        Resolves::One { path } => format!(
+            "no wikilink resolves to `{path}`, the document `old` `{old}` names, outside what already names `new`, so the rewrite changes nothing"
+        ),
+        _ => format!(
+            "no broken wikilink is filed under `old` `{old}`, so the rewrite changes nothing"
         ),
     })
 }

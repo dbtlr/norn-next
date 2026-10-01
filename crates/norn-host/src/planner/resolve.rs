@@ -861,23 +861,18 @@ mod tests {
         }
     }
 
-    /// **A link rewrite is left unresolved until it is planned (NORN-297).**
-    /// A link rewrite and a wikilink rewrite are each left unresolved, naming
-    /// the limit, and write nothing — never planned as something they do not
-    /// say.
+    /// **An authored link rewrite is left unresolved until it is planned
+    /// (NORN-297)**, naming the limit, and writes nothing — never planned as
+    /// something it does not say.
     #[test]
     fn a_link_rewrite_is_left_unresolved_until_it_is_planned() {
         let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
-        let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
-        for kind in [
-            OperationKind::rewrite_link(
-                path("notes/a.md"),
-                norn_wire::LinkFamily::Wikilink,
-                "b",
-                "c",
-            ),
-            OperationKind::rewrite_wikilink(target("b"), target("c")),
-        ] {
+        for kind in [OperationKind::rewrite_link(
+            path("notes/a.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "b",
+            "c",
+        )] {
             let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
             let detail = unresolved_detail(&resolution);
             assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
