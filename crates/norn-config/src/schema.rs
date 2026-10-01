@@ -4,7 +4,8 @@
 //! this module existed it was bytes: read, hashed, pinned, and opaque to every
 //! consumer. [`VaultSchema`] is the typed reading of those bytes — the declared
 //! fields with their types and rules, the declared tag facet, the declared
-//! folders, and the path rules — and it is what makes a declaration something
+//! folders, the path rules, and the creation rules and inbox that say how a
+//! new document is made — and it is what makes a declaration something
 //! derivation and the read surface can act on.
 //!
 //! **The model is a pure function of the bytes, and its identity is the schema
@@ -36,7 +37,24 @@
 //!     description: One document per day
 //! paths:
 //!   ambiguity_ignore: ["archive/**"]
+//! creatable:
+//!   task:
+//!     target: "tasks/{{var.project}}-{{seq}}.md"
+//!     variables: [project, title]
+//!     frontmatter_defaults:
+//!       status: todo
+//!       created: "{{now}}"
+//!     body: "# {{var.title}}\n"
+//! inbox:
+//!   target: "inbox/{{date}}-{{seq}}.md"
 //! ```
+//!
+//! **A creation rule is a template, and so is the inbox.** `target`, `body`
+//! and every string scalar in `frontmatter_defaults` are written in the
+//! grammar [`template`] reads, and where each token may stand is judged when
+//! the schema is read — see [`creation`]. The model holds the templates, not
+//! what they fill to: a clock reading and a caller's variables are the
+//! planner's, so the model stays a function of the bytes.
 //!
 //! **A tag is compared under the tag fold.** `tags.declared` names and
 //! `tags.patterns` match a tag with Unicode case folded and accents kept, over
@@ -93,8 +111,12 @@
 //! paths the resolution ladder does not count as candidates: derivation hands
 //! them to the store with the rest of the content model, the store's resolver
 //! applies them wherever a target's class is read, and `describe` reports the
-//! same set as path rules.
+//! same set as path rules. `describe` reports each creation rule and the
+//! inbox as facets, templates as their source text; no derivation reads
+//! either.
 
+pub mod creation;
+pub mod template;
 pub mod typed;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,8 +124,10 @@ use std::fmt;
 
 use serde_yaml::Value;
 
+pub use creation::{CreationProblem, CreationRule, Inbox, Target};
 use norn_wire::fold_tag;
 pub use norn_wire::{CaseFold, Pattern, PatternError};
+pub use template::{Template, TemplateError};
 pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, TypedValue};
 
 /// The schema version this build reads.
@@ -114,7 +138,15 @@ pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, Type
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// The sections a schema declares, which is every key its root holds.
-const ROOT_KEYS: &[&str] = &["version", "fields", "tags", "folders", "paths"];
+const ROOT_KEYS: &[&str] = &[
+    "version",
+    "fields",
+    "tags",
+    "folders",
+    "paths",
+    "creatable",
+    "inbox",
+];
 
 /// The keys one field's declaration holds.
 const FIELD_KEYS: &[&str] = &["type", "required", "one_of"];
@@ -135,6 +167,8 @@ pub struct VaultSchema {
     tags: TagFacet,
     folders: Vec<DeclaredFolder>,
     ambiguity_ignore: Vec<Pattern>,
+    creation_rules: BTreeMap<String, CreationRule>,
+    inbox: Option<Inbox>,
 }
 
 impl VaultSchema {
@@ -165,6 +199,8 @@ impl VaultSchema {
             tags: read_tags(&document)?,
             folders: read_folders(&document)?,
             ambiguity_ignore: read_ambiguity_ignore(&document)?,
+            creation_rules: creation::read_creatable(&document)?,
+            inbox: creation::read_inbox(&document)?,
         })
     }
 
@@ -217,6 +253,24 @@ impl VaultSchema {
         &self.ambiguity_ignore
     }
 
+    /// The creation rules, in the byte order of their names.
+    ///
+    /// Read by `describe`, which reports each as a facet, and by the planner
+    /// that expands a create-by-rule operation into the document it makes.
+    pub fn creation_rules(&self) -> impl Iterator<Item = &CreationRule> {
+        self.creation_rules.values()
+    }
+
+    /// The creation rule called `name`, if the schema declares one.
+    pub fn creation_rule(&self, name: &str) -> Option<&CreationRule> {
+        self.creation_rules.get(name)
+    }
+
+    /// Where untyped capture lands, if the schema declares an inbox.
+    pub fn inbox(&self) -> Option<&Inbox> {
+        self.inbox.as_ref()
+    }
+
     /// Whether a pin of this schema obliges a re-derivation of the documents
     /// standing under it.
     ///
@@ -232,6 +286,9 @@ impl VaultSchema {
     ///   it the re-derivation that refills it, whether or not its bytes moved.
     ///   A field declared as text or tags orders as its raw text and fills
     ///   nothing.
+    ///
+    /// Creation rules and the inbox are no term: they say how a document is
+    /// made, and no row a document's derivation writes reads them.
     ///
     /// A schema declaring neither leaves every row with the same per-document
     /// derived state under the new pin as under the old. **A declaration
@@ -471,6 +528,14 @@ pub enum VaultSchemaError {
         /// The path declared twice, without its trailing `/`.
         path: String,
     },
+    /// A creation rule or the inbox breaks the template grammar or a rule
+    /// placed on where a token stands.
+    Creation {
+        /// The dotted path to the offending node, `creatable.task.target`.
+        at: String,
+        /// What is wrong there.
+        problem: CreationProblem,
+    },
 }
 
 impl fmt::Display for VaultSchemaError {
@@ -510,6 +575,7 @@ impl fmt::Display for VaultSchemaError {
             VaultSchemaError::RepeatedFolder { path } => {
                 write!(formatter, "`folders` declares the folder `{path}` twice")
             }
+            VaultSchemaError::Creation { at, problem } => write!(formatter, "`{at}` {problem}"),
         }
     }
 }
