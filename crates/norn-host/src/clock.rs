@@ -8,9 +8,16 @@
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use norn_config::schema::LocalTimestamp;
+use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 
-/// Now, in the system's time zone.
+/// Now, in the system's time zone, or the refusal of a system clock set
+/// outside the years 0 to 9999, which `{{date}}` cannot write.
+///
+/// Two zones read as UTC. A system zone jiff cannot resolve, jiff itself
+/// reads as UTC: `TZ=EST5EDT` is one where the zone database holds no
+/// `EST5EDT`, which glibc reads as Eastern time and jiff cannot read at all. A
+/// zone whose offset is a day or more from UTC, which POSIX allows and
+/// RFC 3339 cannot write, reads as UTC here.
 ///
 /// **A dormant carrier.** Its consuming layer is the planner's expansion of a
 /// create-by-rule operation into the document it makes (NORN-298), which
@@ -24,8 +31,17 @@ use norn_config::schema::LocalTimestamp;
         reason = "a dormant carrier: the create-by-rule planner is its consumer"
     )
 )]
-pub(crate) fn local_now() -> LocalTimestamp {
+pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
     local_timestamp(Timestamp::now(), &TimeZone::system())
+}
+
+/// `instant` as the local reading `zone` gives it, or as UTC gives it where
+/// no reading holds what `zone` gives: an offset of a day or more.
+fn local_timestamp(
+    instant: Timestamp,
+    zone: &TimeZone,
+) -> Result<LocalTimestamp, NotALocalTimestamp> {
+    reading(instant, zone).or_else(|_| reading(instant, &TimeZone::UTC))
 }
 
 /// `instant` as the local reading `zone` gives it.
@@ -33,21 +49,20 @@ pub(crate) fn local_now() -> LocalTimestamp {
 /// An offset is read to the minute, the precision `{{now}}` writes it in;
 /// every offset a zone holds today is a whole number of minutes, and a
 /// historical one with seconds in it is truncated toward zero.
-fn local_timestamp(instant: Timestamp, zone: &TimeZone) -> LocalTimestamp {
+fn reading(instant: Timestamp, zone: &TimeZone) -> Result<LocalTimestamp, NotALocalTimestamp> {
     let local = instant.to_zoned(zone.clone());
-    let offset_minutes = i16::try_from(local.offset().seconds() / 60)
-        .expect("a zone's offset is less than a day, so its minutes fit");
-    let part = |value: i8| u8::try_from(value).expect("a civil field is not negative");
+    let offset_minutes =
+        i16::try_from(local.offset().seconds() / 60).map_err(|_| NotALocalTimestamp)?;
+    let part = |value: i8| u8::try_from(value).map_err(|_| NotALocalTimestamp);
     LocalTimestamp::new(
         local.year().into(),
-        part(local.month()),
-        part(local.day()),
-        part(local.hour()),
-        part(local.minute()),
-        part(local.second()),
+        part(local.month())?,
+        part(local.day())?,
+        part(local.hour())?,
+        part(local.minute())?,
+        part(local.second())?,
         offset_minutes,
     )
-    .expect("a zone reads every instant as a day the calendar has and a time inside it")
 }
 
 #[cfg(test)]
@@ -65,7 +80,7 @@ mod tests {
             .expect("a template")
             .fill(&TemplateValues::new(
                 BTreeMap::new(),
-                local_timestamp(instant, zone),
+                local_timestamp(instant, zone).expect("an instant in the years 0 to 9999"),
             ))
             .expect("the template fills")
     }
@@ -105,11 +120,39 @@ mod tests {
         );
     }
 
+    /// **A zone whose offset is a day or more reads as UTC.** POSIX allows
+    /// such an offset and a reading cannot write one, since RFC 3339 writes an
+    /// offset's hours as 00 to 23; the reading falls back to UTC, as a zone
+    /// that cannot be resolved does, rather than refusing the clock.
+    #[test]
+    fn a_zone_a_day_or_more_from_utc_reads_as_utc() {
+        for posix in ["<+24>-24", "<-2430>24:30"] {
+            let zone = TimeZone::posix(posix).expect("a POSIX zone");
+            assert_eq!(
+                now_in("2026-10-01T17:00:00Z", &zone),
+                "2026-10-01T17:00:00+00:00",
+                "{posix}"
+            );
+        }
+    }
+
     /// **The dormant carrier is covered at its seam**: the system clock, in
-    /// the system's zone, reads as a reading the calendar has rather than
-    /// panicking in the conversion.
+    /// the system's zone, fills `{{now}}` with the instant it is, so the
+    /// offset it states has the sign that turns the local time back into
+    /// that instant.
     #[test]
     fn the_system_clock_reads_as_a_local_timestamp() {
-        let _ = local_now();
+        let before = Timestamp::now();
+        let reading = local_now().expect("the system clock reads in the years 0 to 9999");
+        let now = Template::parse("{{now}}")
+            .expect("a template")
+            .fill(&TemplateValues::new(BTreeMap::new(), reading))
+            .expect("the template fills");
+        let read_back: Timestamp = now.parse().expect("`{{now}}` is RFC 3339");
+        let drift = read_back.duration_since(before).abs();
+        assert!(
+            drift <= jiff::SignedDuration::from_secs(5),
+            "`{now}` is {drift:?} from the instant it was read at"
+        );
     }
 }
