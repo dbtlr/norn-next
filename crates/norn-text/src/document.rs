@@ -641,7 +641,9 @@ impl<'a> Document<'a> {
     /// the field holds, or writing or replacing a nested value — replaces the
     /// field's whole entry, a collection written in block style, and refuses
     /// with [`EditError::CommentWouldBeLost`] where the entry carries a
-    /// comment it would drop.
+    /// comment it would drop. A field already holding `value` — equal under
+    /// the value model's equality, at every depth — is left as it is written,
+    /// and the document comes back unchanged.
     ///
     /// Growing the block past [`FRONTMATTER_MAX_BYTES`] refuses too, and with
     /// its own error: past the bound no read turns the block back into fields,
@@ -1239,6 +1241,12 @@ impl<'a> Document<'a> {
             Some(Value::Map(map)) => map.get(&located.name),
             _ => None,
         };
+        // A field already holding `value` already says what the set asks for,
+        // so nothing is written: a re-spelling would be a change of nothing,
+        // and a comment a rewrite would drop is not in the way of one.
+        if held == Some(value) {
+            return Ok(self.source.to_string());
+        }
 
         // A scalar over a scalar replaces the value's bytes, keeping the
         // author's quoting where the new value permits it. A scalar no span

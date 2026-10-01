@@ -2443,8 +2443,9 @@ heading. Each composes as a pure function of its one document's bytes through `n
 which proves every splice by reading it back, and addresses a section through the one
 shared heading resolver a read and a wikilink anchor use. A frontmatter value may be any
 shape the value model holds: a map, a list of maps or a list of lists is written in block
-style, two spaces deeper per level, an empty collection as `[]` or `{}`, and a set over or
-of a nested value rewrites the field's whole entry. A push or a pop on a block list
+style, two spaces deeper per level, an empty collection as `[]` or `{}`, and a set that
+changes the shape a field holds, or writes or replaces a nested value, rewrites the field's
+whole entry; a set of the value a field already holds changes no byte. A push or a pop on a block list
 splices or deletes only the lines of the items it adds or removes, an item spanning several
 lines included, and every byte it does not change stays; a flow list, or a block list whose
 items do not each re-read alone as themselves, is rewritten whole. An edit that cannot be

@@ -3171,3 +3171,43 @@ fn an_edit_to_what_the_document_already_holds_lands_found() {
         "nothing written"
     );
 }
+
+/// **A set of the nested or list value a field already holds lands found**,
+/// however the field is spelled and whatever comment its entry carries: the
+/// set changes no byte, so it neither re-spells the value nor refuses for a
+/// comment a rewrite would drop.
+#[test]
+fn a_set_of_the_collection_a_field_holds_lands_found() {
+    use norn_wire::AuthoredValue as V;
+    let mut fixture = Fixture::new(&[(
+        "a.md",
+        "---\nmeta: # about\n    k: \"v\"   # why\n    rows: [ {a: 1}, [x] ]\ntags: [ a,b ] # kept\n---\n# A\n",
+    )]);
+    let meta = V::map([
+        ("k".to_string(), V::string("v")),
+        (
+            "rows".to_string(),
+            V::list([
+                V::map([("a".to_string(), V::Integer(1))]).expect("a map"),
+                V::list([V::string("x")]),
+            ]),
+        ),
+    ])
+    .expect("a map");
+    let plan = fixture.plan(vec![
+        setting("a.md", "meta", meta),
+        setting("a.md", "tags", tag_list(&["a", "b"])),
+    ]);
+    for transition in &plan.transitions {
+        assert_eq!(transition.after, transition.before, "{transition:?}");
+    }
+    let landed = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&landed),
+        vec![("a.md".to_string(), TargetResult::Found)]
+    );
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "nothing written"
+    );
+}

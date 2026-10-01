@@ -414,3 +414,38 @@ fn a_nested_element_pushed_onto_a_flow_or_absent_list_is_written_in_block_style(
         Ok("---\ntitle: t\nrows:\n  - k: v\n---\n".to_string())
     );
 }
+
+// ── Setting a field to what it holds ─────────────────────────────────────
+
+/// **A nested field set to the value it already holds changes no byte**,
+/// however it is spelled and whatever comment its entry carries: the set
+/// writes nothing, so it neither re-spells the value nor refuses for the
+/// comment it would otherwise drop.
+#[test]
+fn setting_a_nested_field_to_its_own_value_changes_no_byte() {
+    let source = "---\nmeta: # about\n    k: \"v\"   # why\n    rows: [ {a: 1}, [x] ]\nafter: y\n---\nbody\n";
+    let held = map([
+        ("k", "v".into()),
+        (
+            "rows",
+            list([map([("a", Value::Int(1))]), list(["x".into()])]),
+        ),
+    ]);
+    assert_eq!(set(source, "meta", &held), Ok(source.to_string()));
+}
+
+/// **A flat list set to the value it already holds changes no byte**, the
+/// author's spacing and the comment inside the entry included.
+#[test]
+fn setting_a_flat_list_to_its_own_value_changes_no_byte() {
+    for source in [
+        "---\ntags: [ a,b ]   # kept\n---\n",
+        "---\ntags:\n    - 'a'\n    # between\n    - b\n---\n",
+    ] {
+        assert_eq!(
+            set(source, "tags", &list(["a".into(), "b".into()])),
+            Ok(source.to_string()),
+            "for {source:?}"
+        );
+    }
+}
