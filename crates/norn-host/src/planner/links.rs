@@ -277,23 +277,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             })
     };
 
-    // Each key holding a link the cascades left as written, matched or not.
-    let kept: BTreeSet<EntryKey> = kept
-        .iter()
-        .map(|kept| (&kept.holder, kept.syntax, &kept.address))
-        .chain(
-            skipped
-                .iter()
-                .map(|skip| (&skip.holder, skip.syntax, &skip.address)),
-        )
-        .map(|(holder, syntax, address)| {
-            (
-                holder.as_str().to_string(),
-                family_name(syntax),
-                address.clone(),
-            )
-        })
-        .collect();
+    let kept = left_as_written(skipped, kept);
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     // Each delete a link naming its document contradicts.
     let mut named: BTreeSet<usize> = BTreeSet::new();
@@ -460,6 +444,29 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     }
     set.advisories = advised.into_values().collect();
     Ok(set)
+}
+
+/// Each key holding a link a plan's rewrites left as written, matched or
+/// not: a link a rewrite matched and the text layer left (`skipped`), and a
+/// link no rewrite matched under an address one writes (`kept`). Every link
+/// under a key a rewrite writes reads as written, so one left as written
+/// there is known by its key alone.
+pub(crate) fn left_as_written(skipped: &[Skipped], kept: &[Kept]) -> BTreeSet<EntryKey> {
+    kept.iter()
+        .map(|kept| (&kept.holder, kept.syntax, &kept.address))
+        .chain(
+            skipped
+                .iter()
+                .map(|skip| (&skip.holder, skip.syntax, &skip.address)),
+        )
+        .map(|(holder, syntax, address)| {
+            (
+                holder.as_str().to_string(),
+                family_name(syntax),
+                address.clone(),
+            )
+        })
+        .collect()
 }
 
 /// What a plan reaches of the links the store holds: the overlay of every
@@ -1073,7 +1080,7 @@ impl WrittenLinks {
     /// The links `operations` write: each `rewrite_link`'s and each
     /// cascade rewrite's document identity, syntax, and the address it
     /// writes, with the address it respells.
-    fn of<'o>(
+    pub(crate) fn of<'o>(
         operations: impl IntoIterator<Item = &'o Operation>,
         normalizer: &PathNormalizer,
     ) -> Self {
@@ -1110,7 +1117,7 @@ impl WrittenLinks {
     /// Whether the plan writes `link`, as its after-state holds it in the
     /// document `holder`: the one predicate "a link whose text the plan
     /// writes" is read by.
-    fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
+    pub(crate) fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
         self.rewritten
             .contains_key(&(holder.clone(), link.family.as_str(), address(link)))
     }

@@ -131,8 +131,14 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // does; a delete its link choice does not keep falls once the plan
         // composes with its cascades. What is left composes again, until
         // nothing more falls.
-        let generated = generate(&composition, &lineage, view.normalizer(), links)
-            .map_err(PlanningFailure::Links)?;
+        let generated = generate(
+            &composition,
+            &lineage,
+            order.iter().map(|&position| &operations[position]),
+            view.normalizer(),
+            links,
+        )
+        .map_err(PlanningFailure::Links)?;
         let deletes = generated.deletes;
         for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;

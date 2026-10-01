@@ -117,14 +117,14 @@ use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkFact, ProbedLink, TargetNaming};
 use norn_wire::{
     AmbiguousEnd, Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily,
-    LinkRewrite, Resolves, UnresolvedReason,
+    LinkRewrite, Operation, Resolves, UnresolvedReason,
 };
 
 use super::compose::{Composition, Skipped};
 use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
     Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Target, WrittenLinks, address,
-    decider, family_name, reach, reaching, removed_by, respells, retarget_namings,
+    decider, family_name, left_as_written, reach, reaching, removed_by, respells, retarget_namings,
     rewrite_destination, rewrite_targets, selecting, spelled, stored_path, wire_family,
 };
 use crate::derivation::document_links;
@@ -242,12 +242,20 @@ impl Deletes {
 ///   none is left unresolved ([`unmatched`]), as is one selecting a wikilink
 ///   an earlier rewrite selects ([`overlaps`]).
 ///
+/// **A link an authored rewrite writes is its author's.** `composition`
+/// holds each authored `rewrite_link` of `operations` already, so a link one
+/// writes is read with the text its author gave it, which is not what the
+/// link was before the plan: no cascade respells it, no wikilink rewrite
+/// selects it and no delete counts it, as the batch composing every rewrite
+/// of its holder matches the text the holder held.
+///
 /// Empty, and the index never asked, where no move carries a document, no
 /// delete forbids or rewrites the links naming its own, and no wikilink
 /// rewrite stands.
-pub(crate) fn generate<I: LinkIndex + ?Sized>(
+pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     composition: &Composition,
     lineage: &Lineage,
+    operations: impl IntoIterator<Item = &'o Operation>,
     normalizer: &PathNormalizer,
     index: &I,
 ) -> Result<Generated, I::Error> {
@@ -264,13 +272,15 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         composition,
         lineage,
         normalizer,
+        written: WrittenLinks::of(operations, normalizer),
+        kept: left_as_written(&composition.skipped, &composition.kept),
         namings: BTreeMap::new(),
         destinations: BTreeMap::new(),
     };
     let targets = Target::of(composition);
     let Reached {
         overlay, probed, ..
-    } = reach(&targets, lineage, normalizer, &WrittenLinks::default());
+    } = reach(&targets, lineage, normalizer, &cascade.written);
 
     // What each rewriting delete's target names after the plan, and the one
     // document its links are respelled toward where it names one a link can
@@ -320,6 +330,9 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let mut retargeting: BTreeMap<usize, usize> = BTreeMap::new();
     let mut overlapping: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
+        if change.written && !cascade.kept.contains(&change_key(&change)) {
+            return;
+        }
         // A wikilink two rewrites select is the earlier one's, and the later
         // one is left out naming it.
         if let [earlier, later @ ..] = &selecting(
@@ -638,6 +651,10 @@ struct Cascade<'a> {
     composition: &'a Composition,
     lineage: &'a Lineage,
     normalizer: &'a PathNormalizer,
+    /// The links the plan's authored rewrites write, each its author's.
+    written: WrittenLinks,
+    /// Each key holding a link those rewrites left as written.
+    kept: BTreeSet<EntryKey>,
     /// What each wikilink rewrite's two ends name, by its position.
     namings: BTreeMap<usize, RetargetNaming>,
     /// The one document each delete rewriting the links naming its document
@@ -723,7 +740,15 @@ impl<'a> Cascade<'a> {
             else {
                 continue;
             };
+            let file = self.identity(landed.as_str());
             for link in document_links(bytes) {
+                let authored = file
+                    .as_ref()
+                    .is_some_and(|file| self.written.holds(file, &link))
+                    && !self.kept.contains(&entry(landed, &link));
+                if authored {
+                    continue;
+                }
                 let relative = matches!(
                     LinkAddress::of(
                         wire_family(link.family),
@@ -840,6 +865,16 @@ fn strip_extension(path: &str) -> Option<&str> {
 /// A stored path as the wire names it.
 fn wire_path(path: &norn_store::DocumentPath) -> Option<DocumentPath> {
     DocumentPath::new(path.as_str()).ok()
+}
+
+/// The change set's key for `change`'s link, held where it is after the
+/// plan.
+fn change_key(change: &norn_store::LinkChange) -> EntryKey {
+    (
+        change.holder.as_str().to_string(),
+        family_name(wire_family(change.link.family)),
+        address(&change.link),
+    )
 }
 
 /// The change set's key for `link`, held at `holder`.

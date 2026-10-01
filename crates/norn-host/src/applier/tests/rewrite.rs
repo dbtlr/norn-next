@@ -484,6 +484,40 @@ fn an_authored_link_rewrite_matching_no_link_is_unresolved() {
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
 }
 
+/// **A wikilink rewrite selects a wikilink by what it is before the plan,
+/// never by the text an authored link rewrite of the same plan writes.**
+/// `[[d]]`, respelled to `[[a]]` by hand, named `d.md` before the plan, so a
+/// rewrite of `a` to `c` retargets nothing — a holder's rewrites match the
+/// text it held — and is left unresolved saying so, while the authored
+/// rewrite lands alone.
+#[test]
+fn a_wikilink_rewrite_never_selects_the_text_an_authored_rewrite_writes() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("d.md", "D\n"),
+        ("h.md", "[[d]]\n"),
+    ]);
+    let resolution = fixture.planned(vec![
+        relinking("h.md", LinkFamily::Wikilink, "d", "a"),
+        retargeting("a", "c"),
+    ]);
+    let detail = unresolved_detail(&resolution);
+    assert!(detail.contains("no wikilink"), "{detail}");
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty()),
+        "{:?}",
+        resolution.plan.operations
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **A link an authored rewrite matches and the text layer leaves as written
 /// is advised on**: a wikilink's address cannot hold `]]`, so `[[a]]` stays
 /// as it is, the forecast says it is unrepresentable, and the holder lands
