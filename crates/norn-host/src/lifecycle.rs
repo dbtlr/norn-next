@@ -23427,12 +23427,20 @@ mod tests {
     /// again — so the read that meets the empty slot asks for the mint before
     /// it refuses. The recovery costs no teardown, which is what keeps a read
     /// stream from being the thing that prevents its own repair.
+    ///
+    /// The window is the queue: the one worker is held inside another vault's
+    /// attach, so the teardown the reap schedules sits in the channel until
+    /// the read has met the entry. A worker free to run it first would begin
+    /// the release, which a read does not withdraw, and refuse the read for a
+    /// reason this case is not about.
     #[test]
     fn a_read_seam_that_failed_heals_on_the_next_read_after_the_environment_recovers() {
         let ops = Arc::new(FakeOps::default());
         ops.reader_mint_fails.store(true, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name]), 1);
+        let occupied = VaultName::new("occupied").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), Roots::Absent(&[&name, &occupied]), 1);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         assert!(matches!(
@@ -23445,30 +23453,22 @@ mod tests {
             "a mint that refused minted a handle"
         );
 
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
         ops.reader_mint_fails.store(false, Ordering::SeqCst);
-        // Twenty rounds of the reap the entry is over its horizon for, each
-        // followed by a read: the read withdraws the teardown it was
-        // scheduled for, so a seam that could only heal through one would
-        // never heal here.
-        let mut served = None;
-        for round in 0..20 {
-            host.reap_idle(Instant::now() + Duration::from_secs(61))
-                .unwrap();
-            if host.begin_read(&name).is_ok() {
-                served = Some(round);
-                break;
-            }
-        }
-        assert_eq!(
-            served,
-            Some(0),
+        // The reap the entry is over its horizon for, then a read: the read
+        // withdraws the teardown it was scheduled for, so a seam that could
+        // only heal through one would not heal here.
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        assert!(
+            host.begin_read(&name).is_ok(),
             "the read that met the recovered environment did not mint the handle again"
         );
-        assert_eq!(
-            ops.detaches.load(Ordering::SeqCst),
-            0,
-            "the read seam healed through a teardown rather than through a mint"
-        );
+        // Read before the occupier publishes: its attach mints through the
+        // same ledger.
         assert_eq!(
             ops.readers.opened.load(Ordering::SeqCst),
             1,
@@ -23481,6 +23481,20 @@ mod tests {
             None,
             "the reason outlived the mint that replaced it"
         );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &occupied, TrustState::Ready);
+        settle();
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the read seam healed through a teardown rather than through a mint"
+        );
+        assert!(
+            reader_stands(&host, &name),
+            "the teardown the read withdrew ran anyway"
+        );
+        drop(occupier);
     }
 
     /// The control for the heal above: a read over an entry whose environment

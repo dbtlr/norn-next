@@ -65,7 +65,8 @@ pub(crate) struct FolderContents {
     /// path order.
     pub(crate) documents: Vec<DocumentPath>,
     /// Every other file and every place not entered beneath it, in path
-    /// order.
+    /// order, each at the spelling the tree lists it — a name that is not
+    /// UTF-8 at its lossy spelling, its undecodable bytes replaced.
     pub(crate) left: Vec<FilePath>,
 }
 
@@ -82,7 +83,10 @@ impl FolderContents {
         }
     }
 
-    /// Leave behind what stands at `spelled`.
+    /// Leave behind what stands at `spelled`. A file path refuses only an
+    /// empty spelling and one starting at a filesystem root, and a path the
+    /// walk lists beneath a folder is neither, lossy spellings included, so
+    /// nothing left behind goes unnamed; the refusal arm is unreachable.
     fn leave(&mut self, spelled: &str) {
         if let Ok(left) = FilePath::new(spelled) {
             self.left.push(left);
