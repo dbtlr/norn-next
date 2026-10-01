@@ -169,7 +169,7 @@ pub(crate) fn resolve_on(
             ExpandingFailure::Planning(PlanningFailure::View(error)) => {
                 PageRefused::Answered(unreadable(name, error))
             }
-            ExpandingFailure::Match(refused) => refused,
+            ExpandingFailure::Snapshot(refused) => refused,
         },
     )
 }
@@ -182,7 +182,7 @@ pub(crate) fn resolve_on(
 /// **A preview reads the snapshot its read hold took**, under the content
 /// model that snapshot pins. **An apply reads a snapshot its job establishes
 /// inside the entry's claim**, on a read handle the store mints for the job
-/// through the coverage's read seam ([`established_for_matching`]) the first
+/// through the coverage's read seam ([`established_for_the_job`]) the first
 /// time a `where` target or a link resolution asks: the job holds the claim
 /// and its store is the one writer, so that snapshot reads exactly the state
 /// the apply's changeset builds on. One handle serves the job's matching, its
@@ -298,14 +298,15 @@ impl<'a> PlanSnapshot<'a> {
     }
 }
 
-/// A snapshot for one apply's `where` matching, established through
-/// `source`'s own read seam — the mint every entry's read handle comes from
-/// and the establishment every read runs — with the statements the mint ran
-/// beside it, whichever way it ended.
+/// A snapshot for one apply job's reads of the store — its `where` matching,
+/// its planning's resolution change set and the applier's check of it —
+/// established through `source`'s own read seam, the mint every entry's read
+/// handle comes from and the establishment every read runs, with the
+/// statements the mint ran beside it, whichever way it ended.
 ///
 /// The handle is the job's alone, so its connection is idle when taken; the
 /// snapshot holds it, and both close when the snapshot drops.
-pub(crate) fn established_for_matching<S>(
+pub(crate) fn established_for_the_job<S>(
     source: &S,
 ) -> (
     Result<<S::Reader as ReadSource>::Snapshot, ReaderUnavailable>,

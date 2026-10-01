@@ -91,13 +91,14 @@ pub(crate) trait Matcher {
 }
 
 /// Why a plan was not planned: a failure of planning itself, or a snapshot
-/// the matcher could not read.
+/// the matcher or the link index could not read.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ExpandingFailure<V, M> {
     /// The plan's own shape, or the vault's files.
     Planning(PlanningFailure<V>),
-    /// The snapshot the `where` targets are matched on.
-    Match(M),
+    /// The one snapshot the `where` targets are matched on and the plan's
+    /// resolution change set is judged on.
+    Snapshot(M),
 }
 
 /// Plan `authored` against what `view` holds, its `where` targets expanded
@@ -147,7 +148,7 @@ where
         } else {
             match matcher
                 .matching(predicates)
-                .map_err(ExpandingFailure::Match)?
+                .map_err(ExpandingFailure::Snapshot)?
             {
                 Ok(documents) if documents.is_empty() => Err(format!(
                     "no document matches the `where` target {}",
@@ -190,7 +191,7 @@ where
             PlanningFailure::View(error) => {
                 ExpandingFailure::Planning(PlanningFailure::View(error))
             }
-            PlanningFailure::Links(refused) => ExpandingFailure::Match(refused),
+            PlanningFailure::Links(refused) => ExpandingFailure::Snapshot(refused),
         },
     )
 }
@@ -673,7 +674,7 @@ mod tests {
         .expect_err("an unreadable snapshot planned");
         assert_eq!(
             failure,
-            ExpandingFailure::Match("the store refused".to_string())
+            ExpandingFailure::Snapshot("the store refused".to_string())
         );
     }
 }

@@ -319,7 +319,7 @@ fn apply_over(
     // check; the applier gives it back before it publishes.
     let source: &ProductionAttachment = attachment;
     let mint = || {
-        let (snapshot, statements) = crate::apply::established_for_matching(source);
+        let (snapshot, statements) = crate::apply::established_for_the_job(source);
         evidence.count_apply_mint(statements);
         snapshot
     };
@@ -5838,14 +5838,15 @@ mod tests {
         );
     }
 
-    /// **An apply's `where` match mints its read handle through the
-    /// coverage's read seam and accounts the mint to the job account**: the
-    /// store's read-only open reports two statements, and an apply naming no
-    /// `where` target that changes no document's presence mints nothing.
-    /// **A delete mints one handle for the job**: its planning's resolution
-    /// change set and the applier's check of it read the one snapshot.
+    /// **An apply that reads the store mints one read handle for its job
+    /// through the coverage's read seam and accounts the mint to the job
+    /// account**: a `where` match mints it, the store's read-only open
+    /// reporting two statements, and an apply naming no `where` target that
+    /// changes no document's presence mints nothing. A delete mints one
+    /// handle too: its planning's resolution change set and the applier's
+    /// check of it read the one snapshot.
     #[test]
-    fn an_apply_matching_a_where_accounts_its_reader_mint_to_the_job_account() {
+    fn an_apply_reading_the_store_mints_one_reader_for_its_job_and_accounts_it() {
         let f = Fixture::new("apply-mint-account");
         fs::write(f.vault().join("a.md"), "---\nwave: flip\n---\n").unwrap();
         let ops = fixture_ops(&f);
