@@ -443,6 +443,62 @@ fn a_backlink_added_after_preview_refuses_and_the_fresh_plan_answers_for_it() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
 }
 
+/// **A delete whose path the plan refills still reads its backlinks.**
+/// Deleting `a.md` and creating another document there leaves a document at
+/// the path on both sides, but not the one a link naming it named, so the
+/// plan records every link naming it and the applier computes them again: a
+/// backlink another writer adds after the preview is an entry the plan does
+/// not record, and refuses it. A plain delete's fresh plan is left
+/// unresolved for that backlink; one rewriting its links to the document
+/// refilling the path records the backlink it already has, and its fresh
+/// plan, recording the new one too, lands.
+#[test]
+fn a_backlink_added_after_preview_to_a_deleted_and_refilled_path_refuses_the_apply() {
+    let unrecorded = || {
+        norn_wire::RefusedCheck::condition_unrecorded(PlanCondition::link_resolution(
+            key("k.md", LinkFamily::Wikilink, "a"),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("a.md")),
+        ))
+    };
+
+    let mut fixture = Fixture::new(&[("a.md", "Old\n")]);
+    let plan = fixture.plan(vec![deleting("a.md"), creating("a.md", "New\n")]);
+    assert_eq!(plan.conditions, []);
+    fixture.foreign("k.md", "[[a]]\n");
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(refused.checks, [unrecorded()]);
+    assert!(
+        refused.unresolved.contains(&UnresolvedOperation::new(
+            deleting("a.md"),
+            UnresolvedReason::has_backlinks(vec![path("k.md")], 1),
+        )),
+        "{:?}",
+        refused.unresolved
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("Old\n"));
+
+    let mut fixture = Fixture::new(&[("a.md", "Old\n"), ("h.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![rewriting("a.md", "a"), creating("a.md", "New\n")]);
+    assert_eq!(
+        plan.conditions,
+        [PlanCondition::link_resolution(
+            key("h.md", LinkFamily::Wikilink, "a"),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("a.md")),
+        )]
+    );
+    fixture.foreign("k.md", "[[a]]\n");
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(refused.checks, [unrecorded()]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("Old\n"));
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("New\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+    assert_eq!(fixture.read("k.md").as_deref(), Some("[[a]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **Re-sending an interrupted rewriting delete finishes its cascade.** One
 /// holder landed before the interruption, and the store took it in; the
 /// re-send finds it at its after-state, rewrites the holder that did not

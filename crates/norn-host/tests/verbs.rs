@@ -21,11 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthorCondition, AuthoredValue,
-    ChangesetOutcome, DeleteParams, DocumentEdit, DocumentPath, EditParams, ErrorDetail,
-    ErrorEnvelope, ExpectedField, FieldChange, FilePath, FindParams, FindingKind, FolderPath,
-    LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, MoveParams, MoveSubject, NewParams,
-    OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck, ResolutionTarget,
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthorCondition, AuthoredPlan,
+    AuthoredValue, ChangesetOutcome, DeleteParams, DocumentEdit, DocumentPath, EditParams,
+    ErrorDetail, ErrorEnvelope, ExpectedField, FieldChange, FilePath, FindParams, FindingKind,
+    FolderPath, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, MoveParams, MoveSubject, NewParams,
+    Operation, OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck, ResolutionTarget,
     ResolvedPlan, SetParams, TargetResult, UnresolvedReason, VaultAddress, WriteTarget,
 };
 
@@ -910,5 +910,71 @@ fn a_delete_leaving_its_links_broken_lands_and_an_unlinked_delete_lands() {
             .path()
             .join("delete-gate/kept/delete-gate-target.md")
             .exists()
+    );
+}
+
+/// Wait until the attachment has derived the document another writer wrote
+/// at `at`, as the watcher delivers it.
+fn derived(vault: &attach::Vault, at: &str) {
+    let document = norn_store::DocumentPath::new(at).expect("a stored document path");
+    norn_testkit::wait::wait_until(
+        "the other writer's document is derived",
+        attach::state_budget(std::time::Duration::from_secs(10)),
+        || match vault.store().begin_request().stored_facts(&document) {
+            Ok(Some(_)) => norn_testkit::wait::Observed::Met(()),
+            _ => norn_testkit::wait::Observed::pending("not derived yet"),
+        },
+    )
+    .expect("the other writer's document is derived");
+}
+
+/// **A delete whose path the plan refills is refused for a backlink another
+/// writer adds after its preview**, its plan sent back resolved: nothing
+/// named the document at preview, so the delete needed no flag, but the
+/// document the plan replaces is named when the apply's check reads its
+/// links again — the job mints a read handle for the check though every
+/// presence stays as it was — and nothing is written.
+#[test]
+fn a_delete_refilling_its_path_is_refused_for_a_backlink_added_after_its_preview() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-delete-refill",
+        &[("delete-refill/delete-refill-subject.md", "# Old\n")],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let subject = path("delete-refill/delete-refill-subject.md");
+    let plan = previewed(host.apply(ApplyParams::new(
+        ApplyMode::Preview,
+        PlanDocument::operations(AuthoredPlan::new(
+            address(&vault),
+            vec![
+                Operation::new(OperationKind::delete_document(subject.clone())),
+                Operation::new(OperationKind::create_document(subject, "# New\n")),
+            ],
+        )),
+    )));
+    assert_eq!(plan.conditions, vec![]);
+
+    std::fs::write(
+        vault.path().join("delete-refill/linker.md"),
+        "[[delete-refill-subject]]\n",
+    )
+    .expect("another writer links the subject");
+    derived(&vault, "delete-refill/linker.md");
+    let refusal = refused(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+        panic!("the refusal carries {:?}", refusal.detail());
+    };
+    assert!(
+        matches!(&checks[..], [RefusedCheck::ConditionUnrecorded { .. }]),
+        "{checks:?}"
+    );
+    assert_eq!(
+        read(&vault, "delete-refill/delete-refill-subject.md"),
+        "# Old\n"
     );
 }

@@ -33,15 +33,19 @@
 //! path another writer adds after planning is then an entry the plan does
 //! not record, and refuses it as one to a vacated path does.
 //!
-//! **A plan that changes no document's presence and writes no link is
-//! answered without reading anything.** No link's resolution moves unless a
-//! document appears or disappears somewhere a key names, or the plan writes
-//! the link's text, so such a plan — every edit-only plan, a frontmatter set
-//! among them — records nothing, and the index is never asked: nothing is
-//! minted for it. A document a move carries away lands somewhere nothing
-//! stood or leaves somewhere nothing stands after, since moves closing a
-//! cycle are refused, so a plan replacing a document a link follows always
-//! changes a presence too.
+//! **A plan that changes no document's presence, deletes none and writes no
+//! link is answered without reading anything.** No link's resolution moves
+//! unless a document appears or disappears somewhere a key names, the
+//! document at a path a key names is replaced, or the plan writes the link's
+//! text, so such a plan — every edit-only plan, a frontmatter set among them —
+//! records nothing, and the index is never asked: nothing is minted for it.
+//! A plan replaces the document at a path while every presence stays as it
+//! was only by deleting it and refilling the path: a document a move carries
+//! away lands somewhere nothing stood or leaves somewhere nothing stands
+//! after, since moves closing a cycle are refused, and a create with no
+//! delete adds a document. So a plan holding a delete is read — a delete
+//! whose path the plan refills among them, whose backlinks are judged as any
+//! other delete's.
 //!
 //! **Which links a plan writes is one predicate** ([`WrittenLinks::holds`]):
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
@@ -136,19 +140,23 @@ pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) 
 /// **The one fast-path predicate**: whether a plan whose targets each stand
 /// as `presence` — whether a document stands there before the plan, and
 /// after it — and whose operations are `operations` reads the link index:
-/// some target holds a document on one side and not the other, or some
-/// operation rewrites a link, as a `rewrite_link` or through its cascade. A
-/// plan of which neither holds records no entry and reads nothing, so
-/// [`change_set`] answers it without asking and an apply job mints no handle
-/// for it ([`reads_links`]).
+/// some target holds a document on one side and not the other; some
+/// operation deletes a document, which is how a plan replaces the document
+/// at a path it refills, every presence staying as it was ([`replaces`]); or
+/// some operation rewrites a link, as a `rewrite_link` or through its
+/// cascade. A plan of which none holds records no entry and reads nothing,
+/// so [`change_set`] answers it without asking and an apply job mints no
+/// handle for it ([`reads_links`]).
 fn reads_links_over<'o>(
     presence: impl IntoIterator<Item = (bool, bool)>,
     operations: impl IntoIterator<Item = &'o Operation>,
 ) -> bool {
     presence.into_iter().any(|(before, after)| before != after)
         || operations.into_iter().any(|operation| {
-            matches!(operation.kind, OperationKind::RewriteLink { .. })
-                || !operation.cascade.is_empty()
+            matches!(
+                operation.kind,
+                OperationKind::RewriteLink { .. } | OperationKind::DeleteDocument { .. }
+            ) || !operation.cascade.is_empty()
         })
 }
 
@@ -979,6 +987,27 @@ mod tests {
         );
         assert_eq!(entries(&resolution.plan.conditions), []);
         assert!(resolution.forecast.links.is_empty());
+    }
+
+    /// **A plan holding a delete reads the link index, though every
+    /// presence stays as it was.** Deleting `a.md` and creating another
+    /// document there replaces the document a link naming the path follows,
+    /// so the job takes a read handle for it as the change set reads one; an
+    /// edit in place reads none.
+    #[test]
+    fn a_delete_whose_path_the_plan_refills_reads_the_link_index() {
+        use norn_wire::{FileState, Transition};
+        let hash = |text: &str| crate::planner::compose::content_hash(text.as_bytes());
+        let refilled = [Transition::new(
+            path("a.md"),
+            FileState::present(hash("Old\n")),
+            FileState::present(hash("New\n")),
+        )];
+        let deleted = Operation::new(OperationKind::delete_document(path("a.md")));
+        let created = Operation::new(OperationKind::create_document(path("a.md"), "New\n"));
+        assert!(super::reads_links(&refilled, &[deleted, created]));
+        let edited = Operation::new(OperationKind::str_replace(path("a.md"), "Old", "New"));
+        assert!(!super::reads_links(&refilled, &[edited]));
     }
 
     /// **A link a created document holds is keyed where it stands after the

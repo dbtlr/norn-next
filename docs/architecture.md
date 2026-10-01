@@ -2588,8 +2588,9 @@ once through link health's own head statement, cut at two rows past the targets 
 name: the work is the links the plan reaches plus the candidates they resolve against,
 with one limit link health's head statement carries too: a head is read past every member
 of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
-plan that changes no document's presence and writes no link records nothing and reads no
-snapshot. A link a move's cascade leaves naming a path the plan vacates and refills is an
+plan that changes no document's presence, deletes no document and writes no link records
+nothing and reads no snapshot; a delete is read even where the plan refills its path, since
+the document there is then replaced with every presence as it was. A link a move's cascade leaves naming a path the plan vacates and refills is an
 entry too, naming that path on both sides, since the document there is not the one it
 named. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment
@@ -2641,9 +2642,9 @@ bound by the applier's lifecycle tests.
   snapshot is the job's one read handle. Planning mints it the first time a `where` target
   is matched or the plan's resolution change set reads the link index, and hands it to the
   applier; a resolved plan sent back plans nothing, so the job mints it just before the
-  applier's check where the plan changes some document's presence or rewrites a link — the
-  one predicate the change set's own answer-without-reading path reads — and a plan doing
-  neither mints none. Planning matches and records the set on it, the applier computes the
+  applier's check where the plan changes some document's presence, deletes a document or
+  rewrites a link — the one predicate the change set's own answer-without-reading path
+  reads — and a plan doing none of these mints none. Planning matches and records the set on it, the applier computes the
   set again on it, and it is given back before the changeset commits. No commit
   lands in the registration's store between that snapshot and the apply's changeset, so the
   changeset builds on exactly the state the apply read. From planning to its changeset the
