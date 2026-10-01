@@ -24,10 +24,10 @@
 //! ([`PlanSnapshot`]), through the find builder in process, and where its
 //! resolution change set reads the links the store holds.
 //!
-//! **The write verbs enter here.** [`Host::set`], [`Host::edit`] and
-//! [`Host::new_document`] each compile their request to an authored plan and
-//! answer through [`Host::apply`], so a verb previews and applies exactly as
-//! the same operations sent as a plan do.
+//! **The write verbs enter here.** [`Host::set`], [`Host::edit`],
+//! [`Host::new_document`] and [`Host::move_path`] each compile their request
+//! to an authored plan and answer through [`Host::apply`], so a verb previews
+//! and applies exactly as the same operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -58,8 +58,8 @@ use norn_fs::WatchError;
 use norn_store::{ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
-    FindParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams, TrustState,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams,
+    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -531,6 +531,20 @@ where
     /// Answer a `new`: the document `params` creates at its path, compiled
     /// to an operation and previewed or applied through [`Host::apply`].
     pub fn new_document(&self, params: NewParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `move`: the document or folder `params` names, compiled to
+    /// one operation and previewed or applied through [`Host::apply`].
+    ///
+    /// **The move carries its link cascade.** Planning respells every link
+    /// that would stop naming a moved document, or leaves it as written with
+    /// the forecast saying why, and a folder move expands into one document
+    /// move per document the folder holds, its forecast naming every file it
+    /// leaves behind. `move` is a Rust keyword, so the verb's method is
+    /// named for what it moves.
+    pub fn move_path(&self, params: MoveParams) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
         self.apply_operations(mode, params.plan())
     }

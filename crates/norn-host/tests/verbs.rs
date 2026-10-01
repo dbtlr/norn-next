@@ -1,12 +1,14 @@
-//! **The document-local write verbs, end to end**: `Host::set`,
-//! `Host::edit` and `Host::new_document` over a real vault and a real
+//! **The write verbs, end to end**: `Host::set`, `Host::edit`,
+//! `Host::new_document` and `Host::move_path` over a real vault and a real
 //! attachment.
 //!
 //! Each verb compiles its request to operations and enters the one `apply`
 //! path, so what is pinned here is what a caller of each verb sees: a
 //! preview that writes nothing and answers the plan its apply lands, a
-//! `where` target expanded into exactly the documents the store matches, and
-//! the refusals the planner and the applier answer for a write.
+//! `where` target expanded into exactly the documents the store matches, a
+//! move carrying the link cascade it plans and a folder move naming what it
+//! leaves behind, and the refusals the planner and the applier answer for a
+//! write.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -20,8 +22,9 @@ use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthorCondition, AuthoredValue,
     ChangesetOutcome, DocumentEdit, DocumentPath, EditParams, ErrorDetail, ErrorEnvelope,
-    ExpectedField, FieldChange, FindParams, FindingKind, NewParams, OperationKind, PlanDocument,
-    Predicate, ReasonCode, RefusedCheck, ResolvedPlan, SetParams, TargetResult, UnresolvedReason,
+    ExpectedField, FieldChange, FilePath, FindParams, FindingKind, FolderPath, LinkFamily,
+    LinkRewrite, MoveParams, MoveSubject, NewParams, OperationKind, PlanDocument, Predicate,
+    ReasonCode, RefusedCheck, ResolvedPlan, SetParams, TargetResult, UnresolvedReason,
     VaultAddress, WriteTarget,
 };
 
@@ -602,4 +605,126 @@ fn a_where_matching_past_one_page_expands_to_every_matched_document() {
     for (at, _) in &files {
         assert_eq!(read(&vault, at), "---\nwave: flipped\n---\n", "{at}");
     }
+}
+
+/// **A move previews its link cascade, then applies the plan it previewed.**
+/// The linker names the moved document by its bare stem and by a relative
+/// path; the preview writes nothing and carries both rewrites on the move,
+/// and the apply lands the previewed plan, the document at its new path and
+/// both links naming it there.
+#[test]
+fn a_move_previews_its_cascade_then_applies_it() {
+    let linker = "See [[move-gate-subject]] and [s](move-gate-subject.md).\n";
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-move",
+        &[
+            ("move-gate/move-gate-subject.md", "# Subject\n"),
+            ("move-gate/linker.md", linker),
+        ],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moving = |mode| {
+        MoveParams::new(
+            address(&vault),
+            mode,
+            MoveSubject::document(
+                path("move-gate/move-gate-subject.md"),
+                path("move-gate/archive/move-gate-moved.md"),
+            ),
+        )
+    };
+
+    let plan = previewed(host.move_path(moving(ApplyMode::Preview)));
+    assert_eq!(
+        read(&vault, "move-gate/linker.md"),
+        linker,
+        "a preview wrote"
+    );
+    assert_eq!(
+        plan.operations[0].cascade,
+        vec![
+            LinkRewrite::new(
+                path("move-gate/linker.md"),
+                LinkFamily::Markdown,
+                "move-gate-subject.md",
+                "archive/move-gate-moved.md",
+            ),
+            LinkRewrite::new(
+                path("move-gate/linker.md"),
+                LinkFamily::Wikilink,
+                "move-gate-subject",
+                "move-gate-moved",
+            ),
+        ]
+    );
+    let (landed, changeset, _) = applied(host.move_path(moving(ApplyMode::Apply)));
+    assert_eq!(
+        landed, plan,
+        "the apply landed another plan than it previewed"
+    );
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        read(&vault, "move-gate/linker.md"),
+        "See [[move-gate-moved]] and [s](archive/move-gate-moved.md).\n"
+    );
+    assert_eq!(
+        read(&vault, "move-gate/archive/move-gate-moved.md"),
+        "# Subject\n"
+    );
+    assert!(!vault.path().join("move-gate/move-gate-subject.md").exists());
+}
+
+/// **A folder move previews what it leaves behind.** The folder's two
+/// documents move together, so the relative link between them stays as
+/// written and no cascade is planned; the attachment beside them is named
+/// as left behind, and stays in the folder once the move applies.
+#[test]
+fn a_folder_move_previews_what_it_leaves_behind() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-move-folder",
+        &[
+            ("move-folder/a.md", "[b](b.md)\n"),
+            ("move-folder/b.md", "# B\n"),
+            ("move-folder/diagram.png", "png"),
+        ],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moving = |mode| {
+        MoveParams::new(
+            address(&vault),
+            mode,
+            MoveSubject::folder(
+                FolderPath::new("move-folder").expect("a folder path"),
+                FolderPath::new("moved/move-folder").expect("a folder path"),
+            ),
+        )
+    };
+
+    let answered = host
+        .move_path(moving(ApplyMode::Preview))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the folder move previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = answered.report else {
+        panic!("a preview answered {:?}", answered.report);
+    };
+    assert_eq!(
+        forecast.left_behind,
+        vec![FilePath::new("move-folder/diagram.png").expect("a file path")]
+    );
+    assert_eq!(plan.operations.len(), 2);
+    assert!(
+        plan.operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty()),
+        "{:?}",
+        plan.operations
+    );
+    let (landed, _, _) = applied(host.move_path(moving(ApplyMode::Apply)));
+    assert_eq!(landed, plan);
+    assert_eq!(read(&vault, "moved/move-folder/a.md"), "[b](b.md)\n");
+    assert_eq!(read(&vault, "move-folder/diagram.png"), "png");
+    assert!(!vault.path().join("move-folder/a.md").exists());
 }
