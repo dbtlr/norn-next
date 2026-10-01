@@ -7,7 +7,7 @@
 //! the reading is what every template of that plan fills from.
 
 use jiff::Timestamp;
-use jiff::tz::TimeZone;
+use jiff::tz::{Offset, TimeZone};
 use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 
 /// Now, in the system's time zone, or the refusal of a system clock set
@@ -46,13 +46,16 @@ fn local_timestamp(
 
 /// `instant` as the local reading `zone` gives it.
 ///
-/// An offset is read to the minute, the precision `{{now}}` writes it in;
-/// every offset a zone holds today is a whole number of minutes, and a
-/// historical one with seconds in it is truncated toward zero.
+/// An offset is read to the minute, the precision `{{now}}` writes it in, and
+/// the time is read at that same offset, so the reading always names
+/// `instant`. Every offset a zone holds today is a whole number of minutes; an
+/// offset with seconds in it (a historical one, or a POSIX zone written so) is
+/// truncated toward zero, and the time moves with it.
 fn reading(instant: Timestamp, zone: &TimeZone) -> Result<LocalTimestamp, NotALocalTimestamp> {
-    let local = instant.to_zoned(zone.clone());
-    let offset_minutes =
-        i16::try_from(local.offset().seconds() / 60).map_err(|_| NotALocalTimestamp)?;
+    let stated = instant.to_zoned(zone.clone()).offset().seconds() / 60;
+    let offset_minutes = i16::try_from(stated).map_err(|_| NotALocalTimestamp)?;
+    let at_minutes = Offset::from_seconds(stated * 60).map_err(|_| NotALocalTimestamp)?;
+    let local = instant.to_zoned(TimeZone::fixed(at_minutes));
     let part = |value: i8| u8::try_from(value).map_err(|_| NotALocalTimestamp);
     LocalTimestamp::new(
         local.year().into(),
@@ -117,6 +120,23 @@ mod tests {
         assert_eq!(
             now_in("2026-10-01T17:00:00Z", &india),
             "2026-10-01T22:30:00+05:30"
+        );
+    }
+
+    /// **An offset with seconds in it is read at its minutes, and so is the
+    /// time**: the reading names the instant it was taken at, whatever
+    /// precision the zone states its offset in.
+    #[test]
+    fn an_offset_with_seconds_reads_the_time_at_its_minutes() {
+        let zone = TimeZone::posix("XXX-5:30:45").expect("a POSIX zone");
+        assert_eq!(
+            now_in("2026-10-01T17:00:00Z", &zone),
+            "2026-10-01T22:30:00+05:30"
+        );
+        let west = TimeZone::posix("XXX23:59:59").expect("a POSIX zone");
+        assert_eq!(
+            now_in("2026-10-01T17:00:00Z", &west),
+            "2026-09-30T17:01:00-23:59"
         );
     }
 
