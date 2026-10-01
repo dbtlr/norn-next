@@ -10,7 +10,7 @@ use norn_wire::{
     Resolves, UnresolvedReason,
 };
 
-use super::{Fixture, applied, editing, moving, path};
+use super::{Fixture, applied, deleting, editing, moving, path};
 use crate::planner::resolve::Resolution;
 use crate::planner::view::TreeView;
 
@@ -757,4 +757,147 @@ fn a_cascade_naming_a_holder_gone_from_the_vault_leaves_its_move_unresolved() {
     assert!(detail.contains("h.md"), "{detail}");
     assert!(resolution.plan.operations.is_empty());
     assert!(resolution.plan.transitions.is_empty());
+}
+
+impl Fixture {
+    /// Plan `operations`, preview the plan — whose judgment recomputes it and
+    /// its forecast, which must agree with planning's — and apply it, handing
+    /// back what planning resolved, once the store is shown to be a build
+    /// from zero over what landed.
+    fn previewed_and_applied(&mut self, operations: Vec<Operation>) -> Resolution {
+        let resolution = self.resolution(operations);
+        let (previewed, forecast) = self
+            .preview(resolution.plan.clone())
+            .expect("the plan previews");
+        assert_eq!(previewed, resolution.plan);
+        assert_eq!(forecast.links, resolution.forecast.links);
+        applied(self.apply(resolution.plan.clone()));
+        self.assert_store_is_a_build_from_zero();
+        resolution
+    }
+}
+
+/// **A link a cascade left behind is advised on though a respelled link now
+/// shares its key.** `[[x]]` named `x.md`, which moves where no spelling
+/// without the extension reads back, and `t.md` refills `x.md`, so `[[t]]`
+/// is respelled `[[x]]`: in `h.md` the kept link and the written one are one
+/// key, and the kept one's change of meaning is said as it is in `c.md`,
+/// which holds the kept link alone.
+#[test]
+fn a_left_behind_link_sharing_its_key_with_a_respelled_one_is_still_unrepresentable() {
+    let mut fixture = Fixture::new(&[
+        ("x.md", "S\n"),
+        ("t.md", "T\n"),
+        ("Ü/v1.md", "V\n"),
+        ("h.md", "[[x]] [[t]]\n"),
+        ("c.md", "[[x]]\n"),
+    ]);
+    let resolution =
+        fixture.previewed_and_applied(vec![moving("x.md", "Ü/v1.2.md"), moving("t.md", "x.md")]);
+    assert_eq!(
+        resolution.plan.operations[1].cascade,
+        [wikilink("h.md", "t", "x")]
+    );
+    let shared = key("h.md", LinkFamily::Wikilink, "x");
+    assert!(
+        resolution
+            .plan
+            .conditions
+            .contains(&PlanCondition::link_resolution(
+                shared.clone(),
+                Resolves::one(path("x.md")),
+                Resolves::one(path("x.md")),
+            )),
+        "{:?}",
+        resolution.plan.conditions
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![
+            LinkAdvisory::skipped_unrepresentable(key("c.md", LinkFamily::Wikilink, "x")),
+            LinkAdvisory::skipped_unrepresentable(shared),
+        ]
+    );
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[x]] [[x]]\n"));
+    assert_eq!(fixture.read("c.md").as_deref(), Some("[[x]]\n"));
+}
+
+/// **An ambiguous link is advised on though a respelled link now shares its
+/// key.** `[[n]]` could name `p/n.md` or `q/n.md`, both moved away, and
+/// `t.md` lands as `n.md`, so `[[t]]` is respelled `[[n]]`: in `h.md` the
+/// kept ambiguous link and the written one are one key, and the kept one is
+/// said to be skipped for its ambiguity as it is in `c.md`, which holds it
+/// alone.
+#[test]
+fn an_ambiguous_link_sharing_its_key_with_a_respelled_one_is_still_skipped_ambiguous() {
+    let mut fixture = Fixture::new(&[
+        ("p/n.md", "P\n"),
+        ("q/n.md", "Q\n"),
+        ("t.md", "T\n"),
+        ("h.md", "[[n]] [[t]]\n"),
+        ("c.md", "[[n]]\n"),
+    ]);
+    let resolution = fixture.previewed_and_applied(vec![
+        moving("p/n.md", "r/k.md"),
+        moving("q/n.md", "r/j.md"),
+        moving("t.md", "n.md"),
+    ]);
+    assert_eq!(
+        resolution.plan.operations[2].cascade,
+        [wikilink("h.md", "t", "n")]
+    );
+    let shared = key("h.md", LinkFamily::Wikilink, "n");
+    assert!(
+        resolution
+            .plan
+            .conditions
+            .contains(&PlanCondition::link_resolution(
+                shared.clone(),
+                Resolves::several(),
+                Resolves::one(path("n.md")),
+            )),
+        "{:?}",
+        resolution.plan.conditions
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![
+            LinkAdvisory::skipped_ambiguous(key("c.md", LinkFamily::Wikilink, "n")),
+            LinkAdvisory::skipped_ambiguous(shared),
+        ]
+    );
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]] [[n]]\n"));
+    assert_eq!(fixture.read("c.md").as_deref(), Some("[[n]]\n"));
+}
+
+/// **An ambiguous link the plan retargets is advised on though a respelled
+/// link now shares its key.** `[[n]]` could name `p/n.md` or `q/n.md`, both
+/// deleted, and `t.md` lands as `n.md`, so `[[t]]` is respelled `[[n]]`: the
+/// kept link comes to name `n.md`, which is said in `h.md` as in `c.md`.
+#[test]
+fn a_retargeted_link_sharing_its_key_with_a_respelled_one_is_still_retargeted() {
+    let mut fixture = Fixture::new(&[
+        ("p/n.md", "P\n"),
+        ("q/n.md", "Q\n"),
+        ("t.md", "T\n"),
+        ("h.md", "[[n]] [[t]]\n"),
+        ("c.md", "[[n]]\n"),
+    ]);
+    let resolution = fixture.previewed_and_applied(vec![
+        deleting("p/n.md"),
+        deleting("q/n.md"),
+        moving("t.md", "n.md"),
+    ]);
+    assert_eq!(
+        resolution.plan.operations[2].cascade,
+        [wikilink("h.md", "t", "n")]
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![
+            LinkAdvisory::retargeted(key("c.md", LinkFamily::Wikilink, "n")),
+            LinkAdvisory::retargeted(key("h.md", LinkFamily::Wikilink, "n")),
+        ]
+    );
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]] [[n]]\n"));
 }

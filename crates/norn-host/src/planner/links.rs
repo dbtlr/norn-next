@@ -56,8 +56,12 @@
 //! lands, is advised on as the cascade's skip — the text layer's reason, or
 //! unrepresentable where no spelling read back — and an ambiguous link that
 //! could name a moved document as skipped for its ambiguity, each in place
-//! of what its resolution alone would say. Both are read here, from the plan
-//! alone, so the planner and the applier forecast alike.
+//! of what its resolution alone would say. Both are read from the links the
+//! plan does not write — a link a cascade respells to a path the plan
+//! refills reads as left behind from its new address — and said even where a
+//! cascade respelled another link of the holder to the same address, so the
+//! two share a key ([`Kept`]). Both are read here, from the plan alone, so
+//! the planner and the applier forecast alike.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -70,7 +74,7 @@ use norn_wire::{
     Operation, OperationKind, PlanCondition, Resolves, Transition,
 };
 
-use super::compose::{Composition, Skipped};
+use super::compose::{Composition, Kept, Skipped};
 use super::lineage::{Drawn, Lineage};
 use crate::derivation::document_links;
 
@@ -177,13 +181,15 @@ pub(crate) struct ChangeSet {
 /// follows `lineage` and whose operations are `operations`, every name read
 /// through `normalizer`; the links the plan does not write are judged through
 /// `index`. `skipped` is each link the plan's cascades left as written, with
-/// why, which the forecast says of that link.
+/// why, which the forecast says of that link; `kept` each key that holds a
+/// link the cascades did not match beside one they wrote there.
 pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     targets: &[Target<'_>],
     lineage: &Lineage,
     normalizer: &PathNormalizer,
     operations: impl IntoIterator<Item = &'o Operation> + Clone,
     skipped: &[Skipped],
+    kept: &[Kept],
     index: &I,
 ) -> Result<ChangeSet, I::Error> {
     let presence = targets
@@ -202,6 +208,23 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             .is_some()
     };
 
+    // Each key holding a link the cascades left as written, matched or not.
+    let kept: BTreeSet<EntryKey> = kept
+        .iter()
+        .map(|kept| (&kept.holder, kept.syntax, &kept.address))
+        .chain(
+            skipped
+                .iter()
+                .map(|skip| (&skip.holder, skip.syntax, &skip.address)),
+        )
+        .map(|(holder, syntax, address)| {
+            (
+                holder.as_str().to_string(),
+                family_name(syntax),
+                address.clone(),
+            )
+        })
+        .collect();
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
@@ -209,26 +232,37 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             wire_family(change.link.family),
             address(&change.link),
         );
+        let entry = entry_key(&key);
+        // Whether the key holds a link the plan does not write: every link
+        // under a key a rewrite writes reads as written, so one a cascade
+        // left as written there is known by its key alone.
+        let unwritten = !change.written || kept.contains(&entry);
         // A link left behind by the cascade, and an ambiguous link that could
         // name a document a move carries away, which is left as written since
-        // which it names is not known.
-        let left_behind = left_behind(&change.before, &change.after, lineage, normalizer).is_some();
-        let ambiguous_among_moved = matches!(change.before, Resolves::Several {})
+        // which it names is not known — each read from a link the plan does
+        // not write, since one it respells to a path it refills reads as
+        // left behind from its new address.
+        let left_behind =
+            unwritten && left_behind(&change.before, &change.after, lineage, normalizer).is_some();
+        let ambiguous_among_moved = unwritten
+            && matches!(change.before, Resolves::Several {})
             && change
                 .before_targets
                 .iter()
                 .any(|target| moved(target.as_str()));
-        let held = judged.entry(entry_key(&key)).or_insert_with(|| Judged {
+        let held = judged.entry(entry).or_insert_with(|| Judged {
             key,
             address: change.address,
             before: change.before,
             after: change.after,
             written: false,
+            unwritten: false,
             members_moved: false,
             left_behind: false,
             ambiguous_among_moved: false,
         });
         held.written |= change.written;
+        held.unwritten |= unwritten;
         held.members_moved |= change.members_moved;
         held.left_behind |= left_behind;
         held.ambiguous_among_moved |= ambiguous_among_moved;
@@ -420,6 +454,9 @@ struct Judged {
     before: Resolves,
     after: Resolves,
     written: bool,
+    /// The key holds a link the plan does not write: a link of no rewrite's,
+    /// or one a cascade kept beside a link it wrote there.
+    unwritten: bool,
     members_moved: bool,
     /// The link named a document a move of the plan carries away, and does
     /// not name it where it lands: its cascade left it as written.
@@ -447,20 +484,21 @@ impl Judged {
     /// that document from its holder, and is unrepresentable; and an
     /// ambiguous link that could name a moved document is skipped as
     /// ambiguous, since which it names is not known. Each replaces what the
-    /// link's resolution alone would say of it.
+    /// link's resolution alone would say of it, and is said wherever the key
+    /// holds such a link, though a cascade wrote another link there too.
     ///
     /// **Otherwise each side is read as link health judges it**
     /// ([`LinkHealth::of_address`]): a link healthy or ambiguous before and
     /// broken after is left broken; one ambiguous after and not before is
-    /// made ambiguous; and an ambiguous link the plan does not write is
-    /// retargeted where it is healthy after, or ambiguous after with members
+    /// made ambiguous; and an ambiguous link the plan does not write — the
+    /// key holding one, whatever else it holds — is retargeted where it is healthy after, or ambiguous after with members
     /// the plan moved — the last having no entry, since several on both
     /// sides is no change the set records. A side link health does not judge
     /// — an attachment's address resolving to no document — is never broken,
     /// so a link going there is recorded and not advised on.
     fn advisory(&self, skip: Option<RewriteSkip>) -> Option<LinkAdvisory> {
         let key = self.key.clone();
-        if !self.written {
+        if self.unwritten {
             if let Some(reason) = skip {
                 return Some(skip_advisory(key, reason));
             }
@@ -486,11 +524,11 @@ impl Judged {
             (before, LinkHealth::Ambiguous) if !matches!(before, LinkHealth::Ambiguous) => {
                 Some(LinkAdvisory::made_ambiguous(key))
             }
-            (LinkHealth::Ambiguous, LinkHealth::Healthy) if !self.written => {
+            (LinkHealth::Ambiguous, LinkHealth::Healthy) if self.unwritten => {
                 Some(LinkAdvisory::retargeted(key))
             }
             (LinkHealth::Ambiguous, LinkHealth::Ambiguous)
-                if !self.written && self.members_moved =>
+                if self.unwritten && self.members_moved =>
             {
                 Some(LinkAdvisory::retargeted(key))
             }
@@ -877,6 +915,7 @@ mod tests {
             &normalizer,
             &operations,
             &[],
+            &[],
             &links.index(),
         )
         .expect("an empty store's index answers");
@@ -941,6 +980,7 @@ mod tests {
             &normalizer,
             &operations,
             &[],
+            &[],
             &links.index(),
         )
         .expect("an empty store's index answers");
@@ -971,6 +1011,7 @@ mod tests {
                 before,
                 after,
                 written: false,
+                unwritten: true,
                 members_moved: true,
                 left_behind: false,
                 ambiguous_among_moved: false,
@@ -1003,6 +1044,7 @@ mod tests {
                 before,
                 after,
                 written,
+                unwritten: !written,
                 members_moved,
                 left_behind: false,
                 ambiguous_among_moved: false,

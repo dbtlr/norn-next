@@ -279,9 +279,11 @@ pub(super) fn check(
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
         .map_err(|path| Unfit::Invalid(disagreement([path])))?;
-    // What the cascades left as written is read off the recomposition, as
+    // What the cascades left as written, matched or kept beside a link they
+    // wrote, is read off the recomposition, as
     // planning read it off its own composition, so the two forecast alike.
     let skipped = std::mem::take(&mut composition.skipped);
+    let kept = std::mem::take(&mut composition.kept);
     drop(composition);
     let mut after: Vec<Option<&[u8]>> = vec![None; plan.transitions.len()];
     for (unit, content) in units.iter().zip(&contents) {
@@ -307,6 +309,7 @@ pub(super) fn check(
         normalizer,
         &plan.operations,
         &skipped,
+        &kept,
         links,
     )
     .map_err(Unfit::Unread)?;

@@ -13,7 +13,9 @@ use norn_wire::{
 };
 
 use super::edit;
+use super::links::{self, wire_family};
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
+use crate::derivation::document_links;
 
 /// What composing a plan's operations came to.
 pub(crate) struct Composition {
@@ -28,6 +30,27 @@ pub(crate) struct Composition {
     /// Each link a cascade's rewrite matched and left as written, in the
     /// order the cascades composed.
     pub(crate) skipped: Vec<Skipped>,
+    /// Each link a holder's rewrites left as written without matching any of
+    /// them, at an address one of them writes, in the order the holders
+    /// composed.
+    pub(crate) kept: Vec<Kept>,
+}
+
+/// A link no rewrite of its holder's batch matched, written at an address a
+/// rewrite of that batch respells another link to.
+///
+/// **Why it is named.** The change set keys a link by its holder, syntax and
+/// address, so this link and the one respelled to its address are one key,
+/// and every link under a key a rewrite writes reads as written. The
+/// forecast says of a link the cascade left behind, or left for its
+/// ambiguity, why it stayed; this names the key that still holds such a
+/// link beside a written one, so its change of meaning is said. Keyed as
+/// [`Skipped`] is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Kept {
+    pub(crate) holder: DocumentPath,
+    pub(crate) syntax: LinkFamily,
+    pub(crate) address: String,
 }
 
 /// A link a cascade's rewrite matched and the text layer left as written.
@@ -124,6 +147,7 @@ pub(crate) fn compose<V: VaultView>(
         read_at: vault.read_at,
         unresolvable,
         skipped: vault.skipped,
+        kept: vault.kept,
     })
 }
 
@@ -159,6 +183,8 @@ struct Simulated<'view, V> {
     folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
     /// Each link a cascade's rewrite left as written, so far.
     skipped: Vec<Skipped>,
+    /// Each link a holder's batch kept at an address it writes, so far.
+    kept: Vec<Kept>,
 }
 
 /// Why one operation cannot act on the state it met, in words.
@@ -185,6 +211,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             standing_below: BTreeMap::new(),
             folder_spelled: BTreeMap::new(),
             skipped: Vec::new(),
+            kept: Vec::new(),
         }
     }
 
@@ -512,10 +539,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 
     /// Respell, in the document standing at `spelling`, every link each of
     /// `rewrites` names, all at once, recording each matching link the text
-    /// layer leaves as written under the address it is still written with.
+    /// layer leaves as written under the address it is still written with,
+    /// and each link no rewrite matches at an address one of them writes.
     fn rewrite(&mut self, spelling: &DocumentPath, rewrites: &[&LinkRewrite]) {
         let file = self.target(spelling);
         let bytes = file.after.as_ref().expect("a document stands");
+        let kept = kept_at_written(bytes, rewrites);
         let (rewritten, skipped) = edit::rewritten(bytes, rewrites.iter().copied());
         file.after = Some(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
@@ -530,6 +559,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             },
             reason: skip.reason,
         }));
+        self.kept
+            .extend(kept.into_iter().map(|(syntax, address)| Kept {
+                holder: spelling.clone(),
+                syntax,
+                address,
+            }));
     }
 
     fn target(&mut self, spelling: &DocumentPath) -> &mut ComposedTarget {
@@ -537,6 +572,34 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             .get_mut(spelling)
             .expect("a placed file has a target")
     }
+}
+
+/// The syntax and address of each link `bytes` hold, as the change set reads
+/// them, that no rewrite of `rewrites` matches and that one of them writes:
+/// what a batch over `bytes` keeps under a key it also writes.
+fn kept_at_written(bytes: &[u8], rewrites: &[&LinkRewrite]) -> Vec<(LinkFamily, String)> {
+    let matches = |syntax: LinkFamily, address: &str| {
+        rewrites
+            .iter()
+            .any(|rewrite| rewrite.syntax == syntax && rewrite.from == address)
+    };
+    let writes = |syntax: LinkFamily, address: &str| {
+        rewrites
+            .iter()
+            .any(|rewrite| rewrite.syntax == syntax && rewrite.to == address)
+    };
+    let mut kept: Vec<(LinkFamily, String)> = Vec::new();
+    for link in document_links(bytes) {
+        let syntax = wire_family(link.family);
+        let address = links::address(&link);
+        if writes(syntax, &address)
+            && !matches(syntax, &address)
+            && !kept.contains(&(syntax, address.clone()))
+        {
+            kept.push((syntax, address));
+        }
+    }
+    kept
 }
 
 /// `identity` at the spelling its operation asked for, normalized.
