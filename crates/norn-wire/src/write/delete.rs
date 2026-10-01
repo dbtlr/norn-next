@@ -8,10 +8,12 @@
 //! is refused at the read. The flag is written only when `true`, as `force`
 //! is, so a request that omits it asks for the strict reading.
 //!
-//! **A link naming the document is read where the plan leaves the vault.**
-//! It is a link resolving to the document alone: a link naming several
+//! **A link naming the document is held where the plan leaves the vault, and
+//! resolved before it.** It is a link a document holds after the plan that
+//! resolved, before the plan, to the document alone: a link naming several
 //! documents names none of them, and the forecast says what becomes of it; a
-//! link the document holds goes with it. A rewritten link keeps its own
+//! link the document holds goes with it, and so does one in a holder the plan
+//! removes or edits away, while one the plan writes counts. A rewritten link keeps its own
 //! form, its embed marker, its title and its anchor — an anchor the new
 //! document holds no heading for is link health's to report after the
 //! delete, not the delete's to refuse. The host serves the request as
