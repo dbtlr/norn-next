@@ -9,7 +9,7 @@ use norn_wire::{
     UnresolvedReason,
 };
 
-use super::{Fixture, applied, breaking, creating, deleting, editing, path};
+use super::{Fixture, applied, breaking, creating, deleting, editing, moving, path};
 
 /// A delete of the document at `at` rewriting every link naming it to name
 /// `to`.
@@ -497,6 +497,58 @@ fn a_backlink_added_after_preview_to_a_deleted_and_refilled_path_refuses_the_app
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
     assert_eq!(fixture.read("k.md").as_deref(), Some("[[a]]\n"));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A holder the plan moves names the delete's target from where it
+/// lands.** `x/h.md` names `x/a.md` by a relative Markdown link and by a bare
+/// wikilink, and moves to `deep/h.md` in the plan deleting `x/a.md` rewriting
+/// its links to `x/c.md`: each link is respelled once, to the target, from
+/// the holder's new folder — the Markdown link keeping its anchor and title —
+/// whichever of the move and the delete comes first.
+#[test]
+fn a_moved_holder_of_a_rewriting_deletes_backlink_names_its_target_from_where_it_lands() {
+    for delete_first in [true, false] {
+        let mut fixture = Fixture::new(&[
+            ("x/a.md", "A\n"),
+            ("x/c.md", "C\n"),
+            ("x/h.md", "[keep text](a.md#part \"Title\") [[a]]\n"),
+        ]);
+        let (delete, moved) = (rewriting("x/a.md", "x/c"), moving("x/h.md", "deep/h.md"));
+        let operations = if delete_first {
+            vec![delete, moved]
+        } else {
+            vec![moved, delete]
+        };
+        let resolution = fixture.resolution(operations);
+        assert!(
+            resolution.forecast.links.is_empty(),
+            "delete first {delete_first}: {:?}",
+            resolution.forecast.links
+        );
+        let mut cascade: Vec<LinkRewrite> = resolution
+            .plan
+            .operations
+            .iter()
+            .flat_map(|operation| operation.cascade.iter().cloned())
+            .collect();
+        cascade.sort_by(|left, right| left.path.cmp(&right.path).then(left.from.cmp(&right.from)));
+        assert_eq!(
+            cascade,
+            [
+                wikilink("deep/h.md", "a", "c"),
+                markdown("deep/h.md", "a.md", "../x/c.md"),
+            ],
+            "delete first {delete_first}"
+        );
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(fixture.read("x/a.md"), None);
+        assert_eq!(
+            fixture.read("deep/h.md").as_deref(),
+            Some("[keep text](../x/c.md#part \"Title\") [[c]]\n"),
+            "delete first {delete_first}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+    }
 }
 
 /// **Re-sending an interrupted rewriting delete finishes its cascade.** One

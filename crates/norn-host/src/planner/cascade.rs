@@ -52,11 +52,19 @@
 //!
 //! **A moved document's own relative links name what they named.** Each
 //! relative Markdown link a moved document holds is read from where the
-//! document stood, and where its spelling no longer reaches the same file —
-//! or where the plan carries that file — from where the document lands, it is
-//! respelled from there toward it, whether it names a document or an
-//! attachment; a spelling still reaching it is kept as written, and an
-//! anchor-only link names its holder wherever it goes.
+//! document stood, and where its spelling no longer reaches, from where the
+//! document lands, the file the link must name after the plan — the file it
+//! named, wherever the plan carries that file, or the target of a delete
+//! removing it rewriting the links naming it — it is respelled from there
+//! toward that file, whether it names a document or an attachment; a
+//! spelling still reaching it is kept as written, and an anchor-only link
+//! names its holder wherever it goes.
+//!
+//! **Every effect of the plan on a link is read by one rule.** Which file a
+//! link must name after the plan ([`Cascade::final_document`]) counts the
+//! moves and the rewriting deletes alike, so a link reached both ways — a
+//! backlink of a deleted document in a holder the plan moves — is respelled
+//! once, to the delete's target, from where its holder lands.
 //!
 //! **A cascade travels on the operation it serves.** Each rewrite is one
 //! `rewrite_link` per holder, syntax and address, named at the holder's
@@ -126,10 +134,11 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     if lineage.drawing().next().is_none() && !reads_backlinks {
         return Ok(Generated::default());
     }
-    let cascade = Cascade {
+    let mut cascade = Cascade {
         composition,
         lineage,
         normalizer,
+        destinations: BTreeMap::new(),
     };
     let targets = Target::of(composition);
     let (overlay, probed) = reach(&targets, lineage, normalizer, &WrittenLinks::default());
@@ -139,8 +148,6 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     // unresolved.
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
     let mut unresolved: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
-    let mut destinations: BTreeMap<usize, (NormalizedPath, norn_store::DocumentPath)> =
-        BTreeMap::new();
     for removal in lineage.removals() {
         let Some(named) = rewritten_to.get(&removal.position) else {
             continue;
@@ -149,7 +156,7 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
             Resolves::One { path } => {
                 if let (Some(file), Some(at)) = (cascade.identity(path.as_str()), stored_path(path))
                 {
-                    destinations.insert(removal.position, (file, at));
+                    cascade.destinations.insert(removal.position, (file, at));
                 }
             }
             _ => {
@@ -168,45 +175,40 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let mut breaking: Vec<Breaking> = Vec::new();
     let mut forbidden: BTreeMap<usize, Vec<norn_store::DocumentPath>> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
-        if let Some(removal) = removed_by(&change.before, lineage, normalizer) {
-            let position = removal.position;
-            match removal.backlinks {
+        // Whether the link is one a cascade respells: a backlink of a
+        // document a delete removes rewriting the links naming it, or a link
+        // a move leaves behind.
+        let respelled = match removed_by(&change.before, lineage, normalizer) {
+            Some(removal) => match removal.backlinks {
                 Backlinks::Forbidden => {
-                    forbidden.entry(position).or_default().push(change.holder);
+                    forbidden
+                        .entry(removal.position)
+                        .or_default()
+                        .push(change.holder);
+                    return;
                 }
-                Backlinks::RewrittenTo(_)
-                    if rewritten_for(removal, &change.after, &rewritten_to, normalizer) =>
-                {
-                    if let Some((to, at)) = destinations.get(&position) {
-                        breaking.push(Breaking {
-                            holder: change.holder,
-                            link: change.link,
-                            to: to.clone(),
-                            at: at.clone(),
-                            owner: position,
-                        });
-                    }
+                Backlinks::RewrittenTo(_) => {
+                    rewritten_for(removal, &change.after, &rewritten_to, normalizer)
                 }
-                _ => {}
-            }
-            return;
-        }
-        let Some((to, drawn)) = left_behind(&change.before, &change.after, lineage, normalizer)
-        else {
+                Backlinks::LeftBroken => false,
+            },
+            None => left_behind(&change.before, &change.after, lineage, normalizer).is_some(),
+        };
+        let Resolves::One { path: named } = &change.before else {
             return;
         };
-        let (Some(&owner), Some(at)) = (
-            drawn.moves.last(),
-            cascade.spelling(to).and_then(stored_path),
-        ) else {
+        let Some(destination) = respelled
+            .then(|| cascade.final_document(named.as_str()))
+            .flatten()
+        else {
             return;
         };
         breaking.push(Breaking {
             holder: change.holder,
             link: change.link,
-            to: to.clone(),
-            at,
-            owner,
+            to: destination.file,
+            at: destination.at,
+            owner: destination.owner,
         });
     })?;
 
@@ -339,12 +341,29 @@ struct Breaking {
     owner: usize,
 }
 
-/// What a cascade is generated from: the composed plan and where its content
-/// ends.
+/// What a cascade is generated from: the composed plan, where its content
+/// ends, and the document each delete rewriting the links naming its own
+/// rewrites them to.
 struct Cascade<'a> {
     composition: &'a Composition,
     lineage: &'a Lineage,
     normalizer: &'a PathNormalizer,
+    /// The one document each delete rewriting the links naming its document
+    /// names where the plan leaves the vault, and its path there, by the
+    /// delete's position.
+    destinations: BTreeMap<usize, (NormalizedPath, norn_store::DocumentPath)>,
+}
+
+/// The document a link must name after the plan, as [`Cascade::final_document`]
+/// reads it.
+struct Destination {
+    /// The file.
+    file: NormalizedPath,
+    /// Its path where the plan leaves the vault.
+    at: norn_store::DocumentPath,
+    /// The operation whose cascade carries a rewrite toward it: the move
+    /// landing it, or the delete whose target it is.
+    owner: usize,
 }
 
 impl Cascade<'_> {
@@ -352,11 +371,34 @@ impl Cascade<'_> {
         self.normalizer.normalize(Path::new(path)).ok()
     }
 
-    /// The file the plan's moves carry the document at `path` to, and the
-    /// move that lands it there; `None` where the plan moves it nowhere.
-    fn carried(&self, path: &str) -> Option<(NormalizedPath, usize)> {
-        let (to, drawn) = self.lineage.carried_to(&self.identity(path)?)?;
-        Some((to.clone(), *drawn.moves.last()?))
+    /// **The one rule a link's final document is read by**: where a link
+    /// named the document standing at `named` before the plan, the document
+    /// it must name after it, every effect of the plan counted — where a
+    /// delete removes the document rewriting the links naming it, the one
+    /// document its `rewrite_to` names; where a move carries it, the file it
+    /// lands at. `None` where the plan leaves the document where it stood,
+    /// or removes it forbidding or breaking the links naming it.
+    ///
+    /// A backlink a cascade respells and a moved document's own relative
+    /// link are both pointed here, so a holder the plan moves names a
+    /// deleted document's target from where it lands, whichever operation
+    /// writes its rewrite.
+    fn final_document(&self, named: &str) -> Option<Destination> {
+        let file = self.identity(named)?;
+        if let Some(removal) = self.lineage.removed_by(&file) {
+            let (to, at) = self.destinations.get(&removal.position)?;
+            return Some(Destination {
+                file: to.clone(),
+                at: at.clone(),
+                owner: removal.position,
+            });
+        }
+        let (to, drawn) = self.lineage.carried_to(&file)?;
+        Some(Destination {
+            file: to.clone(),
+            at: self.spelling(to).and_then(stored_path)?,
+            owner: *drawn.moves.last()?,
+        })
     }
 
     /// The spelling the plan writes the file `file` at.
@@ -365,10 +407,11 @@ impl Cascade<'_> {
     }
 
     /// The respellings of every relative Markdown link a moved document
-    /// holds whose spelling no longer reaches the file it named — or where
-    /// the plan carries that file — from where the document lands, keyed as
-    /// the change set keys the link, each on the move that lands its holder:
-    /// read from where the document stood, spelled from where it lands.
+    /// holds whose spelling no longer reaches, from where the document
+    /// lands, the file the link must name after the plan
+    /// ([`Self::final_document`]), keyed as the change set keys the link,
+    /// each on the move that lands its holder: read from where the document
+    /// stood, spelled from where it lands.
     fn own_relative_links(&self) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
         let mut rewrites = BTreeMap::new();
         for (file, drawn) in self.lineage.drawing() {
@@ -406,8 +449,8 @@ impl Cascade<'_> {
                     continue;
                 };
                 let named = self
-                    .carried(named)
-                    .and_then(|(to, _)| self.spelling(&to).map(|at| at.as_str().to_string()))
+                    .final_document(named)
+                    .map(|destination| destination.at.as_str().to_string())
                     .unwrap_or_else(|| named.clone());
                 // A spelling that still reaches the file from where the
                 // document lands is kept, however short another would be.
