@@ -268,7 +268,7 @@ pub(super) fn check(
         return Err(Unfit::Refused(checks));
     }
     let lineage = recorded_lineage(plan, normalizer);
-    let composition = match recompose(plan, &states, &lineage, view)
+    let mut composition = match recompose(plan, &states, &lineage, view)
         .map_err(|error| Unfit::Failed(error.to_string()))?
     {
         Recomposed::Sound(composition) => composition,
@@ -279,6 +279,9 @@ pub(super) fn check(
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
         .map_err(|path| Unfit::Invalid(disagreement([path])))?;
+    // What the cascades left as written is read off the recomposition, as
+    // planning read it off its own composition, so the two forecast alike.
+    let skipped = std::mem::take(&mut composition.skipped);
     drop(composition);
     let mut after: Vec<Option<&[u8]>> = vec![None; plan.transitions.len()];
     for (unit, content) in units.iter().zip(&contents) {
@@ -298,8 +301,15 @@ pub(super) fn check(
             after,
         })
         .collect();
-    let recomputed = change_set(&targets, &lineage, normalizer, &plan.operations, links)
-        .map_err(Unfit::Unread)?;
+    let recomputed = change_set(
+        &targets,
+        &lineage,
+        normalizer,
+        &plan.operations,
+        &skipped,
+        links,
+    )
+    .map_err(Unfit::Unread)?;
     drop(targets);
     checks.extend(link_checks(&plan.conditions, &recomputed.entries));
     let schema = Judging {

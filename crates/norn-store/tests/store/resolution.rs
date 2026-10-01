@@ -207,6 +207,42 @@ fn a_second_document_of_a_stem_makes_a_link_ambiguous() {
     });
 }
 
+/// **A link names the targets its keys could name before the plan**: an
+/// ambiguous `[[a]]` names the moved `x/a.md` among the plan's targets, as
+/// the stored `y/a.md` is not one, while a link whose keys name no target
+/// names none. The ambiguity-ignore set keeps a target it keeps out of a
+/// class out of this list too.
+#[test]
+fn a_link_names_the_targets_it_could_name_before_the_plan() {
+    both_orders("resolution-before-targets", |mut vault| {
+        vault.write(&[
+            ("x/a.md", "alpha\n"),
+            ("y/a.md", "alpha\n"),
+            ("archive/a.md", "alpha\n"),
+            ("b.md", "[[a]]\n"),
+        ]);
+        let moving = PathOverlay::new()
+            .with(path("x/a.md"), true, false)
+            .with(path("z/a.md"), false, true)
+            .with(path("archive/a.md"), true, false);
+        let snapshot = vault.snapshot();
+        let mut named = Vec::new();
+        snapshot
+            .resolution_changes(&moving, &[], &declared(), |change| {
+                named.push((
+                    change.link.target.clone(),
+                    change
+                        .before_targets
+                        .iter()
+                        .map(|target| target.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                ));
+            })
+            .expect("a judgment");
+        assert_eq!(named, [("a".to_string(), vec!["x/a.md".to_string()])]);
+    });
+}
+
 /// **A place the ambiguity-ignore set keeps out of a class stays out of it on
 /// either side.** Creating `archive/a.md` leaves `[[a]]` naming `x/a.md`
 /// alone, while `[[archive/a]]`, which names the ignored place, now resolves

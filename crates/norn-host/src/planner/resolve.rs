@@ -136,6 +136,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         &lineage,
         view.normalizer(),
         order.iter().map(|&position| &operations[position]),
+        &composition.skipped,
         links,
     )
     .map_err(PlanningFailure::Links)?;

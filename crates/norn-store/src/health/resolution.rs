@@ -172,6 +172,14 @@ pub struct LinkChange {
     /// resolving to several documents on both sides moved exactly where this
     /// holds.
     pub members_moved: bool,
+    /// Each of the plan's targets standing before it that the link's keys
+    /// name from its before-holder, the ambiguity-ignore set letting it in,
+    /// once each in key order: which of the documents the plan writes the
+    /// link could name before the plan. A link resolving to several
+    /// documents names one of these only where it is among them, which is
+    /// how a caller tells whether an ambiguous link could name a document
+    /// the plan moves.
+    pub before_targets: Vec<DocumentPath>,
 }
 
 /// What one judgment of a plan's links cost, beside the statements its
@@ -444,6 +452,12 @@ impl<'a, R: Runner> Judging<'a, R> {
                     self.members(key)
                         .any(|target| target.before != target.after)
                 });
+            let mut before_targets: Vec<DocumentPath> = Vec::new();
+            for target in judged.before.iter().flat_map(|key| self.members(key)) {
+                if target.before && !before_targets.contains(&target.path) {
+                    before_targets.push(target.path.clone());
+                }
+            }
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
@@ -452,6 +466,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                 after,
                 written: judged.written,
                 members_moved,
+                before_targets,
             });
         }
         // What the next chunk may reuse is what this one held, so what is
