@@ -500,3 +500,33 @@ fn a_refreshed_moves_crossing_rewrites_each_name_the_file_they_named() {
     );
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// **Each syntax's candidate is judged as that syntax reads it**: `b.md` as
+/// a Markdown link from the root names the root's `b.md` alone, while as a
+/// wikilink it is a suffix `y/b.md` answers too, so the wikilink has no
+/// spelling naming the moved document alone and is left as written, said
+/// to be unrepresentable, while the Markdown link is respelled.
+#[test]
+fn a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax() {
+    for written in ["[[a.md]] [t](a.md)\n", "[t](a.md) [[a.md]]\n"] {
+        let mut fixture = Fixture::new(&[("a.md", "A\n"), ("y/b.md", "Y\n"), ("h.md", written)]);
+        let resolution = fixture.resolution(vec![moving("a.md", "b.md")]);
+        assert_eq!(
+            resolution.plan.operations[0].cascade,
+            [markdown("h.md", "a.md", "b.md")]
+        );
+        assert_eq!(
+            resolution.forecast.links,
+            vec![LinkAdvisory::skipped_unrepresentable(key(
+                "h.md",
+                LinkFamily::Wikilink,
+                "a.md"
+            ))]
+        );
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(
+            fixture.read("h.md").as_deref(),
+            Some(written.replace("(a.md)", "(b.md)").as_str())
+        );
+    }
+}

@@ -130,14 +130,13 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         }
         asked.push((at, candidates));
     }
-    let mut answered: BTreeMap<(String, String), Resolves> = BTreeMap::new();
+    // Each answer is keyed as the probe was: a candidate spelled alike in two
+    // syntaxes is two questions, read by two grammars.
+    let mut answered: BTreeMap<EntryKey, Resolves> = BTreeMap::new();
     if !probes.is_empty() {
         index.changes(&overlay, &probes, &mut |change| {
-            if change.written {
-                answered.insert(
-                    (change.holder.as_str().to_string(), address(&change.link)),
-                    change.after,
-                );
+            if let (true, Some(holder)) = (change.written, wire_path(&change.holder)) {
+                answered.insert(entry(&holder, &change.link), change.after);
             }
         })?;
     }
@@ -147,9 +146,8 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
             continue;
         };
         let reads_back = candidates.into_iter().find(|candidate| {
-            let probed = address(&spelled(&broken.link, candidate));
             matches!(
-                answered.get(&(broken.holder.as_str().to_string(), probed)),
+                answered.get(&entry(&holder, &spelled(&broken.link, candidate))),
                 Some(Resolves::One { path })
                     if cascade.identity(path.as_str()).as_ref() == Some(&broken.to)
             )
