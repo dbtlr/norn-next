@@ -1080,6 +1080,204 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
     counters
 }
 
+/// The stem of a document no link names, beside the hub: a delete of it has
+/// no backlink to judge. No generated document shares it, asserted rather
+/// than assumed.
+const LONELY_STEM: &str = "hub-gate-lonely";
+
+/// **A delete's backlink judgment over a hub's in-links (NORN-297).** The
+/// Layer 3 mass-delete cost limit binds a delete as it binds a move: what a
+/// delete costs to plan and judge is the links naming its document, never the
+/// vault around them. Three previews through [`norn_host::Host::delete`] run
+/// at both per-PR scales, each read off the host's read account as the
+/// preview really ran it:
+///
+/// - **the hub's delete saying neither flag** is refused, naming each of the
+///   [`HUB_IN_LINKS`] holders once and the as many links, after one judgment
+///   — the backlink pass that leaves it unresolved; nothing is left to judge
+///   after it;
+/// - **the hub's delete leaving its links broken** records an entry and
+///   advises left broken for each in-link, judged twice — planning's change
+///   set and the applier's computation of it again — with no backlink pass,
+///   since nothing is forbidden or rewritten;
+/// - **a delete of a document no link names** judges no link, three times —
+///   the backlink pass, the change set and the applier's check.
+///
+/// Each costs the same judgments, links evaluated, keys resolved, head rows,
+/// statements and steps, and steps no table or index end to end, at
+/// `ambiguous` (300 documents) exactly as at `realistic` (2000). The bar
+/// stands where no member of a key's class is kept out by the
+/// ambiguity-ignore set ahead of its head (NORN-320); the profiles declare no
+/// ignore set.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = hub_deletes("counter-gate-hub-deletes-ambiguous", &small);
+    let large_counters = hub_deletes("counter-gate-hub-deletes-realistic", &large);
+
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("refused_holders", HUB_IN_LINKS as u64),
+            ("refused_total", HUB_IN_LINKS as u64),
+            ("refused_judgments", 1),
+            ("refused_links_evaluated", HUB_IN_LINKS as u64),
+            ("refused_full_scan_steps", 0),
+            ("broken_entries", HUB_IN_LINKS as u64),
+            ("broken_advised", HUB_IN_LINKS as u64),
+            ("broken_judgments", 2),
+            ("broken_links_evaluated", 2 * HUB_IN_LINKS as u64),
+            ("broken_full_scan_steps", 0),
+            ("lonely_entries", 0),
+            ("lonely_judgments", 3),
+            ("lonely_links_evaluated", 0),
+            ("lonely_full_scan_steps", 0),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "the hub's deletes over `{}` did not read `{name}` as its {HUB_IN_LINKS} planted \
+                 in-links name: {counters:?}",
+                profile.name
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "judging the backlinks of a hub's delete",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with the hub, [`HUB_IN_LINKS`] in-links and a document
+/// no link names planted beside it, preview the three deletes through the
+/// host, and read what each preview's link judgments cost off the host's
+/// read account, each counter named for its preview.
+fn hub_deletes(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_hub_in_links(&vault);
+    std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
+    let lonely_path = format!("hub-gate/{LONELY_STEM}.md");
+    std::fs::write(vault.path().join(&lonely_path), "no link names me\n")
+        .expect("writing the lonely document");
+    let hub = norn_wire::DocumentPath::new(hub_path()).expect("a document path");
+    let lonely = norn_wire::DocumentPath::new(&lonely_path).expect("a document path");
+    let address = VaultAddress::name(vault.name().clone());
+    let mut counters: Vec<(String, u64)> = Vec::new();
+    {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let preview = |params: norn_wire::DeleteParams| {
+            let account = host.read_evidence();
+            let answered = host.delete(params).expect("a preview is answered").wait();
+            let judged = host.read_evidence().since(account).preview_link_judgments;
+            (answered, judged)
+        };
+
+        let (refused, judged) = preview(norn_wire::DeleteParams::new(
+            address.clone(),
+            norn_wire::ApplyMode::Preview,
+            hub.clone(),
+        ));
+        let refused = refused.expect_err("the hub's plain delete is refused");
+        let norn_wire::ErrorDetail::PlanRefused { unresolved, .. } = refused.detail() else {
+            panic!("the hub's plain delete answered {refused:?}");
+        };
+        let [left] = unresolved.as_slice() else {
+            panic!("one operation is unresolved: {unresolved:?}");
+        };
+        let norn_wire::UnresolvedReason::HasBacklinks { holders, total, .. } = &left.reason else {
+            panic!("the hub's plain delete is unresolved for {:?}", left.reason);
+        };
+        judged_as(&mut counters, "refused", judged);
+        counters.push(("refused_holders".to_string(), holders.len() as u64));
+        counters.push(("refused_total".to_string(), *total));
+
+        let (broken, judged) = preview(
+            norn_wire::DeleteParams::new(address.clone(), norn_wire::ApplyMode::Preview, hub)
+                .breaking_links(),
+        );
+        let broken = broken.expect("the hub's delete leaving its links broken previews");
+        let norn_wire::ApplyReport::Previewed { plan, forecast, .. } = broken.report else {
+            panic!("a preview answered {:?}", broken.report);
+        };
+        judged_as(&mut counters, "broken", judged);
+        counters.push(("broken_entries".to_string(), link_entries(&plan)));
+        counters.push(("broken_advised".to_string(), forecast.links.len() as u64));
+
+        let (unlinked, judged) = preview(norn_wire::DeleteParams::new(
+            address,
+            norn_wire::ApplyMode::Preview,
+            lonely,
+        ));
+        let unlinked = unlinked.expect("a delete no link refuses previews");
+        let norn_wire::ApplyReport::Previewed { plan, .. } = unlinked.report else {
+            panic!("a preview answered {:?}", unlinked.report);
+        };
+        judged_as(&mut counters, "lonely", judged);
+        counters.push(("lonely_entries".to_string(), link_entries(&plan)));
+    }
+
+    // The hub and the lonely document are each the one document of their
+    // stem, so the hub's in-links name it alone and nothing names the other.
+    let mut store = vault.store();
+    for at in [hub_path(), lonely_path] {
+        let stem = DocumentPath::new(&at)
+            .expect("a document path")
+            .stem()
+            .to_string();
+        let mut sharing = Vec::new();
+        attach::for_each_derived_path(&mut store, |path| {
+            if path.stem() == stem && path.as_str() != at {
+                sharing.push(path.as_str().to_string());
+            }
+        });
+        assert!(
+            sharing.is_empty(),
+            "the delete bar's `{at}` has stem `{stem}`, and the attachment derived other \
+             documents at it: {sharing:?}"
+        );
+    }
+    let counters: CounterSnapshot = counters.into_iter().collect();
+    record_the_counters(
+        &format!(
+            "judging the backlinks of a hub's delete, {HUB_IN_LINKS} in-links over `{}`",
+            profile.name
+        ),
+        &counters,
+    );
+    counters
+}
+
+/// `judged`'s counts added to `counters`, each named for the preview
+/// `prefix` names.
+fn judged_as(counters: &mut Vec<(String, u64)>, prefix: &str, judged: norn_host::LinkJudgmentCost) {
+    for (name, value) in [
+        ("judgments", judged.judgments),
+        ("links_evaluated", judged.links_evaluated),
+        ("keys_resolved", judged.keys_resolved),
+        ("head_rows", judged.head_rows),
+        ("statements_executed", judged.statements_executed),
+        ("vm_steps", judged.vm_steps),
+        ("full_scan_steps", judged.full_scan_steps),
+    ] {
+        counters.push((format!("{prefix}_{name}"), value));
+    }
+}
+
+/// How many link-resolution entries `plan` records.
+fn link_entries(plan: &norn_wire::ResolvedPlan) -> u64 {
+    plan.conditions
+        .iter()
+        .filter(|condition| matches!(condition, norn_wire::PlanCondition::LinkResolution { .. }))
+        .count() as u64
+}
+
 /// **The size-independence bar over a read.** The vault around a bounded find
 /// is not part of what the find costs.
 ///
