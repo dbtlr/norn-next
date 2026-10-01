@@ -124,10 +124,13 @@ use std::fmt;
 
 use serde_yaml::Value;
 
-pub use creation::{CreationProblem, CreationRule, Inbox, Target};
+pub use creation::{CreationProblem, CreationRule, Inbox, SeqSlot, Target};
 use norn_wire::fold_tag;
 pub use norn_wire::{CaseFold, Pattern, PatternError};
-pub use template::{Template, TemplateError};
+pub use template::{
+    FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateError, TemplateValues,
+    UnsafeValue,
+};
 pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, TypedValue};
 
 /// The schema version this build reads.

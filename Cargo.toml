@@ -28,6 +28,14 @@ publish = false
 
 [workspace.dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
+# The local clock reading a plan fills `{{now}}`, `{{date}}` and `{{time}}`
+# from: an instant and the system time zone's offset at it, which the standard
+# library has no reading of. Only `norn-host` reads a clock; `norn-config`
+# fills templates from the reading it is handed. The features are the ones that
+# reading needs: `tz-system` finds the system zone, and `tzdb-zoneinfo` reads
+# the zone database Linux and macOS keep at `/usr/share/zoneinfo`. No bundled
+# database is carried, since neither platform needs one.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 libc = "0.2"
 # Platform notifications stay behind norn-fs; the crate erases backend event
 # shapes into Norn's own typed invalidation batches.
@@ -63,4 +71,8 @@ sha2 = "0.11"
 # a score parsed one unit in the last place away is a cursor refused.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
+# Canonical composition for `|slug`, so text that is canonically equal slugs to
+# one spelling, and the combining-mark property a slug keeps marks in words by.
+# `std` is not needed: both are pure functions over text.
+unicode-normalization = { version = "0.1", default-features = false }
 toml = "1"

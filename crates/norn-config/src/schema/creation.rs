@@ -17,8 +17,17 @@
 //! in a rule names a variable the rule declares. A frontmatter default's key
 //! is the field name it lands as: not empty, not the merge key `<<`, and
 //! holding no `{{`. The inbox's target carries `{{seq}}` and names no
-//! variable, since untyped capture is supplied nothing. What a token's value
-//! may be is judged when the rule is filled, which is not this module's.
+//! variable, since untyped capture is supplied nothing.
+//!
+//! **What a token's value may be is judged when the rule is filled.** A value
+//! filled into a target that is empty, holds `/`, `\` or `:`, or is `.` or
+//! `..` is refused, after its filter, and the whole path the target fills to
+//! is judged by the same document-path rules its literal text was, so a
+//! target fills to a path inside the vault that the store can hold, whatever
+//! it is supplied. A body and a frontmatter default hold
+//! any value. Where a target is numbered, [`Target::seq_slot`] names the
+//! folder and the file name around the number, which is what allocating a
+//! number reads.
 //!
 //! **A rule derives nothing.** No row a document's derivation writes reads a
 //! creation rule or the inbox, so neither is a term of
@@ -31,7 +40,10 @@ use serde_yaml::{Mapping, Value};
 
 use norn_wire::{AuthoredValue, FiniteFloat, ValueMap};
 
-use super::template::{Part, Slot, Template, TemplateError, Token, is_identifier};
+use super::template::{
+    FillError, Part, Slot, Template, TemplateError, TemplateValues, Token, UnsafeValue,
+    is_identifier,
+};
 use super::{VaultSchemaError, at, known_keys_only, section_error};
 
 /// The keys one creation rule holds.
@@ -78,6 +90,16 @@ impl CreationRule {
     /// one.
     pub fn body(&self) -> Option<&Template> {
         self.body.as_ref()
+    }
+
+    /// The frontmatter a document the rule makes starts with, filled under
+    /// `values`: every string scalar, however deep, filled as a template,
+    /// and every other value, every key and every order kept as written.
+    pub fn fill_frontmatter_defaults(
+        &self,
+        values: &TemplateValues,
+    ) -> Result<ValueMap, FillError> {
+        fill_map(&self.frontmatter_defaults, values)
     }
 }
 
@@ -164,6 +186,151 @@ impl Target {
         }
         Ok(Target { template })
     }
+
+    /// The vault-relative path the target fills to under `values`.
+    ///
+    /// Every token's value is judged after its filter, and one that is
+    /// empty, holds `/`, `\` or `:`, or is `.` or `..` is refused. The whole
+    /// path it fills to is then judged as a document path, by the rules schema
+    /// read judged the target's literal text by, so the path is one the store
+    /// can hold, inside the vault and ending in `.md`, whatever it is
+    /// supplied. A numbered target fills to
+    /// its [slot](Target::seq_slot) at the number `values` carries.
+    pub fn fill(&self, values: &TemplateValues) -> Result<String, FillError> {
+        match self.seq_slot(values)? {
+            Some(slot) => Ok(slot.path(values.seq().ok_or(FillError::NoSeq)?)),
+            None => {
+                let path = fill_path(self.template.parts(), values)?;
+                match document_path_problem(&path) {
+                    Some(problem) => Err(FillError::NotADocumentPath { path, problem }),
+                    None => Ok(path),
+                }
+            }
+        }
+    }
+
+    /// Where a numbered target's numbers go under `values`: the folder, and
+    /// the file name's text before and after `{{seq}}`, every other token
+    /// filled and judged as [`Target::fill`] judges it. `None` for a target
+    /// with no `{{seq}}`. The sequence number `values` carries is not read.
+    pub fn seq_slot(&self, values: &TemplateValues) -> Result<Option<SeqSlot>, FillError> {
+        let parts = self.template.parts();
+        let Some(at) = parts
+            .iter()
+            .position(|part| matches!(part, Part::Token(token) if token.slot == Slot::Seq))
+        else {
+            return Ok(None);
+        };
+        let before = fill_path(&parts[..at], values)?;
+        let suffix = fill_path(&parts[at + 1..], values)?;
+        // `{{seq}}` stands in the file name, so every `/` is before it.
+        let (folder, prefix) = match before.rsplit_once('/') {
+            Some((folder, prefix)) => (folder.to_string(), prefix.to_string()),
+            None => (String::new(), before),
+        };
+        let slot = SeqSlot {
+            folder,
+            prefix,
+            suffix,
+        };
+        // A number adds digits alone to the file name, so the slot holds a
+        // document path at every number exactly where it holds one at the
+        // stand-in.
+        match document_path_problem(&slot.spelled(STAND_IN)) {
+            Some(problem) => Err(FillError::NotADocumentPath {
+                path: slot.spelled("{{seq}}"),
+                problem,
+            }),
+            None => Ok(Some(slot)),
+        }
+    }
+}
+
+/// Where a numbered target's numbers go, with every other value filled.
+///
+/// A document numbered `n` stands at [`SeqSlot::path`]`(n)`: in
+/// [`SeqSlot::folder`], named [`SeqSlot::prefix`], `n` as a plain integer,
+/// then [`SeqSlot::suffix`]. The folder and the text around the number are
+/// what the documents already numbered in it share.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeqSlot {
+    folder: String,
+    prefix: String,
+    suffix: String,
+}
+
+impl SeqSlot {
+    /// The vault-relative folder the numbered documents stand in, without a
+    /// trailing `/`; empty at the vault root.
+    pub fn folder(&self) -> &str {
+        &self.folder
+    }
+
+    /// The file name's text before the number.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The file name's text after the number, ending in `.md`.
+    pub fn suffix(&self) -> &str {
+        &self.suffix
+    }
+
+    /// The vault-relative path of the document numbered `seq`.
+    pub fn path(&self, seq: u64) -> String {
+        self.spelled(&seq.to_string())
+    }
+
+    /// The vault-relative path with `number` standing where the number does.
+    fn spelled(&self, number: &str) -> String {
+        let file_name = format!("{}{number}{}", self.prefix, self.suffix);
+        if self.folder.is_empty() {
+            file_name
+        } else {
+            format!("{}/{file_name}", self.folder)
+        }
+    }
+}
+
+/// `parts` of a target filled under `values`, each token's value judged.
+///
+/// A value is refused where it is empty after its filter, holds `/`, `\` or
+/// `:`, or is `.` or `..`, so a value names no folder the target does not and
+/// writes no `:`. That is not enough to hold the whole path: a value stands
+/// beside literal text, and `.{{var.a}}` filled with `.` is the segment `..`.
+/// So the caller judges the whole filled path as a document path too, by the
+/// same rules schema read judged the target's literal text by; that check is
+/// what makes a path outside the vault, or one the store cannot hold,
+/// unfillable by construction, and the value rules are what name the token at
+/// fault in the common case.
+fn fill_path(parts: &[Part], values: &TemplateValues) -> Result<String, FillError> {
+    parts.iter().try_fold(String::new(), |mut path, part| {
+        match part {
+            Part::Literal(literal) => path.push_str(literal),
+            Part::Token(token) => path.push_str(&path_safe(token, token.fill(values)?)?),
+        }
+        Ok(path)
+    })
+}
+
+/// `value`, which `token` filled to, where it keeps a target's path whole.
+fn path_safe(token: &Token, value: String) -> Result<String, FillError> {
+    let problem = if value.is_empty() {
+        UnsafeValue::Empty
+    } else if value.contains(['/', '\\']) {
+        UnsafeValue::Separator
+    } else if value.contains(':') {
+        UnsafeValue::Colon
+    } else if value == "." || value == ".." {
+        UnsafeValue::DotSegment
+    } else {
+        return Ok(value);
+    };
+    Err(FillError::UnsafeValue {
+        token: token.to_string(),
+        value,
+        problem,
+    })
 }
 
 /// What a token stands as when a target's literal text is judged: a value
@@ -298,6 +465,33 @@ impl DefaultValue {
             DefaultValue::Map(entries) => AuthoredValue::Map(source_map(entries)),
         }
     }
+
+    /// The value filled under `values`: a string as its template fills, and
+    /// every other value as written.
+    fn fill(&self, values: &TemplateValues) -> Result<AuthoredValue, FillError> {
+        Ok(match self {
+            DefaultValue::Plain(value) => value.clone(),
+            DefaultValue::Text(template) => AuthoredValue::String(template.fill(values)?),
+            DefaultValue::List(items) => AuthoredValue::List(
+                items
+                    .iter()
+                    .map(|item| item.fill(values))
+                    .collect::<Result<_, _>>()?,
+            ),
+            DefaultValue::Map(entries) => AuthoredValue::Map(fill_map(entries, values)?),
+        })
+    }
+}
+
+fn fill_map(
+    entries: &[(String, DefaultValue)],
+    values: &TemplateValues,
+) -> Result<ValueMap, FillError> {
+    let filled = entries
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), value.fill(values)?)))
+        .collect::<Result<Vec<_>, FillError>>()?;
+    Ok(ValueMap::new(filled).expect("a YAML mapping holds each key once"))
 }
 
 fn source_map(entries: &[(String, DefaultValue)]) -> ValueMap {

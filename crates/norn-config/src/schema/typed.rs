@@ -401,7 +401,7 @@ fn civil_days(day: &str) -> Option<i64> {
 
 /// How many days the month has, in the proleptic Gregorian calendar a
 /// `YYYY-MM-DD` is read under. `month` is already known to be 1..=12.
-fn days_in_month(year: i64, month: i64) -> i64 {
+pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         2 if is_leap_year(year) => 29,
         2 => 28,
