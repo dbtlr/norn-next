@@ -68,4 +68,8 @@ sha2 = "0.11"
 # a score parsed one unit in the last place away is a cursor refused.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
+# Canonical composition for `|slug`, so text that is canonically equal slugs to
+# one spelling, and the combining-mark property a slug keeps marks in words by.
+# `std` is not needed: both are pure functions over text.
+unicode-normalization = { version = "0.1", default-features = false }
 toml = "1"

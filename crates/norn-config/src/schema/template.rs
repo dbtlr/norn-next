@@ -38,6 +38,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
+
+use super::creation::CreationProblem;
+
 /// A template's text, read into the literal runs and tokens it is made of.
 ///
 /// The source is kept as written, because it is what `describe` reports and
@@ -219,16 +224,25 @@ impl fmt::Display for Token {
     }
 }
 
-/// `text` as a slug: lowercased, its letters and digits kept, and every run
-/// of anything else between them one `-`, with none leading or trailing.
+/// `text` as a slug: normalized, lowercased, its words kept, and every run of
+/// anything else between them one `-`, with none leading or trailing.
 ///
-/// Letters and digits are Unicode's, so `Straße` keeps its `ß` and `日本語`
-/// its characters. Text holding no letter and no digit slugs to nothing.
+/// The text is put in Unicode's canonical composition (NFC) first, so text
+/// that is canonically equal slugs the same: `cafe` with a combining acute
+/// and `café` are one slug. A word is letters, digits and combining marks, all
+/// Unicode's, so `Straße` keeps its `ß`, `日本語` its characters, `हिन्दी` its
+/// vowel sign and virama, and the dot `İ` lowercases to stays on its `i`. A
+/// mark continues the word it follows, and one that follows no word is part
+/// of the run between words. Text holding no letter and no digit slugs to
+/// nothing.
 fn slug(text: &str) -> String {
     let mut slug = String::with_capacity(text.len());
     let mut separated = false;
-    for character in text.chars().flat_map(char::to_lowercase) {
-        if character.is_alphabetic() || character.is_numeric() {
+    for character in text.nfc().flat_map(char::to_lowercase) {
+        let in_word = character.is_alphabetic()
+            || character.is_numeric()
+            || (is_combining_mark(character) && !separated && !slug.is_empty());
+        if in_word {
             if separated && !slug.is_empty() {
                 slug.push('-');
             }
@@ -401,6 +415,16 @@ pub enum FillError {
         /// How it would break the path.
         problem: UnsafeValue,
     },
+    /// The whole path a target fills to is no document path: a value joined
+    /// the literal text beside it into something no single value is, such as
+    /// a `..` segment.
+    NotADocumentPath {
+        /// The path the target fills to, with `{{seq}}` as written where the
+        /// target is numbered.
+        path: String,
+        /// What the path breaks.
+        problem: CreationProblem,
+    },
 }
 
 /// How a value would break a target's path.
@@ -408,6 +432,8 @@ pub enum FillError {
 pub enum UnsafeValue {
     /// It holds `/` or `\`, so it would name a folder the target does not.
     Separator,
+    /// It holds `:`, which is not portable in a file name.
+    Colon,
     /// It is `.` or `..`, so it would name the folder it stands in or climb
     /// out of it.
     DotSegment,
@@ -430,6 +456,7 @@ impl fmt::Display for FillError {
             } => {
                 let why = match problem {
                     UnsafeValue::Separator => "holds `/` or `\\`, which would name another folder",
+                    UnsafeValue::Colon => "holds `:`, which is not portable in a file name",
                     UnsafeValue::DotSegment => {
                         "is a `.` or `..` segment, which would leave the folder it stands in"
                     }
@@ -439,6 +466,9 @@ impl fmt::Display for FillError {
                     formatter,
                     "`{{{{{token}}}}}` fills the target with `{value}`, which {why}"
                 )
+            }
+            FillError::NotADocumentPath { path, problem } => {
+                write!(formatter, "the target fills to {path:?}, which {problem}")
             }
         }
     }

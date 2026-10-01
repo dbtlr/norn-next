@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use norn_config::schema::{
-    FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateValues, UnsafeValue,
-    VaultSchema,
+    CreationProblem, FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateValues,
+    UnsafeValue, VaultSchema,
 };
 use norn_wire::{AuthoredValue, ValueMap};
 
@@ -96,6 +96,32 @@ fn slug_keeps_letters_and_digits_and_joins_the_rest_with_one_dash() {
         ("a/b\\c..d", "a-b-c-d"),
         ("ALL CAPS", "all-caps"),
         ("already-a-slug", "already-a-slug"),
+    ] {
+        assert_eq!(
+            filled("{{var.title|slug}}", &values(&[("title", title)])).as_deref(),
+            Ok(expected),
+            "{title}"
+        );
+    }
+}
+
+/// **Canonically equal text slugs the same, and a combining mark stays with
+/// its letter.** A slug reads its text normalized first, so an accent written
+/// as its own mark slugs as the accented letter does; and a mark is part of
+/// the word it is written in, so a script that writes vowels and viramas as
+/// marks keeps its words whole, and the dot `İ` lowercases to keeps its `i`.
+/// A mark that follows no word is part of the run between words.
+#[test]
+fn slug_keeps_combining_marks_with_their_letters() {
+    for (title, expected) in [
+        ("cafe\u{301}", "café"),
+        ("café", "café"),
+        ("Cafe\u{301} Noir", "café-noir"),
+        ("हिन्दी", "हिन्दी"),
+        ("हिन्दी भाषा", "हिन्दी-भाषा"),
+        ("İstanbul", "i\u{307}stanbul"),
+        ("a \u{301}b", "a-b"),
+        ("\u{301}a", "a"),
     ] {
         assert_eq!(
             filled("{{var.title|slug}}", &values(&[("title", title)])).as_deref(),
@@ -220,6 +246,84 @@ fn a_target_refuses_a_value_that_breaks_its_path() {
         assert!(refused.to_string().contains("var.project"), "{refused}");
         let expected_value = if target.contains("slug") { "" } else { project };
         assert_eq!(value, expected_value);
+    }
+}
+
+/// **A value holding `:` is refused in a target**, since `:` is not portable
+/// in a file name; the same value is text like any other in a body.
+#[test]
+fn a_target_refuses_a_value_holding_a_colon() {
+    for project in ["a:b", "C:", ":"] {
+        let refused = filled_target("tasks/{{var.project}}.md", &values(&[("project", project)]))
+            .expect_err("a value holding a colon");
+        assert!(
+            matches!(
+                &refused,
+                FillError::UnsafeValue {
+                    problem: UnsafeValue::Colon,
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+}
+
+/// **The empty value is refused before it can join two dots**: in
+/// `..{{var.a}}`, an empty `a` would leave the segment `..`.
+#[test]
+fn an_empty_value_beside_dots_is_refused() {
+    let refused = filled_target("..{{var.project}}/x.md", &values(&[("project", "")]))
+        .expect_err("an empty value");
+    assert!(
+        matches!(
+            &refused,
+            FillError::UnsafeValue {
+                problem: UnsafeValue::Empty,
+                ..
+            }
+        ),
+        "{refused}"
+    );
+}
+
+/// **The whole filled target is judged as a document path**, so no value
+/// reaches the store as a path it cannot hold, whatever literal text it
+/// stands beside. A control character is no value rule's, and is refused
+/// here; a numbered target is judged the same way, through its slot, and
+/// names the path with `{{seq}}` as written.
+#[test]
+fn a_target_that_fills_to_no_document_path_is_refused() {
+    for (target, project, path) in [
+        ("tasks/{{var.project}}.md", "a\0b", "tasks/a\0b.md"),
+        ("tasks/{{var.project}}.md", "a\u{7f}", "tasks/a\u{7f}.md"),
+        (
+            "tasks/{{var.project}}-{{seq}}.md",
+            "a\tb",
+            "tasks/a\tb-{{seq}}.md",
+        ),
+    ] {
+        let refused = filled_target(target, &values(&[("project", project)]).with_seq(3))
+            .expect_err("a target that fills to no document path");
+        assert_eq!(
+            refused,
+            FillError::NotADocumentPath {
+                path: path.to_string(),
+                problem: CreationProblem::ControlCharacter,
+            },
+            "{target}"
+        );
+    }
+}
+
+/// **No value joins the literal dots beside it into a `..`**: `.{{var.a}}`
+/// filled with `.`, and `x/.{{var.a}}.md` filled with `.`, would climb out
+/// of a folder or name a file the store keys no document by.
+#[test]
+fn a_value_joining_literal_dots_into_a_dot_segment_is_refused() {
+    for target in [".{{var.project}}/x.md", "x/.{{var.project}}.md"] {
+        filled_target(target, &values(&[("project", ".")]))
+            .expect_err("a value that joins dots into `..`");
     }
 }
 

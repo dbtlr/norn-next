@@ -20,9 +20,11 @@
 //! variable, since untyped capture is supplied nothing.
 //!
 //! **What a token's value may be is judged when the rule is filled.** A value
-//! filled into a target that is empty, holds `/` or `\`, or is a `.` or `..`
-//! segment is refused, after its filter, so a target fills to a path inside
-//! the vault whatever it is supplied. A body and a frontmatter default hold
+//! filled into a target that is empty, holds `/`, `\` or `:`, or is `.` or
+//! `..` is refused, after its filter, and the whole path the target fills to
+//! is judged by the same document-path rules its literal text was, so a
+//! target fills to a path inside the vault that the store can hold, whatever
+//! it is supplied. A body and a frontmatter default hold
 //! any value. Where a target is numbered, [`Target::seq_slot`] names the
 //! folder and the file name around the number, which is what allocating a
 //! number reads.
@@ -188,14 +190,22 @@ impl Target {
     /// The vault-relative path the target fills to under `values`.
     ///
     /// Every token's value is judged after its filter, and one that is
-    /// empty, holds `/` or `\`, or is `.` or `..` is refused, so the path
-    /// stays the shape schema read judged: inside the vault, with no empty,
-    /// `.` or `..` segment, ending in `.md`. A numbered target fills to its
-    /// [slot](Target::seq_slot) at the number `values` carries.
+    /// empty, holds `/`, `\` or `:`, or is `.` or `..` is refused. The whole
+    /// path it fills to is then judged as a document path, by the rules schema
+    /// read judged the target's literal text by, so the path is one the store
+    /// can hold, inside the vault and ending in `.md`, whatever it is
+    /// supplied. A numbered target fills to
+    /// its [slot](Target::seq_slot) at the number `values` carries.
     pub fn fill(&self, values: &TemplateValues) -> Result<String, FillError> {
         match self.seq_slot(values)? {
             Some(slot) => Ok(slot.path(values.seq().ok_or(FillError::NoSeq)?)),
-            None => fill_path(self.template.parts(), values),
+            None => {
+                let path = fill_path(self.template.parts(), values)?;
+                match document_path_problem(&path) {
+                    Some(problem) => Err(FillError::NotADocumentPath { path, problem }),
+                    None => Ok(path),
+                }
+            }
         }
     }
 
@@ -218,11 +228,21 @@ impl Target {
             Some((folder, prefix)) => (folder.to_string(), prefix.to_string()),
             None => (String::new(), before),
         };
-        Ok(Some(SeqSlot {
+        let slot = SeqSlot {
             folder,
             prefix,
             suffix,
-        }))
+        };
+        // A number adds digits alone to the file name, so the slot holds a
+        // document path at every number exactly where it holds one at the
+        // stand-in.
+        match document_path_problem(&slot.spelled(STAND_IN)) {
+            Some(problem) => Err(FillError::NotADocumentPath {
+                path: slot.spelled("{{seq}}"),
+                problem,
+            }),
+            None => Ok(Some(slot)),
+        }
     }
 }
 
@@ -258,7 +278,12 @@ impl SeqSlot {
 
     /// The vault-relative path of the document numbered `seq`.
     pub fn path(&self, seq: u64) -> String {
-        let file_name = format!("{}{seq}{}", self.prefix, self.suffix);
+        self.spelled(&seq.to_string())
+    }
+
+    /// The vault-relative path with `number` standing where the number does.
+    fn spelled(&self, number: &str) -> String {
+        let file_name = format!("{}{number}{}", self.prefix, self.suffix);
         if self.folder.is_empty() {
             file_name
         } else {
@@ -269,10 +294,15 @@ impl SeqSlot {
 
 /// `parts` of a target filled under `values`, each token's value judged.
 ///
-/// Judging each value is enough to hold the whole path: schema read refused
-/// every segment that is empty, `.` or `..` in its literal text, and a segment
-/// holding a token holds that token's non-empty value, which is neither `.`
-/// nor `..` and holds no `/`, so no filled segment is one of those either.
+/// A value is refused where it is empty after its filter, holds `/`, `\` or
+/// `:`, or is `.` or `..`, so a value names no folder the target does not and
+/// writes no `:`. That is not enough to hold the whole path: a value stands
+/// beside literal text, and `.{{var.a}}` filled with `.` is the segment `..`.
+/// So the caller judges the whole filled path as a document path too, by the
+/// same rules schema read judged the target's literal text by; that check is
+/// what makes a path outside the vault, or one the store cannot hold,
+/// unfillable by construction, and the value rules are what name the token at
+/// fault in the common case.
 fn fill_path(parts: &[Part], values: &TemplateValues) -> Result<String, FillError> {
     parts.iter().try_fold(String::new(), |mut path, part| {
         match part {
@@ -289,6 +319,8 @@ fn path_safe(token: &Token, value: String) -> Result<String, FillError> {
         UnsafeValue::Empty
     } else if value.contains(['/', '\\']) {
         UnsafeValue::Separator
+    } else if value.contains(':') {
+        UnsafeValue::Colon
     } else if value == "." || value == ".." {
         UnsafeValue::DotSegment
     } else {

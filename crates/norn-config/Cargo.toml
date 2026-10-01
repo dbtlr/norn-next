@@ -32,11 +32,17 @@ publish.workspace = true
 # no name for. The lock file is opened with it so that a symlink planted at
 # the lock name is refused rather than followed, and spelling the flag's value
 # per platform by hand is a portability bug waiting for its target.
+#
+# `unicode-normalization` is what `|slug` reads text through: canonical
+# composition first, so an accent written as its own mark slugs as the accented
+# letter does, and the combining-mark property, so a mark stays in the word it
+# is written in rather than splitting it.
 [dependencies]
 libc = { workspace = true }
 norn-wire = { path = "../norn-wire" }
 serde_yaml = { workspace = true }
 toml = { workspace = true }
+unicode-normalization = { workspace = true }
 
 # The channel a build is pinned to. Absent is the dev channel, which is what a
 # development build and every test run is; a release build of the shipped
