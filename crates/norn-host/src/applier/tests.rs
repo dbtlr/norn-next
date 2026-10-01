@@ -2187,13 +2187,62 @@ fn a_recorded_flag_the_bytes_do_not_bear_out_is_invalid() {
 
     // An after-state a target already holds, said to decode: the move landed
     // by hand, so its destination is composed from no bytes the apply can
-    // see, and is judged on the bytes it holds.
+    // see, and is judged on the bytes it holds — which pin its source's
+    // before-state too, recording the same bytes.
     let mut plan = fixture.plan(vec![moving("q.md", "e/q.md")]);
     fixture.write("e/q.md", UNDECODABLE);
     std::fs::remove_file(fixture.vault.join("q.md")).expect("the move lands by hand");
-    plan.transitions[0].after =
+    let decoding =
         norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
-    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("e/q.md")]);
+    plan.transitions[0].after = decoding.clone();
+    plan.transitions[1].before = decoding;
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+}
+
+/// **The bytes a hash names decode one way, so a plan records them one way
+/// wherever it carries them.** A moved file's source before the plan and its
+/// destination after it hold the same bytes: a plan recording them as
+/// decoding at one and not at the other is not what its operations do,
+/// whatever has landed, and is `request/plan-invalid` naming both. Landed by
+/// hand, the source's before-bytes are gone, and the destination's bytes are
+/// what pin them: a before-state said to decode where those bytes do not is
+/// refused although no bytes at the source are left to judge it on. The
+/// honest plan, landed, applies finding every target.
+#[test]
+fn a_moved_files_two_records_of_its_bytes_must_agree_with_each_other_and_the_bytes_held() {
+    let decoding =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+
+    // Not landed: the source's flag flipped, the destination's not.
+    let mut fixture = quarantined_fixture();
+    let mut plan = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    assert_eq!(plan.transitions[1].path, path("q.md"));
+    plan.transitions[1].before = decoding.clone();
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+
+    // Landed by hand: the source's before-bytes are gone.
+    let honest = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    fixture.write("e/q.md", UNDECODABLE);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the move lands by hand");
+    let mut plan = honest.clone();
+    plan.transitions[1].before = decoding;
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+    let landed = applied(fixture.apply(honest));
+    assert!(
+        landed
+            .targets
+            .iter()
+            .all(|target| target.result == TargetResult::Found)
+    );
 }
 
 /// **A landed target's recorded flag stands for the bytes it no longer

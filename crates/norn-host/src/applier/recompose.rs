@@ -302,7 +302,10 @@ fn condition_path(condition: &AuthorCondition) -> &DocumentPath {
 /// found nothing, and a document with the before-state's hash where it found
 /// one — holding the bytes the target still holds where it holds that
 /// before-state, and the stand-in where this apply cannot see them, which
-/// decodes as a document exactly where the before-state says the bytes did. A place
+/// decodes as a document exactly where the before-state says the bytes did
+/// ([`stand_in`]). Read from the bytes a target holds, the before-state
+/// composed is compared with the recorded one, flag and all, which is where
+/// a before-state's record of whether those bytes decode is judged. A place
 /// the vault reads no documents at never reaches here: observing refuses a
 /// target named at one, and any other name an operation carries is read from
 /// the vault as it stands, which reads it as what it is.

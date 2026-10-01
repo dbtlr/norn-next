@@ -2386,32 +2386,33 @@ A plan is a self-contained value naming its vault by address and carrying the va
 identity: the host holds no plan between requests. A resolved plan carries its operations,
 each target's before- and after-state — absent, or the hash of the bytes present and
 whether those bytes decode as a document, by the derivation's own rule — and the conditions
-its planning read, never the bytes of a file it did not author. Every template value resolves at planning, so the
-applier recomposes each target as a pure function of the before-states and the operations:
-before staging anything it runs the plan's operations again, through the planner's own
-ordering and composition, over the vault with every target at its recorded before-state and
-in the plan's recorded order, and refuses unless that order is the one the operations'
-dependencies give and the result is exactly the plan's transitions — one per file, none
-missing, added, repeated or changed, every operation acting and every author condition the
-operations carry checked. A plan that fails this is not what its operations do, so its own
-shape is wrong: it answers `request/plan-invalid` with a `transitions_disagree` fault
-naming every file it disagrees at, and no fresh plan, since no target drifted and the
-caller's fix is to preview its operations again. A plan recording that a side's bytes
-decode, or do not, otherwise than the bytes the applier holds for that side — bytes a
-target still holds, or bytes composed again — answers the same; where a target already
-holds its change, its before-state's bytes are gone, and the record stands for them. Whether the transitions name exactly the
-files the operations touch, each once by the vault's own identity rule, is judged before
-the vault is read, so a transition no operation accounts for is never reported as drift,
-whatever before-state it guesses; a changed before-state on a file an operation touches is
-drift, as a foreign edit is. A source is not
-replaced or removed until every other target drawing content from it has durably landed,
-and a plan whose content dependencies form a cycle is refused at planning; the applier
-refuses one as `request/plan-invalid` too, by the planner's one content-cycle rule over
-the plan's recorded order, a cycle closed through a name the plan makes and removes again
-among them. Each condition is recorded
-and checked as the vault would stand with every target of the plan at its after-state,
-after taking in the facts the watcher has delivered, so a plan's own progress never
-changes one.
+its planning read, never the bytes of a file it did not author. Every template value
+resolves at planning, so the applier recomposes each target as a pure function of the
+before-states and the operations: before staging anything it runs the plan's operations
+again, through the planner's own ordering and composition, over the vault with every target
+at its recorded before-state and in the plan's recorded order, and refuses unless that
+order is the one the operations' dependencies give and the result is exactly the plan's
+transitions — one per file, none missing, added, repeated or changed, every operation
+acting and every author condition the operations carry checked. A plan that fails this is
+not what its operations do, so its own shape is wrong: it answers `request/plan-invalid`
+with a `transitions_disagree` fault naming every file it disagrees at, and no fresh plan,
+since no target drifted and the caller's fix is to preview its operations again. Whether
+bytes decode is a fact of the bytes, so a plan recording one hash's bytes as decoding at
+one state and not at another, or otherwise than bytes the applier holds with that hash
+decode — bytes a target holds before, bytes it holds landed, or bytes composed again —
+answers the same; bytes no held bytes share a hash with, the before-state of a target
+already holding its change, are gone, and the record stands for them. Whether the
+transitions name exactly the files the operations touch, each once by the vault's own
+identity rule, is judged before the vault is read, so a transition no operation accounts
+for is never reported as drift, whatever before-state it guesses; a changed before-state on
+a file an operation touches is drift, as a foreign edit is. A source is not replaced or
+removed until every other target drawing content from it has durably landed, and a plan
+whose content dependencies form a cycle is refused at planning; the applier refuses one as
+`request/plan-invalid` too, by the planner's one content-cycle rule over the plan's
+recorded order, a cycle closed through a name the plan makes and removes again among them.
+Each condition is recorded and checked as the vault would stand with every target of the
+plan at its after-state, after taking in the facts the watcher has delivered, so a plan's
+own progress never changes one.
 Applies run as a job holding the entry's claim, one at a time per registration; the request
 waits for the outcome through `PendingApply::wait`, after admission, and a caller that stops
 waiting does not abort the apply. Mutation

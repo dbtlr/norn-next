@@ -207,9 +207,10 @@ pub(super) struct Checked {
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; every side
-/// whose bytes a target holds says whether they decode as a document as they
-/// do ([`misread`]); no target drifted and every content condition holds; the
+/// the vault gives it, at a place the vault reads documents at; the plan
+/// records whether each hash's bytes decode as a document one way, and as
+/// the bytes a target holds of its change decode ([`misread`]); no target
+/// drifted and every content condition holds; the
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
