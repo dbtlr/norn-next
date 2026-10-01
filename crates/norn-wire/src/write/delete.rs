@@ -16,7 +16,8 @@
 //! and so does one in a holder the plan removes or edits away, while one the
 //! plan adds counts. A link another operation's cascade respells is judged
 //! by the text it had, never by what its new spelling named before the plan,
-//! so a link a move respells to the deleted document's name is none. A
+//! so a link a move respells to the deleted document's name is none, and one
+//! that named the document is one however a cascade respells it. A
 //! rewritten link keeps its own form, its embed marker, its title and its anchor — an anchor the new
 //! document holds no heading for is link health's to report after the
 //! delete, not the delete's to refuse. The host serves the request as

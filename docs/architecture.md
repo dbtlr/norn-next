@@ -2554,9 +2554,13 @@ a delete removes where it resolves before the plan to exactly that document — 
 plan's moves carried it first — so a link naming several documents is a backlink of none,
 and a link the document holds goes with it. Backlinks are read from the same door, overlay
 and probes, at the plan's after-state: a link in a holder the plan removes or edits away is
-none, and one the plan adds is. A link a link rewrite respells is judged by the text it had,
-never by what its new spelling named before the plan, so a link a move's cascade respells to
-the name of a document a delete removes is no backlink of it. A delete saying neither flag that a backlink names is left
+none, and one the plan adds is. A link a link rewrite respells is judged by the text it had —
+the address the rewrite matched, read from where its holder's content stood before the plan —
+never by what its new spelling named before the plan: a link a move's cascade respells to
+the name of a document a delete removes is no backlink of it, and a backlink a cascade
+respells, away from the document or from where its moved holder lands, is still one, so the
+applier refuses a plan sent back forbidding the links naming that document. A delete saying
+neither flag that a backlink names is left
 unresolved, its reason naming every holding document once, in path order, and how many
 backlinks there are, so its plan answers `vault/plan-refused`. A delete leaving them broken
 lands, and the forecast advises on each link it leaves broken. A delete rewriting them reads

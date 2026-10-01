@@ -17,7 +17,8 @@
 //! or edits away is none, and one the plan adds is one. A link a link
 //! rewrite respells is judged by the text it had, never by what its new
 //! spelling named before the plan, so a link that another document's move
-//! respells to the deleted document's name is none. A delete
+//! respells to the deleted document's name is none, and one that named the
+//! document is one however a cascade respells it. A delete
 //! forbidding the links does not resolve while one names its document, and
 //! is left unresolved naming every holder and how many links. One rewriting
 //! them carries the cascade respelling each, in its own form, to name
