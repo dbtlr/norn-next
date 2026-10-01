@@ -8,12 +8,13 @@
 
 use norn_store::{
     ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionStatement,
-    ResolutionWork, Snapshot, Store, StoredPathOrder,
+    ResolutionWork, Snapshot, Store, StoredPathOrder, TargetNaming,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 use norn_wire::{
-    Column, FindParams, LinkHealth, Pattern, Predicate, Resolves, VaultAddress, VaultName,
+    CandidateHead, Column, FindParams, LinkHealth, Pattern, Predicate, ResolutionTarget, Resolves,
+    Unsatisfied, VaultAddress, VaultName,
 };
 
 use crate::common::{Scratch, path};
@@ -528,6 +529,149 @@ fn a_declaration_the_snapshot_does_not_pin_is_refused() {
     );
 }
 
+// ---- a target named over a plan ----
+
+/// What `address` names over the plan `overlay` on `vault`, as the door reads
+/// it.
+fn named(vault: &Vault, overlay: &PathOverlay, address: &str) -> TargetNaming {
+    vault
+        .snapshot()
+        .target_naming(overlay, address, &declared())
+        .unwrap_or_else(|refusal| panic!("{:?}: naming `{address}`: {refusal}", vault.order))
+        .0
+}
+
+fn wire(text: &str) -> norn_wire::DocumentPath {
+    norn_wire::DocumentPath::new(text).expect("a document path")
+}
+
+/// What the store's own reads say `address` names on `vault`: every document
+/// a find's `resolves` part matches, and, where it matches several, the head
+/// a links-to part reports of them.
+fn read_naming(vault: &Vault, address: &str) -> (Resolves, Option<CandidateHead>) {
+    let target = ResolutionTarget::new(address).expect("a target");
+    let find = |predicate: Predicate| {
+        vault
+            .snapshot()
+            .find(
+                &FindParams::new(VaultAddress::name(VaultName::new("notes").expect("a name")))
+                    .with_predicates([predicate])
+                    .with_limit(500),
+                &declared(),
+            )
+            .expect("a find")
+    };
+    let resolved = find(Predicate::resolves(target.clone()));
+    match &resolved.rows[..] {
+        [] => (Resolves::none(), None),
+        [one] => (Resolves::one(one.path.clone()), None),
+        _ => {
+            let reported = find(Predicate::links_to(target));
+            let [Unsatisfied::LinksToAmbiguous { candidates, .. }] = &reported.unsatisfied[..]
+            else {
+                panic!("`{address}` names several, and its links-to part reported {reported:?}");
+            };
+            (Resolves::several(), Some(candidates.clone()))
+        }
+    }
+}
+
+/// **A target is named on each side of a plan**: a document the plan removes
+/// is named before and not after, one it creates after and not before, and
+/// one it leaves alone on both.
+#[test]
+fn a_target_is_named_on_each_side_of_a_plan() {
+    both_orders("target-naming-sides", |mut vault| {
+        vault.write(&[("x/a.md", "a\n"), ("b.md", "b\n")]);
+        let plan = overlay(&["y/c.md"], &["x/a.md"]);
+        assert_eq!(
+            named(&vault, &plan, "a"),
+            TargetNaming::new(Resolves::one(wire("x/a.md")), Resolves::none(), None)
+        );
+        assert_eq!(
+            named(&vault, &plan, "b"),
+            TargetNaming::new(
+                Resolves::one(wire("b.md")),
+                Resolves::one(wire("b.md")),
+                None
+            )
+        );
+        assert_eq!(
+            named(&vault, &plan, "c"),
+            TargetNaming::new(Resolves::none(), Resolves::one(wire("y/c.md")), None)
+        );
+        assert_eq!(
+            named(&vault, &plan, "zzz"),
+            TargetNaming::new(Resolves::none(), Resolves::none(), None)
+        );
+    });
+}
+
+/// **A target naming several documents after a plan carries the head of
+/// them, as a store built at the plan's after-state reads it**: the documents
+/// in the resolution ladder's order, each named by its minimal disambiguating
+/// suffix where the plan leaves the vault, beside their exact total — a
+/// stored member the plan removes left out, one it creates merged in at its
+/// rung, an ignored place kept out, and a head that fills counted past it.
+#[test]
+fn a_target_naming_several_after_a_plan_is_headed_as_the_store_built_there_reads_it() {
+    let stored: Vec<(String, String)> = (0..7)
+        .map(|at| (format!("f{at}/c.md"), "c\n".to_string()))
+        .chain([
+            ("x/a.md".to_string(), "a\n".to_string()),
+            ("y/a.md".to_string(), "a\n".to_string()),
+            ("archive/a.md".to_string(), "a\n".to_string()),
+            ("p/q/d.md".to_string(), "d\n".to_string()),
+        ])
+        .collect();
+    let plans: [(&[&str], &[&str], &[&str]); 3] = [
+        (&["z/a.md"], &["y/a.md"], &["a", "x/a", "archive/a"]),
+        (
+            &["e/c.md", "f9/c.md"],
+            &["f0/c.md", "f3/c.md"],
+            &["c", "f1/c"],
+        ),
+        (&["r/q/d.md"], &[], &["d", "q/d"]),
+    ];
+    for order in [Sensitive, Folding] {
+        for (created, removed, addresses) in plans {
+            let label = format!(
+                "target-naming-head-{order:?}-{}",
+                created[0].replace('/', "-")
+            );
+            let mut was = Vault::new(&format!("{label}-before"), order);
+            let documents: Vec<(&str, &str)> = stored
+                .iter()
+                .map(|(at, body)| (at.as_str(), body.as_str()))
+                .collect();
+            was.write(&documents);
+            let mut is = Vault::new(&format!("{label}-after"), order);
+            let after: Vec<(&str, &str)> = documents
+                .iter()
+                .filter(|(at, _)| !removed.contains(at))
+                .copied()
+                .chain(created.iter().map(|at| (*at, "new\n")))
+                .collect();
+            is.write(&after);
+            let plan = overlay(created, removed);
+            for address in addresses {
+                let naming = named(&was, &plan, address);
+                let (after, candidates) = read_naming(&is, address);
+                assert_eq!(
+                    (naming.after, naming.candidates),
+                    (after, candidates),
+                    "{order:?}: `{address}` over {created:?} created and {removed:?} removed"
+                );
+                assert_eq!(
+                    naming.before,
+                    read_naming(&was, address).0,
+                    "{order:?}: `{address}` before the plan"
+                );
+            }
+        }
+    }
+}
+
 // ---- the store's own reads as the oracle ----
 
 /// A deterministic draw, so every run judges the same vaults and plans.
@@ -570,6 +714,19 @@ const LINKS: &[&str] = &[
     "[[A]]",
     "[[b.md]]",
     "[[c]]",
+];
+
+/// The targets each drawn plan names, as a delete's `rewrite_to` would.
+const TARGETS: &[&str] = &[
+    "a",
+    "x/a",
+    "z/a",
+    "v1.2",
+    "v1",
+    "A",
+    "c",
+    "archive/a",
+    "b.md",
 ];
 
 /// Every link the document at `at` holds, keyed by syntax, address and
@@ -730,6 +887,21 @@ fn trial(order: StoredPathOrder, seed: u64) -> Result<usize, String> {
             }
         })
         .map_err(|refusal| format!("the door refused: {refusal}"))?;
+    for address in TARGETS {
+        let (naming, _) = was
+            .snapshot()
+            .target_naming(&overlay, address, &declared())
+            .map_err(|refusal| format!("the door refused to name `{address}`: {refusal}"))?;
+        let read = (read_naming(&was, address).0, read_naming(&is, address));
+        if (&naming.before, (&naming.after, &naming.candidates))
+            != (&read.0, (&read.1.0, &read.1.1))
+        {
+            return Err(format!(
+                "{order:?} seed {seed}\nbefore {before:#?}\nplan {targets:?}\n`{address}` named \
+                 {naming:?}\nthe store's reads name {read:?}"
+            ));
+        }
+    }
     if moved != expected {
         return Err(format!(
             "{order:?} seed {seed}\nbefore {before:#?}\nplan {targets:?}\nmoved from {sources:?}\n\
@@ -746,7 +918,9 @@ fn trial(order: StoredPathOrder, seed: u64) -> Result<usize, String> {
 /// link the door says a plan moves — and nothing else — is a link the store's
 /// own find reads as resolving one way in a store holding the vault before
 /// the plan and another in a store built at the vault after it, read from the
-/// holder's source before the plan.
+/// holder's source before the plan. Every target the door names over the
+/// plan names, on each side, what the store's own reads name in the store
+/// holding that side, the head of several included.
 #[test]
 fn the_door_agrees_with_the_store_rebuilt_at_the_after_state() {
     let mut compared = 0;

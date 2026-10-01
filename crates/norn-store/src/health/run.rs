@@ -5,12 +5,14 @@
 //! re-decision reads the link index on the writer, inside its transaction;
 //! the resolution change set ([`super::resolution`]) reads the same index on
 //! a read snapshot, which a plan is resolved and checked against. Both read
-//! the links one key holds, ask which keys anything is held under, and read
-//! the head of what a key names, and each of those is one text in
-//! [`super::statement`] whichever of the two runs it. So the plan seam's bars
-//! over [`crate::ExplainedStatement::LinkHealthPathLinks`],
-//! [`crate::ExplainedStatement::LinkHealthOccupied`] and
-//! [`crate::ExplainedStatement::LinkHealthHeads`] bar what a snapshot runs
+//! the links one key holds, ask which keys anything is held under, read the
+//! head of what a key names and count what a filled head names, and each of
+//! those is one text in [`super::statement`] whichever of the two runs it. So
+//! the plan seam's bars over
+//! [`crate::ExplainedStatement::LinkHealthPathLinks`],
+//! [`crate::ExplainedStatement::LinkHealthOccupied`],
+//! [`crate::ExplainedStatement::LinkHealthHeads`] and
+//! [`crate::ExplainedStatement::LinkHealthTotals`] bar what a snapshot runs
 //! too: the text is the one they explain.
 //!
 //! **Each place counts what it runs as it always has.** The writer adds a
@@ -45,6 +47,10 @@ pub enum ResolutionStatement {
     /// The head of what each distinct key names, cut in the statement:
     /// [`crate::ExplainedStatement::LinkHealthHeads`].
     Heads,
+    /// How many documents each distinct key names, for a key whose head
+    /// filled: [`crate::ExplainedStatement::LinkHealthTotals`]. Only a target
+    /// named over a plan that names several documents runs it.
+    Totals,
 }
 
 impl From<ResolutionStatement> for ReadStatement {
