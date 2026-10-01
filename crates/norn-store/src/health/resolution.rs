@@ -73,7 +73,7 @@ use crate::facts::{LinkFact, StoredPathOrder};
 use crate::fields::ContentModel;
 use crate::link::{address_kind, keys_naming, link_keys};
 use crate::path::{DocumentPath, SuffixKey};
-use crate::read::{Lookups, PageRefusal, wire_path};
+use crate::read::{Lookups, PageRefusal, ReadStatement, wire_path};
 use crate::request::unreadable;
 use crate::resolve::AmbiguityIgnore;
 use crate::store::Snapshot;
@@ -169,8 +169,14 @@ pub struct LinkChange {
 
 /// What one judgment of a plan's links cost, beside the statements its
 /// snapshot counted.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ResolutionWork {
+    /// Every statement the judgment ran on its snapshot, by name, in the
+    /// order it ran them: the record a bar reads what was run from, beside
+    /// the steps [`Snapshot::counters`] counted. The read of the pinned
+    /// declaration that precedes the judgment is a read's own, not one of
+    /// these.
+    pub ran: Vec<ResolutionStatement>,
     /// Links judged, each once however many ways the plan reached it.
     pub links_evaluated: u64,
     /// Key resolutions: once per distinct key across a run of consecutive
@@ -206,13 +212,27 @@ impl Snapshot {
     ) -> Result<ResolutionWork, PageRefusal> {
         let mut lookups = Lookups::default();
         self.declaration_pinned(declared, &mut lookups)?;
-        let judging = Judging::new(
+        let mut judging = Judging::new(
             self.path_order(),
             declared.ambiguity_ignore(),
             overlay,
             OnSnapshot::new(self),
         );
-        judging.run(probed, &mut each).map_err(PageRefusal::from)
+        judging.run(probed, &mut each).map_err(PageRefusal::from)?;
+        let ran = judging
+            .runner
+            .record
+            .into_inner()
+            .into_iter()
+            .filter_map(|ran| match ran.statement {
+                ReadStatement::Resolution(statement) => Some(statement),
+                _ => None,
+            })
+            .collect();
+        Ok(ResolutionWork {
+            ran,
+            ..judging.work
+        })
     }
 }
 
@@ -292,10 +312,10 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// Judge the probed links, then the links the store holds under each
     /// changed key, a chunk at a time.
     fn run(
-        mut self,
+        &mut self,
         probed: &[ProbedLink],
         each: &mut impl FnMut(LinkChange),
-    ) -> Result<ResolutionWork, StoreError> {
+    ) -> Result<(), StoreError> {
         let mut chunk: Vec<Judged> = Vec::new();
         for probe in probed {
             let before = self.keys_of(&probe.link, &probe.before_holder);
@@ -334,7 +354,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                 }
             }
         }
-        Ok(self.work)
+        Ok(())
     }
 
     /// `held`, read under the changed key `key`, as a link to judge — or

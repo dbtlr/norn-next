@@ -17,7 +17,8 @@
 //! statement's steps to the request's [`ReadWork`]; a snapshot runs it through
 //! [`Snapshot::run_statement`], the one place a snapshot's statements run, so
 //! it is counted on [`Snapshot::counters`] and recorded under its
-//! [`ResolutionStatement`] name.
+//! [`ResolutionStatement`] name, the record a judgment hands back
+//! ([`crate::ResolutionWork::ran`]) so a bar can say what ran.
 
 use std::cell::RefCell;
 

@@ -782,9 +782,9 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 /// an apply's check each run — the store's resolution door, on a snapshot
 /// of the attached store, with the hub overlaid as removed — is then counted
 /// directly: it judges the twenty in-links, resolves the one key they share
-/// once, reads the hub as the one row that key's head holds, and steps no
-/// table or index end to end, at `ambiguous` (300 documents) exactly as at
-/// `realistic` (2000).
+/// once, reads the hub as the one row that key's head holds, runs the same
+/// three statements by name, and steps no table or index end to end, at
+/// `ambiguous` (300 documents) exactly as at `realistic` (2000).
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
@@ -884,6 +884,17 @@ fn one_hub_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnaps
         })
         .expect("judging the hub's in-links");
     let after = snapshot.counters();
+    assert_eq!(
+        work.ran,
+        [
+            norn_store::ResolutionStatement::Occupied,
+            norn_store::ResolutionStatement::KeyLinks,
+            norn_store::ResolutionStatement::Heads,
+        ],
+        "deleting the hub over `{}` ran other than one occupancy read, one page of the hub \
+         key's links and one head read",
+        profile.name
+    );
     let counters: CounterSnapshot = [
         ("entries_recorded", entries),
         ("links_evaluated", work.links_evaluated),

@@ -7,8 +7,8 @@
 //! text layer, as the host derives them.
 
 use norn_store::{
-    ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionWork,
-    Snapshot, Store, StoredPathOrder,
+    ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionStatement,
+    ResolutionWork, Snapshot, Store, StoredPathOrder,
 };
 use norn_wire::{Pattern, Resolves};
 
@@ -369,7 +369,13 @@ fn a_link_free_mass_delete_costs_a_statement_per_chunk_of_its_keys() {
         1 + keys.div_ceil(256),
         "the pin's read and one occupancy read per 256 of the {keys} keys"
     );
-    assert_eq!(work, ResolutionWork::default());
+    assert_eq!(
+        work,
+        ResolutionWork {
+            ran: vec![ResolutionStatement::Occupied; keys.div_ceil(256) as usize],
+            ..ResolutionWork::default()
+        }
+    );
     assert_eq!(snapshot.counters().full_scan_steps(), 0);
 }
 
@@ -397,6 +403,15 @@ fn a_hubs_in_links_resolve_one_key_once() {
         assert_eq!(work.links_evaluated, 20);
         assert_eq!(work.keys_resolved, 1);
         assert_eq!(work.head_rows, 1);
+        assert_eq!(
+            work.ran,
+            [
+                ResolutionStatement::Occupied,
+                ResolutionStatement::KeyLinks,
+                ResolutionStatement::Heads,
+            ],
+            "one occupancy read, one page of the hub key's links, one head read"
+        );
     });
 }
 
