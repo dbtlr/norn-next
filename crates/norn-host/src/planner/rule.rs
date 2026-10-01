@@ -660,6 +660,46 @@ inbox:
         assert_eq!(path.as_str(), "tasks/NORN-7.md");
     }
 
+    /// **A create earlier in the plan holds its number by itself**: with
+    /// the folder empty, the rule numbers past the name the plan creates.
+    #[test]
+    fn a_create_earlier_in_the_plan_holds_its_number() {
+        let creating = Operation::new(create("tasks/NORN-4.md", "4\n"));
+        let resolution = planned(&MemoryVault::default(), vec![creating, task()]);
+        let OperationKind::CreateDocument { path, .. } = &kinds(&resolution)[1] else {
+            panic!("the creation by rule expands into a create");
+        };
+        assert_eq!(path.as_str(), "tasks/NORN-5.md");
+    }
+
+    /// **A name the plan fills in another folder holds no number of the
+    /// slot**, though its file name is the slot's.
+    #[test]
+    fn a_name_the_plan_fills_in_another_folder_holds_no_number() {
+        let vault = MemoryVault::with(&[("tasks/x.md", "x\n")]);
+        let moving = Operation::new(OperationKind::move_document(
+            DocumentPath::new("tasks/x.md").expect("a path"),
+            DocumentPath::new("done/NORN-9.md").expect("a path"),
+        ));
+        let resolution = planned(&vault, vec![moving, task()]);
+        let OperationKind::CreateDocument { path, .. } = &kinds(&resolution)[1] else {
+            panic!("the creation by rule expands into a create");
+        };
+        assert_eq!(path.as_str(), "tasks/NORN-1.md");
+    }
+
+    /// **The highest number counts wherever the listing puts it**: the
+    /// memory vault lists names in byte order, so `NORN-9.md` is listed after
+    /// `NORN-10.md`, and the last name listed is not the highest.
+    #[test]
+    fn the_highest_number_counts_wherever_it_is_listed() {
+        let vault = MemoryVault::with(&[("tasks/NORN-9.md", "9\n"), ("tasks/NORN-10.md", "10\n")]);
+        assert_eq!(
+            landed_at(&planned(&vault, vec![task()])),
+            "tasks/NORN-11.md"
+        );
+    }
+
     /// **On a root that folds case a name counts in any case**, as the root
     /// reads it; on one that tells case apart it does not.
     #[test]
