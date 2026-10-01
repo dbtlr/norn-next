@@ -8,8 +8,7 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_text::RewriteSkip;
 use norn_wire::{
-    Backlinks, ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation,
-    OperationKind,
+    ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation, OperationKind,
 };
 
 use super::edit;
@@ -398,22 +397,16 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             // cascade's, which composes after every operation, and planning's
             // to judge (`super::cascade`): the removal is the same whatever
             // the delete says of them.
-            OperationKind::DeleteDocument {
-                path,
-                backlinks: Backlinks::Forbidden | Backlinks::LeftBroken,
-            } => self.standing(path)?.map(|spelling| {
+            OperationKind::DeleteDocument { path, .. } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: a delete rewriting its links is planned by a later
-            // change of this task, and both link rewrites by another; until
-            // then each is left unresolved in words rather than planned as
-            // something it does not say.
-            OperationKind::DeleteDocument { path, .. } => Err(format!(
-                "a delete rewriting the links naming `{path}` is not planned yet: a delete's link cascade is not planned yet"
-            )),
+            // NORN-297: both link rewrites are vocabulary before they are
+            // planned. Until the planner plans an authored rewrite, each is
+            // left unresolved in words rather than planned as something it
+            // does not say.
             OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
                 Err(format!(
-                    "a `{}` operation is not planned yet: only a move's link cascade is planned yet",
+                    "a `{}` operation is not planned yet: only a move's and a delete's link cascades are planned yet",
                     kind.name()
                 ))
             }

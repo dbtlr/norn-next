@@ -71,7 +71,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{LinkChange, PathOverlay, ProbedLink};
+use norn_store::{LinkChange, PathOverlay, ProbedLink, TargetNaming};
 use norn_text::RewriteSkip;
 use norn_wire::{
     DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
@@ -79,7 +79,7 @@ use norn_wire::{
 };
 
 use super::compose::{Composition, Kept, Skipped};
-use super::lineage::{Drawn, Lineage};
+use super::lineage::{Drawn, Lineage, Removal};
 use crate::derivation::document_links;
 
 /// Where the links a plan does not write are judged: what each link the plan
@@ -99,6 +99,11 @@ pub(crate) trait LinkIndex {
         probed: &[ProbedLink],
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), Self::Error>;
+
+    /// What the suffix address `address` names on each side of the plan
+    /// `overlay` describes, read as a wikilink written with it is, with the
+    /// head of what it names after where that is several.
+    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, Self::Error>;
 
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
@@ -204,12 +209,20 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     }
     let written = WrittenLinks::of(operations, normalizer);
     let (overlay, probed) = reach(targets, lineage, normalizer, &written);
-    let moved = |path: &str| {
+    let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
+    // A document a move carries away, or a delete removes rewriting the
+    // links naming it: one an ambiguous link could name is a document a
+    // cascade would follow, were it known which the link names.
+    let followed = |path: &str| {
         normalizer
             .normalize(Path::new(path))
             .ok()
-            .and_then(|file| lineage.carried_to(&file))
-            .is_some()
+            .is_some_and(|file| {
+                lineage.carried_to(&file).is_some()
+                    || lineage
+                        .removed_by(&file)
+                        .is_some_and(|removal| removal.rewrite_to.is_some())
+            })
     };
 
     // Each key holding a link the cascades left as written, matched or not.
@@ -241,19 +254,24 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // under a key a rewrite writes reads as written, so one a cascade
         // left as written there is known by its key alone.
         let unwritten = !change.written || kept.contains(&entry);
-        // A link left behind by the cascade, and an ambiguous link that could
-        // name a document a move carries away, which is left as written since
-        // which it names is not known — each read from a link the plan does
-        // not write, since one it respells to a path it refills reads as
-        // left behind from its new address.
-        let left_behind =
-            unwritten && left_behind(&change.before, &change.after, lineage, normalizer).is_some();
+        // A link left behind by a cascade — a move's, or a delete's
+        // rewriting the links naming its document — and an ambiguous link
+        // that could name a document either follows, which is left as
+        // written since which it names is not known — each read from a link
+        // the plan does not write, since one it respells to a path it refills
+        // reads as left behind from its new address.
+        let removal = removed_by(&change.before, lineage, normalizer);
+        let left_behind = unwritten
+            && (left_behind(&change.before, &change.after, lineage, normalizer).is_some()
+                || removal.is_some_and(|removal| {
+                    rewritten_for(removal, &change.after, &rewritten_to, normalizer)
+                }));
         let ambiguous_among_moved = unwritten
             && matches!(change.before, Resolves::Several {})
             && change
                 .before_targets
                 .iter()
-                .any(|target| moved(target.as_str()));
+                .any(|target| followed(target.as_str()));
         let held = judged.entry(entry).or_insert_with(|| Judged {
             key,
             address: change.address,
@@ -262,12 +280,14 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             written: false,
             unwritten: false,
             members_moved: false,
+            named_removed: false,
             left_behind: false,
             ambiguous_among_moved: false,
         });
         held.written |= change.written;
         held.unwritten |= unwritten;
         held.members_moved |= change.members_moved;
+        held.named_removed |= removal.is_some();
         held.left_behind |= left_behind;
         held.ambiguous_among_moved |= ambiguous_among_moved;
     })?;
@@ -437,20 +457,70 @@ pub(crate) fn left_behind<'l>(
 }
 
 /// **The one rule a delete's backlinks are read by**: where a link resolved
-/// before the plan to exactly one document a delete of the plan removes, the
-/// position of that delete. A link resolving to several documents is a
-/// backlink of none of them, and a link a removed document holds is gone with
-/// it, so neither is ever handed here.
-pub(crate) fn removed_by(
+/// before the plan to exactly one document a delete of the plan removes, that
+/// delete. A link resolving to several documents is a backlink of none of
+/// them, and a link a removed document holds is gone with it, so neither is
+/// ever handed here.
+pub(crate) fn removed_by<'l>(
     before: &Resolves,
-    lineage: &Lineage,
+    lineage: &'l Lineage,
     normalizer: &PathNormalizer,
-) -> Option<usize> {
+) -> Option<&'l Removal> {
     let Resolves::One { path } = before else {
         return None;
     };
     let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
     lineage.removed_by(&file)
+}
+
+/// What the `rewrite_to` of each delete of the plan rewriting the links
+/// naming its document names, by the delete's position, on each side of the
+/// plan `overlay` describes, read through `index`: the one reading of it
+/// planning resolves the delete by and the change set judges its cascade by.
+pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
+    lineage: &Lineage,
+    overlay: &PathOverlay,
+    index: &I,
+) -> Result<BTreeMap<usize, TargetNaming>, I::Error> {
+    let mut targets = BTreeMap::new();
+    for removal in lineage.removals() {
+        if let Some(address) = &removal.rewrite_to {
+            targets.insert(removal.position, index.target(overlay, address)?);
+        }
+    }
+    Ok(targets)
+}
+
+/// **The one rule a delete's cascade follows**: whether a link that
+/// resolved before the plan to exactly the document `removal` removes, and
+/// resolves to `after` after it, is one the delete rewrites — the delete
+/// rewrites the links naming its document, and the link does not already
+/// name, after the plan, the one document its `rewrite_to` names there
+/// (`targets`, by the delete's position).
+///
+/// A delete's cascade rewrites exactly the links this names; the change set
+/// records every link a removed document leaves and advises on each this
+/// names that the cascade left as written.
+pub(crate) fn rewritten_for(
+    removal: &Removal,
+    after: &Resolves,
+    targets: &BTreeMap<usize, TargetNaming>,
+    normalizer: &PathNormalizer,
+) -> bool {
+    if removal.rewrite_to.is_none() {
+        return false;
+    }
+    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let target = targets
+        .get(&removal.position)
+        .and_then(|target| match &target.after {
+            Resolves::One { path } => identity(path),
+            _ => None,
+        });
+    match (after, target) {
+        (Resolves::One { path }, Some(target)) => identity(path).as_ref() != Some(&target),
+        _ => true,
+    }
 }
 
 /// What a link-resolution entry is ordered and matched by: its holder, its
@@ -479,21 +549,27 @@ struct Judged {
     /// or one a cascade kept beside a link it wrote there.
     unwritten: bool,
     members_moved: bool,
+    /// The link named a document a delete of the plan removes.
+    named_removed: bool,
     /// The link named a document a move of the plan carries away, and does
-    /// not name it where it lands: its cascade left it as written.
+    /// not name it where it lands, or a document a delete of the plan removes
+    /// rewriting the links naming it, and does not name the delete's target:
+    /// its cascade left it as written.
     left_behind: bool,
     /// The link was ambiguous before the plan, and one of the documents it
-    /// could name is one a move of the plan carries away.
+    /// could name is one a move of the plan carries away, or a delete removes
+    /// rewriting the links naming it.
     ambiguous_among_moved: bool,
 }
 
 impl Judged {
     /// Whether the change set records the link: what it resolves to changes,
-    /// the plan writes its text, or it is left behind — which, where the
-    /// path it resolves to is the same on both sides, says the document
-    /// there is not the one it named.
+    /// the plan writes its text, it is left behind, or it named a document
+    /// the plan removes — the last two, where the path it resolves to is the
+    /// same on both sides, saying the document there is not the one it
+    /// named.
     fn records(&self) -> bool {
-        self.before != self.after || self.written || self.left_behind
+        self.before != self.after || self.written || self.left_behind || self.named_removed
     }
 
     /// What the forecast says about the link, where it says anything.
@@ -698,6 +774,14 @@ pub(crate) mod testing {
                 "a plan that moves no document's presence and writes no link read the link index"
             )
         }
+
+        fn target(
+            &self,
+            _: &norn_store::PathOverlay,
+            address: &str,
+        ) -> Result<norn_store::TargetNaming, E> {
+            panic!("a plan that rewrites no link to a target named `{address}`")
+        }
     }
 
     /// A snapshot established now over `store`, whose reader is the
@@ -768,6 +852,17 @@ pub(crate) mod testing {
             self.0
                 .index()
                 .changes(overlay, probed, each)
+                .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+
+        fn target(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            address: &str,
+        ) -> Result<norn_store::TargetNaming, E> {
+            self.0
+                .index()
+                .target(overlay, address)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
         }
     }
@@ -1034,6 +1129,7 @@ mod tests {
                 written: false,
                 unwritten: true,
                 members_moved: true,
+                named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
             }
@@ -1067,6 +1163,7 @@ mod tests {
                 written,
                 unwritten: !written,
                 members_moved,
+                named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
             }

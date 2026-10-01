@@ -55,7 +55,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
-use norn_store::{ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot};
+use norn_store::{
+    ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot, TargetNaming,
+};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
     FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams,
@@ -408,6 +410,24 @@ impl LinkIndex for PlanSnapshot<'_> {
             .map_err(page_refusal)?;
         self.judged.set(self.judged.get().plus(work));
         Ok(())
+    }
+
+    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, PageRefused> {
+        let (naming, work) = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .target_naming(overlay, address, self.declared)
+                    .map(|(naming, work)| {
+                        (
+                            naming,
+                            LinkJudgmentCost::of(&work, before, snapshot.counters()),
+                        )
+                    })
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(naming)
     }
 
     /// Give an apply's handle back, closing its snapshot; a held snapshot is

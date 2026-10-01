@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{Operation, OperationKind};
+use norn_wire::{Backlinks, Operation, OperationKind};
 
 use super::compose::touches;
 
@@ -72,8 +72,18 @@ pub(crate) struct Lineage {
     /// file: [`Self::at_end`] read the other way.
     carried: BTreeMap<NormalizedPath, NormalizedPath>,
     /// Each file whose before-state a delete of the plan removes, wherever
-    /// the plan's moves carried it first, and that delete's position.
-    removed: BTreeMap<NormalizedPath, usize>,
+    /// the plan's moves carried it first, and that delete.
+    removed: BTreeMap<NormalizedPath, Removal>,
+}
+
+/// The delete that removes a document standing before the plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Removal {
+    /// The delete's position.
+    pub(crate) position: usize,
+    /// The address the delete rewrites the links naming the document to,
+    /// where it rewrites them.
+    pub(crate) rewrite_to: Option<String>,
 }
 
 impl Lineage {
@@ -94,10 +104,22 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
-                OperationKind::DeleteDocument { path, .. } => {
+                OperationKind::DeleteDocument { path, backlinks } => {
                     if let Some(file) = identity(path.as_str()) {
                         if let Some(drawn) = lineage.source(&file) {
-                            lineage.removed.insert(drawn.from, position);
+                            let rewrite_to = match backlinks {
+                                Backlinks::RewrittenTo(target) => {
+                                    Some(target.address().to_string())
+                                }
+                                Backlinks::Forbidden | Backlinks::LeftBroken => None,
+                            };
+                            lineage.removed.insert(
+                                drawn.from,
+                                Removal {
+                                    position,
+                                    rewrite_to,
+                                },
+                            );
                         }
                         lineage.at_end.insert(file, None);
                     }
@@ -169,21 +191,21 @@ impl Lineage {
         Some((file, drawn))
     }
 
-    /// The position of the delete that removes the document standing at
-    /// `from` before the plan — at `from`, or wherever the plan's moves
-    /// carried it first — and `None` where no delete of the plan removes it.
+    /// The delete that removes the document standing at `from` before the
+    /// plan — at `from`, or wherever the plan's moves carried it first — and
+    /// `None` where no delete of the plan removes it.
     ///
     /// **What a delete's backlinks are.** A link that named the document
     /// before the plan names nothing of it after, so the delete reads here
-    /// which of the links the store's resolution door reaches are its own.
-    pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<usize> {
-        self.removed.get(from).copied()
+    /// which of the links the store's resolution door reaches are its own,
+    /// and what it rewrites them to.
+    pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<&Removal> {
+        self.removed.get(from)
     }
 
-    /// The position of every delete of the plan that removes a document
-    /// standing before it.
-    pub(crate) fn removals(&self) -> impl Iterator<Item = usize> + '_ {
-        self.removed.values().copied()
+    /// Every delete of the plan that removes a document standing before it.
+    pub(crate) fn removals(&self) -> impl Iterator<Item = &Removal> + '_ {
+        self.removed.values()
     }
 
     /// The source of what `file` holds at the end of the plan, where its
