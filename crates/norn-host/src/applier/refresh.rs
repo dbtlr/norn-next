@@ -32,7 +32,7 @@ enum Fate {
 /// Refuse `plan` for `checks`, answering with a plan resolved afresh through
 /// `view`.
 ///
-/// **What the fresh plan holds** (ADR 0031): an operation whose targets all
+/// **What the fresh plan holds** (ADR 0032): an operation whose targets all
 /// hold their after-states is dropped; an operation none of whose targets
 /// holds its after-state is resolved again against what the vault holds now,
 /// through the one planner, which generates a move's link cascade afresh from

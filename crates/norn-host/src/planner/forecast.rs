@@ -125,7 +125,8 @@ fn folders_above<V: VaultView>(path: &DocumentPath, view: &V) -> Vec<(Normalized
         .collect()
 }
 
-/// Whether a transition puts a document where none stood.
+/// Whether a transition puts a file where none stood, whether or not its
+/// bytes decode as a document.
 fn is_create(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),
@@ -133,7 +134,8 @@ fn is_create(transition: &Transition) -> bool {
     )
 }
 
-/// Whether a transition takes away a document that stood.
+/// Whether a transition takes away a file that stood, whether or not its
+/// bytes decoded as a document.
 fn is_removal(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),

@@ -944,3 +944,69 @@ fn a_retargeted_link_sharing_its_key_with_a_respelled_one_is_still_retargeted() 
     );
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]] [[n]]\n"));
 }
+
+impl Fixture {
+    /// Plan `operations`, preview the plan — whose judgment recomputes it and
+    /// its forecast, which must agree with planning's — and apply it,
+    /// handing back what planning resolved. The store is not compared with
+    /// a build from zero: a moved quarantined file's finding outlives the
+    /// apply until a heal (NORN-323).
+    fn previewed_and_applied_over_quarantine(&mut self, operations: Vec<Operation>) -> Resolution {
+        let resolution = self.resolution(operations);
+        let (previewed, forecast) = self
+            .preview(resolution.plan.clone())
+            .expect("the plan previews");
+        assert_eq!(previewed, resolution.plan);
+        assert_eq!(forecast.links, resolution.forecast.links);
+        applied(self.apply(resolution.plan.clone()));
+        resolution
+    }
+}
+
+/// **A move of a quarantined file generates no cascade.** No link resolves
+/// to a file whose bytes do not decode, before the move or after it, so
+/// `[[q]]`, `[[notes/q]]` and `[q](notes/q.md)` were broken and stay broken
+/// as written, though the move changes the file's stem and folder: the plan
+/// carries no rewrite and records no entry, the preview recomputes it, and
+/// it applies with the linker untouched.
+#[test]
+fn a_move_of_a_quarantined_file_generates_no_cascade() {
+    let linker = "[[q]] [[notes/q]] [q](notes/q.md)\n";
+    let mut fixture = Fixture::new(&[("l.md", linker)]);
+    fixture.foreign("notes/q.md", super::UNDECODABLE);
+    let resolution =
+        fixture.previewed_and_applied_over_quarantine(vec![moving("notes/q.md", "archive/r.md")]);
+    assert_eq!(resolution.plan.operations[0].cascade, []);
+    assert_eq!(resolution.plan.conditions, []);
+    assert_eq!(resolution.forecast.links, []);
+    assert_eq!(fixture.read("l.md").as_deref(), Some(linker));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("archive/r.md"))
+            .ok()
+            .as_deref(),
+        Some(super::UNDECODABLE)
+    );
+}
+
+/// **A quarantined holder moved respells none of its links.** Its bytes do
+/// not decode, so it holds no link the index derives, before the move or
+/// after it: the relative `[d](./d.md)` it carries is no link of the plan's
+/// to keep naming `notes/d.md`, the move carries no rewrite and records no
+/// entry, the preview recomputes it, and it lands the bytes as they were.
+#[test]
+fn a_quarantined_holder_moved_respells_none_of_its_links() {
+    let holder: &[u8] = b"\xff [d](./d.md) [[d]]\n";
+    let mut fixture = Fixture::new(&[("notes/d.md", "d\n")]);
+    fixture.foreign("notes/q.md", holder);
+    let resolution =
+        fixture.previewed_and_applied_over_quarantine(vec![moving("notes/q.md", "archive/q.md")]);
+    assert_eq!(resolution.plan.operations[0].cascade, []);
+    assert_eq!(resolution.plan.conditions, []);
+    assert_eq!(resolution.forecast.links, []);
+    assert_eq!(
+        std::fs::read(fixture.vault.join("archive/q.md"))
+            .ok()
+            .as_deref(),
+        Some(holder)
+    );
+}

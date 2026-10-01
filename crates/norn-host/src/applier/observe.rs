@@ -1,13 +1,15 @@
 //! What a resolved plan's targets hold now: each at its before-state, at its
 //! after-state, or at neither, read at the exact spelling the plan writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{FileState, PlanCondition, ResolvedPlan, Transition};
+use norn_wire::{ContentHash, DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
 
+use crate::derivation::decodes;
+use crate::planner::compose::holding;
 use crate::planner::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
 
@@ -72,7 +74,7 @@ impl TargetState {
     pub(super) fn before_unseen(&self, transition: &Transition) -> bool {
         matches!(transition.before, FileState::Present { .. })
             && match self {
-                TargetState::Landed(_) => transition.before != transition.after,
+                TargetState::Landed(_) => !transition.before.same_content(&transition.after),
                 TargetState::Halfway(_) => true,
                 TargetState::AtBefore(_) | TargetState::Drifted(_) | TargetState::Unplaced => false,
             }
@@ -142,7 +144,7 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
 /// after-state.** The applier replaces or removes a source only after every
 /// target drawing on it durably landed, so a source whose before-state is gone
 /// while a target whose content the plan's moves carry from it has not landed
-/// was changed by another writer (ADR 0031): the source is marked drifted,
+/// was changed by another writer (ADR 0032): the source is marked drifted,
 /// holding what it holds, and the moves that carry it are named. A chain is
 /// followed whole, through names the plan makes and takes away again.
 pub(super) fn observe<V: VaultView>(
@@ -180,7 +182,7 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
     };
     let (holds, bytes) = match view.entry(&identity)? {
         Entry::Document { at, bytes, hash } if at == transition.path => {
-            (FileState::present(hash), Some(bytes))
+            (holding(&bytes, hash), Some(bytes))
         }
         Entry::Document { .. } | Entry::Absent { .. } => (FileState::absent(), None),
         Entry::Blocked {
@@ -206,12 +208,15 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
     Ok(judged(transition, holds, bytes))
 }
 
-/// `holds` judged against `transition`'s two states. The after-state is asked
-/// first, so a transition whose two states agree is landed.
+/// `holds` judged against `transition`'s two states by the bytes each holds
+/// ([`FileState::same_content`]): whether the bytes decode as a document is
+/// judged against the plan's record of them apart ([`misread`]). The
+/// after-state is asked first, so a transition whose two states agree is
+/// landed.
 fn judged(transition: &Transition, holds: FileState, bytes: Option<Arc<[u8]>>) -> TargetState {
-    if holds == transition.after {
+    if holds.same_content(&transition.after) {
         TargetState::Landed(bytes)
-    } else if holds == transition.before {
+    } else if holds.same_content(&transition.before) {
         TargetState::AtBefore(bytes)
     } else {
         TargetState::Drifted(holds)
@@ -237,10 +242,10 @@ fn respell<V: VaultView>(
             ..
         } => (TargetState::Unplaced, TargetState::Unplaced),
         Entry::Document { at, bytes, hash } if at == old.path => {
-            let holds = FileState::present(hash);
-            if holds == old.before {
+            let holds = holding(&bytes, hash);
+            if holds.same_content(&old.before) {
                 (TargetState::AtBefore(Some(bytes)), untouched)
-            } else if holds == new.after {
+            } else if holds.same_content(&new.after) {
                 (
                     TargetState::Halfway(bytes.clone()),
                     TargetState::Halfway(bytes),
@@ -250,8 +255,8 @@ fn respell<V: VaultView>(
             }
         }
         Entry::Document { at, bytes, hash } if at == new.path => {
-            let holds = FileState::present(hash);
-            if holds == new.after {
+            let holds = holding(&bytes, hash);
+            if holds.same_content(&new.after) {
                 (TargetState::Landed(None), TargetState::Landed(Some(bytes)))
             } else {
                 (TargetState::Landed(None), TargetState::Drifted(holds))
@@ -261,6 +266,54 @@ fn respell<V: VaultView>(
         // while the rename had not landed.
         _ => (TargetState::Drifted(FileState::absent()), untouched),
     })
+}
+
+/// Every target carrying bytes whose decoding the plan records wrongly: bytes
+/// it records as decoding as a vault document at one state and not at
+/// another, or otherwise than the bytes a target holds of its change decode.
+///
+/// **Whether bytes decode is a fact of the bytes**, so every present state
+/// sharing a hash records it alike, and bytes the applier holds pin every
+/// state recording their hash, by the derivation's own rule ([`decodes`]).
+/// The bytes a target holds of its change — its after-state, landed, or a
+/// respell's content halfway under the old spelling — are judged here,
+/// against every state with their hash, a gone before-state among them. The
+/// bytes a target holds at its before-state are judged where recomposition
+/// composes from them and compares the before-state it reads with the
+/// recorded one. Bytes no held bytes share a hash with — a landed target's
+/// gone before-state — are read as the plan records them, which is all an
+/// apply can know of them. A plan disagreeing with itself or with bytes it
+/// names is not what its operations do, so it is invalid rather than drift,
+/// and every transition recording the bytes is named.
+pub(super) fn misread(plan: &ResolvedPlan, states: &[TargetState]) -> Vec<DocumentPath> {
+    let mut recorded: BTreeMap<&ContentHash, bool> = BTreeMap::new();
+    let mut misread: BTreeSet<&ContentHash> = BTreeSet::new();
+    for transition in &plan.transitions {
+        for side in [&transition.before, &transition.after] {
+            if let FileState::Present { hash, quarantined } = side
+                && *recorded.entry(hash).or_insert(*quarantined) != *quarantined
+            {
+                misread.insert(hash);
+            }
+        }
+    }
+    for (transition, state) in plan.transitions.iter().zip(states) {
+        if let TargetState::Landed(Some(bytes)) | TargetState::Halfway(bytes) = state
+            && let FileState::Present { hash, quarantined } = &transition.after
+            && *quarantined == decodes(bytes)
+        {
+            misread.insert(hash);
+        }
+    }
+    plan.transitions
+        .iter()
+        .filter(|transition| {
+            [&transition.before, &transition.after]
+                .into_iter()
+                .any(|side| side.hash().is_some_and(|hash| misread.contains(hash)))
+        })
+        .map(|transition| transition.path.clone())
+        .collect()
 }
 
 /// Mark drifted each source whose before-state is gone while a target drawing
@@ -368,7 +421,8 @@ pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<Normal
     normalizer.normalize(Path::new(path)).ok()
 }
 
-/// Whether a transition puts a document where none stood.
+/// Whether a transition puts a file where none stood, whether or not its
+/// bytes decode as a document.
 pub(super) fn is_create(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),
@@ -376,10 +430,130 @@ pub(super) fn is_create(transition: &Transition) -> bool {
     )
 }
 
-/// Whether a transition takes away a document that stood.
+/// Whether a transition takes away a file that stood, whether or not its
+/// bytes decoded as a document.
 pub(super) fn is_removal(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),
         (FileState::Present { .. }, FileState::Absent {})
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use norn_wire::{
+        AuthoredPlan, DocumentPath, FileState, Operation, OperationKind, ResolvedPlan,
+        RootIdentity, VaultAddress, VaultName,
+    };
+
+    use super::{misread, observe, units};
+    use crate::planner::links::testing::resolve_over_files as resolve;
+    use crate::planner::view::VaultView;
+    use crate::planner::view::memory::MemoryVault;
+
+    /// Bytes that do not decode as a vault document until the `X` between
+    /// the two halves of a character is taken out.
+    const UNDECODABLE: &[u8] = b"\xc2X\xa0 note\n";
+
+    fn path(text: &str) -> DocumentPath {
+        DocumentPath::new(text).expect("a legal document path")
+    }
+
+    /// The plan the planner resolves for `operations` over `vault`.
+    fn planned(vault: &MemoryVault, operations: Vec<OperationKind>) -> ResolvedPlan {
+        let authored = AuthoredPlan::new(
+            VaultAddress::name(VaultName::new("notes").expect("a legal vault name")),
+            operations.into_iter().map(Operation::new).collect(),
+        );
+        resolve(
+            authored,
+            RootIdentity::from_device_and_inode(1, 2),
+            &BTreeSet::new(),
+            vault,
+        )
+        .expect("the plan resolves")
+        .plan
+    }
+
+    /// The files `plan` is misread at over `vault`, as it stands.
+    fn misread_over(plan: &ResolvedPlan, vault: &MemoryVault) -> Vec<DocumentPath> {
+        let units = units(plan, VaultView::normalizer(vault));
+        let (states, _) = observe(plan, &units, vault).expect("an infallible view");
+        let mut misread = misread(plan, &states);
+        misread.sort();
+        misread
+    }
+
+    /// `plan` with the flag on `at`'s state on one side turned over.
+    fn flipped(plan: &ResolvedPlan, at: &str, after: bool) -> ResolvedPlan {
+        let mut plan = plan.clone();
+        let transition = plan
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.path == path(at))
+            .expect("a transition at the path");
+        let side = if after {
+            &mut transition.after
+        } else {
+            &mut transition.before
+        };
+        let FileState::Present { quarantined, .. } = side else {
+            panic!("a present side");
+        };
+        *quarantined = !*quarantined;
+        plan
+    }
+
+    /// **A case-only rename records its unchanged bytes at both spellings,
+    /// and records them one way.** Its old spelling before the plan and its
+    /// new one after it hold the same bytes, so a plan saying they decode at
+    /// one and not the other is misread at both spellings, whether the
+    /// rename has landed or not; the honest plan is misread nowhere.
+    #[test]
+    fn a_respells_two_records_of_its_unchanged_bytes_must_agree() {
+        let before = MemoryVault::with_bytes(&[("Note.md", UNDECODABLE)]).folding_case();
+        let landed = MemoryVault::with_bytes(&[("note.md", UNDECODABLE)]).folding_case();
+        let plan = planned(
+            &before,
+            vec![OperationKind::move_document(
+                path("Note.md"),
+                path("note.md"),
+            )],
+        );
+        assert_eq!(plan.transitions.len(), 2);
+        for vault in [&before, &landed] {
+            assert_eq!(misread_over(&plan, vault), Vec::<DocumentPath>::new());
+            for (at, after) in [("Note.md", false), ("note.md", true)] {
+                assert_eq!(
+                    misread_over(&flipped(&plan, at, after), vault),
+                    vec![path("Note.md"), path("note.md")],
+                    "{at} flipped"
+                );
+            }
+        }
+    }
+
+    /// **A respell halfway — its content landed under the old spelling — is
+    /// judged on the bytes the old spelling holds**, which are the new
+    /// spelling's after-state: a plan saying they do not decode where they
+    /// do is misread there, and the honest plan is misread nowhere.
+    #[test]
+    fn a_respell_halfway_is_judged_on_the_bytes_its_old_spelling_holds() {
+        let before = MemoryVault::with_bytes(&[("Note.md", UNDECODABLE)]).folding_case();
+        let halfway = MemoryVault::with_bytes(&[("Note.md", b"\xc2\xa0 note\n")]).folding_case();
+        let plan = planned(
+            &before,
+            vec![
+                OperationKind::str_replace(path("Note.md"), "X", ""),
+                OperationKind::move_document(path("Note.md"), path("note.md")),
+            ],
+        );
+        assert_eq!(misread_over(&plan, &halfway), Vec::<DocumentPath>::new());
+        assert_eq!(
+            misread_over(&flipped(&plan, "note.md", true), &halfway),
+            vec![path("note.md")]
+        );
+    }
 }

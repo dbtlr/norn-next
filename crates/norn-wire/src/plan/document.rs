@@ -86,10 +86,29 @@ use crate::plan::root::RootIdentity;
 use crate::plan::write_target::WriteTarget;
 
 /// What a file holds on one side of a transition: nothing, or exactly the
-/// bytes with a hash.
+/// bytes with a hash, and whether those bytes decode as a vault document.
 ///
 /// On the wire a state is an object tagged `state`: `{"state":"absent"}`,
-/// `{"state":"present","hash":"sha256:…"}`.
+/// `{"state":"present","hash":"sha256:…"}`, and
+/// `{"state":"present","hash":"sha256:…","quarantined":true}` for bytes
+/// that do not decode.
+///
+/// **Whether the bytes decode rides beside their hash**, because a plan's
+/// resolution change set reads a file as a link's candidate only where it is
+/// a document, and the applier must read that on each side of a transition
+/// alike whether or not the bytes are still there to decode: a target that
+/// already holds its change has no before-bytes left. Where the applier
+/// holds a side's bytes — the file still holds them, or it composed them
+/// again — the flag must be the one they decode to, and a plan saying
+/// otherwise is not what its operations do; where it does not, the flag is
+/// what it reads. A file that stops decoding is held out of derived state as
+/// a quarantined document, which is the name the flag carries.
+///
+/// The flag is `false` unless it is written `true`, and is left out where it
+/// is `false`: absent can only mean the bytes decode, so every plan made
+/// before it existed, and every state of a file that decodes, reads and
+/// writes as it did. Which bytes a file holds is their hash alone; the flag
+/// follows from them.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileState {
@@ -99,6 +118,11 @@ pub enum FileState {
     Present {
         /// The hash of what the file holds.
         hash: ContentHash,
+        /// Whether those bytes do not decode as a vault document, so that
+        /// no document stands at the path. Absent is `false`, and `false` is
+        /// left out.
+        #[serde(default, skip_serializing_if = "is_false")]
+        quarantined: bool,
     },
 }
 
@@ -108,9 +132,49 @@ impl FileState {
         FileState::Absent {}
     }
 
-    /// The file holds the bytes whose hash is `hash`.
+    /// The file holds the bytes whose hash is `hash`, which decode as a
+    /// vault document.
     pub const fn present(hash: ContentHash) -> Self {
-        FileState::Present { hash }
+        FileState::Present {
+            hash,
+            quarantined: false,
+        }
+    }
+
+    /// The file holds the bytes whose hash is `hash`, which do not decode
+    /// as a vault document.
+    pub const fn quarantined(hash: ContentHash) -> Self {
+        FileState::Present {
+            hash,
+            quarantined: true,
+        }
+    }
+
+    /// Whether a document stands at the path: a file is there, and its
+    /// bytes decode as one.
+    pub const fn is_document(&self) -> bool {
+        matches!(
+            self,
+            FileState::Present {
+                quarantined: false,
+                ..
+            }
+        )
+    }
+
+    /// The hash of the bytes the file holds, where it holds any.
+    pub const fn hash(&self) -> Option<&ContentHash> {
+        match self {
+            FileState::Absent {} => None,
+            FileState::Present { hash, .. } => Some(hash),
+        }
+    }
+
+    /// Whether `self` and `other` hold the same bytes: both absent, or both
+    /// present with one hash. Whether the bytes decode follows from them, so
+    /// it is not compared.
+    pub fn same_content(&self, other: &FileState) -> bool {
+        self.hash() == other.hash()
     }
 }
 

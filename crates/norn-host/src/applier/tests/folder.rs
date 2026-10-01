@@ -2,7 +2,10 @@
 //! applied: the document moves a folder move expands into, what it leaves
 //! behind, and the folders it empties.
 
-use norn_wire::{AuthoredPlan, FilePath, FolderPath, Operation, OperationKind};
+use norn_wire::{
+    AuthoredPlan, FilePath, FolderPath, LinkFamily, LinkKey, LinkRewrite, Operation, OperationKind,
+    PlanCondition, Resolves,
+};
 
 use super::{Fixture, applied, path};
 use crate::planner::expand::resolve_expanding;
@@ -141,4 +144,70 @@ fn a_folder_move_removes_what_it_empties() {
     );
     assert_eq!(fixture.read("archive/keep/c.md").as_deref(), Some("C\n"));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A folder move carrying a quarantined file generates no cascade for the
+/// links naming it.** `[o](notes/d.md)` names a document the move carries,
+/// and follows it; `[q](notes/q.md)` and `[[notes/q]]` name a file whose
+/// bytes do not decode, which no link resolves to before the move or after
+/// it, so they stay as written and the plan records no entry for them,
+/// though the folder move carries the file too. The preview recomputes the
+/// plan, and it applies.
+#[test]
+fn a_folder_move_carrying_a_quarantined_file_rewrites_no_link_naming_it() {
+    let mut fixture = Fixture::new(&[
+        ("l.md", "[o](notes/d.md) [q](notes/q.md) [[notes/q]]\n"),
+        ("notes/d.md", "d\n"),
+    ]);
+    fixture.foreign("notes/q.md", super::UNDECODABLE);
+    let resolution = fixture.expanded(vec![moving_folder("notes", "archive")]);
+    let cascades: Vec<_> = resolution
+        .plan
+        .operations
+        .iter()
+        .map(|operation| (operation.kind.clone(), operation.cascade.clone()))
+        .collect();
+    assert_eq!(
+        cascades,
+        vec![
+            (
+                OperationKind::move_document(path("notes/d.md"), path("archive/d.md")),
+                vec![LinkRewrite::new(
+                    path("l.md"),
+                    LinkFamily::Markdown,
+                    "notes/d.md",
+                    "archive/d.md",
+                )],
+            ),
+            (
+                OperationKind::move_document(path("notes/q.md"), path("archive/q.md")),
+                Vec::new(),
+            ),
+        ]
+    );
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![PlanCondition::link_resolution(
+            LinkKey::new(path("l.md"), LinkFamily::Markdown, "archive/d.md"),
+            Resolves::none(),
+            Resolves::one(path("archive/d.md")),
+        )]
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("l.md").as_deref(),
+        Some("[o](archive/d.md) [q](notes/q.md) [[notes/q]]\n")
+    );
+    assert_eq!(
+        std::fs::read(fixture.vault.join("archive/q.md"))
+            .ok()
+            .as_deref(),
+        Some(super::UNDECODABLE)
+    );
 }
