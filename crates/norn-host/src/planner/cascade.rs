@@ -154,9 +154,23 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         };
         match &named.after {
             Resolves::One { path } => {
-                if let (Some(file), Some(at)) = (cascade.identity(path.as_str()), stored_path(path))
-                {
-                    cascade.destinations.insert(removal.position, (file, at));
+                match (cascade.identity(path.as_str()), stored_path(path)) {
+                    (Some(file), Some(at)) => {
+                        cascade.destinations.insert(removal.position, (file, at));
+                    }
+                    // A document the store names that the vault's rule does
+                    // not, or the other way round, is no file a link can be
+                    // respelled toward: the delete is left out saying so,
+                    // never landed leaving the links it was to rewrite.
+                    _ => {
+                        let address = removal.rewrite_to().unwrap_or_default();
+                        unresolved.insert(
+                            removal.position,
+                            UnresolvedReason::no_longer_resolves(format!(
+                                "`rewrite_to` `{address}` names `{path}`, which is no path the links naming the removed document can be rewritten toward"
+                            )),
+                        );
+                    }
                 }
             }
             _ => {
