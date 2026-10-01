@@ -577,11 +577,14 @@ fn a_link_left_naming_a_refilled_path_is_recorded_and_advised_on() {
     let resolution = fixture.resolution(vec![moving("a.md", "it's.md"), moving("b.md", "a.md")]);
     let link = key("h.md", LinkFamily::Wikilink, "a");
     assert!(
-        resolution.plan.conditions.contains(&PlanCondition::link_resolution(
-            link.clone(),
-            Resolves::one(path("a.md")),
-            Resolves::one(path("a.md")),
-        )),
+        resolution
+            .plan
+            .conditions
+            .contains(&PlanCondition::link_resolution(
+                link.clone(),
+                Resolves::one(path("a.md")),
+                Resolves::one(path("a.md")),
+            )),
         "{:?}",
         resolution.plan.conditions
     );
@@ -621,4 +624,30 @@ fn a_backlink_added_to_a_refilled_path_after_preview_refuses_the_plan() {
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
     assert_eq!(fixture.read("k.md").as_deref(), Some("[[c]]\n"));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A link is respelled only in the extension style it was written in**: a
+/// wikilink written without the document extension whose every spelling of
+/// the destination without one reads as something else — `Ü/v1.2` names an
+/// attachment — is left as written and said to be unrepresentable, never
+/// given an extension its author did not write.
+#[test]
+fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
+    let mut fixture = Fixture::new(&[
+        ("b/note one.md", "N\n"),
+        ("Ü/v1.md", "V\n"),
+        ("h.md", "[[b/note one]]\n"),
+    ]);
+    let resolution = fixture.resolution(vec![moving("b/note one.md", "Ü/v1.2.md")]);
+    assert_eq!(resolution.plan.operations[0].cascade, []);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_unrepresentable(key(
+            "h.md",
+            LinkFamily::Wikilink,
+            "b/note one"
+        ))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[b/note one]]\n"));
 }

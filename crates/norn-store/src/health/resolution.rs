@@ -485,9 +485,11 @@ impl<'a, R: Runner> Judging<'a, R> {
             let before = self.resolution(&judged.before, |target| target.before)?;
             let after = self.resolution(&judged.after, |target| target.after)?;
             let members_moved = judged.before != judged.after
-                || judged.before.iter().chain(&judged.after).any(|key| {
-                    self.members(key).any(Overlaid::changes)
-                });
+                || judged
+                    .before
+                    .iter()
+                    .chain(&judged.after)
+                    .any(|key| self.members(key).any(Overlaid::changes));
             let mut before_targets: Vec<DocumentPath> = Vec::new();
             for target in judged.before.iter().flat_map(|key| self.members(key)) {
                 if target.before && !before_targets.contains(&target.path) {

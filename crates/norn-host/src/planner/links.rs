@@ -360,11 +360,7 @@ pub(crate) fn reach(
 fn replaces(target: &Target<'_>, file: Option<&NormalizedPath>, lineage: &Lineage) -> bool {
     target.before
         && target.after.is_some()
-        && file.is_some_and(|file| {
-            lineage
-                .source(file)
-                .is_none_or(|drawn| drawn.from != *file)
-        })
+        && file.is_some_and(|file| lineage.source(file).is_none_or(|drawn| drawn.from != *file))
 }
 
 /// **The one rule a link follows a move by**: where a link resolved before

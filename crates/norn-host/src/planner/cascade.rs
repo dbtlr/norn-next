@@ -23,9 +23,9 @@
 //! destination the link's syntax and protocol can write: for a bare wikilink
 //! the shortest suffix of the destination that names it alone with every
 //! target of the plan at its after-state — at least two segments where the
-//! link was written path-qualified, so it stays so — keeping the document
-//! extension only where the link was written with it; for a `vault://`
-//! wikilink the destination's root path; and for a Markdown link the
+//! link was written path-qualified, so it stays so — written with the
+//! document extension exactly where the link was; for a `vault://` wikilink
+//! the destination's root path, in that same style; and for a Markdown link the
 //! destination's path from the holder's folder, or from the root where the
 //! link was written from the root, in the link's own percent-escaping. Each
 //! candidate is probed through the same door, from the holder where it stands
@@ -321,14 +321,13 @@ impl Cascade<'_> {
     }
 }
 
-/// `with` and `without` the document extension, the style the link was
-/// written in first.
+/// The spellings in the style the link was written in: `with` the document
+/// extension where it was written with it, else `without`. The other style
+/// is never a fallback — a link whose own style spells nothing that reads
+/// back is unrepresentable, not given an extension its author did not write
+/// or stripped of one they did.
 fn styled(with_extension: bool, with: Vec<String>, without: Vec<String>) -> Vec<String> {
-    if with_extension {
-        with.into_iter().chain(without).collect()
-    } else {
-        without.into_iter().chain(with).collect()
-    }
+    if with_extension { with } else { without }
 }
 
 /// Whether `target`'s last segment carries the document extension, in any
