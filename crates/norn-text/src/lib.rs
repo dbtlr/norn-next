@@ -43,13 +43,15 @@
 //! it on the same line**, sits in the bytes the replacement writes over; so
 //! the edit refuses rather than drop it. One rewrite is the exception: a flat
 //! list set over a flat list rewrites the list where it stands, and a comment
-//! inside its entry is replaced with it. A `#` is a comment exactly when
-//! truncating the text after it leaves the block reading as the same value, so
-//! a `#` inside a quoted scalar or on a block scalar's content line is content
-//! and refuses nothing; what cannot be judged that way — a bare `#`, or more
-//! candidates in one entry than are worth re-reading the block for — is taken
-//! for a comment. A comment on its own line between two entries belongs to
-//! neither and always survives.
+//! inside its entry is replaced with it. Every `#` in the entry is judged,
+//! whatever precedes it: it is a comment exactly when truncating its text, up
+//! to the next line break the reader recognises, leaves the block reading as
+//! the same value. So no comment the reader sees escapes the check, and a `#`
+//! inside a quoted scalar, on a block scalar's content line or in a URL's
+//! fragment is content and refuses nothing; what cannot be judged that way — a
+//! bare `#`, or more `#`s in one entry than are worth re-reading the block for
+//! — is taken for a comment. A comment on its own line between two entries
+//! belongs to neither and always survives.
 //!
 //! **What cannot be proven is refused.** Every emitted scalar is re-parsed in
 //! the lexical context it will live in and compared against the value it came

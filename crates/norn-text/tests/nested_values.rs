@@ -311,6 +311,60 @@ fn a_comment_below_a_keep_chomping_scalar_refuses_a_whole_entry_rewrite() {
     }
 }
 
+/// **A comment needs no space before it.** The reader takes a `#` straight
+/// after a flow collection's bracket, a quoted scalar's closing quote or a
+/// flow item's comma as a comment, so a whole-entry rewrite that would drop
+/// one refuses.
+#[test]
+fn a_comment_with_no_space_before_it_refuses_a_whole_entry_rewrite() {
+    let z9 = map([("z", Value::Int(9))]);
+    for (source, value) in [
+        ("---\nk: [a]#c\nn: 1\n---\n", z9.clone()),
+        ("---\nk: [a]#c\nn: 1\n---\n", "z".into()),
+        ("---\nk: {a: 1}#c\nn: 1\n---\n", z9.clone()),
+        ("---\nk: \"a\"#c\nn: 1\n---\n", z9.clone()),
+        ("---\nk: 'a'#c\nn: 1\n---\n", z9.clone()),
+        ("---\nk: [a,#c\n  b]\nn: 1\n---\n", z9.clone()),
+        ("---\nk:\n  a: [1]#c\n---\n", z9.clone()),
+        ("---\nk:\n  - \"a\"#c\n---\n", list(["x".into(), list([])])),
+    ] {
+        assert_eq!(
+            set(source, "k", &value),
+            comment_lost("k"),
+            "for {source:?}"
+        );
+    }
+}
+
+/// **A push or a pop that rewrites a list whole refuses for a comment with
+/// no space before it**: one after a flow list's bracket, and one after an
+/// item whose alias keeps the list from being spliced item by item.
+#[test]
+fn a_list_rewrite_refuses_for_a_comment_with_no_space_before_it() {
+    let flow = Document::parse("---\nk: [a, b]#c\n---\n");
+    assert_eq!(flow.push_to_list("k", &"y".into()), comment_lost("k"));
+    assert_eq!(flow.pop_from_list("k", &"a".into()), comment_lost("k"));
+    let aliased = Document::parse("---\nk:\n  - &x {a: 1}#c\n  - *x\n---\n");
+    assert_eq!(aliased.push_to_list("k", &"y".into()), comment_lost("k"));
+}
+
+/// **A comment ends at every line break the reader recognises**: NEL, LS and
+/// PS as well as `\n` and `\r`. What follows one of them is the next line's
+/// content, not the comment's, so the comment before it is still found.
+#[test]
+fn a_comment_ended_by_a_unicode_line_break_refuses_a_whole_entry_rewrite() {
+    for line_break in ['\u{2028}', '\u{2029}', '\u{85}'] {
+        let source = format!("---\nk:\n  a: 1 # c{line_break}  b: 2\nn: 1\n---\n");
+        for value in [map([("z", Value::Int(9))]), "z".into()] {
+            assert_eq!(
+                set(&source, "k", &value),
+                comment_lost("k"),
+                "for {source:?} set to {value:?}"
+            );
+        }
+    }
+}
+
 /// **A `#` that is content is not a comment**: inside a quoted scalar, on a
 /// block scalar's content line, or with no space before it. A whole-entry
 /// rewrite over it lands.
@@ -325,6 +379,8 @@ fn a_hash_that_is_content_does_not_refuse_a_whole_entry_rewrite() {
         "---\nk: |\n  a\n  # not a comment\nn: 1\n---\n",
         "---\nk: a#b\nn: 1\n---\n",
         "---\nk:\n  - 'x '' # y'\nn: 1\n---\n",
+        "---\nk: https://example.com/page#section\nn: 1\n---\n",
+        "---\nk: [https://example.com/a#b, c#d]\nn: 1\n---\n",
     ] {
         assert_eq!(
             set(source, "k", &value),

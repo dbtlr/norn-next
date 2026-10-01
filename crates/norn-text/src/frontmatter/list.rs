@@ -102,30 +102,40 @@ pub(crate) fn key_line_value_point(content: &str, line_start: usize) -> Option<R
 /// the range of the frontmatter's YAML in `content`.
 ///
 /// **A `#` is a comment exactly when truncating the text after it leaves the
-/// block reading as the same value.** Each `#` in the entry that opens a line
-/// or follows a space or tab is a candidate; the block is re-read with the
-/// rest of that `#`'s line deleted — the `#` and the line's terminator stay
-/// — and compared with the block as written. A comment truncated is still a
-/// comment, so the layout around it, blank lines a keep-chomping scalar owns
-/// included, reads as it did; content truncated loses text, so the value
-/// changes or the block stops parsing: a `#` inside a quoted scalar or on a
-/// block scalar's content line. No lexer decides it, so a quote that opens
-/// nothing — one inside a plain or a block scalar — cannot hide a comment
-/// from it.
+/// block reading as the same value.** Every `#` in the entry's bytes is a
+/// candidate, whatever stands before it; the block is re-read with the text
+/// between that `#` and the next line break deleted — the `#` and the break
+/// stay — and compared with the block as written.
 ///
-/// The answer decides whether a whole-entry rewrite may run, and a comment
-/// it misses is one that rewrite drops silently, so every case it cannot
-/// judge answers yes and the rewrite refuses instead:
+/// **It cannot miss a comment.** Every comment the reader sees opens with a
+/// `#` and runs to a line break, so every comment is a candidate. A line
+/// break here is exactly what the reader ends a comment at: libyaml's
+/// `IS_BREAKZ` — `\n`, `\r`, NEL (U+0085), LS (U+2028), PS (U+2029), or the
+/// end of the input; its reader refuses NUL, the other end it knows, before
+/// any scan. Truncating a comment's text leaves a comment, at the same place
+/// and ending at the same break, so the block reads unchanged and the
+/// candidate is found. No lexer of this crate's decides anything, so a quote
+/// that opens nothing, a `#` with no space before it or an exotic break
+/// cannot hide a comment from it.
+///
+/// **Its errors all refuse.** Truncating content — a `#` inside a quoted or
+/// a plain scalar, on a block scalar's content line, in a URL's fragment —
+/// loses text, so the value changes or the block stops parsing and the
+/// candidate is content. Where a case cannot be judged that way the answer
+/// is yes, and the whole-entry rewrite refuses rather than risk dropping a
+/// comment silently:
 ///
 /// - a bare `#`, with nothing after it to truncate;
-/// - more candidates than [`MAX_JUDGED_CANDIDATES`], which bounds what the
-///   answer costs to that many re-reads of a block itself bounded by
-///   [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES);
+/// - a `#` whose text the reader would discard anyway, such as spaces a
+///   quoted scalar folds away at a line break;
+/// - more candidates than [`MAX_JUDGED_CANDIDATES`], content `#`s counted
+///   too, which bounds what the answer costs to that many re-reads of a block
+///   itself bounded by [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES);
 /// - a block that does not re-read as written at all.
 ///
 /// Every candidate is truncated at once first, and a block that still reads
 /// the same holds a comment; only otherwise is each judged alone, stopping at
-/// the first comment. An entry with no candidate is not re-read.
+/// the first comment. An entry with no `#` is not re-read.
 pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &Field) -> bool {
     let yaml = &content[block.clone()];
     let entry = field.line_range.start - block.start..field.line_range.end - block.start;
@@ -166,22 +176,24 @@ pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &
 /// a dropped comment.
 pub(crate) const MAX_JUDGED_CANDIDATES: usize = 32;
 
-/// The text each comment candidate in `yaml[entry]` would truncate: for a `#`
-/// that opens a line or follows a space or tab, the rest of its line, the
-/// terminator excluded. A bare `#` truncates an empty range.
+/// The text each comment candidate in `yaml[entry]` would truncate: for
+/// every `#`, the rest of its line up to the next [`READER_LINE_BREAKS`] or
+/// the end of the block. A bare `#` truncates an empty range.
 fn comment_candidates(yaml: &str, entry: Range<usize>) -> impl Iterator<Item = Range<usize>> {
-    let bytes = yaml.as_bytes();
-    entry
-        .filter(|&at| bytes[at] == b'#')
-        .filter(move |&at| at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'\r'))
-        .map(move |at| {
-            let end = bytes[at..]
-                .iter()
-                .position(|&byte| matches!(byte, b'\n' | b'\r'))
-                .map_or(bytes.len(), |offset| at + offset);
-            at + 1..end
+    yaml[entry.clone()]
+        .match_indices('#')
+        .map(move |(offset, _)| {
+            let text = entry.start + offset + 1;
+            let end = yaml[text..]
+                .find(READER_LINE_BREAKS)
+                .map_or(yaml.len(), |length| text + length);
+            text..end
         })
 }
+
+/// The characters the YAML reader ends a line, and so a comment, at:
+/// libyaml's `IS_BREAK`.
+const READER_LINE_BREAKS: [char; 5] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'];
 
 /// The key line starting at `line_start`, without its terminator, and the
 /// offset in it just past the key's `:`.
@@ -210,9 +222,10 @@ mod tests {
     /// **A `#` is a comment exactly when truncating the text after it leaves
     /// the block reading as the same value.** A quote inside a plain or a
     /// block scalar opens nothing, so a comment after it is still found, and
-    /// so is one among the blank lines a keep-chomping scalar owns; a `#`
-    /// inside a quoted scalar, on a block scalar's content line or with no
-    /// space before it is content. A bare `#` cannot be truncated, so it is
+    /// so is one among the blank lines a keep-chomping scalar owns, one with
+    /// no space before it and one a Unicode line break ends; a `#` inside a
+    /// quoted scalar, on a block scalar's content line, inside a word or in a
+    /// URL's fragment is content. A bare `#` cannot be truncated, so it is
     /// taken for a comment.
     #[test]
     fn a_comment_is_a_hash_whose_truncation_changes_no_value() {
@@ -237,6 +250,14 @@ mod tests {
             ),
             ("---\nk: |+\n    a\n\n  # c\n\nn: 1\n---\n", "k", true),
             ("---\nk: v #\nn: 1\n---\n", "k", true),
+            ("---\nk: [a]#c\nn: 1\n---\n", "k", true),
+            ("---\nk: 'a'#c\nn: 1\n---\n", "k", true),
+            ("---\nk:\n  a: 1 # c\u{2028}  b: 2\nn: 1\n---\n", "k", true),
+            (
+                "---\nk: https://example.com/page#section\n---\n",
+                "k",
+                false,
+            ),
             (
                 "---\nname: Lovelace, 'Ada # don't rename\nn: 1\n---\n",
                 "name",
