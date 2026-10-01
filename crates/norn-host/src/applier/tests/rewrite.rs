@@ -11,7 +11,7 @@ use norn_wire::{
 
 use norn_store::StoredPathOrder;
 
-use super::{Fixture, applied, creating, path};
+use super::{Fixture, applied, creating, deleting, path};
 
 /// A rewrite of every wikilink naming `old` to name `new`.
 fn retargeting(old: &str, new: &str) -> Operation {
@@ -458,4 +458,58 @@ fn resending_an_authored_link_rewrite_whose_holder_landed_finishes_it() {
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
     assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A wikilink rewrite clears a forbidding delete's backlinks only by
+/// respelling them.** With `a.md` deleted and every wikilink naming `a`
+/// retargeted to `c`, the wikilinks name `c` after the plan, so the delete
+/// needs no flag and the plan lands; a Markdown link naming `a.md` is no
+/// wikilink and still holds the delete back. A wikilink the rewrite leaves
+/// as written — its new spelling would read as emphasis in the heading
+/// holding it — still names the deleted document, so it holds the delete
+/// back too, at planning as the applier would judge it.
+#[test]
+fn a_wikilink_rewrite_clears_a_forbidding_deletes_backlinks_only_where_it_respells_them() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("*x.md", "X\n"),
+        ("h.md", "[[a]]\n"),
+        ("k.md", "# See [[a]] and b*\n"),
+    ]);
+    let held_back = |resolution: &crate::planner::resolve::Resolution| {
+        resolution
+            .unresolved
+            .iter()
+            .find(|left| matches!(left.operation.kind, OperationKind::DeleteDocument { .. }))
+            .map(|left| left.reason.clone())
+    };
+
+    let skipped = fixture.planned(vec![deleting("a.md"), retargeting("a", "*x")]);
+    assert_eq!(
+        held_back(&skipped),
+        Some(UnresolvedReason::has_backlinks(vec![path("k.md")], 1))
+    );
+
+    fixture.foreign("k.md", "# See it\n");
+    let resolution = fixture.resolution(vec![deleting("a.md"), retargeting("a", "c")]);
+    assert_eq!(
+        resolution.plan.operations[1].cascade,
+        [wikilink("h.md", "a", "c")]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+
+    let fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[a]] [t](a.md)\n"),
+    ]);
+    let markdown = fixture.planned(vec![deleting("a.md"), retargeting("a", "c")]);
+    assert_eq!(
+        held_back(&markdown),
+        Some(UnresolvedReason::has_backlinks(vec![path("h.md")], 1))
+    );
 }

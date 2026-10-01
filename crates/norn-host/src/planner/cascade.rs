@@ -111,7 +111,7 @@ use norn_wire::{
     UnresolvedReason,
 };
 
-use super::compose::Composition;
+use super::compose::{Composition, Skipped};
 use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
     Decider, EntryKey, LinkIndex, Named, RetargetNaming, Target, WrittenLinks, address, decider,
@@ -132,6 +132,11 @@ pub(crate) struct Generated {
     /// rewrite whose ends name no one document each, or which retargets no
     /// wikilink.
     pub(crate) unresolved: BTreeMap<usize, UnresolvedReason>,
+    /// Each backlink of a document a delete forbidding them removes that a
+    /// wikilink rewrite's cascade respells instead, keyed as the change set
+    /// keys it, by the delete's position. Composition may yet leave one as
+    /// written, which then holds the delete back ([`held_back`]).
+    pub(crate) contested: BTreeMap<usize, Vec<EntryKey>>,
 }
 
 /// What the plan `composition` composed generates from the links naming what
@@ -377,10 +382,12 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
 
     // A backlink of a document a delete forbidding them removes that a
     // wikilink rewrite decides is no backlink once the rewrite respells it;
-    // one it leaves as written still names the removed document.
+    // one no spelling reaches still names the removed document.
+    let mut respelled: BTreeMap<usize, Vec<EntryKey>> = BTreeMap::new();
     for (position, holder, key) in contested {
-        if !key.is_some_and(|key| rewrites.contains_key(&key)) {
-            forbidden.entry(position).or_default().push(holder);
+        match key.filter(|key| rewrites.contains_key(key)) {
+            Some(key) => respelled.entry(position).or_default().push(key),
+            None => forbidden.entry(position).or_default().push(holder),
         }
     }
     for (position, holders) in forbidden {
@@ -394,7 +401,41 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     Ok(Generated {
         cascades,
         unresolved,
+        contested: respelled,
     })
+}
+
+/// Why each delete forbidding the links naming its document does not
+/// resolve where composition left as written a backlink of it a wikilink
+/// rewrite's cascade was to respell (`contested`, by the delete's position),
+/// `skipped` saying which links composition left: the link still names the
+/// removed document, so every holder of such a link, and how many, hold the
+/// delete back as the applier would judge them.
+pub(crate) fn held_back(
+    contested: &BTreeMap<usize, Vec<EntryKey>>,
+    skipped: &[Skipped],
+) -> BTreeMap<usize, UnresolvedReason> {
+    let left: BTreeSet<EntryKey> = skipped
+        .iter()
+        .map(|skip| {
+            (
+                skip.holder.as_str().to_string(),
+                family_name(skip.syntax),
+                skip.address.clone(),
+            )
+        })
+        .collect();
+    contested
+        .iter()
+        .filter_map(|(&position, keys)| {
+            let held: Vec<norn_store::DocumentPath> = keys
+                .iter()
+                .filter(|key| left.contains(*key))
+                .filter_map(|(holder, _, _)| norn_store::DocumentPath::new(holder).ok())
+                .collect();
+            (!held.is_empty()).then(|| (position, backlinks(held)))
+        })
+        .collect()
 }
 
 /// Why the delete `removal` rewriting the links naming its document does not

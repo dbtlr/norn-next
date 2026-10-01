@@ -11,7 +11,7 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::cascade::generate;
+use super::cascade::{generate, held_back};
 use super::compose::{Composition, compose, content_hash, touched, touches};
 use super::edit;
 use super::forecast::forecast;
@@ -133,6 +133,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // falls.
         let generated = generate(&composition, &lineage, view.normalizer(), links)
             .map_err(PlanningFailure::Links)?;
+        let contested = generated.contested;
         for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;
         }
@@ -145,8 +146,15 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             // left out in the composition's words, in every build, rather
             // than planned with a transition its cascade does not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-            if composition.unresolvable.is_empty() {
+            // A forbidding delete's backlink a wikilink rewrite's cascade was
+            // to respell, and composition left as written, still names the
+            // removed document, so it holds the delete back.
+            let held = held_back(&contested, &composition.skipped);
+            if composition.unresolvable.is_empty() && held.is_empty() {
                 break (order, lineage, composition);
+            }
+            for (position, reason) in held {
+                left_out.entry(position).or_insert(reason);
             }
             for unresolvable in &composition.unresolvable {
                 left_out.entry(unresolvable.position).or_insert_with(|| {
