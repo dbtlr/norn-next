@@ -17,8 +17,16 @@ User-authored rules defining the valid structure and values of vault documents.
 _Avoid_: Doctrine, schema (unqualified)
 
 **Schema content model**:
-The typed reading of a vault schema's bytes — the declared fields with their types and rules, the declared tag facet, the declared folders, and the path rules. It is a pure function of those bytes, so its identity is the schema fingerprint, and it is what derivation and the read surface act on rather than the bytes themselves.
+The typed reading of a vault schema's bytes — the declared fields with their types and rules, the declared tag facet, the declared folders, the path rules, the creation rules, and the inbox. It is a pure function of those bytes, so its identity is the schema fingerprint, and it is what derivation and the read surface act on rather than the bytes themselves.
 _Avoid_: Parsed schema
+
+**Creation rule**:
+A named rule in a vault schema for making a new vault document: where it is written, the values a caller must supply, and the frontmatter and body it starts with. Every value it varies on is fixed when the change that makes the document is planned.
+_Avoid_: Template (a creation rule is written in templates, and is not one), creatable
+
+**Inbox**:
+The one place a vault schema names for capturing a new vault document that no creation rule describes; each capture there is numbered.
+_Avoid_: Capture folder
 
 **Derived state**:
 Rebuildable state computed from vault documents. It is never the source of truth.

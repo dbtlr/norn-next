@@ -1279,6 +1279,8 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "path_rule",
             "tag_pattern",
             "undeclared_tags",
+            "creation_rule",
+            "inbox",
         ])
     );
     assert_eq!(
@@ -1293,9 +1295,11 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
     assert_eq!(
         FacetKind::in_code_order().map(|kind| kind.as_str()),
         [
+            "creation_rule",
             "declared_field",
             "declared_tag",
             "folder",
+            "inbox",
             "observed_field",
             "path_rule",
             "tag_pattern",
@@ -2438,6 +2442,8 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             "folder",
             "path_rule",
             "undeclared_tags",
+            "creation_rule",
+            "inbox",
         ])
     );
     let declared = branches(&schema)

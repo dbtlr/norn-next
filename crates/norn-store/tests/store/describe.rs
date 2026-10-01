@@ -25,8 +25,9 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    ContainerKind, Cursor, CursorKey, DescribeParams, Direction, Facet, FacetKind, FieldType,
-    PagedRows, PathRuleKind, Pattern, Sort, SortKey, TagStance, VaultAddress, VaultName,
+    AuthoredValue, ContainerKind, Cursor, CursorKey, DescribeParams, Direction, Facet, FacetKind,
+    FieldType, PagedRows, PathRuleKind, Pattern, Sort, SortKey, TagStance, ValueMap, VaultAddress,
+    VaultName,
 };
 
 // ---- fixtures ----
@@ -57,6 +58,30 @@ fn declared() -> ContentModel {
         .declare_folder("journal", Some("One per day".to_string()))
         .declare_folder("archive", None)
         .declare_ambiguity_ignore(Pattern::parse("archive/**").expect("a glob"))
+        .declare_creation_rule(
+            "task",
+            "tasks/{{var.project}}-{{seq}}.md",
+            vec!["project".to_string()],
+            task_defaults(),
+            Some("# {{var.project}}\n".to_string()),
+        )
+        .declare_creation_rule(
+            "note",
+            "notes/{{date}}.md",
+            Vec::new(),
+            ValueMap::default(),
+            None,
+        )
+        .declare_inbox("inbox/{{date}}-{{seq}}.md")
+}
+
+/// The frontmatter the fixture's `task` rule starts a document with.
+fn task_defaults() -> ValueMap {
+    ValueMap::new([
+        ("status".to_string(), AuthoredValue::string("todo")),
+        ("created".to_string(), AuthoredValue::string("{{now}}")),
+    ])
+    .expect("each key once")
 }
 
 fn sequence(items: &[&str]) -> FrontmatterValue {
@@ -221,10 +246,25 @@ fn observed_only() -> DescribeParams {
 }
 
 /// Every facet the fixture answers, in `(kind, key)` order: the kinds in the
-/// byte order of their codes — `declared_field`, `declared_tag`, `folder`,
-/// `observed_field`, `path_rule`, `tag_pattern`, `undeclared_tags`.
+/// byte order of their codes — `creation_rule`, `declared_field`,
+/// `declared_tag`, `folder`, `inbox`, `observed_field`, `path_rule`,
+/// `tag_pattern`, `undeclared_tags`.
 fn every_facet() -> Vec<Facet> {
     vec![
+        Facet::creation_rule(
+            "note",
+            "notes/{{date}}.md",
+            Vec::new(),
+            ValueMap::default(),
+            None,
+        ),
+        Facet::creation_rule(
+            "task",
+            "tasks/{{var.project}}-{{seq}}.md",
+            vec!["project".to_string()],
+            task_defaults(),
+            Some("# {{var.project}}\n".to_string()),
+        ),
         Facet::declared_field("due", FieldType::Date, false, None),
         Facet::declared_field("reviewer", FieldType::Text, false, None),
         Facet::declared_field(
@@ -237,6 +277,7 @@ fn every_facet() -> Vec<Facet> {
         Facet::declared_tag("project"),
         Facet::folder("archive", None),
         Facet::folder("journal", Some("One per day".to_string())),
+        Facet::inbox("inbox/{{date}}-{{seq}}.md"),
         Facet::observed_field("aliases", [ContainerKind::Scalar, ContainerKind::Sequence]),
         Facet::observed_field("meta", [ContainerKind::Map]),
         Facet::observed_field("status", [ContainerKind::Scalar]),
@@ -321,6 +362,7 @@ fn naming_kinds_answers_those_kinds_alone_in_the_order_of_their_codes() {
         ],
         vec![FacetKind::PathRule],
         vec![FacetKind::ObservedField, FacetKind::Folder],
+        vec![FacetKind::Inbox, FacetKind::CreationRule],
     ] {
         assert_eq!(
             describing_store.facets(&describing().with_facets(kinds.clone())),
@@ -357,7 +399,7 @@ fn the_empty_key_is_observed_first() {
     );
     assert_eq!(observed.len(), 4);
     assert_eq!(drained(&describing_store, &observed_only(), 1), observed);
-    assert_eq!(drained(&describing_store, &describing(), 2).len(), 14);
+    assert_eq!(drained(&describing_store, &describing(), 2).len(), 17);
 }
 
 /// The key a facet's cursor names.
@@ -404,6 +446,7 @@ fn a_drain_a_page_at_a_time_answers_the_facets_one_page_does() {
         observed_only(),
         describing().with_facets([FacetKind::ObservedField, FacetKind::DeclaredTag]),
         describing().with_facets([FacetKind::UndeclaredTags, FacetKind::DeclaredField]),
+        describing().with_facets([FacetKind::Inbox, FacetKind::CreationRule]),
     ] {
         let whole = describing_store.facets(&params.clone().with_limit(1000));
         for limit in [1, 2, 3] {
@@ -417,7 +460,7 @@ fn a_drain_a_page_at_a_time_answers_the_facets_one_page_does() {
     let page = describing_store.describe(&describing().with_limit(4));
     assert_eq!(
         page.next.as_ref().map(Cursor::key),
-        Some(&CursorKey::facet(FacetKind::DeclaredTag, "area")),
+        Some(&CursorKey::facet(FacetKind::DeclaredField, "reviewer")),
         "a page stops at its last facet's kind and key"
     );
 }
@@ -589,8 +632,8 @@ fn a_declaration_not_pinned_and_a_bound_outside_its_range_are_refused() {
 
 /// **With no schema pinned describe answers the observed fields alone**: no
 /// schema declares anything, so there is no declared field, tag, pattern,
-/// folder, path rule or stance, and the keys the documents carry are the
-/// whole field universe.
+/// folder, path rule, stance, creation rule or inbox, and the keys the
+/// documents carry are the whole field universe.
 #[test]
 fn with_no_schema_pinned_describe_answers_the_observed_fields_alone() {
     let describing_store = Describing::unpinned("describe-unpinned");
@@ -599,9 +642,12 @@ fn with_no_schema_pinned_describe_answers_the_observed_fields_alone() {
         of_kinds(&[FacetKind::ObservedField])
     );
     assert_eq!(
-        describing_store.facets(
-            &describing().with_facets([FacetKind::DeclaredField, FacetKind::UndeclaredTags])
-        ),
+        describing_store.facets(&describing().with_facets([
+            FacetKind::DeclaredField,
+            FacetKind::UndeclaredTags,
+            FacetKind::CreationRule,
+            FacetKind::Inbox,
+        ])),
         Vec::new()
     );
 }
@@ -850,7 +896,7 @@ fn a_declared_section_adds_no_statement_work_to_a_page() {
     let declared_only = describing_store.describe(&describing().with_facets(declared_kinds));
     assert_eq!(
         declared_only.facets.len(),
-        10,
+        13,
         "every declared facet answers"
     );
     assert_eq!(steps(declared_only.work), (0, 0, 0));

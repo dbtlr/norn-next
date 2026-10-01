@@ -1026,6 +1026,40 @@ fn a_describe_answers_the_facets_its_snapshot_holds() {
     );
 }
 
+/// **A describe answers the creation rules and the inbox the pinned schema
+/// declares**, each template as the text the schema writes, read off the
+/// schema bytes the attachment pinned.
+#[test]
+fn a_describe_answers_the_creation_rules_and_inbox_its_schema_declares() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-describe-creation", &[]);
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        "version: 1\ncreatable:\n  task:\n    target: \"tasks/{{var.project}}-{{seq}}.md\"\n    variables: [project]\ninbox:\n  target: \"inbox/{{date}}-{{seq}}.md\"\n",
+    )
+    .expect("write a schema declaring creation rules");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .describe(
+            &DescribeParams::new(address(vault.name()))
+                .with_facets([FacetKind::CreationRule, FacetKind::Inbox]),
+        )
+        .expect("an attached vault answers a describe");
+    assert_eq!(
+        answered.answer.report.rows,
+        vec![
+            Facet::creation_rule(
+                "task",
+                "tasks/{{var.project}}-{{seq}}.md",
+                vec!["project".to_string()],
+                norn_wire::ValueMap::default(),
+                None,
+            ),
+            Facet::inbox("inbox/{{date}}-{{seq}}.md"),
+        ]
+    );
+}
+
 /// What a get of `target` answered, under the reading of its snapshot.
 fn got(host: &attach::ServingHost, vault: &attach::Vault, params: &GetParams) -> GetReport {
     let answered = host.get(params).expect("an attached vault answers a get");

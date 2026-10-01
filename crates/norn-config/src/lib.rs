@@ -32,7 +32,8 @@
 //!   bearer tokens, and the loopback endpoint.
 //! - [`vault`] — the generic per-vault config envelope.
 //! - [`schema`] — the vault schema's content model: the declared fields with
-//!   their types, the declared tag facet, the folders, and the path rules.
+//!   their types, the declared tag facet, the folders, the path rules, and the
+//!   creation rules and inbox.
 //!
 //! # The two surfaces
 //!

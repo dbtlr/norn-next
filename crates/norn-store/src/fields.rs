@@ -61,7 +61,7 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance};
+use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance, ValueMap};
 
 use crate::json::{FrontmatterValue, float_text};
 use crate::path::DocumentPath;
@@ -298,8 +298,11 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// reports every declaration here as a facet — the declared fields with their
 /// type, whether they are required and their closed set of values, the
 /// declared tags, the tag patterns, the stance on an undeclared tag, the
-/// declared folders and the path rules. A key declared without a typed order
-/// is ordered by its raw text, which is what a field declared as text is.
+/// declared folders, the path rules, the creation rules and the inbox. No
+/// read and no derivation consults a creation rule or the inbox: they are held
+/// here for `describe` alone, as the source text of their templates. A key
+/// declared without a typed order is ordered by its raw text, which is what a
+/// field declared as text is.
 ///
 /// **The ambiguity-ignore set is held once.** The one path rule a schema
 /// states is ambiguity-ignore, and its globs are held as the
@@ -322,7 +325,8 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 ///
 /// **Every declaration is held once, by the text that names it**: a field by
 /// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
-/// folder by its path. A schema names each field and each folder once — its
+/// folder by its path, a creation rule by its name. A schema names each field,
+/// each folder and each creation rule once — its
 /// grammar refuses a repeated field key and a folder path written twice — so
 /// the host hands neither twice. A schema reading holds a declared tag once
 /// under the tag fold, at its first spelling, so the host hands each tag
@@ -338,6 +342,18 @@ pub struct ContentModel {
     undeclared_tags: Option<TagStance>,
     folders: BTreeMap<String, Option<String>>,
     ambiguity_ignore: AmbiguityIgnore,
+    creation_rules: BTreeMap<String, CreationRuleDeclaration>,
+    inbox: Option<String>,
+}
+
+/// One creation rule as `describe` reports it: every template as its source
+/// text.
+#[derive(Clone, Debug)]
+struct CreationRuleDeclaration {
+    target: String,
+    variables: Vec<String>,
+    frontmatter_defaults: ValueMap,
+    body: Option<String>,
 }
 
 impl ContentModel {
@@ -429,6 +445,42 @@ impl ContentModel {
         self
     }
 
+    /// The same declaration with the creation rule `name` declared: where a
+    /// document it makes is written, the variables a caller supplies, the
+    /// frontmatter it starts with and its body, each template as its source
+    /// text. A schema keys its rules by name, so the host declares each name
+    /// once.
+    pub fn declare_creation_rule(
+        mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        variables: Vec<String>,
+        frontmatter_defaults: ValueMap,
+        body: Option<String>,
+    ) -> Self {
+        let name = name.into();
+        self.schema_declares(&name);
+        self.creation_rules.insert(
+            name,
+            CreationRuleDeclaration {
+                target: target.into(),
+                variables,
+                frontmatter_defaults,
+                body,
+            },
+        );
+        self
+    }
+
+    /// The same declaration with the inbox writing untyped capture to
+    /// `target`, a template as its source text.
+    pub fn declare_inbox(mut self, target: impl Into<String>) -> Self {
+        let target = target.into();
+        self.schema_declares(&target);
+        self.inbox = Some(target);
+        self
+    }
+
     /// The invariant every declare method holds to: a declaration built over
     /// [`ContentModel::under`] before anything is declared on it, so `schema`
     /// is `Some` here. Debug-checked rather than refused, because every
@@ -473,7 +525,8 @@ impl ContentModel {
     /// Every facet of `kind` this declaration reports keyed after `after` —
     /// from the first where it is `None` — in the order of the text that keys
     /// it: the byte order of a field's key, a tag's name, a pattern, a
-    /// folder's path or the stance's spelling. Each is reported once.
+    /// folder's path, the stance's spelling, a creation rule's name or the
+    /// inbox's target. Each is reported once.
     ///
     /// A pure read of the declaration: it runs no statement, and it builds a
     /// facet only as the iterator is drawn, so a page drawing the facets it
@@ -516,6 +569,23 @@ impl ContentModel {
                     .filter(|stance| after.is_none_or(|after| stance.as_str() > after))
                     .into_iter()
                     .map(Facet::undeclared_tags),
+            ),
+            FacetKind::CreationRule => Box::new(keyed_after(&self.creation_rules, after).map(
+                |(name, rule)| {
+                    Facet::creation_rule(
+                        name.clone(),
+                        rule.target.clone(),
+                        rule.variables.clone(),
+                        rule.frontmatter_defaults.clone(),
+                        rule.body.clone(),
+                    )
+                },
+            )),
+            FacetKind::Inbox => Box::new(
+                self.inbox
+                    .iter()
+                    .filter(move |target| after.is_none_or(|after| target.as_str() > after))
+                    .map(Facet::inbox),
             ),
             // Observed fields, and a kind this build does not know, are
             // declared nowhere.

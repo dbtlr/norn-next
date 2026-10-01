@@ -887,7 +887,9 @@ impl Declared {
 /// type reads a raw value into; the declared tags, the tag patterns and the
 /// stance on an undeclared tag; the declared folders; and the ambiguity-ignore
 /// patterns, the places the schema keeps out of ambiguity classes, which
-/// the resolver applies and `describe` reports as path rules.
+/// the resolver applies and `describe` reports as path rules; and each
+/// creation rule and the inbox, every template as its source text, which
+/// `describe` alone reports.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
@@ -921,12 +923,25 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.folders().iter().fold(declared, |declared, folder| {
         declared.declare_folder(folder.path(), folder.description().map(str::to_string))
     });
-    schema
+    let declared = schema
         .ambiguity_ignore()
         .iter()
         .fold(declared, |declared, pattern| {
             declared.declare_ambiguity_ignore(pattern.clone())
-        })
+        });
+    let declared = schema.creation_rules().fold(declared, |declared, rule| {
+        declared.declare_creation_rule(
+            rule.name(),
+            rule.target().as_str(),
+            rule.variables().to_vec(),
+            rule.frontmatter_defaults(),
+            rule.body().map(|body| body.as_str().to_string()),
+        )
+    });
+    match schema.inbox() {
+        Some(inbox) => declared.declare_inbox(inbox.target().as_str()),
+        None => declared,
+    }
 }
 
 /// A field declared as `kind`, as the store reads it: under the wire type a
@@ -1278,11 +1293,15 @@ mod tests {
     /// makes**, each as the facet `describe` answers with, in the order of the
     /// text that keys it: each field with its type, whether it is required and
     /// its closed set, the tags, the patterns, the stance, the folders and the
-    /// ambiguity-ignore patterns. A vault with no schema pinned declares
-    /// nothing, and a schema silent on tags states the default stance.
+    /// ambiguity-ignore patterns, and each creation rule and the inbox with
+    /// every template as its source text. A vault with no schema pinned
+    /// declares nothing, and a schema silent on tags states the default
+    /// stance.
     #[test]
     fn a_pinned_declaration_reports_every_declaration_its_schema_makes() {
-        use norn_wire::{Facet, FacetKind, FieldType as Wire, PathRuleKind};
+        use norn_wire::{
+            AuthoredValue, Facet, FacetKind, FieldType as Wire, PathRuleKind, ValueMap,
+        };
 
         let declared = Declared::pinned(
             VaultSchema::parse(
@@ -1301,6 +1320,18 @@ folders:
   - path: archive
 paths:
   ambiguity_ignore: [\"archive/**\"]
+creatable:
+  task:
+    target: \"tasks/{{var.project}}-{{seq}}.md\"
+    variables: [project, title]
+    frontmatter_defaults:
+      status: todo
+      tags: [\"{{var.project|slug}}\", 2]
+    body: \"# {{var.title}}\\n\"
+  note:
+    target: \"notes/{{date}}.md\"
+inbox:
+  target: \"inbox/{{date}}-{{seq}}.md\"
 ",
             )
             .expect("a schema declaring every shape"),
@@ -1355,6 +1386,39 @@ paths:
                 PathRuleKind::AmbiguityIgnore,
                 "archive/**"
             )]
+        );
+        assert_eq!(
+            facets(FacetKind::CreationRule),
+            vec![
+                Facet::creation_rule(
+                    "note",
+                    "notes/{{date}}.md",
+                    Vec::new(),
+                    ValueMap::default(),
+                    None
+                ),
+                Facet::creation_rule(
+                    "task",
+                    "tasks/{{var.project}}-{{seq}}.md",
+                    vec!["project".to_string(), "title".to_string()],
+                    ValueMap::new([
+                        ("status".to_string(), AuthoredValue::string("todo")),
+                        (
+                            "tags".to_string(),
+                            AuthoredValue::list([
+                                AuthoredValue::string("{{var.project|slug}}"),
+                                AuthoredValue::Integer(2),
+                            ])
+                        ),
+                    ])
+                    .expect("each key once"),
+                    Some("# {{var.title}}\n".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::Inbox),
+            vec![Facet::inbox("inbox/{{date}}-{{seq}}.md")]
         );
         assert_eq!(facets(FacetKind::ObservedField), Vec::new());
 
