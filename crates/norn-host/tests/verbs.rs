@@ -734,6 +734,35 @@ fn a_creation_by_rule_is_made_by_the_pinned_schema_not_the_bytes_on_disk() {
     assert!(!vault.path().join("elsewhere").exists());
 }
 
+/// **A directory at a matching name holds its number**, as a file does: it
+/// occupies the name. One at the largest number leaves the creation
+/// unresolved naming it.
+#[test]
+fn a_directory_at_a_matching_name_holds_its_number() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-seq-directory", RULE_SCHEMA, &[]);
+    std::fs::create_dir_all(vault.path().join("tasks/NORN-7.md")).expect("make a directory");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.new_document(new_task(&vault, ApplyMode::Preview, "T", None)));
+    assert_eq!(the_create(&plan).0, "tasks/NORN-8.md");
+
+    std::fs::create_dir_all(vault.path().join("tasks/NORN-18446744073709551615.md"))
+        .expect("make a directory");
+    let refusal = refused(host.new_document(new_task(&vault, ApplyMode::Preview, "T", None)));
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("the refusal carries {:?}", refusal.detail());
+    };
+    let [left] = unresolved.as_slice() else {
+        panic!("one operation is unresolved: {unresolved:?}");
+    };
+    let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+        panic!("left out for {:?}", left.reason);
+    };
+    assert!(
+        detail.contains("tasks/NORN-18446744073709551615.md"),
+        "{detail}"
+    );
+}
+
 /// **Two writers previewing one numbered name before either applies: one
 /// document lands, the other is refused** (Layer 4, exit item 10). Both
 /// previews allocate the same number; the first applied lands; the second's

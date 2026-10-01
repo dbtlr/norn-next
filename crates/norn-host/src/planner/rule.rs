@@ -697,6 +697,29 @@ inbox:
         assert_eq!(landed_at(&planned(&vault, vec![task()])), "tasks/NORN-3.md");
     }
 
+    /// **The number is cut where the slot's text puts it, digits around it
+    /// included**: a slot whose prefix and suffix end and start in digits
+    /// counts only the digits between them, and a name with anything else
+    /// there, in another case, or in a deeper folder counts for nothing.
+    #[test]
+    fn the_number_is_cut_between_the_slots_own_text() {
+        let digits_around = schema(b"version: 1\ninbox:\n  target: \"tasks/T7{{seq}}9.md\"\n");
+        let vault = MemoryVault::with(&[
+            ("tasks/T700079.md", "7\n"),
+            ("tasks/T799x9.md", "not a number\n"),
+            ("tasks/t7999.md", "another case\n"),
+            ("tasks/deep/T7999.md", "another folder\n"),
+        ]);
+        let resolution = planned_reading(
+            &vault,
+            &digits_around,
+            vec![by_rule(None, &[], ValueMap::default(), Some("body\n"))],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        assert_eq!(landed_at(&resolution), "tasks/T789.md");
+    }
+
     /// **Two creations on one slot in one plan take consecutive numbers**,
     /// in plan order.
     #[test]
