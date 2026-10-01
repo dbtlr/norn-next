@@ -20,16 +20,28 @@
 //! the document's content stood — a moved document's source — so a relative
 //! link a move breaks is seen breaking. Every other link is the store's, read
 //! through the [`LinkIndex`] by the keys that could name a target whose
-//! presence the plan changes (`norn_store::Snapshot::resolution_changes`). A
-//! link in a document the plan removes is no entry: its disappearance is the
-//! plan's own transition.
+//! presence the plan changes, or whose document it replaces
+//! (`norn_store::Snapshot::resolution_changes`). A link in a document the
+//! plan removes is no entry: its disappearance is the plan's own transition.
+//!
+//! **An entry is a link whose resolution changes, whose text the plan
+//! writes, or that is left behind** ([`left_behind`]). The vocabulary an
+//! entry records a resolution in names paths, so a link left naming a path
+//! the plan vacates and refills is recorded naming that path on both sides:
+//! what changed is the document there, which the entry's presence in the set
+//! says, and the forecast says why the cascade left it. A backlink to such a
+//! path another writer adds after planning is then an entry the plan does
+//! not record, and refuses it as one to a vacated path does.
 //!
 //! **A plan that changes no document's presence and writes no link is
 //! answered without reading anything.** No link's resolution moves unless a
 //! document appears or disappears somewhere a key names, or the plan writes
 //! the link's text, so such a plan — every edit-only plan, a frontmatter set
 //! among them — records nothing, and the index is never asked: nothing is
-//! minted for it.
+//! minted for it. A document a move carries away lands somewhere nothing
+//! stood or leaves somewhere nothing stands after, since moves closing a
+//! cycle are refused, so a plan replacing a document a link follows always
+//! changes a presence too.
 //!
 //! **Which links a plan writes is one predicate** ([`WrittenLinks::holds`]):
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
@@ -59,7 +71,7 @@ use norn_wire::{
 };
 
 use super::compose::{Composition, Skipped};
-use super::lineage::Lineage;
+use super::lineage::{Drawn, Lineage};
 use crate::derivation::document_links;
 
 /// Where the links a plan does not write are judged: what each link the plan
@@ -182,11 +194,12 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     }
     let written = WrittenLinks::of(operations, normalizer);
     let (overlay, probed) = reach(targets, lineage, normalizer, &written);
-    let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
     let moved = |path: &str| {
-        identity(path)
+        normalizer
+            .normalize(Path::new(path))
+            .ok()
             .and_then(|file| lineage.carried_to(&file))
-            .map(|(to, _)| to.clone())
+            .is_some()
     };
 
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
@@ -196,22 +209,15 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             wire_family(change.link.family),
             address(&change.link),
         );
-        // A link that named a document a move carries away, and does not name
-        // it where it lands, was left behind by the cascade; an ambiguous link
-        // that could name one is left as written, since which it names is not
-        // known.
-        let left_behind = match &change.before {
-            Resolves::One { path } => moved(path.as_str()).is_some_and(|to| match &change.after {
-                Resolves::One { path } => identity(path.as_str()).as_ref() != Some(&to),
-                _ => true,
-            }),
-            _ => false,
-        };
+        // A link left behind by the cascade, and an ambiguous link that could
+        // name a document a move carries away, which is left as written since
+        // which it names is not known.
+        let left_behind = left_behind(&change.before, &change.after, lineage, normalizer).is_some();
         let ambiguous_among_moved = matches!(change.before, Resolves::Several {})
             && change
                 .before_targets
                 .iter()
-                .any(|target| moved(target.as_str()).is_some());
+                .any(|target| moved(target.as_str()));
         let held = judged.entry(entry_key(&key)).or_insert_with(|| Judged {
             key,
             address: change.address,
@@ -245,7 +251,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         if let Some(advisory) = judged.advisory(skips.get(&entry).copied()) {
             advised.insert(entry, advisory);
         }
-        if judged.before != judged.after || judged.written {
+        if judged.records() {
             set.entries.push(PlanCondition::link_resolution(
                 judged.key,
                 judged.before,
@@ -284,6 +290,15 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 /// rewrites and what the set records of it are read alike. Whether a target
 /// counts as a document on either side is decided here and nowhere else.
 ///
+/// **A target whose document the plan replaces changes too.** A path
+/// standing filled on both sides of the plan whose after-state is not drawn
+/// from its own before-state — one a move vacates and another move or a
+/// create refills — holds another document after the plan than before it
+/// ([`replaces`]), so it is overlaid as replaced and every link the store
+/// holds under a key that could name it is judged: a link naming the
+/// document that left is found, where its path alone would say nothing
+/// changed.
+///
 /// **A moved document's links are read from where it stood.** Each probe's
 /// before-holder is its document's lineage source, where a move carried its
 /// content from, so a relative link a move breaks is read breaking. A target
@@ -309,11 +324,15 @@ pub(crate) fn reach(
         let Some(stored) = stored_path(target.path) else {
             continue;
         };
-        overlay = overlay.with(stored.clone(), target.before, target.after.is_some());
+        let file = identity(target.path);
+        overlay = if replaces(target, file.as_ref(), lineage) {
+            overlay.replacing(stored.clone())
+        } else {
+            overlay.with(stored.clone(), target.before, target.after.is_some())
+        };
         let Some(bytes) = target.after else {
             continue;
         };
-        let file = identity(target.path);
         let before_holder = file
             .as_ref()
             .and_then(|file| lineage.source(file))
@@ -331,6 +350,56 @@ pub(crate) fn reach(
         }
     }
     (overlay, probed)
+}
+
+/// Whether the plan replaces the document standing at `target`, the file
+/// `file`: a document stands there on both sides, and what stands there after
+/// is not drawn from what stood there before — created, or carried there by
+/// a move from another file. An edit in place, and a document moved away and
+/// back, leave the same document there.
+fn replaces(target: &Target<'_>, file: Option<&NormalizedPath>, lineage: &Lineage) -> bool {
+    target.before
+        && target.after.is_some()
+        && file.is_some_and(|file| {
+            lineage
+                .source(file)
+                .is_none_or(|drawn| drawn.from != *file)
+        })
+}
+
+/// **The one rule a link follows a move by**: where a link resolved before
+/// the plan to exactly one document, and the plan's moves carry that
+/// document to another file, the file the link must name after the plan, and
+/// how the document got there — unless the link already resolves to exactly
+/// that file after the plan. `None` for a link that needs nothing.
+///
+/// **What is compared is the document, not the path.** A link naming a path
+/// the plan vacates and refills resolves to that same path on both sides, but
+/// the document it named is the one the plan carries away, so it is left
+/// behind exactly as a link the vacated path leaves broken is. A link whose
+/// document stays, edited in place or moved away and back, needs nothing, and
+/// so does one whose document's move keeps it named — a bare link to a
+/// document keeping its stem, a relative link between two documents one
+/// folder move carries together.
+///
+/// A link cascade rewrites exactly the links this names; the change set
+/// records every link it names and advises on each the cascade left as
+/// written.
+pub(crate) fn left_behind<'l>(
+    before: &Resolves,
+    after: &Resolves,
+    lineage: &'l Lineage,
+    normalizer: &PathNormalizer,
+) -> Option<(&'l NormalizedPath, &'l Drawn)> {
+    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let Resolves::One { path } = before else {
+        return None;
+    };
+    let (to, drawn) = lineage.carried_to(&identity(path)?)?;
+    match after {
+        Resolves::One { path } if identity(path).as_ref() == Some(to) => None,
+        _ => Some((to, drawn)),
+    }
 }
 
 /// What a link-resolution entry is ordered and matched by: its holder, its
@@ -365,6 +434,14 @@ struct Judged {
 }
 
 impl Judged {
+    /// Whether the change set records the link: what it resolves to changes,
+    /// the plan writes its text, or it is left behind — which, where the
+    /// path it resolves to is the same on both sides, says the document
+    /// there is not the one it named.
+    fn records(&self) -> bool {
+        self.before != self.after || self.written || self.left_behind
+    }
+
     /// What the forecast says about the link, where it says anything.
     ///
     /// **A link a cascade left as written says why, and only that.** One the

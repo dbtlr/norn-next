@@ -16,6 +16,13 @@
 //! its path key in the store's key space, so on a root that folds case the
 //! store's spelling of a target is the target.
 //!
+//! **A target changes where its presence does, or where the plan replaces the
+//! document standing there** ([`PathOverlay::replacing`]): one taken away and
+//! another put at its path — the path a move vacates refilled by another
+//! move or a create. A link resolving there resolves to the same path on
+//! both sides, but not to the same document, so it is reached as a link
+//! whose target changes is.
+//!
 //! # Which links are judged
 //!
 //! Two arms, each over links the plan bounds:
@@ -27,10 +34,10 @@
 //!   holder's lineage source: where a move carried the document's content
 //!   from. One is judged where the plan writes its text, where the two
 //!   holders give it different keys — a relative path from a moved
-//!   document — or where one of its keys names a target whose presence
+//!   document — or where one of its keys names a target the plan
 //!   changes.
 //! - **The links the store holds under a changed key**: every key that could
-//!   name a target whose presence the plan changes ([`crate::link`]'s
+//!   name a target the plan changes ([`crate::link`]'s
 //!   `keys_naming`), each read by an equality seek of the link index — a
 //!   suffix key as a path key is, since the index holds both as written. A
 //!   link held by a target is the first arm's, or, where the target is gone
@@ -40,8 +47,8 @@
 //!   links were judged.
 //!
 //! A link reached by neither arm keeps its resolution: no key it is held
-//! under names a document whose presence the plan changes, and its holder
-//! stands where it stood.
+//! under names a target the plan changes, and its holder stands where it
+//! stood.
 //!
 //! # What a key names, read once
 //!
@@ -100,6 +107,17 @@ struct Overlaid {
     path: DocumentPath,
     before: bool,
     after: bool,
+    /// The document standing there after the plan is not the one standing
+    /// there before it.
+    replaced: bool,
+}
+
+impl Overlaid {
+    /// Whether the plan changes what stands at this file: a document where
+    /// none stood, none where one did, or another document where one did.
+    fn changes(&self) -> bool {
+        self.before != self.after || self.replaced
+    }
 }
 
 impl PathOverlay {
@@ -117,6 +135,24 @@ impl PathOverlay {
             path,
             before,
             after,
+            replaced: false,
+        });
+        self
+    }
+
+    /// The same overlay, with a document standing at `path` on both sides of
+    /// the plan, but not the same one: the plan takes the document standing
+    /// there away and puts another there. Every link the store holds under a
+    /// key that could name `path` is judged, as for a target whose presence
+    /// changes, and is said to have had what it names move under it.
+    #[must_use]
+    pub fn replacing(mut self, path: DocumentPath) -> Self {
+        self.targets.retain(|held| held.path != path);
+        self.targets.push(Overlaid {
+            path,
+            before: true,
+            after: true,
+            replaced: true,
         });
         self
     }
@@ -167,8 +203,9 @@ pub struct LinkChange {
     /// Whether the plan writes the link's text ([`ProbedLink::written`]).
     pub written: bool,
     /// Whether what the link names moved under it: its two holders give it
-    /// different keys, or one of its keys names a target whose presence the
-    /// plan changes and the ambiguity-ignore set lets it in. An ambiguous link
+    /// different keys, or one of its keys names a target the plan changes —
+    /// its presence, or the document standing there — and the
+    /// ambiguity-ignore set lets it in. An ambiguous link
     /// resolving to several documents on both sides moved exactly where this
     /// holds.
     pub members_moved: bool,
@@ -206,7 +243,7 @@ impl Snapshot {
     /// Judge every link the plan `overlay` describes reaches, handing each to
     /// `each` with what it resolves to before the plan and after it: the
     /// links of `probed`, and the links this snapshot holds under a key that
-    /// could name a target whose presence the plan changes. A class's members
+    /// could name a target the plan changes. A class's members
     /// are read less the places `declared`'s ambiguity-ignore set keeps out,
     /// as every surface reads one.
     ///
@@ -285,7 +322,7 @@ struct Judging<'a, R> {
     target_keys: BTreeSet<String>,
     /// Each key that could name a target, and the targets it could name.
     naming: BTreeMap<String, Vec<usize>>,
-    /// Each key that could name a target whose presence changes.
+    /// Each key that could name a target the plan changes.
     changed: BTreeSet<String>,
     resolved: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
@@ -303,7 +340,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         let mut changed = BTreeSet::new();
         for (at, target) in overlay.targets.iter().enumerate() {
             for named in keys_naming(&target.path, key) {
-                if target.before != target.after {
+                if target.changes() {
                     changed.insert(named.clone());
                 }
                 naming.entry(named).or_default().push(at);
@@ -422,7 +459,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         keys
     }
 
-    /// Whether one of `keys` could name a target whose presence changes.
+    /// Whether one of `keys` could name a target the plan changes.
     fn meets_a_change(&self, keys: &[Key]) -> bool {
         keys.iter().any(|(text, _)| self.changed.contains(text))
     }
@@ -449,8 +486,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             let after = self.resolution(&judged.after, |target| target.after)?;
             let members_moved = judged.before != judged.after
                 || judged.before.iter().chain(&judged.after).any(|key| {
-                    self.members(key)
-                        .any(|target| target.before != target.after)
+                    self.members(key).any(Overlaid::changes)
                 });
             let mut before_targets: Vec<DocumentPath> = Vec::new();
             for target in judged.before.iter().flat_map(|key| self.members(key)) {

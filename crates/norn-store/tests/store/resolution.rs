@@ -328,6 +328,39 @@ fn a_written_link_is_handed_back_and_an_untouched_one_is_not() {
     });
 }
 
+/// **A document replaced at a path its plan keeps filled is a change**: a
+/// plan that takes `a.md`'s document away and puts another there changes
+/// what `[[a]]` names though the path it resolves to is the same, so the
+/// link is handed back, its two sides alike, and what it names is said to
+/// have moved under it. Overlaid as standing on both sides and no more, the
+/// same path reaches nothing.
+#[test]
+fn a_document_replaced_at_its_path_reaches_the_links_naming_it() {
+    both_orders("resolution-replaced", |mut vault| {
+        vault.write(&[("a.md", "alpha\n"), ("h.md", "[[a]] [t](a.md)\n")]);
+        let kept = PathOverlay::new().with(path("a.md"), true, true);
+        let (untouched, _) = vault.judge(&kept, &[]);
+        assert_eq!(untouched, []);
+
+        let replaced = PathOverlay::new().replacing(path("a.md"));
+        let snapshot = vault.snapshot();
+        let mut reached = Vec::new();
+        snapshot
+            .resolution_changes(&replaced, &[], &declared(), |change| {
+                reached.push((read(&change), change.members_moved));
+            })
+            .unwrap_or_else(|refusal| panic!("a judgment: {refusal}"));
+        reached.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            reached,
+            [
+                (judged("h.md", "a", "one:a.md", "one:a.md"), true),
+                (judged("h.md", "a.md", "one:a.md", "one:a.md"), true),
+            ]
+        );
+    });
+}
+
 // ---- robustness ----
 
 /// **A plan's own progress never changes what it records.** Once the store

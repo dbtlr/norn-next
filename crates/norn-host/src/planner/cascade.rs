@@ -4,16 +4,19 @@
 //! **Which links a move breaks is the change set's own question.** A link
 //! follows a move where, before the plan, it resolves to exactly the document
 //! the move carries away, and after the plan does not resolve to exactly the
-//! file the move carries it to. Both sides are read through the store's
-//! resolution door, over the overlay and probes the change set itself reads
-//! ([`reach`]), so the backlinks a cascade rewrites are the links the set
-//! would otherwise record leaving: the store's links under a key that could
-//! name the moved document, and the links the plan's own documents hold. A
-//! move that keeps its document's stem, so its bare backlinks still name it
-//! alone, and a relative link between two documents one folder move carries
-//! together, need nothing. A link resolving to several documents before the
-//! plan is never rewritten: which it names is not known, and the forecast
-//! says so.
+//! file the move carries it to — the one rule [`left_behind`] states, which
+//! the change set records and advises by too. Both sides are read through
+//! the store's resolution door, over the overlay and probes the change set
+//! itself reads ([`reach`]), so the backlinks a cascade rewrites are the
+//! links the set would otherwise record leaving: the store's links under a
+//! key that could name the moved document, and the links the plan's own
+//! documents hold. A path the plan vacates and refills is overlaid as
+//! replaced, so a link naming the document that left is found there though
+//! its path still resolves. A move that keeps its document's stem, so its
+//! bare backlinks still name it alone, and a relative link between two
+//! documents one folder move carries together, need nothing. A link resolving
+//! to several documents before the plan is never rewritten: which it names is
+//! not known, and the forecast says so.
 //!
 //! **A link is respelled in its own style, and only to a spelling that reads
 //! back.** The new address is the shortest spelling of the moved document's
@@ -54,8 +57,8 @@ use norn_wire::{DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkR
 use super::compose::Composition;
 use super::lineage::Lineage;
 use super::links::{
-    EntryKey, LinkIndex, Target, WrittenLinks, address, family_name, reach, stored_path,
-    wire_family,
+    EntryKey, LinkIndex, Target, WrittenLinks, address, family_name, left_behind, reach,
+    stored_path, wire_family,
 };
 use crate::derivation::document_links;
 
@@ -81,24 +84,21 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let targets = Target::of(composition);
     let (overlay, probed) = reach(&targets, lineage, normalizer, &WrittenLinks::default());
 
-    // The links the moves break, each with the file it must name after.
+    // The links the moves leave behind, each with the file it must name
+    // after and the move that lands that file.
     let mut breaking: Vec<Breaking> = Vec::new();
     index.changes(&overlay, &probed, &mut |change| {
-        let Resolves::One { path } = &change.before else {
+        let Some((to, drawn)) = left_behind(&change.before, &change.after, lineage, normalizer)
+        else {
             return;
         };
-        let Some((to, owner)) = cascade.carried(path.as_str()) else {
+        let Some(&owner) = drawn.moves.last() else {
             return;
         };
-        if let Resolves::One { path } = &change.after
-            && cascade.identity(path.as_str()).as_ref() == Some(&to)
-        {
-            return;
-        }
         breaking.push(Breaking {
             holder: change.holder,
             link: change.link,
-            to,
+            to: to.clone(),
             owner,
         });
     })?;

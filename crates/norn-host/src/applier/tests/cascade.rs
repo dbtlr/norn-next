@@ -530,3 +530,95 @@ fn a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax() {
         );
     }
 }
+
+/// **A path a move vacates and another operation refills changes what its
+/// links name**: `a.md`'s document goes to `c.md` and another lands where it
+/// stood, so every link that named it — a bare wikilink, a relative Markdown
+/// link and a `vault://` one — follows it to `c.md` rather than naming the
+/// newcomer, whether a move or a create refills the path.
+#[test]
+fn backlinks_to_a_vacated_and_refilled_path_follow_the_document_that_left() {
+    for refill in [moving("b.md", "a.md"), super::creating("a.md", "new\n")] {
+        let mut fixture = Fixture::new(&[
+            ("a.md", "A\n"),
+            ("b.md", "B\n"),
+            ("h.md", "[[a]] [t](a.md) [[vault://a]]\n"),
+        ]);
+        fixture.moved(vec![moving("a.md", "c.md"), refill]);
+        assert_eq!(
+            fixture.read("h.md").as_deref(),
+            Some("[[c]] [t](c.md) [[vault://c]]\n")
+        );
+    }
+}
+
+/// **A moved document's rooted self-link follows it off a refilled path**:
+/// `[me](/n/a.md)` named the document now at `c.md`, not the one another
+/// move puts at `n/a.md`.
+#[test]
+fn a_rooted_self_link_follows_its_document_off_a_refilled_path() {
+    let mut fixture = Fixture::new(&[("n/a.md", "[me](/n/a.md)\n"), ("b.md", "B\n")]);
+    fixture.moved(vec![moving("n/a.md", "c.md"), moving("b.md", "n/a.md")]);
+    assert_eq!(fixture.read("c.md").as_deref(), Some("[me](/c.md)\n"));
+}
+
+/// **A link left naming a refilled path is recorded and advised on.** The
+/// path it resolves to is the same on both sides, but the document there is
+/// not the one it named: the link is an entry naming that path on both
+/// sides, the forecast says why the cascade left it, and the applier's
+/// judgment of the plan computes the same entry and the same advice.
+#[test]
+fn a_link_left_naming_a_refilled_path_is_recorded_and_advised_on() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("b.md", "B\n"),
+        ("h.md", "---\nsee: '[[a]]'\n---\nbody\n"),
+    ]);
+    let resolution = fixture.resolution(vec![moving("a.md", "it's.md"), moving("b.md", "a.md")]);
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    assert!(
+        resolution.plan.conditions.contains(&PlanCondition::link_resolution(
+            link.clone(),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("a.md")),
+        )),
+        "{:?}",
+        resolution.plan.conditions
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_would_corrupt_frontmatter(link)]
+    );
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A backlink another writer adds to a path the plan refills refuses the
+/// plan**, as one to a path the plan vacates does, and the fresh plan's
+/// cascade follows it.
+#[test]
+fn a_backlink_added_to_a_refilled_path_after_preview_refuses_the_plan() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("b.md", "B\n"), ("h.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![moving("a.md", "c.md"), moving("b.md", "a.md")]);
+    fixture.foreign("k.md", "[[a]]\n");
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_unrecorded(
+            PlanCondition::link_resolution(
+                key("k.md", LinkFamily::Wikilink, "a"),
+                Resolves::one(path("a.md")),
+                Resolves::one(path("a.md")),
+            )
+        )]
+    );
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
+    assert_eq!(fixture.read("k.md").as_deref(), Some("[[c]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
