@@ -97,12 +97,15 @@ use crate::plan::write_target::WriteTarget;
 /// resolution change set reads a file as a link's candidate only where it is
 /// a document, and the applier must read that on each side of a transition
 /// alike whether or not the bytes are still there to decode: a target that
-/// already holds its change has no before-bytes left. Where the applier
-/// holds a side's bytes — the file still holds them, or it composed them
-/// again — the flag must be the one they decode to, and a plan saying
-/// otherwise is not what its operations do; where it does not, the flag is
-/// what it reads. A file that stops decoding is held out of derived state as
-/// a quarantined document, which is the name the flag carries.
+/// already holds its change has no before-bytes left. The flag is a function
+/// of the bytes alone, so every present state in a plan that shares a hash
+/// must carry the same flag, whether or not any of those bytes are held.
+/// Where the applier holds bytes with a hash — a file still holds them, or it
+/// composed them again — every state with that hash must carry the flag they
+/// decode to, a gone side included, and a plan saying otherwise is not what
+/// its operations do; only a hash no held bytes share is read as recorded. A
+/// file that stops decoding is held out of derived state as a quarantined
+/// document, which is the name the flag carries.
 ///
 /// The flag is `false` unless it is written `true`, and is left out where it
 /// is `false`: absent can only mean the bytes decode, so every plan made
