@@ -774,7 +774,10 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 /// Deleting the document [`HUB_IN_LINKS`] others link by its bare stem
 /// records exactly their links, and judging them costs the same at both
 /// per-PR scales: a plan's change set costs the links it reaches and the
-/// candidates they resolve against, never the vault around them.
+/// candidates they resolve against, never the vault around them. The bar
+/// stands where no member of a key's class is kept out by the
+/// ambiguity-ignore set ahead of its head, which the head read steps through
+/// (NORN-320); the profiles declare no ignore set.
 ///
 /// The hub and its planted in-links are derived by the attach heal beside
 /// each profile's generated tree. A preview of the delete through the host

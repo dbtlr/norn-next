@@ -2490,7 +2490,9 @@ the plan, so a relative link a move breaks is recorded breaking. Every other lin
 reached through the link index, by an equality seek of each key that could name a target
 whose presence the plan changes, and each distinct key a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
-name: the work is the links the plan reaches plus the candidates they resolve against. A
+name: the work is the links the plan reaches plus the candidates they resolve against,
+with one limit link health's head statement carries too: a head is read past every member
+of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
 plan that changes no document's presence and writes no link records nothing and reads no
 snapshot. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment

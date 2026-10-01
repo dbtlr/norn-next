@@ -55,6 +55,13 @@
 //! the side being resolved are counted in. Two rows left over tell several
 //! from one, so no key's whole class is ever counted.
 //!
+//! **One limit stands on that bound.** The head is read in ladder order with
+//! the places the ambiguity-ignore set keeps out dropped as the read meets
+//! them, so a class whose head stands behind many ignored members steps
+//! through each before the cut is reached: what such a key costs grows with
+//! the ignored members ahead of its head. The statement is link health's own,
+//! and the changeset's re-decision pays the same; NORN-320 bounds it.
+//!
 //! # The caller filters
 //!
 //! Every judged link is handed back ([`LinkChange`]), whether or not its
@@ -203,6 +210,9 @@ impl Snapshot {
     /// some link is held under is read; its links are read a chunk at a time,
     /// and each distinct key a chunk holds is resolved once, its head cut at
     /// two more rows than the targets it could name. Nothing counts a class.
+    /// The one limit: a head is read past every member of its class the
+    /// ambiguity-ignore set keeps out ahead of it, so a class with many such
+    /// members costs them (NORN-320).
     pub fn resolution_changes(
         &self,
         overlay: &PathOverlay,
