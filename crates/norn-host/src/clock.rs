@@ -148,10 +148,9 @@ mod tests {
         }
     }
 
-    /// **The dormant carrier is covered at its seam**: the system clock, in
-    /// the system's zone, fills `{{now}}` with the instant it is, so the
-    /// offset it states has the sign that turns the local time back into
-    /// that instant.
+    /// **The system clock reads as the instant it is**: read in the system's
+    /// zone, it fills `{{now}}` with that instant, so the offset it states
+    /// has the sign that turns the local time back into it.
     #[test]
     fn the_system_clock_reads_as_a_local_timestamp() {
         let before = Timestamp::now();
