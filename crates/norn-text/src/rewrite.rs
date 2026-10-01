@@ -94,14 +94,15 @@ impl Document<'_> {
     /// from the document reads as it did, where its bytes moved to, with only
     /// the rewritten targets changed — the same links in the same order, and
     /// the same headings, tags and code. A heading or a link title whose own
-    /// text holds a rewritten link reads exactly as it did with that link's
-    /// old token replaced by its new one, so a target whose bytes would read
-    /// as markup there — a `*` pairing with a literal one later in the
+    /// text holds a rewritten wikilink reads exactly as it did with that
+    /// link's old token replaced by its new one, so a target whose bytes would
+    /// read as markup there — a `*` pairing with a literal one later in the
     /// heading — is caught. A text that does not hold the old token as written
     /// (or, for `[[a]](b)`, where the two links share their outer brackets,
-    /// the token inside them) cannot be proven so and skips the edit. An edit
-    /// that does not read back is skipped where it stands rather than
-    /// returned.
+    /// the token inside them) cannot be proven so and skips the edit. Such a
+    /// text reads a Markdown link as its bracket text alone, so one holding a
+    /// rewritten Markdown link reads exactly as it did. An edit that does not
+    /// read back is skipped where it stands rather than returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
         let (from, to) = (Address::of(from), Address::of(to));
         let to = &to;
@@ -207,8 +208,8 @@ impl Document<'_> {
     /// edits ([`Reading::respelled`]): the links of both families, frontmatter
     /// ones included, in the same order, with only the rewritten ones' targets
     /// changed; the headings and the tags of both sources as they were, a
-    /// heading or link title holding a rewritten link with only that link's
-    /// token changed; and the code ranges, which decide which bytes can be any
+    /// heading or link title holding a rewritten wikilink with only that
+    /// link's token changed; and the code ranges, which decide which bytes can be any
     /// of those. Each is compared where its bytes moved to, so a fact that
     /// survives one byte further on is a fact that moved, and the proof fails.
     ///
@@ -225,7 +226,7 @@ impl Document<'_> {
         edits: &[Edit],
         to: &Address,
     ) -> bool {
-        let respelling = Respelling::of(edits, &to.target);
+        let respelling = Respelling::of(edits, &to.target, before);
         before
             .respelled(&respelling)
             .is_some_and(|expected| Reading::of(&Document::parse(text)) == expected)
@@ -436,9 +437,9 @@ impl Reading {
 
     /// What this reading becomes under `respelling`: every fact where its
     /// bytes moved to, each respelled link targeting `to`, and each heading or
-    /// link title holding a respelled link with that link's token respelled
-    /// ([`Respelling::carried`]). `None` where such a text does not hold the
-    /// link's token as written, so what it should read as is unknown.
+    /// link title holding a respelled wikilink with that link's token
+    /// respelled ([`Respelling::carried`]). `None` where such a text does not
+    /// hold the wikilink as written, so what it should read as is unknown.
     fn respelled(&self, respelling: &Respelling<'_>) -> Option<Reading> {
         let moved = |at: &Range<usize>| respelling.moved(at.start)..respelling.moved(at.end);
         let links = self
@@ -511,18 +512,20 @@ struct Respelling<'t> {
 }
 
 /// One link a respelling rewrites: its family and the byte its token begins
-/// at, which name it; the source bytes its stem stands at; and its token as
-/// written and as respelled.
+/// at, which name it; the source bytes its stem stands at; and the text a
+/// heading or link title holding it reads it as, before and after
+/// ([`Respelling::carried`]).
 struct RespelledStem<'t> {
     family: LinkFamily,
     at: usize,
     stem: Range<usize>,
-    old: &'t str,
-    new: String,
+    read_as: Option<(&'t str, String)>,
 }
 
 impl<'t> Respelling<'t> {
-    fn of(edits: &'t [Edit], to: &'t str) -> Self {
+    /// The links `edits` respell to `to`, each read against `before`, the
+    /// document's reading before the edits.
+    fn of(edits: &'t [Edit], to: &'t str, before: &Reading) -> Self {
         let stems = edits
             .iter()
             .flat_map(|edit| &edit.links)
@@ -534,12 +537,39 @@ impl<'t> Respelling<'t> {
                     family: link.family,
                     at,
                     stem: at + stem.start..at + stem.end,
-                    old: &link.raw,
-                    new,
+                    read_as: Self::read_as(link, new, before),
                 })
             })
             .collect();
         Respelling { stems, to }
+    }
+
+    /// What a heading or link title holding `link` reads it as, before and
+    /// once respelled to `new`.
+    ///
+    /// Such a text is flattened: a Markdown link reads as its bracket text
+    /// alone, so its destination — the only bytes a rewrite changes — never
+    /// stands in it, and respelling one changes no text (`None`). A wikilink
+    /// reads as its token, except where it is the bracket text of a Markdown
+    /// link beginning at the same byte — `[[a]](b)` — and the two share the
+    /// outer brackets: the text holds the token inside them, `[a]`.
+    fn read_as(link: &'t Link, new: String, before: &Reading) -> Option<(&'t str, String)> {
+        if link.family == LinkFamily::Markdown {
+            return None;
+        }
+        let at = link.span.byte_offset;
+        let shares_brackets = before
+            .links
+            .iter()
+            .any(|other| other.family == LinkFamily::Markdown && other.at.start == at);
+        if !shares_brackets {
+            return Some((&link.raw, new));
+        }
+        fn inside(token: &str) -> Option<&str> {
+            token.get(1..token.len().checked_sub(1)?)
+        }
+        let new = inside(&new)?.to_string();
+        Some((inside(&link.raw)?, new))
     }
 
     /// Whether `link` is one this respelling rewrites.
@@ -564,19 +594,17 @@ impl<'t> Respelling<'t> {
 
     /// `text`, the text of a fact whose bytes span `range`, as it reads once
     /// every respelled link other than `except` beginning inside `range` is
-    /// rewritten: each such link's old token replaced by its new one, in
-    /// order, each found after the one before.
+    /// rewritten: what the text reads each such link as replaced by what it
+    /// reads it as respelled ([`Respelling::read_as`]), in order, each found
+    /// after the one before. A respelled Markdown link leaves the text as it
+    /// was; the read-back of the links themselves is what proves its new
+    /// destination still reads as one.
     ///
-    /// A link beginning where a Markdown link does — `[[a]](b)` — shares its
-    /// brackets with it, so that link's bracket text holds the token inside
-    /// its outer brackets, `[a]`, and that is what is replaced when the whole
-    /// token is not there.
-    ///
-    /// `None` where `text` does not hold a link's old token as written — the
-    /// link's own title holding markup the text flattens, say — so the proof
-    /// cannot say what the text reads as and fails rather than guess. A
-    /// literal copy of the token earlier in the text, in a code span say, is
-    /// found first, and the proof fails then too: conservative, never wrong.
+    /// `None` where `text` does not hold a wikilink as it should read — the
+    /// link holding markup the text flattens, say — so the proof cannot say
+    /// what the text reads as and fails rather than guess. A literal copy of
+    /// it earlier in the text, in a code span say, is found first, and the
+    /// proof fails then too: conservative, never wrong.
     fn carried(
         &self,
         text: &str,
@@ -590,15 +618,10 @@ impl<'t> Respelling<'t> {
             .iter()
             .filter(|stem| range.contains(&stem.at) && except != Some((stem.family, stem.at)))
         {
-            let (found, old, new) = match rest.find(respelled.old) {
-                Some(found) => (found, respelled.old, respelled.new.as_str()),
-                None if except.is_some() && respelled.at == range.start => {
-                    let old = respelled.old.get(1..respelled.old.len() - 1)?;
-                    let new = respelled.new.get(1..respelled.new.len() - 1)?;
-                    (rest.find(old)?, old, new)
-                }
-                None => return None,
+            let Some((old, new)) = &respelled.read_as else {
+                continue;
             };
+            let found = rest.find(old)?;
             expected.push_str(&rest[..found]);
             expected.push_str(new);
             rest = &rest[found + old.len()..];

@@ -714,6 +714,88 @@ fn a_target_that_emphasises_a_link_title_is_skipped() {
     assert_skipped_as_unrepresentable("[see [[a]] and b*](d)\n", LinkFamily::Wikilink, "*x");
 }
 
+/// A heading holding a rewritten link reads as it did but for that link's
+/// new spelling, its slug following its text: a Markdown link's destination
+/// is not part of the text the heading reads, so respelling it leaves both
+/// as they were.
+fn assert_heading_link_rewritten(
+    source: &str,
+    family: LinkFamily,
+    (from, to): (&str, &str),
+    expected: &str,
+    heading: (&str, &str),
+) {
+    let out = rewrite(source, family, from, to);
+    assert_eq!(out.text, expected);
+    assert_eq!(out.rewritten, 1);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+    let headings = Document::parse(&out.text).headings();
+    assert_eq!(
+        (headings[0].text.as_str(), headings[0].slug.as_str()),
+        heading
+    );
+}
+
+#[test]
+fn a_markdown_link_in_an_atx_heading_is_rewritten() {
+    assert_heading_link_rewritten(
+        "# See [t](a)\n",
+        LinkFamily::Markdown,
+        ("a", "b"),
+        "# See [t](b)\n",
+        ("See t", "see-t"),
+    );
+}
+
+#[test]
+fn a_markdown_link_with_spaced_text_mid_heading_is_rewritten() {
+    assert_heading_link_rewritten(
+        "## Guide [the guide](a.md) here\n",
+        LinkFamily::Markdown,
+        ("a.md", "b.md"),
+        "## Guide [the guide](b.md) here\n",
+        ("Guide the guide here", "guide-the-guide-here"),
+    );
+}
+
+#[test]
+fn a_markdown_link_in_a_setext_heading_is_rewritten() {
+    assert_heading_link_rewritten(
+        "See [t](a)\n===\n",
+        LinkFamily::Markdown,
+        ("a", "b"),
+        "See [t](b)\n===\n",
+        ("See t", "see-t"),
+    );
+}
+
+/// A Markdown rewrite leaves a wikilink to the same target in the same
+/// heading as written.
+#[test]
+fn a_markdown_link_beside_a_wikilink_in_a_heading_is_rewritten() {
+    assert_heading_link_rewritten(
+        "# [[a]] [t](a)\n",
+        LinkFamily::Markdown,
+        ("a", "b"),
+        "# [[a]] [t](b)\n",
+        ("[[a]] t", "a-t"),
+    );
+}
+
+/// `[[a]](b)` in a heading shares its outer brackets with the Markdown link
+/// around it, so the heading reads the token inside them, `[a]`, and reads
+/// it respelled.
+#[test]
+fn a_wikilink_sharing_a_markdown_links_brackets_in_a_heading_is_rewritten() {
+    assert_heading_link_rewritten(
+        "# [[a]](b)\n",
+        LinkFamily::Wikilink,
+        ("a", "x"),
+        "# [[x]](b)\n",
+        ("[x]", "x"),
+    );
+}
+
 /// A rewrite that changes nothing returns the document's own bytes — a mark,
 /// CRLF breaks and all — whether nothing matched or every match was a link
 /// already spelled `to`.
