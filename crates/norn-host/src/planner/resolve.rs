@@ -12,7 +12,7 @@ use norn_wire::{
 };
 
 use super::cascade::generate;
-use super::compose::{Composition, compose, content_hash, touched};
+use super::compose::{Composition, compose, content_hash, touched, touches};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
@@ -412,6 +412,15 @@ fn requiring_closure(operations: &[Operation], failed: &BTreeSet<usize>) -> BTre
 /// touching a file a left-out operation touches, since operations on one file
 /// stand or fall together — each directly or through others. A file is its
 /// identity, so two spellings of one file are one file here too.
+///
+/// **A standing operation touches its cascade's holders; a left-out one does
+/// not.** An operation that stands touches every file its kind names and
+/// every holder its cascade rewrites ([`touched`]), so a holder a left-out
+/// operation touches takes down the move whose cascade rewrites it. A
+/// left-out operation's cascade is discarded with it — planning generates
+/// cascades again for what stands — so what it takes down is only what
+/// shares a file its kind names ([`touches`]): a holder only its cascade
+/// rewrote drags no other move down.
 fn leave_out_what_falls_with<V: VaultView>(
     operations: &[Operation],
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
@@ -442,7 +451,7 @@ fn leave_out_what_falls_with<V: VaultView>(
                     .expect("a requirement names an identifier");
                 (requirer, UnresolvedReason::requires_unresolved(id))
             });
-        let by_file = touched(operation).flat_map(|path| {
+        let by_file = touches(&operation.kind).flat_map(|path| {
             let sharers = match identity(path) {
                 // A name with no identity is no file anybody else touches.
                 None => None,

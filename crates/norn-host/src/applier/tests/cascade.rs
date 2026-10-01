@@ -695,3 +695,35 @@ fn a_move_making_a_link_to_an_unmoved_document_ambiguous_rewrites_nothing() {
     applied(fixture.apply(resolution.plan));
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]]\n"));
 }
+
+/// **A move that falls takes down only what its own operation touches**: the
+/// cascade it would have carried is discarded with it, so a holder only that
+/// cascade shared with another move does not take the other move down. Both
+/// moves rewrite `idx.md`; an edit failing on `h.md`, which only the first
+/// rewrites, leaves the first unresolved, and the second resolves with its
+/// own cascade.
+#[test]
+fn a_fallen_moves_discarded_cascade_takes_down_no_other_move() {
+    let fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("b.md", "B\n"),
+        ("idx.md", "[[a]] [[b]]\n"),
+        ("h.md", "[[a]]\n"),
+    ]);
+    let operations = vec![
+        moving("a.md", "x/a2.md"),
+        moving("b.md", "x/b2.md"),
+        editing("h.md", "missing", "x"),
+    ];
+    let resolution = fixture.planned(operations.clone());
+    let left: Vec<&Operation> = resolution
+        .unresolved
+        .iter()
+        .map(|unresolved| &unresolved.operation)
+        .collect();
+    assert_eq!(left, [&operations[0], &operations[2]]);
+    assert_eq!(
+        resolution.plan.operations,
+        [moving("b.md", "x/b2.md").with_cascade(vec![wikilink("idx.md", "b", "b2")])]
+    );
+}
