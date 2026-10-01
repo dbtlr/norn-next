@@ -327,6 +327,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     let mut forbidden: BTreeMap<usize, Vec<norn_store::DocumentPath>> = BTreeMap::new();
     let mut contested: Vec<(usize, norn_store::DocumentPath, Option<EntryKey>)> = Vec::new();
     let mut retargeting: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut selected: BTreeSet<usize> = BTreeSet::new();
     let mut overlapping: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
         if change.written && !cascade.kept.contains(&change_key(&change)) {
@@ -339,15 +340,16 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         };
         // A wikilink two rewrites select is the earlier one's, and the later
         // one is left out naming it.
+        let selecting = selecting(
+            &change.link,
+            Named::of(&change),
+            lineage,
+            &cascade.namings,
+            normalizer,
+        );
+        selected.extend(selecting.iter().map(|retarget| retarget.position));
         if let Decider::Retarget(earlier) = destination.by {
-            let selected = selecting(
-                &change.link,
-                Named::of(&change),
-                lineage,
-                &cascade.namings,
-                normalizer,
-            );
-            for later in selected
+            for later in selecting
                 .into_iter()
                 .filter(|retarget| retarget.position != earlier.position)
             {
@@ -410,9 +412,13 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     }
     for retarget in lineage.retargets() {
         if !retargeting.contains_key(&retarget.position) {
-            unresolved
-                .entry(retarget.position)
-                .or_insert_with(|| unmatched(retarget, &cascade.namings[&retarget.position]));
+            unresolved.entry(retarget.position).or_insert_with(|| {
+                unmatched(
+                    retarget,
+                    &cascade.namings[&retarget.position],
+                    selected.contains(&retarget.position),
+                )
+            });
         }
     }
 
@@ -599,8 +605,16 @@ fn unretargeted(
 /// Why the wikilink rewrite `retarget`, its ends naming as `named` says,
 /// does not resolve where no wikilink is one it retargets: it would change
 /// nothing, and a rewrite of nothing is not landed as though it acted.
-fn unmatched(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
-    let old = &retarget.old;
+/// Where it `selected` wikilinks, each already names `new`'s document after
+/// the plan or is an authored link rewrite's, and it says so; else none
+/// names what `old` names.
+fn unmatched(retarget: &Retarget, named: &RetargetNaming, selected: bool) -> UnresolvedReason {
+    let (old, new) = (&retarget.old, &retarget.new);
+    if selected {
+        return UnresolvedReason::no_longer_resolves(format!(
+            "each wikilink `old` `{old}` names either already names the document `new` `{new}` names where the plan leaves the vault or is one an authored link rewrite of the plan names, so the rewrite changes nothing"
+        ));
+    }
     UnresolvedReason::no_longer_resolves(match &named.old.before {
         Resolves::One { path } => format!(
             "no wikilink resolves to `{path}`, the document `old` `{old}` names, so the rewrite changes nothing"

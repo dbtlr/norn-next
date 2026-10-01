@@ -11,7 +11,7 @@ use norn_wire::{
 
 use norn_store::StoredPathOrder;
 
-use super::{Fixture, applied, creating, deleting, path};
+use super::{Fixture, applied, breaking, creating, deleting, path};
 
 /// A rewrite of every wikilink naming `old` to name `new`.
 fn retargeting(old: &str, new: &str) -> Operation {
@@ -349,6 +349,32 @@ fn a_rewrite_naming_a_moved_document_before_and_after_its_move_is_unresolved_as_
         resolution.plan.operations[0].cascade,
         [wikilink("h.md", "a", "b")]
     );
+}
+
+/// **A wikilink rewrite whose wikilinks need nothing from it says so, not
+/// that none names `old`.** One whose only wikilink is an authored link
+/// rewrite's, and one whose wikilink already names `new`'s document where
+/// the plan leaves the vault — `a.md` deleted and `c.md` moved into its
+/// path — each change nothing and are left unresolved saying why.
+#[test]
+fn a_wikilink_rewrite_whose_wikilinks_need_nothing_says_why() {
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", "[[a]]\n")]);
+    let authored = fixture.planned(vec![
+        relinking("h.md", LinkFamily::Wikilink, "a", "x]]y"),
+        retargeting("a", "c"),
+    ]);
+    let detail = unresolved_detail(&authored);
+    assert!(detail.contains("authored link rewrite"), "{detail}");
+    assert!(!detail.contains("no wikilink"), "{detail}");
+
+    let named = fixture.planned(vec![
+        breaking("a.md"),
+        super::moving("c.md", "a.md"),
+        retargeting("a", "a"),
+    ]);
+    let detail = unresolved_detail(&named);
+    assert!(detail.contains("already names"), "{detail}");
+    assert!(!detail.contains("no wikilink"), "{detail}");
 }
 
 /// **An ambiguous wikilink is never rewritten**, and the forecast says it

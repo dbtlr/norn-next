@@ -673,10 +673,11 @@ fn spelled_as_asked(identity: &NormalizedPath) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `kind` edits a document where it stands, changing the content the
-/// file already holds: a `str_replace`, an authored link rewrite and every
-/// document-local kind. Such an edit names no name it fills or empties and
-/// carries no content from another file.
+/// Whether `kind` edits a document in place, changing the content the file
+/// it names already holds: a `str_replace` and every document-local kind,
+/// each where the document stands when it composes, and an authored link
+/// rewrite, where the plan leaves the document it names. Such an edit names
+/// no name it fills or empties and carries no content from another file.
 pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
     match kind {
         OperationKind::StrReplace { .. } | OperationKind::RewriteLink { .. } => true,
