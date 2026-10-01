@@ -55,8 +55,9 @@
 //! backlink of a document a delete removes is read from the text it had —
 //! the address the rewrite matched, probed from where its holder's content
 //! stood ([`Reached::originals`]) — never from its new text, unless the
-//! rewrite is the one its author said it names by: a wikilink rewrite's
-//! ([`decider`]), which clears a backlink by respelling it.
+//! rewrite is the one its author said it names by: an authored link
+//! rewrite's or a wikilink rewrite's ([`decider`]), which clears a backlink
+//! by respelling it.
 //!
 //! **What the forecast says of a link a cascade did not follow.** A link
 //! that named a document a move carries away, and does not name it where it

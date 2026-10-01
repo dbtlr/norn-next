@@ -19,7 +19,8 @@
 //! spelling named before the plan, so a link that another document's move
 //! respells to the deleted document's name is none, and one that named the
 //! document is one however a cascade respells it — unless a wikilink rewrite
-//! respells it, whose author said what it names. A delete forbidding the
+//! or an authored link rewrite respells it, whose author said what it names.
+//! A delete forbidding the
 //! links does not resolve while one names its document, and is left
 //! unresolved naming every holder and how many links. One rewriting them
 //! carries the cascade respelling each, in its own form, to name

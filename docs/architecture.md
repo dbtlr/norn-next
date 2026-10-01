@@ -2564,8 +2564,9 @@ never by what its new spelling named before the plan: a link a move's cascade re
 the name of a document a delete removes is no backlink of it, and a backlink a cascade
 respells, away from the document or from where its moved holder lands, is still one, so the
 applier refuses a plan sent back forbidding the links naming that document. The one
-exception is a backlink a wikilink rewrite decides, whose author said what it names: once
-respelled it is none, and where its rewrite leaves it as written it is still one. A delete saying
+exception is a backlink an authored link rewrite or a wikilink rewrite decides, whose author
+said what it names: once respelled it is none, and where its rewrite leaves it as written it is
+still one. A delete saying
 neither flag that a backlink names is left
 unresolved, its reason naming every holding document once, in path order, and how many
 backlinks there are, so its plan answers `vault/plan-refused`. A delete leaving them broken

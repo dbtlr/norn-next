@@ -18,7 +18,8 @@
 //! by the text it had, never by what its new spelling named before the plan,
 //! so a link a move respells to the deleted document's name is none, and one
 //! that named the document is one however a cascade respells it — unless a
-//! wikilink rewrite respells it, whose author said what it names. A
+//! wikilink rewrite or an authored link rewrite respells it, whose author
+//! said what it names. A
 //! rewritten link keeps its own form, its embed marker, its title and its
 //! anchor — an anchor the new
 //! document holds no heading for is link health's to report after the
