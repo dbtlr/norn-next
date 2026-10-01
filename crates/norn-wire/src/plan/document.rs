@@ -26,10 +26,18 @@
 //!
 //! **A resolved plan names its documents by path.** Planning expands a
 //! frontmatter kind's `where` target into one operation per matched document,
-//! so a resolved plan still carrying one is a fault in its shape, named by
+//! and a folder move into one document move per document the folder holds, so
+//! a resolved plan still carrying either is a fault in its shape, named by
 //! [`ResolvedPlan::unexpanded_targets`] and answered `request/plan-invalid`.
 //! It is judged rather than refused at the read, so it answers with that code
 //! and the operations it names.
+//!
+//! **Planning writes a cascade; an author does not.** A resolved plan's
+//! document move, document removal and wikilink rewrite carry the link
+//! rewrites their planning generated, so a cascade on an authored operation,
+//! or on any other kind, is a fault in the plan's shape — judged, as an
+//! unexpanded target is, by [`AuthoredPlan::misplaced_cascades`] and
+//! [`ResolvedPlan::misplaced_cascades`].
 //!
 //! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
 //! the finding generation they read and the findings they skipped. No Layer 4
@@ -71,7 +79,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use crate::address::VaultAddress;
 use crate::document::DocumentPath;
 use crate::plan::hash::ContentHash;
-use crate::plan::operation::{Operation, written};
+use crate::plan::operation::{Operation, OperationKind, written};
 use crate::plan::outcome::PlanFault;
 use crate::plan::root::RootIdentity;
 use crate::plan::write_target::WriteTarget;
@@ -335,6 +343,23 @@ impl AuthoredPlan {
             .collect();
         (!positions.is_empty()).then(|| PlanFault::where_target_ordered(positions))
     }
+
+    /// The fault of a plan whose operations carry a link cascade, naming each
+    /// such operation by its position; `None` where none does.
+    ///
+    /// **A cascade is planning's to write**: it is read off the links the
+    /// vault holds when the plan is resolved, so an authored one would either
+    /// repeat what planning finds or claim a rewrite no link calls for.
+    pub fn misplaced_cascades(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| !operation.cascade.is_empty())
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
+    }
 }
 
 /// A plan resolved against what the vault held: its operations, one transition
@@ -410,17 +435,36 @@ impl ResolvedPlan {
     }
 
     /// The fault of a resolved plan whose operations still carry a `where`
-    /// target, naming each such operation by its position; `None` where
-    /// every target is a path, as planning makes them.
+    /// target or move a folder, naming each such operation by its position;
+    /// `None` where every operation names its documents by path, as planning
+    /// makes them.
     pub fn unexpanded_targets(&self) -> Option<PlanFault> {
         let positions: Vec<usize> = self
             .operations
             .iter()
             .enumerate()
-            .filter(|(_, operation)| matches!(operation.kind.target(), Some(WriteTarget::Where(_))))
+            .filter(|(_, operation)| {
+                matches!(operation.kind.target(), Some(WriteTarget::Where(_)))
+                    || matches!(operation.kind, OperationKind::MoveFolder { .. })
+            })
             .map(|(position, _)| position)
             .collect();
         (!positions.is_empty()).then(|| PlanFault::unexpanded_target(positions))
+    }
+
+    /// The fault of a resolved plan whose operations carry a link cascade on
+    /// a kind that does not cascade, naming each such operation by its
+    /// position; `None` where only a document move, a document removal or a
+    /// wikilink rewrite carries one.
+    pub fn misplaced_cascades(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| !operation.cascade.is_empty() && !operation.kind.cascades())
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
     }
 
     /// The plan carrying `footnote`.

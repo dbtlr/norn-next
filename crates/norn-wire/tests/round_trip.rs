@@ -25,9 +25,9 @@ use norn_wire::{
     FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
     FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
     HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRewrite, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams,
+    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
     OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
     PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
     RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
@@ -6724,10 +6724,32 @@ fn file_states() -> Vec<FileState> {
     vec![FileState::absent(), FileState::present(content_hash(0x01))]
 }
 
-/// Every kind bare, and one operation carrying every optional part.
+/// The link cascade a move of `notes/a.md` to `archive/a.md` carries: one
+/// rewrite per document holding a link to it.
+fn a_cascade() -> Vec<LinkRewrite> {
+    vec![
+        LinkRewrite::new(path("notes/c.md"), LinkFamily::Wikilink, "a", "archive/a"),
+        LinkRewrite::new(
+            path("notes/d.md"),
+            LinkFamily::Markdown,
+            "a.md",
+            "../archive/a.md",
+        ),
+    ]
+}
+
+/// Every kind bare, a move carrying its cascade, and one operation carrying
+/// every part an author writes.
 fn operations() -> Vec<Operation> {
     let mut operations: Vec<Operation> =
         operation_kinds().into_iter().map(Operation::new).collect();
+    operations.push(
+        Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        ))
+        .with_cascade(a_cascade()),
+    );
     operations.push(
         Operation::new(OperationKind::str_replace(
             path("notes/a.md"),
@@ -7161,9 +7183,10 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         .expect("an authored plan as JSON");
     for pointer in [
         "",
-        "/operations/17",
-        "/operations/17/fields",
-        "/operations/17/conditions/0",
+        "/operations/17/cascade/0",
+        "/operations/18",
+        "/operations/18/fields",
+        "/operations/18/conditions/0",
     ] {
         let json = with_surprise(&authored, pointer);
         assert!(
@@ -7554,6 +7577,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
         PlanFault::unexpanded_target(vec![1]),
         PlanFault::where_target_ordered(vec![2]),
+        PlanFault::misplaced_cascade(vec![0]),
     ]
 }
 
@@ -8218,6 +8242,7 @@ fn applier_decision(operation: &Operation) -> String {
         requires,
         footnote,
         conditions,
+        cascade,
     } = operation;
     let writes = match kind {
         OperationKind::CreateDocument { path, content } => {
@@ -8318,13 +8343,29 @@ fn applier_decision(operation: &Operation) -> String {
         })
         .collect();
     let requires: Vec<&str> = requires.iter().map(OperationId::as_str).collect();
-    format!(
+    let cascade: Vec<String> = cascade
+        .iter()
+        .map(
+            |LinkRewrite {
+                 path,
+                 syntax,
+                 from,
+                 to,
+             }| format!("{path}: {syntax:?} {from} to {to}"),
+        )
+        .collect();
+    let decided = format!(
         "{writes} as {}, after [{}], noting {}; {}",
         id.as_ref().map_or("-", OperationId::as_str),
         requires.join(", "),
         footnote.as_deref().unwrap_or("-"),
         observed.join(", ")
-    )
+    );
+    if cascade.is_empty() {
+        decided
+    } else {
+        format!("{decided}; cascading {}", cascade.join(", "))
+    }
 }
 
 /// Which documents a frontmatter kind writes, decided with no wildcard arm.
@@ -8438,6 +8479,10 @@ fn applier_reading(document: &PlanDocument) -> Vec<String> {
 fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
     let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
     assert_eq!(decisions.len(), operations().len());
+    assert_eq!(
+        decisions[decisions.len() - 2],
+        "move notes/a.md to archive/a.md as -, after [], noting -; ; cascading notes/c.md: Wikilink a to archive/a, notes/d.md: Markdown a.md to ../archive/a.md"
+    );
     assert_eq!(
         decisions.last().map(String::as_str),
         Some(
@@ -8906,6 +8951,124 @@ fn a_resolved_plan_with_a_where_target_is_a_fault() {
     assert_eq!(
         wire(&PlanFault::unexpanded_target(vec![2, 3])),
         r#"{"kind":"unexpanded_target","positions":[2,3]}"#
+    );
+}
+
+/// **A cascade travels on the operation that caused it**, after every part
+/// an author writes, as one rewrite per holding document in a
+/// `rewrite_link`'s own four fields; it is left out where there is none.
+#[test]
+fn a_cascade_travels_on_the_operation_that_caused_it() {
+    let moved = Operation::new(OperationKind::move_document(
+        path("notes/a.md"),
+        path("archive/a.md"),
+    ))
+    .with_id(operation_id("move-a"))
+    .with_cascade(a_cascade());
+    let json = concat!(
+        r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"},"id":"move-a","#,
+        r#""cascade":[{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"},"#,
+        r#"{"path":"notes/d.md","syntax":"markdown","from":"a.md","to":"../archive/a.md"}]}"#
+    );
+    assert_eq!(wire(&moved), json);
+    round_trip(&moved);
+    for rewrite in a_cascade() {
+        round_trip(&rewrite);
+        let as_kind =
+            serde_json::to_value(OperationKind::from(rewrite.clone())).expect("a kind as JSON");
+        assert_eq!(as_kind["kind"], "rewrite_link");
+        assert_eq!(
+            as_kind["fields"],
+            serde_json::to_value(&rewrite).expect("a rewrite as JSON"),
+            "a cascade's rewrite is not a `rewrite_link`'s fields"
+        );
+    }
+    for refused in [
+        json.replace(r#""syntax":"wikilink""#, r#""syntax":"embed""#),
+        json.replace(r#""to":"archive/a"}"#, r#""to":"archive/a","anchor":"x"}"#),
+        json.replace(r#""path":"notes/c.md","#, ""),
+        json.replace(r#""cascade":["#, r#""cascade":null,"x":["#),
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(&refused).is_err(),
+            "{refused} read as an operation"
+        );
+    }
+}
+
+/// **Planning writes a cascade; an author does not.** An authored plan
+/// carrying one names each operation that does, and a resolved plan names
+/// each operation carrying one on a kind that does not cascade — a document
+/// move, a document removal and a wikilink rewrite may.
+#[test]
+fn a_cascade_where_planning_writes_none_is_a_fault() {
+    let cascading = |kind| Operation::new(kind).with_cascade(a_cascade());
+    let target = |text: &str| ResolutionTarget::new(text).expect("a target");
+    let mut authored = AuthoredPlan::new(
+        VaultAddress::name(name("notes")),
+        vec![Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        ))],
+    );
+    assert_eq!(authored.misplaced_cascades(), None);
+    authored
+        .operations
+        .push(cascading(OperationKind::move_document(
+            path("notes/b.md"),
+            path("archive/b.md"),
+        )));
+    assert_eq!(
+        authored.misplaced_cascades(),
+        Some(PlanFault::misplaced_cascade(vec![1]))
+    );
+
+    let mut resolved = a_bare_resolved_plan();
+    resolved.operations = vec![
+        cascading(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        )),
+        cascading(OperationKind::delete_document_rewriting(
+            path("notes/b.md"),
+            target("c"),
+        )),
+        cascading(OperationKind::rewrite_wikilink(target("a"), target("b"))),
+    ];
+    assert_eq!(resolved.misplaced_cascades(), None);
+    resolved.operations.extend([
+        cascading(OperationKind::str_replace(path("notes/a.md"), "x", "y")),
+        cascading(OperationKind::rewrite_link(
+            path("notes/c.md"),
+            LinkFamily::Wikilink,
+            "a",
+            "b",
+        )),
+    ]);
+    assert_eq!(
+        resolved.misplaced_cascades(),
+        Some(PlanFault::misplaced_cascade(vec![3, 4]))
+    );
+    assert_eq!(
+        wire(&PlanFault::misplaced_cascade(vec![3, 4])),
+        r#"{"kind":"misplaced_cascade","positions":[3,4]}"#
+    );
+}
+
+/// **A resolved plan carries no folder move.** Planning expands one into a
+/// document move per document the folder holds, as it expands a `where`
+/// target, so a resolved plan still carrying one names it in the same fault.
+#[test]
+fn a_resolved_plan_with_a_folder_move_is_a_fault() {
+    let mut plan = a_bare_resolved_plan();
+    plan.operations
+        .push(Operation::new(OperationKind::move_folder(
+            folder("notes"),
+            folder("archive"),
+        )));
+    assert_eq!(
+        plan.unexpanded_targets(),
+        Some(PlanFault::unexpanded_target(vec![1]))
     );
 }
 

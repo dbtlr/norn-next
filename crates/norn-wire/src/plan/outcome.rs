@@ -319,13 +319,27 @@ pub enum PlanFault {
         /// checked condition matches.
         paths: Vec<DocumentPath>,
     },
-    /// A resolved plan's operations still carry a `where` target. Planning
-    /// expands every `where` target into one operation per matched document,
-    /// each naming its document by path, so a resolved plan carrying one was
-    /// not made by planning. Preview its operations again.
+    /// A resolved plan's operations still carry what planning expands into
+    /// one operation per document: a `where` target, or a folder move.
+    /// Planning expands every `where` target into one operation per matched
+    /// document, and every folder move into one document move per document
+    /// the folder holds, each naming its document by path, so a resolved plan
+    /// carrying either was not made by planning. Preview its operations
+    /// again.
     #[non_exhaustive]
     UnexpandedTarget {
-        /// The positions of the operations carrying a `where` target.
+        /// The positions of the operations carrying a `where` target or
+        /// moving a folder.
+        positions: Vec<usize>,
+    },
+    /// An operation carries a link cascade where none may stand: on an
+    /// operation of an authored plan, since planning generates a cascade
+    /// from what the vault's links hold, or on a kind that does not cascade —
+    /// anything but a document move, a document removal and a wikilink
+    /// rewrite. Leave the cascade out and preview the operations again.
+    #[non_exhaustive]
+    MisplacedCascade {
+        /// The positions of the operations carrying a cascade they may not.
         positions: Vec<usize>,
     },
     /// An authored operation with a `where` target carries an identifier or
@@ -342,10 +356,15 @@ pub enum PlanFault {
 }
 
 impl PlanFault {
-    /// The operations at `positions` carry a `where` target a resolved plan
-    /// may not.
+    /// The operations at `positions` carry a `where` target or move a folder,
+    /// which a resolved plan's operations may not.
     pub const fn unexpanded_target(positions: Vec<usize>) -> Self {
         PlanFault::UnexpandedTarget { positions }
+    }
+
+    /// The operations at `positions` carry a link cascade they may not.
+    pub const fn misplaced_cascade(positions: Vec<usize>) -> Self {
+        PlanFault::MisplacedCascade { positions }
     }
 
     /// The `where` operations at `positions` carry an identifier or a

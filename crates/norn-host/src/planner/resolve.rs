@@ -794,6 +794,25 @@ mod tests {
             );
             assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
         }
+        // A refused plan's operations are re-resolved here as they were
+        // carried, so a move carrying its cascade falls whole.
+        let cascading = Operation::new(OperationKind::move_document(
+            path("notes/b.md"),
+            path("archive/b.md"),
+        ))
+        .with_cascade(vec![norn_wire::LinkRewrite::new(
+            path("notes/a.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "b",
+            "archive/b",
+        )]);
+        let resolution = planned(&vault, vec![cascading]);
+        let detail = unresolved_detail(&resolution);
+        assert!(
+            detail.contains("link cascades are not planned yet"),
+            "{detail}"
+        );
+        assert!(resolution.plan.transitions.is_empty());
     }
 
     /// **An expected value of absent on a document the plan writes is judged

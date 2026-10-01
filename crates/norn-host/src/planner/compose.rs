@@ -58,6 +58,20 @@ pub(crate) fn compose<V: VaultView>(
     let mut vault = Simulated::over(view);
     let mut unresolvable = Vec::new();
     for &position in order {
+        // NORN-297: an operation and its link cascade are one operation, and
+        // the cascade's rewrites are not composed yet, so an operation
+        // carrying one is left unresolved whole rather than composed without
+        // the rewrites it says it makes.
+        if !operations[position].cascade.is_empty() {
+            unresolvable.push(Unresolvable {
+                position,
+                detail: format!(
+                    "a `{}` operation carrying a link cascade is not planned yet: link cascades are not planned yet",
+                    operations[position].kind.name()
+                ),
+            });
+            continue;
+        }
         if let Err(detail) = vault.apply(&operations[position].kind)? {
             unresolvable.push(Unresolvable { position, detail });
         }

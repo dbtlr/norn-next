@@ -63,6 +63,16 @@
 //! name `rewrite_to`; saying neither, it does not resolve while any link names
 //! its document, and saying both is refused at the read.
 //!
+//! **A cascade travels on the operation that caused it.** In a resolved
+//! plan a `move_document`, a `delete_document` and a `rewrite_wikilink` carry
+//! the link rewrites their planning generated as their `cascade`, one per
+//! document holding a link the operation changes, each a `rewrite_link`'s
+//! four fields. The operation and its cascade are one operation: they
+//! resolve, land and are left unresolved together. A caller authors the
+//! operation and planning writes its cascade, so a cascade on an operation of
+//! an authored plan, or on a kind that does not cascade, is a fault in the
+//! plan's shape rather than a refusal at the read.
+//!
 //! **A resolution target here names a document, never a place inside one.**
 //! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
 //! and an anchor on any of them is refused at the read. A rewrite changes a
@@ -575,6 +585,33 @@ impl OperationKind {
         }
     }
 
+    /// Whether the kind changes what links elsewhere in the vault resolve
+    /// to, so that a resolved plan may carry its link cascade: a document
+    /// move, a document removal and a wikilink rewrite.
+    pub const fn cascades(&self) -> bool {
+        match self {
+            OperationKind::MoveDocument { .. }
+            | OperationKind::DeleteDocument { .. }
+            | OperationKind::RewriteWikilink { .. } => true,
+            // A folder move cascades through the document moves planning
+            // expands it into, and a link rewrite is a cascade's own unit.
+            OperationKind::MoveFolder { .. }
+            | OperationKind::RewriteLink { .. }
+            | OperationKind::CreateDocument { .. }
+            | OperationKind::StrReplace { .. }
+            | OperationKind::SetFrontmatter { .. }
+            | OperationKind::RemoveFrontmatter { .. }
+            | OperationKind::PushFrontmatter { .. }
+            | OperationKind::PopFrontmatter { .. }
+            | OperationKind::ReplaceBody { .. }
+            | OperationKind::ReplaceSection { .. }
+            | OperationKind::AppendToSection { .. }
+            | OperationKind::DeleteSection { .. }
+            | OperationKind::InsertBeforeHeading { .. }
+            | OperationKind::InsertAfterHeading { .. } => false,
+        }
+    }
+
     /// The kind's name, as the wire writes it under `kind`.
     pub const fn name(&self) -> &'static str {
         self.kind_name().as_str()
@@ -668,6 +705,67 @@ impl<'de> Deserialize<'de> for OperationKind {
     }
 }
 
+/// One document's share of a link cascade: in the document at `path`, every
+/// link of `syntax` whose address is `from` respelled `to`. It is a
+/// `rewrite_link` operation's four fields, carried in a cascading operation's
+/// `cascade`.
+///
+/// On the wire a rewrite is one object:
+/// `{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRewrite {
+    /// The document holding the links.
+    pub path: DocumentPath,
+    /// The syntax of the links rewritten.
+    pub syntax: LinkFamily,
+    /// The address a rewritten link is written with, exactly as written, its
+    /// protocol prefix included: `vault://notes/a` and `notes/a` are two
+    /// addresses.
+    pub from: String,
+    /// The address it is written with after, protocol prefix included. A
+    /// rewrite never changes a link's protocol, so a `to` whose protocol
+    /// differs from `from`'s cannot be written into the link.
+    pub to: String,
+}
+
+impl LinkRewrite {
+    /// In the document at `path`, every link of `syntax` whose address is
+    /// `from` respelled `to`.
+    pub fn new(
+        path: DocumentPath,
+        syntax: LinkFamily,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        LinkRewrite {
+            path,
+            syntax,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+impl From<LinkRewrite> for OperationKind {
+    /// A cascade's rewrite is the `rewrite_link` operation an author could
+    /// write for the same document.
+    fn from(rewrite: LinkRewrite) -> Self {
+        let LinkRewrite {
+            path,
+            syntax,
+            from,
+            to,
+        } = rewrite;
+        OperationKind::RewriteLink {
+            path,
+            syntax,
+            from,
+            to,
+        }
+    }
+}
+
 /// A fact about the vault an operation's author observed and requires to
 /// hold.
 ///
@@ -749,8 +847,9 @@ impl ExpectedField {
 }
 
 /// One change a plan is authored in: a kind and its fields, and optionally an
-/// identifier, the operations it requires, a footnote and the conditions its
-/// author observed.
+/// identifier, the operations it requires, a footnote, the conditions its
+/// author observed and, in a resolved plan, the link cascade its planning
+/// generated.
 ///
 /// On the wire an operation is one object:
 /// `{"kind":"move_document","fields":{"from":"a.md","to":"b.md"},"id":"move-a"}`.
@@ -774,6 +873,11 @@ pub struct Operation {
     /// What the author observed and requires to hold.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<AuthorCondition>,
+    /// The link rewrites a cascading operation's planning generated, one per
+    /// document holding a link it changes. Only a resolved plan's move,
+    /// delete or wikilink rewrite carries one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cascade: Vec<LinkRewrite>,
 }
 
 impl Operation {
@@ -785,6 +889,7 @@ impl Operation {
             requires: Vec::new(),
             footnote: None,
             conditions: Vec::new(),
+            cascade: Vec::new(),
         }
     }
 
@@ -813,6 +918,13 @@ impl Operation {
     #[must_use]
     pub fn with_conditions(mut self, conditions: Vec<AuthorCondition>) -> Self {
         self.conditions = conditions;
+        self
+    }
+
+    /// The operation carrying the link rewrites `cascade` as its cascade.
+    #[must_use]
+    pub fn with_cascade(mut self, cascade: Vec<LinkRewrite>) -> Self {
+        self.cascade = cascade;
         self
     }
 }
@@ -1160,6 +1272,8 @@ struct OperationFields {
     footnote: Option<String>,
     #[serde(default)]
     conditions: Vec<AuthorCondition>,
+    #[serde(default)]
+    cascade: Vec<LinkRewrite>,
 }
 
 impl<'de> Deserialize<'de> for Operation {
@@ -1178,6 +1292,7 @@ impl<'de> Deserialize<'de> for Operation {
             requires,
             footnote,
             conditions,
+            cascade,
         } = OperationFields::deserialize(deserializer)?;
         Ok(Operation {
             kind: fields.into_kind(kind)?,
@@ -1185,6 +1300,7 @@ impl<'de> Deserialize<'de> for Operation {
             requires,
             footnote,
             conditions,
+            cascade,
         })
     }
 }
@@ -1204,7 +1320,7 @@ impl JsonSchema for Operation {
     /// not name, so the parts are added inside it rather than beside it. Each
     /// part is advertised as the reader takes it: the identifier and the
     /// footnote admit `null`, read as absent, as a derived optional field
-    /// advertises; the two lists do not.
+    /// advertises; the three lists do not.
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let optional_parts = [
             (
@@ -1227,6 +1343,11 @@ impl JsonSchema for Operation {
                 generator.subschema_for::<Vec<AuthorCondition>>(),
                 "What the author observed and requires to hold.",
             ),
+            (
+                "cascade",
+                generator.subschema_for::<Vec<LinkRewrite>>(),
+                "The link rewrites a cascading operation's planning generated, one per document holding a link it changes. Only a resolved plan's move, delete or wikilink rewrite carries one.",
+            ),
         ];
         let mut schema = OperationKind::json_schema(generator);
         transform_subschemas(
@@ -1245,7 +1366,7 @@ impl JsonSchema for Operation {
         );
         schema.insert(
             "description".to_string(),
-            "One change a plan is authored in: a kind and its fields, and optionally an identifier, the operations it requires, a footnote and the conditions its author observed. The optional parts are left out where they are not written, and a key the operation does not name is refused."
+            "One change a plan is authored in: a kind and its fields, and optionally an identifier, the operations it requires, a footnote, the conditions its author observed and, in a resolved plan, the link cascade its planning generated. The optional parts are left out where they are not written, and a key the operation does not name is refused."
                 .into(),
         );
         schema

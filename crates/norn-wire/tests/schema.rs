@@ -2959,10 +2959,22 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         let branch = branch(&schema, "kind", kind);
         assert_eq!(
             property_names(branch),
-            ["kind", "fields", "id", "requires", "footnote", "conditions"]
-                .into_iter()
-                .collect(),
+            [
+                "kind",
+                "fields",
+                "id",
+                "requires",
+                "footnote",
+                "conditions",
+                "cascade"
+            ]
+            .into_iter()
+            .collect(),
             "the {kind} branch"
+        );
+        assert_eq!(
+            branch["properties"]["cascade"]["items"]["$ref"].as_str(),
+            Some("#/$defs/LinkRewrite")
         );
         assert_eq!(
             required_names(branch),
@@ -3004,6 +3016,11 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         definition(&schema, "OperationId")["minLength"].as_u64(),
         Some(1)
     );
+    let rewrite = definition(&schema, "LinkRewrite");
+    let fields: BTreeSet<&str> = ["path", "syntax", "from", "to"].into_iter().collect();
+    assert_eq!(property_names(rewrite), fields);
+    assert_eq!(required_names(rewrite), fields);
+    assert!(refuses_unknown_keys(rewrite), "{rewrite} admits any key");
 }
 
 /// Whether a schema admits `null`: its type is `null` or a list naming it, or
@@ -3032,7 +3049,7 @@ fn admits_null(schema: &Value) -> bool {
 fn an_operation_advertises_null_exactly_where_its_reader_takes_one() {
     let schema = schema_of::<Operation>();
     let branch = branch(&schema, "kind", "delete_document");
-    for part in ["id", "requires", "footnote", "conditions"] {
+    for part in ["id", "requires", "footnote", "conditions", "cascade"] {
         let json = format!(
             r#"{{"kind":"delete_document","fields":{{"path":"notes/b.md"}},"{part}":null}}"#
         );
@@ -3318,7 +3335,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "content_cycle",
             "transitions_disagree",
             "unexpanded_target",
-            "where_target_ordered"
+            "where_target_ordered",
+            "misplaced_cascade"
         ])
     );
     let schema = schema_of::<ErrorDetail>();

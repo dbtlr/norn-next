@@ -1120,6 +1120,54 @@ fn a_resolved_plan_carrying_a_where_target_is_invalid() {
     );
 }
 
+/// **A resolved plan carrying a folder move, or a cascade on a kind that
+/// does not cascade, is invalid.** Planning expands a folder move into
+/// document moves and writes a cascade only on a move, a delete or a
+/// wikilink rewrite, so either plan was not made by planning: it answers
+/// `request/plan-invalid` naming the operation, and nothing is published.
+#[test]
+fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
+    let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+    let cascade = vec![norn_wire::LinkRewrite::new(
+        path("b.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "a",
+        "c",
+    )];
+    for (extra, fault) in [
+        (
+            Operation::new(norn_wire::OperationKind::move_folder(
+                folder("notes"),
+                folder("archive"),
+            )),
+            norn_wire::PlanFault::unexpanded_target(vec![1]),
+        ),
+        (
+            editing("a.md", "final", "done").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+        let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+        plan.operations.push(extra);
+        let envelope = fixture
+            .apply(plan)
+            .into_wire()
+            .expect("a refusal is answered")
+            .expect_err("the plan is refused");
+        assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
+        assert_eq!(
+            envelope.detail(),
+            &norn_wire::ErrorDetail::plan_invalid(fault)
+        );
+        assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+        assert!(
+            fixture.recorded.calls.borrow().is_empty(),
+            "no write recorded"
+        );
+    }
+}
+
 /// A removal no operation makes, added to a plan, is refused.
 #[test]
 fn an_extra_removal_no_operation_makes_is_refused() {

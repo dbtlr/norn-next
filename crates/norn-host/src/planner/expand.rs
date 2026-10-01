@@ -107,7 +107,10 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
     view: &V,
     matcher: &M,
 ) -> Result<Resolution, ExpandingFailure<V::Error, M::Error>> {
-    if let Some(fault) = authored.ordered_where_targets() {
+    if let Some(fault) = authored
+        .ordered_where_targets()
+        .or_else(|| authored.misplaced_cascades())
+    {
         return Err(ExpandingFailure::Planning(PlanningFailure::Fault(fault)));
     }
     // One observation of each file: the bytes a match is judged against
@@ -571,6 +574,39 @@ mod tests {
             ExpandingFailure::Planning(PlanningFailure::Fault(PlanFault::where_target_ordered(
                 vec![0]
             )))
+        );
+        assert_eq!(matcher.asked.get(), 0);
+    }
+
+    /// **An authored operation carrying a link cascade is a fault in the
+    /// plan**, answered before anything is matched: planning writes a
+    /// cascade from the links the vault holds, and an author does not.
+    #[test]
+    fn an_authored_cascade_is_a_fault() {
+        let matcher = Answering::paths(&["a.md"]);
+        let cascade = vec![norn_wire::LinkRewrite::new(
+            path("b.md"),
+            norn_wire::LinkFamily::Wikilink,
+            "a",
+            "c",
+        )];
+        let failure = resolve_expanding(
+            authored(vec![
+                set_done(WriteTarget::matching(drafts())),
+                Operation::new(OperationKind::move_document(path("a.md"), path("c.md")))
+                    .with_cascade(cascade),
+            ]),
+            root(),
+            &MemoryVault::with(&[("a.md", draft())]),
+            &matcher,
+        )
+        .expect_err("an authored cascade is planned");
+
+        assert_eq!(
+            failure,
+            ExpandingFailure::Planning(PlanningFailure::Fault(PlanFault::misplaced_cascade(vec![
+                1
+            ])))
         );
         assert_eq!(matcher.asked.get(), 0);
     }

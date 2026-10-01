@@ -565,7 +565,8 @@ pub use plan::document::{
 pub use plan::forecast::{FolderPath, Forecast};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
-    AuthorCondition, ExpectedField, IllegalOperationId, Operation, OperationId, OperationKind,
+    AuthorCondition, ExpectedField, IllegalOperationId, LinkRewrite, Operation, OperationId,
+    OperationKind,
 };
 pub use plan::outcome::{
     InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
