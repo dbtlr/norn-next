@@ -122,7 +122,7 @@ impl Document<'_> {
         if !edits.is_empty() {
             let before = Reading::of(self);
             if !self.reads_as_rewritten(&before, &text, &edits, to) {
-                edits = self.provable_alone(&before, edits, to, &mut skipped);
+                edits = self.kept_in_order(&before, edits, to, &mut skipped);
                 text = self.spliced(&edits);
             }
         }
@@ -225,15 +225,23 @@ impl Document<'_> {
         actual == expected
     }
 
-    /// The edits each provable alone and alongside the ones kept before it,
-    /// in document order; every other edit's links are skipped.
+    /// The edits kept greedily in document order: each is kept when it reads
+    /// back alongside the ones kept before it, and every other edit's links
+    /// are skipped.
+    ///
+    /// The answer depends on that order. Two edits that each read back alone
+    /// may not read back together — two frontmatter strings that each fit the
+    /// block's byte bound, a backtick in one stem pairing with one in another
+    /// — and then the first is kept and the second skipped, though the
+    /// opposite choice would have read back as well. Document order is the
+    /// tie-break because it is the one a reader of the skips can predict.
     ///
     /// This is the path a rewrite takes only when the edits together did not
     /// read back, which is rare and is what the extra reads are spent on. An
-    /// edit that cannot be proven is one whose target bytes read as something
-    /// else where they were written, so a frontmatter one is skipped as
-    /// corrupting its value and a body one as unrepresentable there.
-    fn provable_alone(
+    /// edit refused here is one whose target bytes read as something else where
+    /// they were written, so a frontmatter one is skipped as corrupting its
+    /// value and a body one as unrepresentable there.
+    fn kept_in_order(
         &self,
         before: &Reading,
         edits: Vec<Edit>,

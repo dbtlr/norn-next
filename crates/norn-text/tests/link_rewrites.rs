@@ -1,10 +1,11 @@
-//! Rewriting a document's links: every link of one family whose target is
+//! Rewriting a document's links: every link of one family whose address is
 //! `from` is respelled `to`, and nothing else in the document moves.
 //!
 //! This is the one seam a link cascade composes a document's after-bytes
-//! through. A cascade keys each of its per-document operations by a family
-//! and a target as the index stored it, so the match here is exactly the
-//! parse's [`Link::target`]: what the index holds is what is matched. What a
+//! through. A cascade keys each of its per-document operations by a family,
+//! a protocol and a target as the index stored them, so the match here is
+//! exactly the parse's [`Link::protocol`] and [`Link::target`]: what the
+//! index holds is what is matched. What a
 //! single token preserves is `rewrite_fidelity.rs`; what a whole document
 //! preserves, skips and refuses is here.
 

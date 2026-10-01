@@ -599,17 +599,20 @@ pub(crate) fn addresses_the_vault(link: &Link) -> bool {
 pub enum RewriteSkip {
     /// `to` cannot be written where this link's target is written and read
     /// back as `to`: it is no target this family can spell, its protocol is
-    /// not the link's, or the bytes it would put there read as something else
-    /// in that place.
+    /// not the link's, or the bytes it would put there change what the
+    /// document reads — the link itself, or a link, heading, tag or code span
+    /// around it.
     Unrepresentable,
     /// The link is written in a frontmatter value that cannot hold `to` and
     /// still read as the same YAML with only the target changed — a quote
-    /// character inside a quoted scalar, or text a plain scalar cannot carry.
+    /// character inside a quoted scalar, text a plain scalar cannot carry, or
+    /// a block grown past its byte bound.
     WouldCorruptFrontmatter,
     /// The link's own bytes give no place to write any target: a wikilink
-    /// token spanning a line break, or a Markdown destination written with
-    /// escapes or entity references, whose target is not the bytes it was
-    /// written as.
+    /// token spanning a line break, or a Markdown destination whose stem
+    /// cannot be named inside its token — one written with escapes or entity
+    /// references, whose target is not the bytes it was written as, or one
+    /// whose destination could not be located in the token at all.
     LinkNotRewritable,
 }
 
