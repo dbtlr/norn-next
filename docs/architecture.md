@@ -2459,6 +2459,25 @@ the shape a refusal carries, on the preview's forecast, the applied report, and 
 interruption for the targets that landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
+Link cascades are spelled in the plan vocabulary ahead of the planning that reads
+them. A document move, a document removal and a wikilink rewrite change what links
+elsewhere in the vault resolve to. In a resolved plan each carries its cascade, one
+`rewrite_link` per document holding a link it changes, which an author may also write
+as an operation of its own; the plan records every link whose resolution it changes as
+a condition naming the link by its holder, its syntax and its address as written —
+protocol prefix included — with what it resolves to before and after the plan; and the
+forecast names the links the plan leaves as written, leaves broken, makes ambiguous or
+retargets, and the files a folder move leaves behind. A folder move expands at planning
+into one document move per document, as a `where` target does. A delete rewrites the
+links naming its document to `rewrite_to`, or leaves them broken only where
+`allow_broken_links` says so. The `move`, `delete` and `rewrite_wikilink` requests
+compile to one such operation each. A cascade on an authored operation or on a kind that
+does not cascade, and a folder move left in a resolved plan, are `request/plan-invalid`.
+The planner does not yet read backlinks or compose a cascade, so it leaves a folder
+move, both link rewrites, a delete that rewrites or breaks its links and any operation
+carrying a cascade unresolved, naming that limit, and the applier refuses every
+link-resolution condition as failed, since nothing checks one yet.
+
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
 reply rides in the job. The seam holds these invariants; which gate hold carries each is
