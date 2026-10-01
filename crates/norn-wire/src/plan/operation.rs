@@ -95,7 +95,7 @@ use schemars::transform::transform_subschemas;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::document::{DocumentPath, LinkFamily};
+use crate::document::{DocumentPath, LinkFamily, written_protocol};
 use crate::plan::backlinks::Backlinks;
 use crate::plan::forecast::FolderPath;
 use crate::plan::hash::ContentHash;
@@ -247,11 +247,12 @@ pub enum OperationKind {
         syntax: LinkFamily,
         /// The address a rewritten link is written with, exactly as written,
         /// its protocol prefix included: `vault://notes/a` and `notes/a` are
-        /// two addresses.
+        /// two addresses. Never empty.
+        #[schemars(length(min = 1))]
         from: String,
         /// The address it is written with after, protocol prefix included. A
         /// rewrite never changes a link's protocol, so a `to` whose protocol
-        /// differs from `from`'s cannot be written into the link.
+        /// differs from `from`'s is refused.
         to: String,
     },
     /// Respell every wikilink in the vault naming one document to name
@@ -704,7 +705,7 @@ impl<'de> Deserialize<'de> for OperationKind {
 ///
 /// On the wire a rewrite is one object:
 /// `{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}`.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkRewrite {
     /// The document holding the links.
@@ -713,11 +714,12 @@ pub struct LinkRewrite {
     pub syntax: LinkFamily,
     /// The address a rewritten link is written with, exactly as written, its
     /// protocol prefix included: `vault://notes/a` and `notes/a` are two
-    /// addresses.
+    /// addresses. Never empty.
+    #[schemars(length(min = 1))]
     pub from: String,
     /// The address it is written with after, protocol prefix included. A
     /// rewrite never changes a link's protocol, so a `to` whose protocol
-    /// differs from `from`'s cannot be written into the link.
+    /// differs from `from`'s is refused.
     pub to: String,
 }
 
@@ -736,6 +738,62 @@ impl LinkRewrite {
             from: from.into(),
             to: to.into(),
         }
+    }
+}
+
+/// Why respelling the address `from` to `to` is no link rewrite, or `None`
+/// where it is one. An empty `from` is an anchor-only link's, which names
+/// its holder wherever the holder goes, so nothing respells it; and a
+/// rewrite changes a link's address and never its protocol, so a `to`
+/// written under another protocol than `from`'s cannot be written into the
+/// link. An empty `to` and a `to` equal to `from` are rewrites.
+fn rewrite_refusal(from: &str, to: &str) -> Option<&'static str> {
+    if from.is_empty() {
+        return Some("`from` is empty, and an anchor-only link is never respelled");
+    }
+    if written_protocol(from) != written_protocol(to) {
+        return Some(
+            "`to` is written under another protocol than `from`, and a rewrite keeps a link's protocol",
+        );
+    }
+    None
+}
+
+/// A cascade's rewrite as it arrives: its four keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkRewriteKeys {
+    path: DocumentPath,
+    syntax: LinkFamily,
+    from: String,
+    to: String,
+}
+
+impl<'de> Deserialize<'de> for LinkRewrite {
+    /// The four keys are read by the derive, refusing any other and any
+    /// written twice; the two addresses are then held to the rule a
+    /// `rewrite_link` operation's are.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let LinkRewriteKeys {
+            path,
+            syntax,
+            from,
+            to,
+        } = LinkRewriteKeys::deserialize(deserializer)?;
+        if let Some(problem) = rewrite_refusal(&from, &to) {
+            return Err(D::Error::custom(format_args!(
+                "a cascade's rewrite of `{from}` to `{to}` is refused: {problem}"
+            )));
+        }
+        Ok(LinkRewrite {
+            path,
+            syntax,
+            from,
+            to,
+        })
     }
 }
 
@@ -1170,12 +1228,23 @@ impl KindFields {
                 from: required_as(kind, "from", from, FolderPath::new)?,
                 to: required_as(kind, "to", to, FolderPath::new)?,
             },
-            KindName::RewriteLink => OperationKind::RewriteLink {
-                path: required(kind, "path", path)?,
-                syntax: required(kind, "syntax", syntax)?,
-                from: required(kind, "from", from)?,
-                to: required(kind, "to", to)?,
-            },
+            KindName::RewriteLink => {
+                let path = required(kind, "path", path)?;
+                let syntax = required(kind, "syntax", syntax)?;
+                let from: String = required(kind, "from", from)?;
+                let to: String = required(kind, "to", to)?;
+                if let Some(problem) = rewrite_refusal(&from, &to) {
+                    return Err(E::custom(format_args!(
+                        "a `rewrite_link` operation's rewrite of `{from}` to `{to}` is refused: {problem}"
+                    )));
+                }
+                OperationKind::RewriteLink {
+                    path,
+                    syntax,
+                    from,
+                    to,
+                }
+            }
             KindName::RewriteWikilink => OperationKind::RewriteWikilink {
                 old: whole_document(kind, "old", required(kind, "old", old)?)?,
                 new: whole_document(kind, "new", required(kind, "new", new)?)?,

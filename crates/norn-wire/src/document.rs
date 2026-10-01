@@ -626,6 +626,24 @@ fn opens_with_a_scheme(target: &str) -> bool {
         })
 }
 
+/// The protocol `address` is written under, or `None`: a lowercase RFC 3986
+/// scheme, then `://`, then a stem that is not empty — the narrow
+/// recognition the text layer reads a link's protocol by, so `HTTPS://x`
+/// and `note:draft` are addresses with no protocol.
+pub(crate) fn written_protocol(address: &str) -> Option<&str> {
+    let (scheme, stem) = address.split_once("://")?;
+    let mut characters = scheme.chars();
+    let is_scheme = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '+' | '-' | '.')
+        });
+    (is_scheme && !stem.is_empty()).then_some(scheme)
+}
+
 /// What resolving a link's target found.
 ///
 /// On the wire a health is the flat string itself: `"healthy"`, `"broken"`,

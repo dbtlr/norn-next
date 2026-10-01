@@ -180,8 +180,9 @@
 //!   fields that name the delete, so it is written by hand, and
 //!   [`DeleteParams`] reads its two keys the way an operation does.
 //!   [`MoveParams`] reads its two ends together, as text, before deciding
-//!   which grammar reads them, so it is read by the derive into a private
-//!   shape first.
+//!   which grammar reads them, and a cascade's [`LinkRewrite`] holds its two
+//!   addresses to the rule a `rewrite_link` operation's are held to, so each
+//!   is read by the derive into a private shape first.
 //!   [`Cursor`] and [`PlanDocument`] are written by
 //!   hand on both sides: a cursor's wire shape is one opaque string rather
 //!   than the fields a derive would emit, and a document is written as the

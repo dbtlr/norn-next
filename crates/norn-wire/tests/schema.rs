@@ -2928,6 +2928,11 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         rewrite["properties"]["syntax"]["$ref"].as_str(),
         Some("#/$defs/LinkFamily")
     );
+    assert_eq!(
+        rewrite["properties"]["from"]["minLength"].as_u64(),
+        Some(1),
+        "a link rewrite's `from` admits the empty address its reader refuses"
+    );
     let targeted = [
         ("set_frontmatter", vec!["field", "value"]),
         ("remove_frontmatter", vec!["field"]),
@@ -3039,6 +3044,11 @@ fn an_operation_advertises_each_kind_with_its_fields() {
     assert_eq!(property_names(rewrite), fields);
     assert_eq!(required_names(rewrite), fields);
     assert!(refuses_unknown_keys(rewrite), "{rewrite} admits any key");
+    assert_eq!(
+        rewrite["properties"]["from"]["minLength"].as_u64(),
+        Some(1),
+        "a cascade's `from` admits the empty address its reader refuses"
+    );
 }
 
 /// What a delete may not carry, as its schema's `not` states it: a

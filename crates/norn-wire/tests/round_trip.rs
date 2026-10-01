@@ -7078,6 +7078,70 @@ fn a_link_kind_reads_its_ends_through_their_own_grammars() {
     }
 }
 
+/// **A link rewrite names an address to respell and keeps its protocol**,
+/// as an operation and as a cascade's share alike. An empty `from` is
+/// refused — an anchor-only link names its holder wherever it goes, so no
+/// rewrite respells one — and so is a `to` written under another protocol
+/// than `from`, which no rewrite can write into the link. An empty `to`, a
+/// `to` equal to `from`, and two addresses under one protocol all read.
+#[test]
+fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
+    let kind = |from: &str, to: &str| {
+        format!(
+            r#"{{"kind":"rewrite_link","fields":{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}}}"#
+        )
+    };
+    let share = |from: &str, to: &str| {
+        format!(r#"{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}"#)
+    };
+    for (from, to) in [
+        ("", "b"),
+        ("vault://a", "b"),
+        ("a", "vault://b"),
+        ("vault://a", "https://a"),
+    ] {
+        assert!(
+            serde_json::from_str::<OperationKind>(&kind(from, to)).is_err(),
+            "a rewrite of `{from}` to `{to}` read as an operation"
+        );
+        assert!(
+            serde_json::from_str::<LinkRewrite>(&share(from, to)).is_err(),
+            "a rewrite of `{from}` to `{to}` read as a cascade's share"
+        );
+    }
+    for (from, to) in [
+        ("a", ""),
+        ("a", "a"),
+        ("vault://notes/a", "vault://archive/a"),
+        ("a", "b"),
+        // Not a protocol: the sentinel is a lowercase scheme, `://` and a
+        // stem, so each end reads as a plain address.
+        ("HTTPS://a", "b"),
+        ("note:draft", "b"),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<OperationKind>(&kind(from, to)).ok(),
+            Some(OperationKind::rewrite_link(
+                path("notes/c.md"),
+                LinkFamily::Wikilink,
+                from,
+                to
+            )),
+            "a rewrite of `{from}` to `{to}`"
+        );
+        assert_eq!(
+            serde_json::from_str::<LinkRewrite>(&share(from, to)).ok(),
+            Some(LinkRewrite::new(
+                path("notes/c.md"),
+                LinkFamily::Wikilink,
+                from,
+                to
+            )),
+            "a share rewriting `{from}` to `{to}`"
+        );
+    }
+}
+
 /// A file state is absent, or present with the hash of what it holds.
 #[test]
 fn a_file_state_is_an_object_tagged_state() {
