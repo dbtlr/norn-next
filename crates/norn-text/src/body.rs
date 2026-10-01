@@ -59,7 +59,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, 
 use crate::frontmatter::extract::BOM;
 use crate::heading::{Heading, SlugCounter};
 use crate::link::{
-    BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
+    BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, wikilink_ranges,
 };
 use crate::section::{SectionAddress, SectionError, SectionSpan, is_ascii_space, resolve_section};
 use crate::span::{LineCursor, lf_normalized, split_lines_inclusive};
@@ -391,23 +391,6 @@ impl<'a> BodyScan<'a> {
     /// in prose is recognized by nothing and is the stated exception.
     pub fn tags(&self) -> Vec<TagFact> {
         scan_tags(self.body, &self.opaque_to_tags())
-    }
-
-    /// Rewrite selected `[[…]]` tokens by splicing a replacement at each
-    /// token's exact byte span.
-    ///
-    /// `replace` returns `Some(text)` to substitute for a token verbatim, or
-    /// `None` to leave it untouched; it is `FnMut`, so a caller can rewrite
-    /// only the first match. Every substitution lands on a parser-recognized
-    /// span, so the embed marker, the title and the anchor survive by
-    /// construction, and code-fenced samples are excluded structurally rather
-    /// than by a rule somebody has to remember.
-    ///
-    /// Inline Markdown links are never touched: their targets are relative to
-    /// the document they sit in, so rewriting one is a per-document
-    /// computation rather than a token substitution.
-    pub fn splice_wikilinks(&self, replace: impl FnMut(&Link) -> Option<String>) -> String {
-        splice_tokens(self.body, &self.wikilinks(), replace)
     }
 
     /// Trailing block-id definitions (`… ^block-id`), one per line that

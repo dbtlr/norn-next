@@ -8,7 +8,7 @@
 //! here rather than tested-for: those bytes are never inside the edited range.
 
 use norn_text::{
-    BodyScan, Link, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
+    Document, Link, LinkFamily, parse_wikilinks_in_text, reconstruct_wikilink,
     wikilink_target_is_representable,
 };
 
@@ -133,34 +133,6 @@ fn whitespace_between_the_stem_and_the_fragment_is_padding() {
     );
 }
 
-// ── Over a whole document ────────────────────────────────────────────────
-
-#[test]
-fn a_splice_over_a_body_preserves_every_untouched_byte() {
-    let body = "prose [[ Old | Shown ]] and ![[Old#^blk]] and [[keep]]\n\n\
-                ```\n[[Old]]\n```\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| {
-        (link.target == "Old")
-            .then(|| reconstruct_wikilink(link, "New"))
-            .flatten()
-    });
-    assert_eq!(
-        out,
-        "prose [[ New | Shown ]] and ![[New#^blk]] and [[keep]]\n\n\
-         ```\n[[Old]]\n```\n"
-    );
-}
-
-#[test]
-fn a_splice_over_raw_text_preserves_the_same_way() {
-    assert_eq!(
-        splice_wikilinks_in_text("[[ Old | Shown ]]", |link| reconstruct_wikilink(
-            link, "New"
-        )),
-        "[[ New | Shown ]]"
-    );
-}
-
 // ── What is still refused ────────────────────────────────────────────────
 
 /// A stem that would re-parse as a different link shape, as no link at all, or
@@ -209,18 +181,19 @@ fn an_unrepresentable_stem_is_refused() {
 }
 
 /// The reason the refusal is not pedantry: a line break inside a table cell
-/// ends the row, and one inside a blockquote ends the quote. A splice that
+/// ends the row, and one inside a blockquote ends the quote. A rewrite that
 /// emitted these would rewrite the block the link sat in, so it emits nothing
 /// and leaves the token alone.
 #[test]
-fn a_splice_to_an_unrepresentable_target_leaves_the_document_alone() {
+fn a_rewrite_to_an_unrepresentable_target_leaves_the_document_alone() {
     for body in [
         "| a | b |\n| --- | --- |\n| [[old]] | x |\n",
         "> quoted [[old]] here\n> still quoted\n",
     ] {
         for bad in ["a\nb", "", " padded "] {
-            let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, bad));
-            assert_eq!(out, body, "rewriting {body:?} to {bad:?}");
+            let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, "old", bad);
+            assert_eq!(out.text, body, "rewriting {body:?} to {bad:?}");
+            assert_eq!(out.rewritten, 0, "rewriting {body:?} to {bad:?}");
         }
     }
 }

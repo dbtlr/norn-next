@@ -200,15 +200,6 @@ pub fn parse_wikilinks_in_text(text: &str) -> Vec<Link> {
     parse_tokens(text, &[])
 }
 
-/// Rewrite selected `[[…]]` tokens in arbitrary text with no code exclusion.
-/// The Markdown-body counterpart is [`crate::BodyScan::splice_wikilinks`].
-pub fn splice_wikilinks_in_text(
-    text: &str,
-    replace: impl FnMut(&Link) -> Option<String>,
-) -> String {
-    splice_tokens(text, &parse_wikilinks_in_text(text), replace)
-}
-
 pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
     // Matches arrive in ascending order, so their positions are counted once
     // across the text rather than once per token.
@@ -467,6 +458,9 @@ fn unescaped_index(text: &str, needle: char) -> Option<usize> {
     None
 }
 
+/// `text` with each of `links` that `replace` answers for replaced by its
+/// answer, and every other byte as written. The links are `text`'s own, in
+/// document order and not overlapping, as one family's tokens always are.
 pub(crate) fn splice_tokens(
     text: &str,
     links: &[Link],
@@ -601,11 +595,13 @@ pub fn wikilink_target_is_representable(target: &str) -> bool {
 /// Returns `None` when `new_target` is not representable
 /// ([`wikilink_target_is_representable`]): emitting it would corrupt the link
 /// into a different shape, so the caller refuses or skips instead. Also `None`
-/// for a link with no usable stem span — an inline Markdown link, or a
-/// hand-built fact whose span does not index its own bytes. Rewriting a
-/// Markdown link is not a token-level edit at all: its target is relative to
-/// the document it sits in, so one move produces different bytes per
-/// referencing file.
+/// for an inline Markdown link, and for a hand-built fact whose span does not
+/// index its own bytes. A Markdown target is relative to the document it sits
+/// in, so one move respells it differently in every referencing file, and
+/// whether its new bytes read back as written depends on the document around
+/// them: [`Document::rewrite_links`](crate::Document::rewrite_links) is where
+/// a destination is respelled, with a target computed for its document and
+/// the whole document read back.
 ///
 /// Three more refusals, each the other half of something this crate already
 /// recognizes:
