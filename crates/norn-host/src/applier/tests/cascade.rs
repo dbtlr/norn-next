@@ -737,3 +737,24 @@ fn a_fallen_moves_discarded_cascade_takes_down_no_other_move() {
         [moving("b.md", "x/b2.md").with_cascade(vec![wikilink("idx.md", "b", "b2")])]
     );
 }
+
+/// **A cascade that cannot compose leaves its move unresolved, in every
+/// build.** The store has not yet taken in that `h.md` is gone, so the move's
+/// cascade names a holder no document stands at; the move is left out in the
+/// composition's words rather than planned with a transition its cascade
+/// does not make.
+#[test]
+fn a_cascade_naming_a_holder_gone_from_the_vault_leaves_its_move_unresolved() {
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    std::fs::remove_file(fixture.vault.join("h.md")).expect("h.md is removed");
+    let resolution = fixture.planned(vec![moving("a.md", "b.md")]);
+    let [left] = &resolution.unresolved[..] else {
+        panic!("the move is left out: {:?}", resolution.unresolved);
+    };
+    let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+        panic!("the move no longer resolves: {left:?}");
+    };
+    assert!(detail.contains("h.md"), "{detail}");
+    assert!(resolution.plan.operations.is_empty());
+    assert!(resolution.plan.transitions.is_empty());
+}

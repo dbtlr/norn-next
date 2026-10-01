@@ -111,7 +111,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
-    let (order, lineage) = loop {
+    let (order, lineage, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
         let failed =
@@ -137,17 +137,25 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         let standing = left_out.len();
         leave_out_what_falls_with(&operations, &mut left_out, view);
         if left_out.len() == standing {
-            break (order, lineage);
+            // A cascade names only holders that stand, so it composes
+            // wherever its operation did. Should one not, its operation is
+            // left out in the composition's words, in every build, rather
+            // than planned with a transition its cascade does not make.
+            let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
+            if composition.unresolvable.is_empty() {
+                break (order, lineage, composition);
+            }
+            for unresolvable in &composition.unresolvable {
+                left_out.entry(unresolvable.position).or_insert_with(|| {
+                    UnresolvedReason::no_longer_resolves(unresolvable.detail.clone())
+                });
+            }
+            leave_out_what_falls_with(&operations, &mut left_out, view);
         }
         for operation in &mut operations {
             operation.cascade.clear();
         }
     };
-    let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-    debug_assert!(
-        composition.unresolvable.is_empty(),
-        "a cascade names only holders that stand, so it composes wherever its operation did"
-    );
     let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     // The resolution change set is recorded as the vault stands with every
