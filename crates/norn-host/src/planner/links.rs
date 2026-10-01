@@ -227,7 +227,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                 lineage.carried_to(&file).is_some()
                     || lineage
                         .removed_by(&file)
-                        .is_some_and(|removal| removal.rewrite_to.is_some())
+                        .is_some_and(|removal| removal.rewrite_to().is_some())
             })
     };
 
@@ -490,7 +490,7 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
 ) -> Result<BTreeMap<usize, TargetNaming>, I::Error> {
     let mut targets = BTreeMap::new();
     for removal in lineage.removals() {
-        if let Some(address) = &removal.rewrite_to {
+        if let Some(address) = removal.rewrite_to() {
             targets.insert(removal.position, index.target(overlay, address)?);
         }
     }
@@ -513,7 +513,7 @@ pub(crate) fn rewritten_for(
     targets: &BTreeMap<usize, TargetNaming>,
     normalizer: &PathNormalizer,
 ) -> bool {
-    if removal.rewrite_to.is_none() {
+    if removal.rewrite_to().is_none() {
         return false;
     }
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();

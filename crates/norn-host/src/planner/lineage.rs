@@ -71,19 +71,35 @@ pub(crate) struct Lineage {
     /// Each file whose before-state ends the plan at another file, and that
     /// file: [`Self::at_end`] read the other way.
     carried: BTreeMap<NormalizedPath, NormalizedPath>,
+    /// Every delete of the plan, in the order they compose, whatever the
+    /// content it removes was drawn from.
+    removals: Vec<Removal>,
     /// Each file whose before-state a delete of the plan removes, wherever
-    /// the plan's moves carried it first, and that delete.
-    removed: BTreeMap<NormalizedPath, Removal>,
+    /// the plan's moves carried it first, and that delete's place in
+    /// [`Self::removals`].
+    removed: BTreeMap<NormalizedPath, usize>,
 }
 
-/// The delete that removes a document standing before the plan.
+/// A delete of the plan, and what it says of the links naming the document
+/// it removes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Removal {
     /// The delete's position.
     pub(crate) position: usize,
-    /// The address the delete rewrites the links naming the document to,
+    /// The delete's link choice: forbidding the links naming its document,
+    /// rewriting them, or leaving them broken.
+    pub(crate) backlinks: Backlinks,
+}
+
+impl Removal {
+    /// The address the delete rewrites the links naming its document to,
     /// where it rewrites them.
-    pub(crate) rewrite_to: Option<String>,
+    pub(crate) fn rewrite_to(&self) -> Option<&str> {
+        match &self.backlinks {
+            Backlinks::RewrittenTo(target) => Some(target.address()),
+            Backlinks::Forbidden | Backlinks::LeftBroken => None,
+        }
+    }
 }
 
 impl Lineage {
@@ -104,23 +120,18 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
+                // Every delete is a removal, so its link choice is read
+                // though the content it removes is one the plan created; only
+                // one removing a before-state can have links naming it.
                 OperationKind::DeleteDocument { path, backlinks } => {
                     if let Some(file) = identity(path.as_str()) {
                         if let Some(drawn) = lineage.source(&file) {
-                            let rewrite_to = match backlinks {
-                                Backlinks::RewrittenTo(target) => {
-                                    Some(target.address().to_string())
-                                }
-                                Backlinks::Forbidden | Backlinks::LeftBroken => None,
-                            };
-                            lineage.removed.insert(
-                                drawn.from,
-                                Removal {
-                                    position,
-                                    rewrite_to,
-                                },
-                            );
+                            lineage.removed.insert(drawn.from, lineage.removals.len());
                         }
+                        lineage.removals.push(Removal {
+                            position,
+                            backlinks: backlinks.clone(),
+                        });
                         lineage.at_end.insert(file, None);
                     }
                 }
@@ -200,12 +211,13 @@ impl Lineage {
     /// which of the links the store's resolution door reaches are its own,
     /// and what it rewrites them to.
     pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<&Removal> {
-        self.removed.get(from)
+        self.removed.get(from).map(|&at| &self.removals[at])
     }
 
-    /// Every delete of the plan that removes a document standing before it.
+    /// Every delete of the plan, in the order they compose — one removing a
+    /// document the plan itself created among them.
     pub(crate) fn removals(&self) -> impl Iterator<Item = &Removal> + '_ {
-        self.removed.values()
+        self.removals.iter()
     }
 
     /// The source of what `file` holds at the end of the plan, where its

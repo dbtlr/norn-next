@@ -131,14 +131,8 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // does; a delete forbidding the links naming its document falls
         // where one does. What is left composes again, until nothing more
         // falls.
-        let generated = generate(
-            &operations,
-            &composition,
-            &lineage,
-            view.normalizer(),
-            links,
-        )
-        .map_err(PlanningFailure::Links)?;
+        let generated = generate(&composition, &lineage, view.normalizer(), links)
+            .map_err(PlanningFailure::Links)?;
         for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;
         }

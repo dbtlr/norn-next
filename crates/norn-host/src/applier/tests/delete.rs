@@ -315,6 +315,36 @@ fn a_delete_whose_target_names_no_one_document_is_unresolved_saying_why() {
     );
 }
 
+/// **A delete's `rewrite_to` is read whatever the document it removes
+/// was.** A document the plan itself creates and then deletes stood nowhere
+/// before the plan, so no link names it, yet a `rewrite_to` naming no
+/// document still leaves the delete unresolved in words, as it would for a
+/// document that stood, and the create sharing its file falls with it.
+#[test]
+fn a_delete_of_a_document_the_plan_creates_still_reads_its_target() {
+    let fixture = Fixture::new(&[("h.md", "H\n")]);
+    let resolution = fixture.planned(vec![
+        creating("transient.md", "T\n"),
+        rewriting("transient.md", "absent-replacement"),
+    ]);
+    let [create, delete] = &resolution.unresolved[..] else {
+        panic!(
+            "both operations are unresolved: {:?}",
+            resolution.unresolved
+        );
+    };
+    assert_eq!(create.operation, creating("transient.md", "T\n"));
+    assert_eq!(
+        delete.operation,
+        rewriting("transient.md", "absent-replacement")
+    );
+    let UnresolvedReason::NoLongerResolves { detail, .. } = &delete.reason else {
+        panic!("the delete no longer resolves: {:?}", delete.reason);
+    };
+    assert!(detail.contains("names no one document"), "{detail}");
+    assert!(resolution.plan.transitions.is_empty());
+}
+
 /// **An ambiguous link that could name the deleted document is never
 /// rewritten**, and the forecast says it was skipped for its ambiguity; a
 /// link naming the document alone beside it is rewritten.

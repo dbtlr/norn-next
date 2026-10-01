@@ -73,8 +73,8 @@ use std::path::Path;
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkFact, ProbedLink, TargetNaming};
 use norn_wire::{
-    Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkRewrite, Operation,
-    OperationKind, Resolves, UnresolvedReason,
+    Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkRewrite, Resolves,
+    UnresolvedReason,
 };
 
 use super::compose::Composition;
@@ -96,8 +96,8 @@ pub(crate) struct Generated {
     pub(crate) unresolved: BTreeMap<usize, UnresolvedReason>,
 }
 
-/// What the plan `composition` composed from `operations` generates from the
-/// links naming what it carries away or removes, judged through `index`.
+/// What the plan `composition` composed generates from the links naming what
+/// it carries away or removes, judged through `index`.
 ///
 /// - **Each move's cascade**, by its position: every link that names a
 ///   document the plan's moves carry away, as `lineage` follows them, and
@@ -115,19 +115,14 @@ pub(crate) struct Generated {
 /// Empty, and the index never asked, where no move carries a document and no
 /// delete forbids or rewrites the links naming its own.
 pub(crate) fn generate<I: LinkIndex + ?Sized>(
-    operations: &[Operation],
     composition: &Composition,
     lineage: &Lineage,
     normalizer: &PathNormalizer,
     index: &I,
 ) -> Result<Generated, I::Error> {
-    let choice = |position: usize| match &operations[position].kind {
-        OperationKind::DeleteDocument { backlinks, .. } => Some(backlinks),
-        _ => None,
-    };
-    let reads_backlinks = lineage.removals().any(|removal| {
-        choice(removal.position).is_some_and(|choice| *choice != Backlinks::LeftBroken)
-    });
+    let reads_backlinks = lineage
+        .removals()
+        .any(|removal| removal.backlinks != Backlinks::LeftBroken);
     if lineage.drawing().next().is_none() && !reads_backlinks {
         return Ok(Generated::default());
     }
@@ -175,11 +170,11 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     index.changes(&overlay, &probed, &mut |change| {
         if let Some(removal) = removed_by(&change.before, lineage, normalizer) {
             let position = removal.position;
-            match choice(position) {
-                Some(Backlinks::Forbidden) => {
+            match removal.backlinks {
+                Backlinks::Forbidden => {
                     forbidden.entry(position).or_default().push(change.holder);
                 }
-                Some(Backlinks::RewrittenTo(_))
+                Backlinks::RewrittenTo(_)
                     if rewritten_for(removal, &change.after, &rewritten_to, normalizer) =>
                 {
                     if let Some((to, at)) = destinations.get(&position) {
@@ -302,7 +297,7 @@ fn unnamed(
     lineage: &Lineage,
     normalizer: &PathNormalizer,
 ) -> UnresolvedReason {
-    let address = removal.rewrite_to.as_deref().unwrap_or_default();
+    let address = removal.rewrite_to().unwrap_or_default();
     if let (Resolves::Several {}, Some(candidates)) = (&named.after, &named.candidates) {
         return UnresolvedReason::ambiguous_target(candidates.clone());
     }
