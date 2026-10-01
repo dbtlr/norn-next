@@ -741,3 +741,67 @@ fn a_wikilink_rewrite_clears_a_forbidding_deletes_backlinks_only_where_it_respel
         Some(UnresolvedReason::has_backlinks(vec![path("h.md")], 1))
     );
 }
+
+/// **An `old` naming a quarantined file's place names no document**, so it
+/// repairs the broken wikilinks naming that place: no link resolves to the
+/// bytes at `q.md`, which do not decode, so `[[q]]` and `[[q.md]]` are
+/// broken before the plan and each is retargeted to `c.md` in its own form,
+/// recorded as written at its new address, while the Markdown `[x](q.md)`
+/// is no wikilink and stays. The preview
+/// recomputes the plan, and it lands with the quarantined file untouched.
+#[test]
+fn an_old_naming_a_quarantined_file_repairs_the_broken_wikilinks_naming_its_place() {
+    let mut fixture = Fixture::new(&[("c.md", "C\n"), ("h.md", "[[q]] [[q.md]] [x](q.md)\n")]);
+    fixture.foreign("q.md", super::UNDECODABLE);
+    let resolution = fixture.resolution(vec![retargeting("q", "c")]);
+    assert_eq!(
+        resolution.plan.operations[0].cascade,
+        [wikilink("h.md", "q", "c"), wikilink("h.md", "q.md", "c.md")]
+    );
+    assert_eq!(
+        resolution.plan.conditions,
+        [
+            PlanCondition::link_resolution(
+                key("h.md", "c"),
+                Resolves::one(path("c.md")),
+                Resolves::one(path("c.md")),
+            ),
+            PlanCondition::link_resolution(
+                key("h.md", "c.md"),
+                Resolves::one(path("c.md")),
+                Resolves::one(path("c.md")),
+            ),
+        ]
+    );
+    assert!(resolution.forecast.links.is_empty());
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the planned cascade previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[c]] [[c.md]] [x](q.md)\n")
+    );
+    assert_eq!(
+        std::fs::read(fixture.vault.join("q.md")).ok().as_deref(),
+        Some(super::UNDECODABLE)
+    );
+}
+
+/// **A `new` naming a quarantined file names no document.** The bytes at
+/// `q.md` do not decode, so no wikilink can be retargeted toward them: a
+/// rewrite of `[[a]]` to `q`, or to `q.md`, is left unresolved as one whose
+/// `new` names no one document, and writes nothing.
+#[test]
+fn a_new_naming_a_quarantined_file_is_unresolved() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    fixture.foreign("q.md", super::UNDECODABLE);
+    for new in ["q", "q.md"] {
+        let resolution = fixture.planned(vec![retargeting("a", new)]);
+        let detail = unresolved_detail(&resolution);
+        assert!(detail.contains("names no one document"), "{detail}");
+        assert!(resolution.plan.transitions.is_empty());
+    }
+}
