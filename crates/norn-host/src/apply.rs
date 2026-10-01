@@ -25,9 +25,10 @@
 //! resolution change set reads the links the store holds.
 //!
 //! **The write verbs enter here.** [`Host::set`], [`Host::edit`],
-//! [`Host::new_document`] and [`Host::move_path`] each compile their request
-//! to an authored plan and answer through [`Host::apply`], so a verb previews
-//! and applies exactly as the same operations sent as a plan do.
+//! [`Host::new_document`], [`Host::move_path`] and [`Host::delete`] each
+//! compile their request to an authored plan and answer through
+//! [`Host::apply`], so a verb previews and applies exactly as the same
+//! operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -59,9 +60,9 @@ use norn_store::{
     ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot, TargetNaming,
 };
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
-    FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams,
-    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, EditParams, ErrorDetail,
+    ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity,
+    SetParams, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -588,6 +589,20 @@ where
     /// leaves behind. `move` is a Rust keyword, so the verb's method is
     /// named for what it moves.
     pub fn move_path(&self, params: MoveParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `delete`: the document `params` removes, compiled to one
+    /// operation and previewed or applied through [`Host::apply`].
+    ///
+    /// **The delete says what becomes of the links naming its document.**
+    /// Saying neither flag, it is refused while any link names the document,
+    /// its operation unresolved naming every holder and how many links; with
+    /// `rewrite_to` it carries the cascade respelling each of them to name
+    /// that document; with `allow_broken_links` it lands, the forecast
+    /// advising on each link it leaves broken.
+    pub fn delete(&self, params: DeleteParams) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
         self.apply_operations(mode, params.plan())
     }
