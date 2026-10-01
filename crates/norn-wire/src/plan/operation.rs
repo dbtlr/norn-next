@@ -592,14 +592,23 @@ impl OperationKind {
         }
     }
 
-    /// Whether the kind changes what links elsewhere in the vault resolve
-    /// to, so that a resolved plan may carry its link cascade: a document
-    /// move, a document removal and a wikilink rewrite.
+    /// Whether the kind rewrites the links elsewhere in the vault that name
+    /// what it changes, so that a resolved plan may carry its link cascade: a
+    /// document move, a document removal rewriting the links naming its
+    /// document to `rewrite_to`, and a wikilink rewrite. A removal forbidding
+    /// those links, or leaving them broken, rewrites none.
     pub const fn cascades(&self) -> bool {
         match self {
             OperationKind::MoveDocument { .. }
-            | OperationKind::DeleteDocument { .. }
+            | OperationKind::DeleteDocument {
+                backlinks: Backlinks::RewrittenTo(_),
+                ..
+            }
             | OperationKind::RewriteWikilink { .. } => true,
+            OperationKind::DeleteDocument {
+                backlinks: Backlinks::Forbidden | Backlinks::LeftBroken,
+                ..
+            } => false,
             // A folder move cascades through the document moves planning
             // expands it into, and a link rewrite is a cascade's own unit.
             OperationKind::MoveFolder { .. }

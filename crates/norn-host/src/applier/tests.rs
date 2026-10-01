@@ -1180,9 +1180,11 @@ fn a_resolved_plan_carrying_a_where_target_is_invalid() {
 
 /// **A resolved plan carrying a folder move, or a cascade on a kind that
 /// does not cascade, is invalid.** Planning expands a folder move into
-/// document moves and writes a cascade only on a move, a delete or a
-/// wikilink rewrite, so either plan was not made by planning: it answers
-/// `request/plan-invalid` naming the operation, and nothing is published.
+/// document moves and writes a cascade only on a move, a delete rewriting
+/// the links naming its document or a wikilink rewrite — never on a delete
+/// forbidding those links or leaving them broken — so each such plan was not
+/// made by planning: it answers `request/plan-invalid` naming the operation,
+/// and nothing is published.
 #[test]
 fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
     let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
@@ -1202,6 +1204,14 @@ fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
         ),
         (
             editing("a.md", "final", "done").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+        (
+            deleting("b.md").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+        (
+            breaking("b.md").with_cascade(cascade.clone()),
             norn_wire::PlanFault::misplaced_cascade(vec![1]),
         ),
     ] {

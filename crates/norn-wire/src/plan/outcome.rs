@@ -397,8 +397,9 @@ pub enum PlanFault {
     /// An operation carries a link cascade where none may stand: on an
     /// operation of an authored plan, since planning generates a cascade
     /// from what the vault's links hold, or on a kind that does not cascade —
-    /// anything but a document move, a document removal and a wikilink
-    /// rewrite. Leave the cascade out and preview the operations again.
+    /// anything but a document move, a document removal rewriting the links
+    /// naming its document, and a wikilink rewrite. Leave the cascade out and
+    /// preview the operations again.
     #[non_exhaustive]
     MisplacedCascade {
         /// The positions of the operations carrying a cascade they may not.
