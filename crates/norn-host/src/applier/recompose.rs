@@ -34,7 +34,7 @@ use norn_wire::{
 };
 
 use super::observe::{TargetState, identity};
-use crate::planner::compose::{Composition, compose, content_hash, edits_in_place, touches};
+use crate::planner::compose::{Composition, compose, content_hash, edits_in_place, touched};
 use crate::planner::edit;
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
@@ -99,7 +99,7 @@ pub(super) fn recompose<V: VaultView>(
             .zip(&allowed)
             .filter(|(recorded, allowed)| recorded != allowed)
             .flat_map(|(&recorded, &allowed)| [recorded, allowed])
-            .flat_map(|position| touches(&plan.operations[position].kind).cloned());
+            .flat_map(|position| touched(&plan.operations[position]).cloned());
         return Ok(Recomposed::Invalid(disagreement(misplaced)));
     }
     if let Some(cycle) = lineage.content_cycle() {
@@ -118,8 +118,7 @@ pub(super) fn recompose<V: VaultView>(
             && lineage.edited(unresolvable.position).is_some_and(unseen);
         if !stood_in {
             inactive = true;
-            disagreeing.extend(touches(&operation.kind).cloned());
-            disagreeing.extend(operation.cascade.iter().map(|rewrite| rewrite.path.clone()));
+            disagreeing.extend(touched(operation).cloned());
         }
     }
     disagreeing.extend(transitions_differ(

@@ -14,7 +14,7 @@ use super::observe::{TargetState, identity, observe, units};
 use super::outcome::{ApplyOutcome, Refused};
 use super::stage::{Links, check, drifted_checks};
 use crate::derivation::Declared;
-use crate::planner::compose::touches;
+use crate::planner::compose::touched;
 use crate::planner::resolve::{PlanningFailure, resolve};
 use crate::planner::view::{TreeView, VaultView};
 
@@ -246,7 +246,7 @@ fn fates(
         .operations
         .iter()
         .map(|operation| {
-            touches(&operation.kind)
+            touched(operation)
                 .filter_map(|path| identity(normalizer, path.as_str()))
                 .collect()
         })

@@ -11,7 +11,7 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::compose::{Composition, compose, content_hash, touches};
+use super::compose::{Composition, compose, content_hash, touched};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
@@ -399,7 +399,7 @@ fn leave_out_what_falls_with<V: VaultView>(
     let mut touching: BTreeMap<_, Vec<usize>> = BTreeMap::new();
     let mut requiring: BTreeMap<&OperationId, Vec<usize>> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
-        for path in touches(&operation.kind) {
+        for path in touched(operation) {
             touching.entry(identity(path)).or_default().push(position);
         }
         for required in &operation.requires {
@@ -420,7 +420,7 @@ fn leave_out_what_falls_with<V: VaultView>(
                     .expect("a requirement names an identifier");
                 (requirer, UnresolvedReason::requires_unresolved(id))
             });
-        let by_file = touches(&operation.kind).flat_map(|path| {
+        let by_file = touched(operation).flat_map(|path| {
             let sharers = match identity(path) {
                 // A name with no identity is no file anybody else touches.
                 None => None,
