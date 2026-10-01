@@ -62,8 +62,9 @@ use norn_store::{
 };
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, EditParams, ErrorDetail,
-    ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity,
-    SetParams, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate,
+    RewriteWikilinkParams, RootIdentity, SetParams, TrustState, UntrustedReason, VaultAddress,
+    VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -609,6 +610,26 @@ where
     /// that document; with `allow_broken_links` it lands, the forecast
     /// advising on each link it leaves broken.
     pub fn delete(&self, params: DeleteParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `rewrite_wikilink`: every wikilink naming what `params`
+    /// names `old`, compiled to one operation retargeting them to `new` and
+    /// previewed or applied through [`Host::apply`].
+    ///
+    /// **The rewrite carries its link cascade.** Where `old` names one
+    /// document before the plan, every wikilink resolving to it, whatever
+    /// its spelling, is respelled in its own form to name `new`'s document;
+    /// where it names none, every broken wikilink filed under `old` in any
+    /// case is. An ambiguous wikilink is left as written, the forecast saying
+    /// so, and a Markdown link is no wikilink. An `old` naming several
+    /// documents, a `new` naming none or several, and a rewrite retargeting
+    /// nothing are refused, the operation unresolved saying why.
+    pub fn rewrite_wikilink(
+        &self,
+        params: RewriteWikilinkParams,
+    ) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
         self.apply_operations(mode, params.plan())
     }
