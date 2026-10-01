@@ -35,9 +35,11 @@
 //!
 //! **A moved document's own relative links name what they named.** Each
 //! relative Markdown link a moved document holds is read from where the
-//! document stood, and respelled from where it lands toward the same file —
-//! or toward where the plan carries that file — whether it names a document
-//! or an attachment; an anchor-only link names its holder wherever it goes.
+//! document stood, and where its spelling no longer reaches the same file —
+//! or where the plan carries that file — from where the document lands, it is
+//! respelled from there toward it, whether it names a document or an
+//! attachment; a spelling still reaching it is kept as written, and an
+//! anchor-only link names its holder wherever it goes.
 //!
 //! **A cascade travels on the move it serves.** Each rewrite is one
 //! `rewrite_link` per holder, syntax and address, named at the holder's
@@ -208,10 +210,10 @@ impl Cascade<'_> {
     }
 
     /// The respellings of every relative Markdown link a moved document
-    /// holds, keyed as the change set keys the link, each on the move that
-    /// lands its holder: read from where the document stood, spelled from
-    /// where it lands toward the file it named, or where the plan carries
-    /// that file.
+    /// holds whose spelling no longer reaches the file it named — or where
+    /// the plan carries that file — from where the document lands, keyed as
+    /// the change set keys the link, each on the move that lands its holder:
+    /// read from where the document stood, spelled from where it lands.
     fn own_relative_links(&self) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
         let mut rewrites = BTreeMap::new();
         for (file, drawn) in self.lineage.drawing() {
@@ -252,13 +254,15 @@ impl Cascade<'_> {
                     .carried(named)
                     .and_then(|(to, _)| self.spelling(&to).map(|at| at.as_str().to_string()))
                     .unwrap_or_else(|| named.clone());
+                // A spelling that still reaches the file from where the
+                // document lands is kept, however short another would be.
+                if norn_store::named_paths(&link, &holder) == [named.as_str()] {
+                    continue;
+                }
                 let Some(respelled) = norn_store::relative_spelling(&holder, &named, &link.target)
                 else {
                     continue;
                 };
-                if respelled == link.target {
-                    continue;
-                }
                 let rewrite = LinkRewrite::new(
                     landed.clone(),
                     LinkFamily::Markdown,

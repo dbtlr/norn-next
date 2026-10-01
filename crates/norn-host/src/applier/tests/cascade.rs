@@ -651,3 +651,15 @@ fn a_link_with_no_spelling_in_its_own_extension_style_is_unrepresentable() {
     applied(fixture.apply(resolution.plan));
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[b/note one]]\n"));
 }
+
+/// **A moved document's relative link still reaching its file is left as
+/// written**: from `b/`, `../b/n.md` names `b/n.md` as it did from `x/`, so
+/// moving the document into `b/` rewrites nothing, though `n.md` would be
+/// shorter.
+#[test]
+fn an_own_relative_link_still_reaching_its_file_is_left_as_written() {
+    let mut fixture = Fixture::new(&[("x/a.md", "[n](../b/n.md)\n"), ("b/n.md", "N\n")]);
+    let cascades = fixture.moved(vec![moving("x/a.md", "b/a.md")]);
+    assert_eq!(cascades, [Vec::<LinkRewrite>::new()]);
+    assert_eq!(fixture.read("b/a.md").as_deref(), Some("[n](../b/n.md)\n"));
+}
