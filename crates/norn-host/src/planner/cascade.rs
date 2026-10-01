@@ -106,8 +106,8 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> = cascade.own_relative_links();
 
     // Every spelling each breaking link could take, probed from its holder
-    // in one judgment.
-    // A link written twice in one holder is one key, asked about once.
+    // in one judgment; a link written twice in one holder is one key, asked
+    // about once.
     let mut asked: Vec<(usize, Vec<String>)> = Vec::new();
     let mut probes: Vec<ProbedLink> = Vec::new();
     let mut seen: BTreeSet<EntryKey> = BTreeSet::new();
