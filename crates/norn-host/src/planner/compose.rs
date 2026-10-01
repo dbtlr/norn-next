@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
-use norn_wire::{Backlinks, ContentHash, DocumentPath, FileState, Operation, OperationKind};
+use norn_text::RewriteSkip;
+use norn_wire::{
+    Backlinks, ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation,
+    OperationKind,
+};
 
 use super::edit;
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
@@ -21,6 +25,23 @@ pub(crate) struct Composition {
     pub(crate) read_at: BTreeMap<NormalizedPath, DocumentPath>,
     /// Each operation that did not resolve against the state it met.
     pub(crate) unresolvable: Vec<Unresolvable>,
+    /// Each link a cascade's rewrite matched and left as written, in the
+    /// order the cascades composed.
+    pub(crate) skipped: Vec<Skipped>,
+}
+
+/// A link a cascade's rewrite matched and the text layer left as written.
+///
+/// **Keyed as the change set keys it**: the holder at the spelling the plan
+/// writes it, the syntax, and the address the link is still written with —
+/// the rewrite's `from`. The link keeps its entry in the plan's resolution
+/// change set, and the forecast says why it stayed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Skipped {
+    pub(crate) holder: DocumentPath,
+    pub(crate) syntax: LinkFamily,
+    pub(crate) address: String,
+    pub(crate) reason: RewriteSkip,
 }
 
 impl Composition {
@@ -50,6 +71,18 @@ pub(crate) struct Unresolvable {
 }
 
 /// Compose `operations`, taken in `order`, over what `view` holds.
+///
+/// **A cascade composes after every operation.** An operation and its link
+/// cascade are one operation, but each of the cascade's rewrites is an edit
+/// in place of a holder named at the spelling it holds after the plan, so
+/// the rewrites of every operation that acted compose once all operations
+/// have, in the order the operations do: a holder another operation edits
+/// is rewritten on its final bytes, and a link a moved document holds is
+/// rewritten at its destination. Planning read each link a cascade rewrites
+/// from exactly those bytes, so generating a cascade and composing it are
+/// one function of the same state. A rewrite never fails ([`edit::rewritten`]);
+/// a cascade naming a holder that holds no document leaves its operation
+/// unresolvable whole, since planning names only holders that stand.
 pub(crate) fn compose<V: VaultView>(
     operations: &[Operation],
     order: &[usize],
@@ -58,28 +91,27 @@ pub(crate) fn compose<V: VaultView>(
     let mut vault = Simulated::over(view);
     let mut unresolvable = Vec::new();
     for &position in order {
-        // NORN-297: an operation and its link cascade are one operation, and
-        // the cascade's rewrites are not composed yet, so an operation
-        // carrying one is left unresolved whole rather than composed without
-        // the rewrites it says it makes.
-        if !operations[position].cascade.is_empty() {
-            unresolvable.push(Unresolvable {
-                position,
-                detail: format!(
-                    "a `{}` operation carrying a link cascade is not planned yet: link cascades are not planned yet",
-                    operations[position].kind.name()
-                ),
-            });
-            continue;
-        }
         if let Err(detail) = vault.apply(&operations[position].kind)? {
             unresolvable.push(Unresolvable { position, detail });
+        }
+    }
+    let failed: std::collections::BTreeSet<usize> = unresolvable
+        .iter()
+        .map(|unresolvable: &Unresolvable| unresolvable.position)
+        .collect();
+    for &position in order.iter().filter(|position| !failed.contains(position)) {
+        for rewrite in &operations[position].cascade {
+            if let Err(detail) = vault.rewrite(rewrite)? {
+                unresolvable.push(Unresolvable { position, detail });
+                break;
+            }
         }
     }
     Ok(Composition {
         targets: vault.targets,
         read_at: vault.read_at,
         unresolvable,
+        skipped: vault.skipped,
     })
 }
 
@@ -113,6 +145,8 @@ struct Simulated<'view, V> {
     /// folder: a second spelling is then refused where it could have stood,
     /// which costs the author a re-plan and never a wrong transition.
     folder_spelled: BTreeMap<NormalizedPath, PathBuf>,
+    /// Each link a cascade's rewrite left as written, so far.
+    skipped: Vec<Skipped>,
 }
 
 /// Why one operation cannot act on the state it met, in words.
@@ -135,6 +169,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             spelled: BTreeMap::new(),
             standing_below: BTreeMap::new(),
             folder_spelled: BTreeMap::new(),
+            skipped: Vec::new(),
         }
     }
 
@@ -431,6 +466,34 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         Ok(Ok(()))
     }
 
+    /// Respell, in the document `rewrite` names as it stands so far, every
+    /// link of its syntax whose address is its `from`, recording each
+    /// matching link the text layer leaves as written; or say why no
+    /// document stands there to rewrite.
+    fn rewrite(&mut self, rewrite: &LinkRewrite) -> Result<Result<(), Unresolved>, V::Error> {
+        let spelling = match self.standing(&rewrite.path)? {
+            Ok(spelling) => spelling,
+            Err(detail) => {
+                return Ok(Err(format!(
+                    "its link cascade rewrites `{}`, where it cannot: {detail}",
+                    rewrite.path
+                )));
+            }
+        };
+        let file = self.target(&spelling);
+        let bytes = file.after.as_ref().expect("a document stands");
+        let (rewritten, skipped) =
+            edit::rewritten(bytes, rewrite.syntax, &rewrite.from, &rewrite.to);
+        file.after = Some(rewritten);
+        self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
+            holder: spelling.clone(),
+            syntax: rewrite.syntax,
+            address: rewrite.from.clone(),
+            reason: skip.reason,
+        }));
+        Ok(Ok(()))
+    }
+
     fn target(&mut self, spelling: &DocumentPath) -> &mut ComposedTarget {
         self.targets
             .get_mut(spelling)
@@ -481,6 +544,14 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         OperationKind::MoveFolder { .. } | OperationKind::RewriteWikilink { .. } => (None, None),
     };
     first.into_iter().chain(second)
+}
+
+/// The files `operation` touches: those its kind names ([`touches`]), then
+/// each holder its link cascade rewrites. An operation and its cascade are
+/// one operation, so every file either names stands or falls with it, and
+/// every such file carries a transition.
+pub(crate) fn touched(operation: &Operation) -> impl Iterator<Item = &DocumentPath> {
+    touches(&operation.kind).chain(operation.cascade.iter().map(|rewrite| &rewrite.path))
 }
 
 /// `bytes` with the one occurrence of `old` replaced by `new`.
@@ -561,6 +632,100 @@ mod tests {
             after_text(&composition, "notes/new.md").as_deref(),
             Some("hello")
         );
+    }
+
+    fn rewrite(at: &str, from: &str, to: &str) -> norn_wire::LinkRewrite {
+        norn_wire::LinkRewrite::new(path(at), norn_wire::LinkFamily::Wikilink, from, to)
+    }
+
+    /// **A cascade composes after every operation of the plan**, each
+    /// rewrite on its holder's final bytes: an edit of a holder another
+    /// operation also writes composes first, and a link the moved document
+    /// holds is respelled at its destination.
+    #[test]
+    fn a_cascade_respells_its_holders_after_every_operation() {
+        let vault = MemoryVault::with(&[("a.md", "self [[a]]\n"), ("h.md", "[[a]] and old\n")]);
+        let operations = [
+            Operation::new(OperationKind::move_document(path("a.md"), path("x/b.md")))
+                .with_cascade(vec![rewrite("h.md", "a", "b"), rewrite("x/b.md", "a", "b")]),
+            Operation::new(OperationKind::str_replace(path("h.md"), "old", "new")),
+        ];
+        let composition =
+            compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+        assert!(composition.unresolvable.is_empty());
+        assert!(composition.skipped.is_empty());
+        assert_eq!(
+            after_text(&composition, "h.md").as_deref(),
+            Some("[[b]] and new\n")
+        );
+        assert_eq!(
+            after_text(&composition, "x/b.md").as_deref(),
+            Some("self [[b]]\n")
+        );
+        assert_eq!(after_text(&composition, "a.md"), None);
+    }
+
+    /// **A rewrite matching nothing composes its holder unchanged** and is no
+    /// failure: the holder is a target whose after-state is its
+    /// before-state.
+    #[test]
+    fn a_rewrite_matching_nothing_composes_its_holder_unchanged() {
+        let vault = MemoryVault::with(&[("a.md", "A\n"), ("h.md", "[[other]]\n")]);
+        let operations = [
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite("h.md", "a", "b")]),
+        ];
+        let composition =
+            compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+        assert!(composition.unresolvable.is_empty());
+        let holder = &composition.targets[&path("h.md")];
+        assert_eq!(
+            holder.before,
+            FileState::present(content_hash(b"[[other]]\n"))
+        );
+        assert_eq!(
+            after_text(&composition, "h.md").as_deref(),
+            Some("[[other]]\n")
+        );
+    }
+
+    /// **A link the rewriter leaves as written is reported with its reason**,
+    /// keyed by the holder at the spelling the plan writes it, the syntax and
+    /// the address it is still written with; its holder composes unchanged.
+    #[test]
+    fn a_skipped_link_reports_its_reason() {
+        let vault = MemoryVault::with(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+        let operations = [
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite("h.md", "a", "b]]c")]),
+        ];
+        let composition =
+            compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+        assert!(composition.unresolvable.is_empty());
+        assert_eq!(after_text(&composition, "h.md").as_deref(), Some("[[a]]\n"));
+        assert_eq!(
+            composition.skipped,
+            vec![Skipped {
+                holder: path("h.md"),
+                syntax: norn_wire::LinkFamily::Wikilink,
+                address: "a".to_string(),
+                reason: norn_text::RewriteSkip::Unrepresentable,
+            }]
+        );
+    }
+
+    /// **A cascade whose holder holds no document does not act**, and its
+    /// operation is unresolvable whole: planning names only holders that
+    /// stand, so such a cascade was not planned.
+    #[test]
+    fn a_cascade_naming_no_document_leaves_its_operation_unresolvable() {
+        let vault = MemoryVault::with(&[("a.md", "A\n")]);
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite("gone.md", "a", "b")]),
+        );
+        assert!(detail.contains("gone.md"), "{detail}");
     }
 
     #[test]

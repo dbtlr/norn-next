@@ -29,8 +29,10 @@
 
 use std::sync::Arc;
 
-use norn_text::{Document, EditError, Mapping, SectionError, Value};
-use norn_wire::{AuthoredValue, DocumentPath, ExpectedField, OperationKind, WriteTarget};
+use norn_text::{Document, EditError, Mapping, SectionError, SkippedLink, Value};
+use norn_wire::{
+    AuthoredValue, DocumentPath, ExpectedField, LinkFamily, OperationKind, WriteTarget,
+};
 
 use super::compose::Unresolved;
 
@@ -163,6 +165,38 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
     result
         .map(|edited| Arc::from(edited.into_bytes()))
         .map_err(|error| refusal(&error))
+}
+
+/// `bytes`, every link of `syntax` whose address is `from` respelled `to`
+/// through `norn-text`'s link rewriter, and each matching link the rewriter
+/// left as written, with why — one unit of a link cascade.
+///
+/// **A rewrite never fails.** A rewrite matching no link composes its
+/// document unchanged: the applier recomposes a cascade over the stand-in for
+/// a holder already holding its change, where nothing matches, and a link a
+/// foreign edit took away since planning is the change set's to notice, not
+/// composition's. Bytes that are not UTF-8 hold no link the index derives, so
+/// they are returned as they are, and so are they for a syntax the text layer
+/// reads no link of.
+pub(crate) fn rewritten(
+    bytes: &Arc<[u8]>,
+    syntax: LinkFamily,
+    from: &str,
+    to: &str,
+) -> (Arc<[u8]>, Vec<SkippedLink>) {
+    let family = match syntax {
+        LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
+        LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
+        _ => return (bytes.clone(), Vec::new()),
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return (bytes.clone(), Vec::new());
+    };
+    let rewritten = Document::parse(text).rewrite_links(family, from, to);
+    if rewritten.rewritten == 0 {
+        return (bytes.clone(), rewritten.skipped);
+    }
+    (Arc::from(rewritten.text.into_bytes()), rewritten.skipped)
 }
 
 /// An edit refusal in the words an unresolved operation carries.
