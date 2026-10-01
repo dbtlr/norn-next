@@ -33,6 +33,7 @@
 
 use std::fmt;
 
+use crate::frontmatter::extract::FRONTMATTER_MAX_BYTES;
 use crate::frontmatter::fields::{ValueStyle, reparse_admitted};
 use crate::line_ending::LineEnding;
 use crate::span::trailing_break;
@@ -76,6 +77,9 @@ pub enum RenderError {
         text: String,
         context: ScalarContext,
     },
+    /// A whole document's frontmatter block would be `bytes` long, past the
+    /// `bound` the reader admits, so the document would read as having none.
+    PastBound { bytes: usize, bound: usize },
 }
 
 impl fmt::Display for RenderError {
@@ -84,6 +88,10 @@ impl fmt::Display for RenderError {
             RenderError::NotRoundTrippable { text, context } => write!(
                 f,
                 "{text:?} cannot be written to read back unchanged as a {context}"
+            ),
+            RenderError::PastBound { bytes, bound } => write!(
+                f,
+                "the frontmatter block would be {bytes} bytes and the bound is {bound}"
             ),
         }
     }
@@ -540,17 +548,26 @@ fn escape_double_quoted(text: &str) -> String {
 /// emits block style, nested ones two spaces deeper per level, and an empty
 /// one emits `key: []` or `key: {}`. Each collection is re-read before it is
 /// returned, and one that does not read back refuses with
-/// [`RenderError::NotRoundTrippable`].
+/// [`RenderError::NotRoundTrippable`]. A block longer than the reader admits
+/// ([`FRONTMATTER_MAX_BYTES`]) refuses with [`RenderError::PastBound`], so a
+/// document is never written with frontmatter that would read as absent.
 pub fn render_document(
     fields: &Mapping,
     body: &str,
     line_ending: LineEnding,
 ) -> Result<String, RenderError> {
     let terminator = line_ending.as_str();
-    let mut out = format!("---{terminator}");
+    let mut block = String::new();
     for (field, value) in fields.iter() {
-        out.push_str(&render_entry(field, value, line_ending)?);
+        block.push_str(&render_entry(field, value, line_ending)?);
     }
+    if block.len() > FRONTMATTER_MAX_BYTES {
+        return Err(RenderError::PastBound {
+            bytes: block.len(),
+            bound: FRONTMATTER_MAX_BYTES,
+        });
+    }
+    let mut out = format!("---{terminator}{block}");
     out.push_str("---");
     out.push_str(terminator);
     if !body.is_empty() {

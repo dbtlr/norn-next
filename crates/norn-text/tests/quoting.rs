@@ -806,23 +806,30 @@ fn a_block_written_from_no_fields_reads_back_as_the_empty_mapping() {
     ));
 }
 
-/// The refusal vocabulary is exactly one reason, and it is reachable. A
-/// second that no path constructs is a variant nobody can act on — and a dead
+/// The refusal vocabulary is exactly two reasons, and each is reachable. A
+/// reason that no path constructs is a variant nobody can act on — and a dead
 /// variant is what this crate deleted rather than inherited. The match names
 /// every variant, so a new one does not compile here until a path reaching
 /// it is added to `seen`.
 #[test]
 fn every_render_refusal_is_reachable() {
     let long_key: Mapping = [("k".repeat(2000), Value::Int(1))].into_iter().collect();
-    let seen = [render_document(&long_key, "", LineEnding::Lf)];
+    let past_bound: Mapping = [("k".to_string(), Value::String("x".repeat(17_000)))]
+        .into_iter()
+        .collect();
+    let seen = [
+        render_document(&long_key, "", LineEnding::Lf),
+        render_document(&past_bound, "", LineEnding::Lf),
+    ];
     let reasons: Vec<&'static str> = seen
         .iter()
         .map(|outcome| match outcome {
             Err(RenderError::NotRoundTrippable { .. }) => "not-round-trippable",
+            Err(RenderError::PastBound { .. }) => "past-bound",
             Ok(_) => panic!("expected a refusal"),
         })
         .collect();
-    assert_eq!(reasons, ["not-round-trippable"]);
+    assert_eq!(reasons, ["not-round-trippable", "past-bound"]);
 }
 
 /// A value no span can name is refused by the field layer, before any bytes

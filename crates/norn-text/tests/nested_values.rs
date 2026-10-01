@@ -748,3 +748,34 @@ fn a_value_past_the_bound_is_refused_for_the_bound() {
         refusal(&pushed)
     );
 }
+
+/// **A whole document whose frontmatter would not be readable is not
+/// written.** The reader refuses a block past the bound, so a document
+/// rendered with one would read as having no frontmatter at all; the refusal
+/// names the bound, whether one value or many fields carry it past.
+#[test]
+fn a_rendered_document_refuses_a_block_past_the_bound() {
+    let past_bound = |result: Result<String, norn_text::RenderError>| matches!(result, Err(norn_text::RenderError::PastBound { bound, .. }) if bound == FRONTMATTER_MAX_BYTES);
+    let one_value: Mapping = [(
+        "note".to_string(),
+        Value::String("x".repeat(FRONTMATTER_MAX_BYTES + 1)),
+    )]
+    .into_iter()
+    .collect();
+    assert!(past_bound(render_document(&one_value, "", LineEnding::Lf)));
+
+    let many_fields: Mapping = (0..FRONTMATTER_MAX_BYTES / 8)
+        .map(|n| (format!("f{n}"), Value::Int(1)))
+        .collect();
+    assert!(past_bound(render_document(
+        &many_fields,
+        "",
+        LineEnding::Lf
+    )));
+
+    let small: Mapping = [("a".to_string(), Value::Int(1))].into_iter().collect();
+    assert_eq!(
+        render_document(&small, "", LineEnding::Lf).as_deref(),
+        Ok("---\na: 1\n---\n")
+    );
+}
