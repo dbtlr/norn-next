@@ -67,8 +67,8 @@ use crate::applier;
 use crate::derivation::Declared;
 use crate::evidence::LinkJudgmentCost;
 use crate::lifecycle::{
-    ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, ReaderUnavailable,
-    SnapshotSource, not_run, watcher_lost,
+    ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadRefusal, ReadSource,
+    ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
 };
 use crate::planner::expand::{
     ExpandingFailure, Matched, MatchedDocument, Matcher, listed, resolve_expanding,
@@ -187,11 +187,12 @@ pub(crate) fn resolve_on(
 /// time a `where` target or a link resolution asks: the job holds the claim
 /// and its store is the one writer, so that snapshot reads exactly the state
 /// the apply's changeset builds on. One handle serves the job's matching, its
-/// planning's change set and the applier's check of it
-/// ([`PlanSnapshot::established`]), and the applier gives it back
-/// ([`LinkIndex::release`]) before its changeset commits. A plan with no
+/// planning's change set, the applier's check of it and the fresh plan a
+/// refusal resolves, whichever of them asks first, and the applier gives it
+/// back ([`LinkIndex::release`]) before its changeset commits. A plan with no
 /// `where` target that changes no document's presence and writes no link
-/// mints none. Either way the match is the find a caller would have been
+/// mints none unless the applier refuses it and the plan resolved afresh does
+/// one of those. Either way the match is the find a caller would have been
 /// answered at the same instant, paged to its end.
 ///
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
@@ -210,10 +211,10 @@ pub(crate) struct PlanSnapshot<'a> {
 enum ReadOn<'a> {
     /// The snapshot a read hold took.
     Held(&'a Snapshot),
-    /// A snapshot of the job's own, established by `mint` when first asked
-    /// where there is one to ask, until it is released.
+    /// A snapshot of the job's own, established by `mint` when first asked,
+    /// until it is released.
     Job {
-        mint: Option<&'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>>,
+        mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         established: RefCell<Option<Snapshot>>,
     },
 }
@@ -244,28 +245,8 @@ impl<'a> PlanSnapshot<'a> {
             vault,
             declared,
             on: ReadOn::Job {
-                mint: Some(mint),
+                mint,
                 established: RefCell::new(None),
-            },
-            judged: Cell::new(LinkJudgmentCost::NONE),
-        }
-    }
-
-    /// Reading `snapshot`, a job's own, for `vault`, which pins `declared`:
-    /// the snapshot planning established, handed on to the applier, which
-    /// mints nothing. Asked with none, it answers as a read seam that could
-    /// not be minted.
-    pub(crate) fn established(
-        vault: VaultAddress,
-        snapshot: Option<Snapshot>,
-        declared: &'a ContentModel,
-    ) -> Self {
-        PlanSnapshot {
-            vault,
-            declared,
-            on: ReadOn::Job {
-                mint: None,
-                established: RefCell::new(snapshot),
             },
             judged: Cell::new(LinkJudgmentCost::NONE),
         }
@@ -277,30 +258,16 @@ impl<'a> PlanSnapshot<'a> {
         self.judged.get()
     }
 
-    /// The job's snapshot, where one was established and not released.
-    pub(crate) fn into_established(self) -> Option<Snapshot> {
-        match self.on {
-            ReadOn::Held(_) => None,
-            ReadOn::Job { established, .. } => established.into_inner(),
-        }
-    }
-
-    /// `read` over the snapshot. **A handle that cannot be minted or
-    /// established refuses as a read over an unavailable read seam does**,
-    /// `host/reader-unavailable`: a failed mint changes no trust label.
+    /// `read` over the snapshot. **A handle that cannot be minted refuses as
+    /// a read over an unavailable read seam does**, `host/reader-unavailable`:
+    /// a failed mint changes no trust label.
     fn reading<T>(&self, read: impl FnOnce(&Snapshot) -> T) -> Result<T, PageRefused> {
         match &self.on {
             ReadOn::Held(snapshot) => Ok(read(snapshot)),
             ReadOn::Job { mint, established } => {
                 let mut established = established.borrow_mut();
                 if established.is_none() {
-                    let minted = match mint {
-                        Some(mint) => mint(),
-                        None => Err(ReaderUnavailable::new(
-                            "the apply's snapshot was given back before this read asked for it",
-                        )),
-                    };
-                    *established = Some(minted.map_err(|unavailable| {
+                    *established = Some(mint().map_err(|unavailable| {
                         PageRefused::Answered(reader_unavailable(unavailable.detail()))
                     })?);
                 }
@@ -315,28 +282,25 @@ impl<'a> PlanSnapshot<'a> {
 }
 
 /// A snapshot for one apply job's reads of the store — its `where` matching,
-/// its planning's resolution change set and the applier's check of it —
-/// established through `source`'s own read seam, the mint every entry's read
-/// handle comes from and the establishment every read runs, with the
-/// statements the mint ran beside it, whichever way it ended.
+/// its planning's resolution change set, the applier's check of it and the
+/// fresh plan a refusal resolves — established on `minted`, a handle the
+/// coverage's own read seam minted, the mint every entry's read handle comes
+/// from, by the establishment every read runs, with the statements the mint
+/// ran beside it, whichever way it ended.
 ///
 /// The handle is the job's alone, so its connection is idle when taken; the
 /// snapshot holds it, and both close when the snapshot drops.
-pub(crate) fn established_for_the_job<S>(
-    source: &S,
-) -> (
-    Result<<S::Reader as ReadSource>::Snapshot, ReaderUnavailable>,
-    u64,
-)
+pub(crate) fn established_for_the_job<R>(
+    minted: MintedReader<R>,
+) -> (Result<R::Snapshot, ReaderUnavailable>, u64)
 where
-    S: SnapshotSource,
+    R: ReadSource,
 {
-    let minted = source.open_reader();
     let established = minted.reader.and_then(|reader| {
         let turn = Arc::new(reader)
             .try_take()
             .expect("a read handle minted for this apply alone is idle");
-        S::Reader::establish(turn).map(|established| established.snapshot)
+        R::establish(turn).map(|established| established.snapshot)
     });
     (established, minted.statements)
 }

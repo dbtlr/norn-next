@@ -88,7 +88,7 @@ use norn_store::{LinkChange, PathOverlay, ProbedLink};
 use norn_text::RewriteSkip;
 use norn_wire::{
     DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
-    Operation, OperationKind, PlanCondition, Resolves, Transition,
+    Operation, OperationKind, PlanCondition, Resolves,
 };
 
 use super::compose::{Composition, Kept, Skipped, content_hash, holding};
@@ -119,23 +119,6 @@ pub(crate) trait LinkIndex {
     fn release(&self) {}
 }
 
-/// Whether the resolution change set of a plan with `transitions` and
-/// `operations` reads the link index at all, which is whether an apply job
-/// needs a read handle for it: [`reads_links_over`] whether a document
-/// stands at each transition's file on its two sides
-/// ([`FileState::is_document`]).
-pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) -> bool {
-    reads_links_over(
-        transitions.iter().map(|transition| {
-            (
-                transition.before.is_document(),
-                transition.after.is_document(),
-            )
-        }),
-        operations,
-    )
-}
-
 /// **The one fast-path predicate**: whether a plan whose targets each stand
 /// as `presence` — whether a document stands there before the plan, and
 /// after it — and whose operations are `operations` reads the link index:
@@ -144,8 +127,8 @@ pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) 
 /// file whose bytes start or stop decoding holds a document on one side only,
 /// though a file stands there on both. A
 /// plan of which neither holds records no entry and reads nothing, so
-/// [`change_set`] answers it without asking and an apply job mints no handle
-/// for it ([`reads_links`]).
+/// [`change_set`] answers it without asking, and an apply job whose index is
+/// asked by nothing else mints no handle for it.
 fn reads_links_over<'o>(
     presence: impl IntoIterator<Item = (bool, bool)>,
     operations: impl IntoIterator<Item = &'o Operation>,
@@ -1192,14 +1175,7 @@ mod tests {
         let quarantined = FileState::quarantined(content_hash(UNDECODABLE));
         let document = FileState::present(content_hash(b"text\n"));
         let reads = |before: &FileState, after: &FileState| {
-            super::reads_links(
-                &[norn_wire::Transition::new(
-                    path("q.md"),
-                    before.clone(),
-                    after.clone(),
-                )],
-                &[],
-            )
+            super::reads_links_over([(before.is_document(), after.is_document())], &[])
         };
         assert!(reads(&quarantined, &document));
         assert!(reads(&document, &quarantined));
