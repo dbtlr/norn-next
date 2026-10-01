@@ -421,7 +421,8 @@ pub(super) fn identity(normalizer: &PathNormalizer, path: &str) -> Option<Normal
     normalizer.normalize(Path::new(path)).ok()
 }
 
-/// Whether a transition puts a document where none stood.
+/// Whether a transition puts a file where none stood, whether or not its
+/// bytes decode as a document.
 pub(super) fn is_create(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),
@@ -429,7 +430,8 @@ pub(super) fn is_create(transition: &Transition) -> bool {
     )
 }
 
-/// Whether a transition takes away a document that stood.
+/// Whether a transition takes away a file that stood, whether or not its
+/// bytes decoded as a document.
 pub(super) fn is_removal(transition: &Transition) -> bool {
     matches!(
         (&transition.before, &transition.after),

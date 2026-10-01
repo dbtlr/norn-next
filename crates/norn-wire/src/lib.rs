@@ -96,8 +96,8 @@
 //! [`AuthorCondition`]s its author observed — a content hash, or the
 //! [`ExpectedField`] a frontmatter field held — or a [`ResolvedPlan`]: the
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
-//! between two [`FileState`]s, each absent or a [`ContentHash`] saying
-//! whether its bytes decode as a document, the
+//! between two [`FileState`]s, each absent or a [`ContentHash`] with a flag
+//! saying whether its bytes decode as a document, the
 //! [`PlanCondition`]s its planning read — a file's content, or what one link,
 //! named by its [`LinkKey`], [`Resolves`] to before the plan and after it —
 //! and the [`Provenance`] a repair plan cites, with the [`SkippedFinding`]s
