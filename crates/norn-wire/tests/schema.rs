@@ -2933,6 +2933,26 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         Some(1),
         "a link rewrite's `from` admits the empty address its reader refuses"
     );
+    // A link rewrite's `to` admits what its reader refuses: an address under
+    // another protocol than `from`'s. Which protocol `to` may carry is decided
+    // by `from`, a rule the schema states in words rather than relating the
+    // two fields, so the over-admission is pinned here and changes only on
+    // purpose.
+    let to = &rewrite["properties"]["to"];
+    assert!(
+        to.get("pattern").is_none(),
+        "a link rewrite's `to` advertises a pattern: {to}"
+    );
+    assert!(
+        to["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("never changes a link's protocol")),
+        "a link rewrite's `to` does not state in words what decides its protocol: {to}"
+    );
+    assert!(
+        rewrite.get("if").is_none() && rewrite.get("oneOf").is_none(),
+        "a link rewrite's schema now relates `from` and `to`; unpin the over-admission: {rewrite}"
+    );
     let targeted = [
         ("set_frontmatter", vec!["field", "value"]),
         ("remove_frontmatter", vec!["field"]),
