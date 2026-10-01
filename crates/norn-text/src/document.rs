@@ -15,8 +15,8 @@ use crate::frontmatter::list::{
     BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
 };
 use crate::frontmatter::render::{
-    RenderError, ScalarStyle, render_block_item, render_flow_sequence, render_key,
-    render_scalar_entry, render_scalar_in_span, render_sequence_entry,
+    RenderError, Scalar, ScalarStyle, is_collection, is_nested, render_block_item, render_entry,
+    render_flow_sequence, render_key, render_scalar_in_span,
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
@@ -85,9 +85,11 @@ pub enum EditError {
         field: String,
         kind: &'static str,
     },
-    /// A list edit would have to rewrite the field whole, and the field's
-    /// entry carries a comment that rewrite would drop. Nothing is written: a
-    /// comment is the author's, and no edit loses one silently.
+    /// An edit would have to rewrite the field whole — a list edit that cannot
+    /// splice an item, or a set changing what the field holds or writing or
+    /// replacing a nested value — and the field's entry carries a comment that
+    /// rewrite would drop. Nothing is written: a comment is the author's, and no edit
+    /// loses one silently.
     CommentWouldBeLost {
         field: String,
     },
@@ -159,7 +161,7 @@ impl fmt::Display for EditError {
             }
             EditError::CommentWouldBeLost { field } => write!(
                 f,
-                "the list {field:?} carries a comment this edit would drop, so it was refused"
+                "the field {field:?} carries a comment this edit would drop, so it was refused"
             ),
             EditError::ListValueAbsent { field, value } => {
                 write!(f, "the list {field:?} holds no element equal to {value:?}")
@@ -632,6 +634,18 @@ impl<'a> Document<'a> {
     /// after any byte-order mark. The result is re-read before it is returned,
     /// and an edit that does not read back as intended refuses.
     ///
+    /// `value` may be any shape the model holds, over whatever the field
+    /// holds. A scalar over a scalar replaces the value's bytes, and a flat
+    /// sequence over a flat sequence rewrites the list where it stands in the
+    /// author's flow or block spelling. Every other set — one changing what
+    /// the field holds, or writing or replacing a nested value — replaces the
+    /// field's whole entry, a collection written in block style, and refuses
+    /// with [`EditError::CommentWouldBeLost`] where the entry carries a
+    /// comment it would drop. A field already holding `value` — equal under
+    /// the value model's equality, at every depth — is left as it is written,
+    /// and the document comes back unchanged, even from a block whose entries
+    /// no other set could locate.
+    ///
     /// Growing the block past [`FRONTMATTER_MAX_BYTES`] refuses too, and with
     /// its own error: past the bound no read turns the block back into fields,
     /// which is the bound speaking rather than the splice going wrong.
@@ -1012,14 +1026,19 @@ impl<'a> Document<'a> {
     /// scalar or a map refuses with [`EditError::FieldNotAList`]: turning it
     /// into a list is a set.
     ///
+    /// `value` may be any shape the model holds; a collection is written in
+    /// block style, as [`Document::set_field`] writes one.
+    ///
     /// **Every byte the push does not change stays.** A block list whose
-    /// items each sit on a line of their own gains one item line below its
-    /// last item, at that item's indent and with its line terminator;
-    /// comments, the other items' quoting and the key's spelling are not
-    /// touched. Every other list — a flow list, a block list with a multi-line
-    /// item — and an absent or null field, which becomes a one-element list,
-    /// are written whole by [`Document::set_field`], and only where the entry
-    /// carries no comment: a comment the rewrite would drop refuses with
+    /// items each re-read alone as themselves — on one line or several, a map
+    /// or a nested list included — gains one item below the last line of its
+    /// last item, at that item's indent and with its line terminator on every
+    /// line; comments, the other items' quoting and layout and the key's
+    /// spelling are not touched. Every other list — a flow list, a block list
+    /// whose items cannot be proven one by one — and an absent or null field,
+    /// which becomes a one-element list, are written whole by
+    /// [`Document::set_field`], and only where the entry carries no comment: a
+    /// comment the rewrite would drop refuses with
     /// [`EditError::CommentWouldBeLost`] instead. Either way the result is
     /// re-read and proven as a set is.
     pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
@@ -1032,9 +1051,9 @@ impl<'a> Document<'a> {
             return self.rewrite_list(field, items);
         };
         let terminator =
-            trailing_break(&self.source[last.line.clone()]).unwrap_or(self.line_ending.as_str());
-        let line = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
-        let edited = splice(self.source, last.line.end..last.line.end, &line);
+            trailing_break(&self.source[last.lines.clone()]).unwrap_or(self.line_ending.as_str());
+        let item = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
+        let edited = splice(self.source, last.lines.end..last.lines.end, &item);
         refuse_past_bound(&edited)?;
         items.push(value.clone());
         self.verified_list(edited, field, items)
@@ -1044,7 +1063,7 @@ impl<'a> Document<'a> {
     /// the field's entry carries no comment the rewrite would drop.
     fn rewrite_list(&self, field: &str, items: Vec<Value>) -> Result<String, EditError> {
         if let Some(located) = self.field(field)
-            && entry_carries_comment(self.source, located)
+            && self.entry_carries_comment(located)
         {
             return Err(EditError::CommentWouldBeLost {
                 field: field.to_string(),
@@ -1077,11 +1096,12 @@ impl<'a> Document<'a> {
     /// with [`EditError::FieldNotAList`].
     ///
     /// **Every byte the pop does not change stays.** From a block list whose
-    /// items each sit on a line of their own, the lines of the matching items
-    /// are deleted and nothing else; popping its last item writes `[]` on the
-    /// key line, before any comment there, because a key with nothing under
-    /// it reads as null and `[]` reads back as the empty list. A comment
-    /// trailing a matching item on its own line goes with that line: it
+    /// items each re-read alone as themselves, on one line or several, the
+    /// lines of the matching items are deleted and nothing else; popping its
+    /// last item writes `[]` on the key line, before any comment there,
+    /// because a key with nothing under it reads as null and `[]` reads back
+    /// as the empty list. A comment on a matching item's own lines — trailing
+    /// one of them, or between two of them — goes with those lines: it
     /// annotates the item being removed. Comments on every other line stay.
     /// Every other list is written whole by [`Document::set_field`], only
     /// where its entry carries no comment; a comment that rewrite would drop
@@ -1113,7 +1133,7 @@ impl<'a> Document<'a> {
             .iter()
             .zip(&items)
             .filter(|(_, item)| *item == value)
-            .map(|(line, _)| line)
+            .map(|(lines, _)| lines)
             .collect();
         let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
         if kept.is_empty() {
@@ -1122,8 +1142,12 @@ impl<'a> Document<'a> {
             };
             edits.push((point, " []"));
         }
-        edits.extend(popped.iter().map(|line| (line.line.clone(), "")));
-        self.verified_list(splice_all(self.source, &edits), field, kept)
+        edits.extend(popped.iter().map(|item| (item.lines.clone(), "")));
+        // An emptied list is written `[]`, which can outgrow the bare item it
+        // replaces, so a pop is judged against the bound as a push is.
+        let edited = splice_all(self.source, &edits);
+        refuse_past_bound(&edited)?;
+        self.verified_list(edited, field, kept)
     }
 
     /// The items of the list `field` holds — none for a field written with no
@@ -1181,10 +1205,30 @@ impl<'a> Document<'a> {
         }
     }
 
+    /// Whether `located`'s entry carries a comment a whole-entry rewrite would
+    /// drop, on [`entry_carries_comment`]'s reading. A located field always
+    /// sits in a block; were one ever to sit in none, nothing could prove it
+    /// comment-free, so it would carry one.
+    fn entry_carries_comment(&self, located: &Field) -> bool {
+        self.frontmatter_range
+            .clone()
+            .is_none_or(|block| entry_carries_comment(self.source, block, located))
+    }
+
     /// The edited bytes, before they are proven.
     fn spliced_set(&self, field: &str, value: &Value) -> Result<String, EditError> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
+        }
+        // A field already holding `value` already says what the set asks for,
+        // so nothing is written: a re-spelling would be a change of nothing.
+        // Nothing in the way of a rewrite is in the way of no write — not a
+        // comment the rewrite would drop, nor a block whose entries cannot be
+        // located — so this answers before either refuses.
+        if let Some(Value::Map(map)) = &self.frontmatter
+            && map.get(field) == Some(value)
+        {
+            return Ok(self.source.to_string());
         }
         if let Some(cause) = &self.split_refusal {
             return Err(EditError::FrontmatterNotEditable {
@@ -1200,7 +1244,7 @@ impl<'a> Document<'a> {
             return self.splice_existing(located, value);
         }
 
-        let entry = self.render_entry(field, value)?;
+        let entry = render_entry(field, value, self.line_ending)?;
         let terminator = self.line_ending.as_str();
         match &self.frontmatter_range {
             // Append before the closing delimiter. A null block — `---\n---\n`
@@ -1217,63 +1261,68 @@ impl<'a> Document<'a> {
         }
     }
 
-    fn render_entry(&self, field: &str, value: &Value) -> Result<String, EditError> {
-        Ok(match value {
-            Value::Sequence(items) => render_sequence_entry(field, items, self.line_ending)?,
-            Value::Map(_) => {
-                return Err(EditError::Render(RenderError::NonScalarValue {
-                    kind: "map",
-                }));
-            }
-            scalar => render_scalar_entry(field, scalar, self.line_ending)?,
-        })
-    }
-
     fn splice_existing(&self, located: &Field, value: &Value) -> Result<String, EditError> {
-        // A sequence replaces the whole entry, keeping the author's flow or
-        // block spelling. A stubbed field — `tags:` with nothing after it, or
-        // null however it is spelled (`null`, `~`, `Null`) — becomes a block
-        // sequence: a null holds no scalar a sequence would restyle.
-        let stubbed = located.style == ValueStyle::EmptyValue
-            || matches!(&self.frontmatter, Some(Value::Map(map))
-                if map.get(&located.name) == Some(&Value::Null));
-        if let Value::Sequence(items) = value
-            && (located.style.is_sequence() || stubbed)
+        let held = match &self.frontmatter {
+            Some(Value::Map(map)) => map.get(&located.name),
+            _ => None,
+        };
+
+        // A scalar over a scalar replaces the value's bytes, keeping the
+        // author's quoting where the new value permits it. A scalar no span
+        // names — a block scalar, an anchored or tagged one — is not
+        // replaceable in place.
+        if let Some(scalar) = Scalar::of(value)
+            && !held.is_some_and(is_collection)
         {
-            // Replacing a stub's whole entry takes its key line with it, so a
-            // comment there — `tags: # c`, `tags: null # c` — would be dropped
-            // silently. It refuses instead.
-            if stubbed && entry_carries_comment(self.source, located) {
-                return Err(EditError::CommentWouldBeLost {
+            let (Some(range), Some(style)) = (&located.value_range, ScalarStyle::of(located.style))
+            else {
+                return Err(EditError::FieldNotEditable {
                     field: located.name.clone(),
                 });
+            };
+            let mut rendered = render_scalar_in_span(scalar, style)?;
+            if located.style == ValueStyle::EmptyValue {
+                // The span is the point just past the colon, so the separating
+                // space is part of what the splice writes.
+                rendered.insert(0, ' ');
             }
+            return Ok(splice(self.source, range.clone(), &rendered));
+        }
+
+        // A flat sequence over a flat sequence rewrites the list where it
+        // stands, keeping the author's flow or block spelling; a comment
+        // inside the entry goes with it.
+        let flat_list = |value: &Value| matches!(value, Value::Sequence(_)) && !is_nested(value);
+        if let Value::Sequence(items) = value
+            && located.style.is_sequence()
+            && let Some(scalars) = Scalar::all(items)
+            && held.is_some_and(flat_list)
+        {
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(
                     "{}: {}{}",
                     render_key(&located.name)?,
-                    render_flow_sequence(items)?,
+                    render_flow_sequence(&scalars)?,
                     self.line_ending.as_str()
                 )
             } else {
-                render_sequence_entry(&located.name, items, self.line_ending)?
+                render_entry(&located.name, value, self.line_ending)?
             };
             return Ok(splice(self.source, located.line_range.clone(), &entry));
         }
 
-        let (Some(range), Some(style)) = (&located.value_range, ScalarStyle::of(located.style))
-        else {
-            return Err(EditError::FieldNotEditable {
+        // Every other set changes what the field holds — a collection over a
+        // scalar, a stub or another shape of collection, a scalar over a
+        // collection — or writes a nested value, and replaces the whole entry,
+        // the collection in block style. A comment anywhere in the entry, its
+        // key line included, would be dropped silently, so it refuses instead.
+        if self.entry_carries_comment(located) {
+            return Err(EditError::CommentWouldBeLost {
                 field: located.name.clone(),
             });
-        };
-        let mut rendered = render_scalar_in_span(value, style)?;
-        if located.style == ValueStyle::EmptyValue {
-            // The span is the point just past the colon, so the separating
-            // space is part of what the splice writes.
-            rendered.insert(0, ' ');
         }
-        Ok(splice(self.source, range.clone(), &rendered))
+        let entry = render_entry(&located.name, value, self.line_ending)?;
+        Ok(splice(self.source, located.line_range.clone(), &entry))
     }
 
     /// Re-read the edited bytes and refuse unless the frontmatter is exactly

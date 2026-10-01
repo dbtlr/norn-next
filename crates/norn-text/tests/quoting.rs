@@ -295,6 +295,19 @@ fn a_key_no_parser_will_read_back_refuses_rather_than_emitting_unproven_bytes() 
     ));
 }
 
+/// **A refusal says what would not read back, and where.** It claims no more
+/// than that: the text, and the context it was to be read in.
+#[test]
+fn a_refusal_names_the_text_and_the_context_it_would_not_read_back_in() {
+    let key = "k".repeat(2000);
+    let fields: Mapping = [(key.clone(), Value::Int(1))].into_iter().collect();
+    let refusal = render_document(&fields, "", LineEnding::Lf).expect_err("a refusal");
+    assert_eq!(
+        refusal.to_string(),
+        format!("{key:?} cannot be written to read back unchanged as a mapping key")
+    );
+}
+
 // ── Minimal, and never a downgrade ───────────────────────────────────────
 
 #[test]
@@ -793,62 +806,30 @@ fn a_block_written_from_no_fields_reads_back_as_the_empty_mapping() {
     ));
 }
 
-#[test]
-fn a_rendered_document_refuses_a_nested_mapping() {
-    let nested: Mapping = [("inner", "x")].into_iter().collect();
-    let fields: Mapping = [("outer", Value::Map(nested))].into_iter().collect();
-    assert_eq!(
-        render_document(&fields, "", LineEnding::Lf),
-        Err(RenderError::NonScalarValue { kind: "map" })
-    );
-}
-
-#[test]
-fn a_rendered_document_refuses_a_sequence_inside_a_sequence() {
-    let fields: Mapping = [(
-        "outer",
-        Value::Sequence(vec![Value::Sequence(vec!["inner".into()])]),
-    )]
-    .into_iter()
-    .collect();
-    assert_eq!(
-        render_document(&fields, "", LineEnding::Lf),
-        Err(RenderError::NonScalarValue { kind: "sequence" })
-    );
-}
-
-/// The refusal vocabulary is exactly three reasons, and each one is reachable.
-/// A fourth that no path constructs is a variant nobody can act on — and a
-/// dead variant is what this crate deleted rather than inherited.
+/// The refusal vocabulary is exactly two reasons, and each is reachable. A
+/// reason that no path constructs is a variant nobody can act on — and a dead
+/// variant is what this crate deleted rather than inherited. The match names
+/// every variant, so a new one does not compile here until a path reaching
+/// it is added to `seen`.
 #[test]
 fn every_render_refusal_is_reachable() {
     let long_key: Mapping = [("k".repeat(2000), Value::Int(1))].into_iter().collect();
-    let nested: Mapping = [("outer", Value::Map(Mapping::new()))]
+    let past_bound: Mapping = [("k".to_string(), Value::String("x".repeat(17_000)))]
         .into_iter()
         .collect();
     let seen = [
         render_document(&long_key, "", LineEnding::Lf),
-        render_document(&nested, "", LineEnding::Lf),
-        Document::parse("---\nk: scalar\n---\n")
-            .set_field("k", &Value::Sequence(vec!["a".into()]))
-            .map_err(|error| match error {
-                EditError::Render(render) => render,
-                other => panic!("unexpected {other:?}"),
-            }),
+        render_document(&past_bound, "", LineEnding::Lf),
     ];
     let reasons: Vec<&'static str> = seen
         .iter()
         .map(|outcome| match outcome {
             Err(RenderError::NotRoundTrippable { .. }) => "not-round-trippable",
-            Err(RenderError::NonScalarValue { .. }) => "non-scalar",
-            Err(RenderError::SequenceIntoScalar) => "sequence-into-scalar",
+            Err(RenderError::PastBound { .. }) => "past-bound",
             Ok(_) => panic!("expected a refusal"),
         })
         .collect();
-    assert_eq!(
-        reasons,
-        ["not-round-trippable", "non-scalar", "sequence-into-scalar"]
-    );
+    assert_eq!(reasons, ["not-round-trippable", "past-bound"]);
 }
 
 /// A value no span can name is refused by the field layer, before any bytes

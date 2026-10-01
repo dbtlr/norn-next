@@ -1480,35 +1480,42 @@ mod tests {
         );
     }
 
-    /// **An operation whose value is nested does not resolve, naming the
-    /// limit and NORN-317**: a map, or a list holding a list or a map, set;
-    /// or a list or a map pushed or popped as one element.
+    /// **A nested value composes like any other**: a map and a list of lists
+    /// set in block style, a map pushed onto a list as one element and popped
+    /// from it again.
     #[test]
-    fn a_nested_value_does_not_resolve_naming_the_limit() {
-        let vault = MemoryVault::with(&[("a.md", "---\ntags: []\n---\n")]);
-        let map =
-            AuthoredValue::map([("k".to_string(), AuthoredValue::Integer(1))]).expect("a map");
-        let flat = AuthoredValue::list([AuthoredValue::string("a")]);
-        let deep = AuthoredValue::list([flat.clone()]);
-        for kind in [
-            OperationKind::set_frontmatter(at("a.md"), "owner", map.clone()),
-            OperationKind::set_frontmatter(at("a.md"), "grid", deep),
-            OperationKind::push_frontmatter(at("a.md"), "tags", flat.clone()),
-            OperationKind::pop_frontmatter(at("a.md"), "tags", map),
+    fn a_nested_value_composes_like_any_other() {
+        let source = "---\ntags: []\nrows:\n  - k: 1\n---\n";
+        let vault = MemoryVault::with(&[("a.md", source)]);
+        let map = |value| {
+            AuthoredValue::map([("k".to_string(), AuthoredValue::Integer(value))]).expect("a map")
+        };
+        let grid = AuthoredValue::list([AuthoredValue::list([AuthoredValue::string("a")])]);
+        for (kind, written) in [
+            (
+                OperationKind::set_frontmatter(at("a.md"), "owner", map(2)),
+                "---\ntags: []\nrows:\n  - k: 1\nowner:\n  k: 2\n---\n",
+            ),
+            (
+                OperationKind::set_frontmatter(at("a.md"), "grid", grid),
+                "---\ntags: []\nrows:\n  - k: 1\ngrid:\n  - - a\n---\n",
+            ),
+            (
+                OperationKind::push_frontmatter(at("a.md"), "rows", map(2)),
+                "---\ntags: []\nrows:\n  - k: 1\n  - k: 2\n---\n",
+            ),
+            (
+                OperationKind::pop_frontmatter(at("a.md"), "rows", map(1)),
+                "---\ntags: []\nrows: []\n---\n",
+            ),
         ] {
             let name = kind.name();
-            let detail = unresolvable_detail(&vault, Operation::new(kind));
-            assert!(
-                detail.contains("nested") && detail.contains("NORN-317"),
-                "{name}: {detail}"
+            assert_eq!(
+                composed_text(&vault, Operation::new(kind), "a.md").as_deref(),
+                Some(written),
+                "{name}"
             );
         }
-        let set_flat = composed_text(
-            &vault,
-            Operation::new(OperationKind::set_frontmatter(at("a.md"), "tags", flat)),
-            "a.md",
-        );
-        assert!(set_flat.is_some(), "a flat list is written");
     }
 
     /// **A refusal `norn-text` makes leaves the operation unresolved with its

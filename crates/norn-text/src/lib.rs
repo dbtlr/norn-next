@@ -35,14 +35,23 @@
 //! style is a floor and is never weakened.
 //!
 //! **Where the construct ends is where the boundary is.** A scalar set
-//! replaces the value's bytes, so a comment sharing that line survives. A
-//! sequence set replaces the whole entry — a list's items are not separately
-//! addressable, and rewriting the items around interleaved comments would be
-//! guesswork — so a comment written *inside* that entry, **including one
-//! trailing it on the same line**, is replaced with it: the comment sits
-//! inside the entry's bytes, and the entry's bytes are what a whole-entry
-//! replacement writes over. A comment on its own line between two entries
-//! belongs to neither and always survives.
+//! replaces the value's bytes, so a comment sharing that line survives. A push
+//! or a pop on a block list whose items each re-read alone splices or deletes
+//! only the lines of the items it adds or removes, so a comment on any other
+//! line survives. Every other set, push or pop replaces the field's whole
+//! entry, and a comment written *inside* that entry, **including one trailing
+//! it on the same line**, sits in the bytes the replacement writes over; so
+//! the edit refuses rather than drop it. One rewrite is the exception: a flat
+//! list set over a flat list rewrites the list where it stands, and a comment
+//! inside its entry is replaced with it. Every `#` in the entry is judged,
+//! whatever precedes it: it is a comment exactly when truncating its text, up
+//! to the next line break the reader recognises, leaves the block reading as
+//! the same value. So no comment the reader sees escapes the check, and a `#`
+//! inside a quoted scalar, on a block scalar's content line or in a URL's
+//! fragment is content and refuses nothing; a bare `#` is judged by writing
+//! past it instead, so `C#` is content too. An entry holding more `#`s than
+//! are worth re-reading the block for is taken to carry a comment. A comment
+//! on its own line between two entries belongs to neither and always survives.
 //!
 //! **What cannot be proven is refused.** Every emitted scalar is re-parsed in
 //! the lexical context it will live in and compared against the value it came

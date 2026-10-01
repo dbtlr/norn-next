@@ -19,6 +19,11 @@
 //! line into a comment, an embedded `: ` splits it into nested mappings, and
 //! `123`, `true` and `null` stop being strings.
 //!
+//! A collection is built from those proven scalars and keys in block style,
+//! and is then proven whole: its entry, or its list item, is re-read and
+//! compared against the value it came from, so an indentation or nesting
+//! mistake refuses the same way a quoting one does.
+//!
 //! # Minimal by default, and never a downgrade
 //!
 //! An emission starts at the least-quoted style its origin permits and climbs
@@ -28,16 +33,19 @@
 
 use std::fmt;
 
-use crate::frontmatter::fields::{ValueStyle, reparse};
+use crate::frontmatter::extract::FRONTMATTER_MAX_BYTES;
+use crate::frontmatter::fields::{ValueStyle, reparse_admitted};
 use crate::line_ending::LineEnding;
 use crate::span::trailing_break;
 use crate::value::{Mapping, Value};
 
-/// The YAML lexical context a scalar is emitted into.
+/// The YAML lexical context a value is emitted into, and proven in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarContext {
-    /// A mapping value: `key: <scalar>`.
+    /// A mapping value: `key: <value>`.
     Block,
+    /// An item of a block list: `- <value>`.
+    Item,
     /// An item of a flow collection: `key: [<scalar>]`.
     Flow,
     /// A mapping key: `<scalar>: value`.
@@ -48,6 +56,7 @@ impl fmt::Display for ScalarContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             ScalarContext::Block => "block value",
+            ScalarContext::Item => "block-list item",
             ScalarContext::Flow => "flow item",
             ScalarContext::Key => "mapping key",
         })
@@ -57,18 +66,20 @@ impl fmt::Display for ScalarContext {
 /// Why frontmatter bytes could not be emitted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
-    /// No quoting style renders this text so that it reads back unchanged in
-    /// this context. The refusal that replaces writing an unproven render.
+    /// This text cannot be written so that it reads back unchanged in this
+    /// context. The refusal that replaces writing an unproven render.
+    ///
+    /// For a scalar, `text` is the scalar, and no quoting style reads back as
+    /// it. For a collection, `text` is the block layout it was written in,
+    /// which is the only one this crate writes, and which read back as some
+    /// other value.
     NotRoundTrippable {
         text: String,
         context: ScalarContext,
     },
-    /// A map, or a collection nested inside a sequence. The frontmatter edit
-    /// surface writes scalars and flat sequences.
-    NonScalarValue { kind: &'static str },
-    /// A sequence was offered for a field currently holding a scalar. Remove
-    /// the field and write it afresh rather than silently restyling it.
-    SequenceIntoScalar,
+    /// A whole document's frontmatter block would be `bytes` long, past the
+    /// `bound` the reader admits, so the document would read as having none.
+    PastBound { bytes: usize, bound: usize },
 }
 
 impl fmt::Display for RenderError {
@@ -76,13 +87,11 @@ impl fmt::Display for RenderError {
         match self {
             RenderError::NotRoundTrippable { text, context } => write!(
                 f,
-                "no quoting style renders {text:?} so that it reads back unchanged as a {context}"
+                "{text:?} cannot be written to read back unchanged as a {context}"
             ),
-            RenderError::NonScalarValue { kind } => {
-                write!(f, "a {kind} value cannot be written here")
-            }
-            RenderError::SequenceIntoScalar => f.write_str(
-                "a sequence cannot replace a scalar field; remove the field and write it afresh",
+            RenderError::PastBound { bytes, bound } => write!(
+                f,
+                "the frontmatter block would be {bytes} bytes and the bound is {bound}"
             ),
         }
     }
@@ -132,89 +141,277 @@ impl ScalarStyle {
     }
 }
 
-/// The bytes that replace a field's `value_range`, keeping the author's
-/// quoting where the new value permits it and upgrading where it does not.
+/// A scalar the model holds, borrowed: what a value span or a flow item is
+/// written from.
+///
+/// A collection has no scalar view, so the renderers that write into a span
+/// or a flow item cannot be handed one: a collection replaces a field's whole
+/// entry ([`render_entry`]) or is a block-list item ([`render_block_item`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Scalar<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(&'a str),
+}
+
+impl<'a> Scalar<'a> {
+    /// The scalar `value` is, or `None` for a collection.
+    pub(crate) fn of(value: &'a Value) -> Option<Self> {
+        match view(value) {
+            View::Scalar(scalar) => Some(scalar),
+            View::Sequence(_) | View::Map(_) => None,
+        }
+    }
+
+    /// The scalars `items` are, or `None` where any of them is a collection.
+    pub(crate) fn all(items: &'a [Value]) -> Option<Vec<Self>> {
+        items.iter().map(Scalar::of).collect()
+    }
+
+    fn to_value(self) -> Value {
+        match self {
+            Scalar::Null => Value::Null,
+            Scalar::Bool(value) => Value::Bool(value),
+            Scalar::Int(number) => Value::Int(number),
+            Scalar::Float(number) => Value::Float(number),
+            Scalar::String(text) => Value::String(text.to_string()),
+        }
+    }
+
+    /// The scalar spelled at quoting `rank`. A non-string scalar has one
+    /// spelling, whatever the rank.
+    fn spelled_at(self, rank: u8) -> String {
+        match self {
+            Scalar::Null => "~".to_string(),
+            Scalar::Bool(true) => "true".to_string(),
+            Scalar::Bool(false) => "false".to_string(),
+            Scalar::Int(number) => number.to_string(),
+            Scalar::Float(number) => render_float(number),
+            Scalar::String(text) => render_at_rank(text, rank),
+        }
+    }
+}
+
+/// What a value is to a writer: a scalar it spells, or a collection it lays
+/// out.
+enum View<'a> {
+    Scalar(Scalar<'a>),
+    Sequence(&'a [Value]),
+    Map(&'a Mapping),
+}
+
+fn view(value: &Value) -> View<'_> {
+    match value {
+        Value::Null => View::Scalar(Scalar::Null),
+        Value::Bool(value) => View::Scalar(Scalar::Bool(*value)),
+        Value::Int(number) => View::Scalar(Scalar::Int(*number)),
+        Value::Float(number) => View::Scalar(Scalar::Float(*number)),
+        Value::String(text) => View::Scalar(Scalar::String(text)),
+        Value::Sequence(items) => View::Sequence(items),
+        Value::Map(map) => View::Map(map),
+    }
+}
+
+/// The bytes that replace a field's `value_range` with `scalar`, keeping the
+/// author's quoting where the new value permits it and upgrading where it
+/// does not.
 pub(crate) fn render_scalar_in_span(
-    value: &Value,
+    scalar: Scalar<'_>,
     original: ScalarStyle,
 ) -> Result<String, RenderError> {
-    match value {
-        Value::Sequence(_) => Err(RenderError::SequenceIntoScalar),
-        Value::Map(_) => Err(RenderError::NonScalarValue { kind: "map" }),
-        scalar => render_scalar(scalar, original.rank(), ScalarContext::Block),
-    }
+    render_scalar(scalar, original.rank(), ScalarContext::Block)
 }
 
 /// A sequence written inline: `[one, two]`. Each item is verified as a flow
 /// item, where a comma splits and a bracket breaks the document.
-pub(crate) fn render_flow_sequence(items: &[Value]) -> Result<String, RenderError> {
+///
+/// Only a flat sequence is written inline: a sequence holding a collection is
+/// written in block style ([`render_entry`]) whatever style it replaces.
+pub(crate) fn render_flow_sequence(items: &[Scalar<'_>]) -> Result<String, RenderError> {
     let mut out = String::from("[");
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&render_scalar(item, RANK_PLAIN, ScalarContext::Flow)?);
+        out.push_str(&render_scalar(*item, RANK_PLAIN, ScalarContext::Flow)?);
     }
     out.push(']');
     Ok(out)
 }
 
-/// A whole `field: <sequence>` entry, its terminator included.
-///
-/// An empty sequence emits `field: []`: a bare `field:` line reads back as
-/// null, not as the empty list it was written as.
-pub(crate) fn render_sequence_entry(
-    field: &str,
-    items: &[Value],
-    line_ending: LineEnding,
-) -> Result<String, RenderError> {
-    let key = render_key(field)?;
-    if items.is_empty() {
-        return Ok(format!("{key}: []{}", line_ending.as_str()));
-    }
-    Ok(format!(
-        "{key}:{}{}",
-        line_ending.as_str(),
-        render_block_items(items, line_ending)?
-    ))
+/// Whether `value` is a sequence or a map.
+pub(crate) fn is_collection(value: &Value) -> bool {
+    matches!(value, Value::Sequence(_) | Value::Map(_))
 }
 
-/// A sequence's block items — `  - one` lines at a two-space indent, each
-/// terminated.
-pub(crate) fn render_block_items(
-    items: &[Value],
+/// Whether `value` is nested: a map, or a sequence holding a collection.
+pub(crate) fn is_nested(value: &Value) -> bool {
+    match value {
+        Value::Map(_) => true,
+        Value::Sequence(items) => items.iter().any(is_collection),
+        _ => false,
+    }
+}
+
+/// A whole `field: <value>` entry, its terminator included, for any value
+/// the model holds.
+///
+/// A scalar is written on the key line at the least quoting that reads back.
+/// A collection is written in block style, its entries or items two spaces
+/// deeper than the key, and each level of nesting two spaces deeper again; an
+/// empty one is written `field: []` or `field: {}`, because a bare `field:`
+/// line reads back as null, not as the empty collection it was written as.
+///
+/// A collection's entry is proven whole: it is re-read and refused with
+/// [`RenderError::NotRoundTrippable`] unless it reads back as exactly
+/// `field` holding `value`.
+pub(crate) fn render_entry(
+    field: &str,
+    value: &Value,
     line_ending: LineEnding,
 ) -> Result<String, RenderError> {
-    let mut out = String::new();
-    for item in items {
-        out.push_str(&render_block_item(item, "  ", line_ending.as_str())?);
+    let mut out = render_key(field)?;
+    out.push(':');
+    let value_start = out.len();
+    write_value(value, Slot::Key, "", line_ending.as_str(), &mut out)?;
+    // A backstop: every scalar and key inside the collection is already
+    // proven in its own context, and no input is known to lay out a
+    // collection that reads back as another value. It stays because it is
+    // `render_document`'s only proof of the whole value: an edit re-reads
+    // the document it produces, but nothing re-reads a rendered one.
+    if is_collection(value) {
+        let read = match reparse_admitted(&out) {
+            Some(Value::Map(map)) if map.len() == 1 => map.get(field).cloned(),
+            _ => None,
+        };
+        prove(
+            read.as_ref() == Some(value),
+            &out[value_start..],
+            ScalarContext::Block,
+        )?;
     }
     Ok(out)
 }
 
-/// One block-list item line — `{indent}- item{terminator}` — at the least
-/// quoting that reads back as `item`.
+/// One block-list item — `{indent}- item{terminator}` — written as
+/// [`render_entry`] writes a value: a scalar at the least quoting that reads
+/// back as `item`, a collection in block style. A collection's first entry or
+/// item shares the `-` line (`- k: v`, `- - a`) and the rest of it sits two
+/// spaces past `indent`, so the item is one block whatever it holds.
+///
+/// The item is proven as an entry is: re-read alone, it is a list holding
+/// exactly `item`.
 pub(crate) fn render_block_item(
     item: &Value,
     indent: &str,
     terminator: &str,
 ) -> Result<String, RenderError> {
-    let rendered = render_scalar(item, RANK_PLAIN, ScalarContext::Block)?;
-    Ok(format!("{indent}- {rendered}{terminator}"))
+    let mut out = format!("{indent}-");
+    let item_start = out.len();
+    write_value(item, Slot::Item, indent, terminator, &mut out)?;
+    // A backstop, as in `render_entry`: no input is known to reach it.
+    if is_collection(item) {
+        let read = match reparse_admitted(&out) {
+            Some(Value::Sequence(items)) if items.len() == 1 => items.into_iter().next(),
+            _ => None,
+        };
+        prove(
+            read.as_ref() == Some(item),
+            &out[item_start..],
+            ScalarContext::Item,
+        )?;
+    }
+    Ok(out)
 }
 
-/// A whole `field: <scalar>` entry, its terminator included.
-pub(crate) fn render_scalar_entry(
-    field: &str,
+/// Where [`write_value`] writes a value: after a mapping key's `:`, or after
+/// a block item's `-`.
+#[derive(Clone, Copy)]
+enum Slot {
+    Key,
+    Item,
+}
+
+/// Write what follows the `:` or the `-` that opens `value`, at `indent` —
+/// the indent of the line holding that indicator — its terminator included.
+fn write_value(
     value: &Value,
-    line_ending: LineEnding,
-) -> Result<String, RenderError> {
-    Ok(format!(
-        "{}: {}{}",
-        render_key(field)?,
-        render_scalar(value, RANK_PLAIN, ScalarContext::Block)?,
-        line_ending.as_str()
-    ))
+    slot: Slot,
+    indent: &str,
+    terminator: &str,
+    out: &mut String,
+) -> Result<(), RenderError> {
+    let child = format!("{indent}  ");
+    let mut body = String::new();
+    // Whether `body` is block lines at `child`, each terminated, rather than
+    // one inline value.
+    let block = match view(value) {
+        View::Sequence([]) => {
+            body.push_str("[]");
+            false
+        }
+        View::Map(map) if map.is_empty() => {
+            body.push_str("{}");
+            false
+        }
+        View::Sequence(items) => {
+            for item in items {
+                body.push_str(&child);
+                body.push('-');
+                write_value(item, Slot::Item, &child, terminator, &mut body)?;
+            }
+            true
+        }
+        View::Map(map) => {
+            for (key, entry) in map.iter() {
+                body.push_str(&child);
+                body.push_str(&render_key(key)?);
+                body.push(':');
+                write_value(entry, Slot::Key, &child, terminator, &mut body)?;
+            }
+            true
+        }
+        View::Scalar(scalar) => {
+            let context = match slot {
+                Slot::Key => ScalarContext::Block,
+                Slot::Item => ScalarContext::Item,
+            };
+            body.push_str(&render_scalar(scalar, RANK_PLAIN, context)?);
+            false
+        }
+    };
+    match (slot, block) {
+        // Under a key, a block collection starts on the next line.
+        (Slot::Key, true) => {
+            out.push_str(terminator);
+            out.push_str(&body);
+        }
+        // After a `-`, its first line is the item's own line.
+        (Slot::Item, true) => {
+            out.push(' ');
+            out.push_str(&body[child.len()..]);
+        }
+        (_, false) => {
+            out.push(' ');
+            out.push_str(&body);
+            out.push_str(terminator);
+        }
+    }
+    Ok(())
+}
+
+/// A collection `rendered` as a `context`, refused unless it `reads_back`.
+fn prove(reads_back: bool, rendered: &str, context: ScalarContext) -> Result<(), RenderError> {
+    if reads_back {
+        Ok(())
+    } else {
+        Err(RenderError::NotRoundTrippable {
+            text: rendered.to_string(),
+            context,
+        })
+    }
 }
 
 /// A field name in key position, quoted only where the round-trip requires it.
@@ -223,56 +420,33 @@ pub(crate) fn render_scalar_entry(
 /// comment and `a: b` invalid YAML, so both escalate; `123` and `true` escalate
 /// because they would stop being strings.
 pub(crate) fn render_key(field: &str) -> Result<String, RenderError> {
-    render_scalar(
-        &Value::String(field.to_string()),
-        RANK_PLAIN,
-        ScalarContext::Key,
-    )
+    render_scalar(Scalar::String(field), RANK_PLAIN, ScalarContext::Key)
 }
 
-/// Emit `value` at the least-quoted rank at or above `start` that reads back
-/// as exactly `value` in `context`, or refuse.
-fn render_scalar(value: &Value, start: u8, context: ScalarContext) -> Result<String, RenderError> {
-    let text = match value {
-        Value::String(text) => text.as_str(),
-        Value::Sequence(_) => return Err(RenderError::NonScalarValue { kind: "sequence" }),
-        Value::Map(_) => return Err(RenderError::NonScalarValue { kind: "map" }),
-        // A non-string scalar has one spelling, and it is still verified: a
-        // float that rendered as `1` would read back as an integer.
-        other => {
-            let rendered = render_non_string(other);
-            return if reparse_in_context(&rendered, context).as_ref() == Some(other) {
-                Ok(rendered)
-            } else {
-                Err(RenderError::NotRoundTrippable {
-                    text: rendered,
-                    context,
-                })
-            };
-        }
+/// Emit `scalar` at the least-quoted rank at or above `start` that reads back
+/// as exactly that scalar in `context`, or refuse. A non-string scalar has one
+/// spelling, and it is still verified: a float that rendered as `1` would read
+/// back as an integer.
+fn render_scalar(
+    scalar: Scalar<'_>,
+    start: u8,
+    context: ScalarContext,
+) -> Result<String, RenderError> {
+    let value = scalar.to_value();
+    let ranks = match scalar {
+        Scalar::String(_) => start..=RANK_DOUBLE,
+        _ => RANK_PLAIN..=RANK_PLAIN,
     };
-
-    for rank in start..=RANK_DOUBLE {
-        let rendered = render_at_rank(text, rank);
-        if reparse_in_context(&rendered, context).as_ref() == Some(value) {
+    for rank in ranks {
+        let rendered = scalar.spelled_at(rank);
+        if reparse_in_context(&rendered, context).as_ref() == Some(&value) {
             return Ok(rendered);
         }
     }
     Err(RenderError::NotRoundTrippable {
-        text: text.to_string(),
+        text: scalar.spelled_at(RANK_PLAIN),
         context,
     })
-}
-
-fn render_non_string(value: &Value) -> String {
-    match value {
-        Value::Null => "~".to_string(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        Value::Int(number) => number.to_string(),
-        Value::Float(number) => render_float(*number),
-        Value::String(_) | Value::Sequence(_) | Value::Map(_) => unreachable!("scalar only"),
-    }
 }
 
 /// A float spelled so it reads back as a float: `1` would read back as an
@@ -302,13 +476,17 @@ fn render_at_rank(text: &str, rank: u8) -> String {
 /// Read `rendered` back as the value it would be in `context`.
 fn reparse_in_context(rendered: &str, context: ScalarContext) -> Option<Value> {
     match context {
-        ScalarContext::Block => match reparse(&format!("k: {rendered}"))? {
+        ScalarContext::Block => match reparse_admitted(&format!("k: {rendered}"))? {
             Value::Map(map) if map.len() == 1 => map.get("k").cloned(),
+            _ => None,
+        },
+        ScalarContext::Item => match reparse_admitted(&format!("- {rendered}"))? {
+            Value::Sequence(items) if items.len() == 1 => items.into_iter().next(),
             _ => None,
         },
         // A flow item reads back only if it is the sole element: a value that
         // would split on `,` or `]` fails here and escalates to a quote.
-        ScalarContext::Flow => match reparse(&format!("k: [{rendered}]"))? {
+        ScalarContext::Flow => match reparse_admitted(&format!("k: [{rendered}]"))? {
             Value::Map(map) if map.len() == 1 => match map.get("k") {
                 Some(Value::Sequence(items)) if items.len() == 1 => Some(items[0].clone()),
                 _ => None,
@@ -317,7 +495,7 @@ fn reparse_in_context(rendered: &str, context: ScalarContext) -> Option<Value> {
         },
         // A key reads back only if the mapping has exactly the one entry, its
         // value is the sentinel, and its key is a string.
-        ScalarContext::Key => match reparse(&format!("{rendered}: x\n"))? {
+        ScalarContext::Key => match reparse_admitted(&format!("{rendered}: x\n"))? {
             Value::Map(map) if map.len() == 1 => match map.iter().next() {
                 Some((key, Value::String(sentinel))) if sentinel == "x" => {
                     Some(Value::String(key.to_string()))
@@ -366,24 +544,30 @@ fn escape_double_quoted(text: &str) -> String {
 ///
 /// Every line uses `line_ending`. Fields are emitted exactly as offered — a
 /// null field emits `key: ~`, because whether an unset field belongs in a
-/// document is a question about the vault, not about its syntax. A sequence
-/// emits block style, and an empty sequence emits `key: []`.
+/// document is a question about the vault, not about its syntax. A collection
+/// emits block style, nested ones two spaces deeper per level, and an empty
+/// one emits `key: []` or `key: {}`. Each collection is re-read before it is
+/// returned, and one that does not read back refuses with
+/// [`RenderError::NotRoundTrippable`]. A block longer than the reader admits
+/// ([`FRONTMATTER_MAX_BYTES`]) refuses with [`RenderError::PastBound`], so a
+/// document is never written with frontmatter that would read as absent.
 pub fn render_document(
     fields: &Mapping,
     body: &str,
     line_ending: LineEnding,
 ) -> Result<String, RenderError> {
     let terminator = line_ending.as_str();
-    let mut out = format!("---{terminator}");
+    let mut block = String::new();
     for (field, value) in fields.iter() {
-        match value {
-            Value::Sequence(items) => {
-                out.push_str(&render_sequence_entry(field, items, line_ending)?);
-            }
-            Value::Map(_) => return Err(RenderError::NonScalarValue { kind: "map" }),
-            scalar => out.push_str(&render_scalar_entry(field, scalar, line_ending)?),
-        }
+        block.push_str(&render_entry(field, value, line_ending)?);
     }
+    if block.len() > FRONTMATTER_MAX_BYTES {
+        return Err(RenderError::PastBound {
+            bytes: block.len(),
+            bound: FRONTMATTER_MAX_BYTES,
+        });
+    }
+    let mut out = format!("---{terminator}{block}");
     out.push_str("---");
     out.push_str(terminator);
     if !body.is_empty() {
@@ -396,4 +580,20 @@ pub fn render_document(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scalar;
+    use crate::value::{Mapping, Value};
+
+    /// **Only a scalar has a scalar view**, so a collection cannot reach the
+    /// renderers that write a value span or a flow item.
+    #[test]
+    fn a_collection_has_no_scalar_view() {
+        assert_eq!(Scalar::of(&Value::Int(1)), Some(Scalar::Int(1)));
+        assert_eq!(Scalar::of(&"a".into()), Some(Scalar::String("a")));
+        assert_eq!(Scalar::of(&Value::Sequence(Vec::new())), None);
+        assert_eq!(Scalar::of(&Value::Map(Mapping::new())), None);
+    }
 }
