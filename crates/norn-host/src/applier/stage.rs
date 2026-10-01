@@ -280,8 +280,11 @@ pub(super) fn check(
         .collect::<Result<_, _>>()
         .map_err(|path| Unfit::Invalid(disagreement([path])))?;
     // What the cascades left as written, matched or kept beside a link they
-    // wrote, is read off the recomposition, as
-    // planning read it off its own composition, so the two forecast alike.
+    // wrote, is read off the recomposition, as planning read it off its own
+    // composition, so the two forecast alike for every holder not yet landed.
+    // A holder an interrupted apply already landed recomposes from stand-in
+    // bytes, so its skip advisory can be omitted or mislabelled; the limit is
+    // stated in the planner's links module.
     let skipped = std::mem::take(&mut composition.skipped);
     let kept = std::mem::take(&mut composition.kept);
     drop(composition);

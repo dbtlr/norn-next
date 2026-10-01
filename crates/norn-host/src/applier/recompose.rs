@@ -395,7 +395,8 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
 }
 
 /// The bytes standing in for a before-state this apply cannot see. Nothing
-/// composed from them is published or compared.
+/// composed from them is published or compared; the one thing read from them
+/// is a landed holder's skip advisories, which they leave empty.
 fn stand_in() -> Arc<[u8]> {
     Arc::from(&b""[..])
 }
