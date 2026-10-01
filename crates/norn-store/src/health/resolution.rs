@@ -199,7 +199,7 @@ impl Snapshot {
     ///
     /// **The work is the links the plan reaches plus the candidates they
     /// resolve against**: the changed keys are asked about
-    /// [`LINK_HEALTH_CHUNK`] at a time in one statement, and only a key
+    /// 256 at a time in one statement, and only a key
     /// some link is held under is read; its links are read a chunk at a time,
     /// and each distinct key a chunk holds is resolved once, its head cut at
     /// two more rows than the targets it could name. Nothing counts a class.

@@ -871,6 +871,8 @@ fn read_links(
     selected: Selected,
     values: Vec<Value>,
 ) -> Result<(Vec<Held>, BTreeSet<After>), StoreError> {
+    // A snapshot runs this only in the shape that pages one key's links, so
+    // that is the name it records; the writer records no name.
     let rows = runner.read_all(
         ResolutionStatement::KeyLinks,
         statement::links_sql(key, selected),
