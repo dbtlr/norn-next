@@ -22,26 +22,27 @@ use norn_wire::{
     DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
     DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
     EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
+    FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindingKind, FindingRow,
     FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
     HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
-    NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
-    OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    ResolvedTag, Resolves, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
-    RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams,
-    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition,
-    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
-    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap,
-    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
-    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite,
+    LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved,
+    NameSet, NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
+    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, ResolvedTag, Resolves, RollUp, RootIdentity, Rung, RungReport, RungSelection,
+    RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport,
+    SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
+    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
+    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
+    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -7621,6 +7622,30 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
         UnresolvedReason::part_landed(),
         UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
         UnresolvedReason::requires_unresolved(operation_id("make-b")),
+        UnresolvedReason::has_backlinks(vec![path("notes/c.md"), path("notes/d.md")], 3),
+        UnresolvedReason::ambiguous_target(
+            CandidateHead::new(
+                [
+                    Candidate::new(path("notes/a.md"), "notes/a"),
+                    Candidate::new(path("archive/a.md"), "archive/a"),
+                ],
+                2,
+            )
+            .expect("a head"),
+        ),
+    ]
+}
+
+/// Every advice a forecast gives about one link.
+fn link_advisories() -> Vec<LinkAdvisory> {
+    vec![
+        LinkAdvisory::skipped_ambiguous(a_link_key()),
+        LinkAdvisory::skipped_unrepresentable(a_link_key()),
+        LinkAdvisory::skipped_would_corrupt_frontmatter(a_link_key()),
+        LinkAdvisory::skipped_not_rewritable(a_link_key()),
+        LinkAdvisory::left_broken(a_link_key()),
+        LinkAdvisory::made_ambiguous(a_link_key()),
+        LinkAdvisory::retargeted(a_link_key()),
     ]
 }
 
@@ -7777,6 +7802,10 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
         advertised::<UnresolvedReason>(Some("kind"))
     );
     assert_eq!(
+        tags(&link_advisories(), "advisory"),
+        advertised::<LinkAdvisory>(Some("advisory"))
+    );
+    assert_eq!(
         tags(&interruption_causes(), "kind"),
         advertised::<InterruptionCause>(Some("kind"))
     );
@@ -7814,6 +7843,10 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
 #[test]
 fn every_apply_shape_survives_the_round_trip() {
     round_trip(&a_forecast());
+    round_trip(&a_forecast_of_links());
+    for advisory in link_advisories() {
+        round_trip(&advisory);
+    }
     for check in refused_checks() {
         round_trip(&check);
     }
@@ -7875,7 +7908,7 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
 fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
     assert_eq!(
         wire(&a_forecast()),
-        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[]}"#
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[],"links":[],"left_behind":[]}"#
     );
     let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
     for transition in &a_resolved_plan().transitions {
@@ -7887,6 +7920,56 @@ fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
             transition.path
         );
     }
+}
+
+/// A forecast advising on every link it can and naming a file a folder move
+/// leaves behind.
+fn a_forecast_of_links() -> Forecast {
+    a_forecast()
+        .with_links(link_advisories())
+        .with_left_behind(vec![file("notes/diagram.png")])
+}
+
+fn file(text: &str) -> FilePath {
+    FilePath::new(text).expect("a legal file path")
+}
+
+/// **A link advisory points into the change set by the link's key**, never
+/// repeating a resolution, and a folder move's left-behind file is named by a
+/// path of its own.
+#[test]
+fn a_forecast_advises_on_links_by_their_key_and_names_files_left_behind() {
+    assert_eq!(
+        wire(&LinkAdvisory::left_broken(a_link_key())),
+        r#"{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","target":"a"}}"#
+    );
+    let json = wire(&a_forecast_of_links());
+    assert!(!json.contains("resolves"), "{json}");
+    assert!(
+        json.ends_with(r#""left_behind":["notes/diagram.png"]}"#),
+        "{json}"
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::has_backlinks(
+            vec![path("notes/c.md")],
+            2
+        )),
+        r#"{"kind":"has_backlinks","holders":["notes/c.md"],"total":2}"#
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::ambiguous_target(
+            CandidateHead::new([Candidate::new(path("a.md"), "a")], 2).expect("a head")
+        )),
+        r#"{"kind":"ambiguous_target","candidates":{"candidates":[{"path":"a.md","suffix":"a"}],"total":2}}"#
+    );
+    for text in ["", "/", "/notes/a.png"] {
+        assert!(FilePath::new(text).is_err(), "`{text}` was built");
+        assert!(
+            serde_json::from_str::<FilePath>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a file path"
+        );
+    }
+    assert_eq!(FilePath::new("/a").expect_err("rooted").what(), "file path");
 }
 
 /// A forecast is an answer, so it drops a field it does not know where a plan
@@ -8007,7 +8090,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
         format!(
             concat!(
                 r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
-                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[]}},"#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[],"links":[],"left_behind":[]}},"#,
                 r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
                 r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
@@ -9230,7 +9313,9 @@ fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
     round_trip(&forecast);
     let forced_json = wire(&vec![violation.clone()]);
     assert!(
-        wire(&forecast).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        wire(&forecast).ends_with(&format!(
+            r#""forced":{forced_json},"links":[],"left_behind":[]}}"#
+        )),
         "{}",
         wire(&forecast)
     );

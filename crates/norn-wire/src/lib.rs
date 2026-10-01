@@ -562,7 +562,7 @@ pub use plan::document::{
     AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
     ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,
 };
-pub use plan::forecast::{FolderPath, Forecast};
+pub use plan::forecast::{FilePath, FolderPath, Forecast, LinkAdvisory};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
     AuthorCondition, ExpectedField, IllegalOperationId, LinkRewrite, Operation, OperationId,

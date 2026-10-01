@@ -13,6 +13,14 @@
 //! identifier, or, for a resolved plan whose transitions are not what its
 //! operations do, the files involved.
 //!
+//! **An ambiguous target is spelled as a finding spells one.** A wikilink
+//! rewrite whose `old` names several documents carries the same bounded
+//! [`CandidateHead`] a link row and the ambiguous-target refusal carry, so a
+//! vault-wide ambiguity class never crosses whole. A delete left unresolved
+//! for its backlinks names every holding document, as its cascade would
+//! have rewritten each: the plan it stands in for carries one rewrite per
+//! holder already.
+//!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
 //! refused check carries the finding kind, the subject inside the document and
@@ -24,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::DocumentPath;
 use crate::finding::FindingKind;
+use crate::finding_row::CandidateHead;
 use crate::plan::document::{FileState, PlanCondition};
 use crate::plan::operation::{Operation, OperationId};
 
@@ -177,6 +186,28 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
+    // Minted with the link-cascade vocabulary before the planner reads
+    // backlinks (NORN-297): a later change of the same task plans a delete's
+    // backlinks and a wikilink rewrite's `old`, and is what answers these
+    // two. Until then the planner leaves both kinds unresolved in words.
+    /// It removes a document links still name, and says neither what to
+    /// rewrite them to nor that they may be left broken.
+    #[non_exhaustive]
+    HasBacklinks {
+        /// Every document holding a link that names the removed one, each
+        /// once.
+        holders: Vec<DocumentPath>,
+        /// How many links name it, across every holder.
+        total: u64,
+    },
+    /// It rewrites the wikilinks naming a target that resolves to more than
+    /// one document, so which links name the document meant is not known.
+    #[non_exhaustive]
+    AmbiguousTarget {
+        /// The documents the target resolves to, in the resolution ladder's
+        /// order, and how many there were.
+        candidates: CandidateHead,
+    },
 }
 
 impl UnresolvedReason {
@@ -195,6 +226,16 @@ impl UnresolvedReason {
     /// The operation requires the unresolved operation `requires`.
     pub const fn requires_unresolved(requires: OperationId) -> Self {
         UnresolvedReason::RequiresUnresolved { requires }
+    }
+
+    /// The operation removes a document `total` links in `holders` name.
+    pub const fn has_backlinks(holders: Vec<DocumentPath>, total: u64) -> Self {
+        UnresolvedReason::HasBacklinks { holders, total }
+    }
+
+    /// The operation's target resolves to the documents `candidates` heads.
+    pub const fn ambiguous_target(candidates: CandidateHead) -> Self {
+        UnresolvedReason::AmbiguousTarget { candidates }
     }
 }
 

@@ -19,7 +19,7 @@ use norn_wire::{
     DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
     DocumentPath, DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus,
     ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType,
-    FieldValue, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
     Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
     Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
     ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady, Operation,
@@ -3310,9 +3310,16 @@ fn an_apply_report_advertises_its_outcome_tag() {
     let forecast = schema_of::<Forecast>();
     assert_eq!(
         property_names(&forecast),
-        ["drifted", "folders_made", "folders_removed", "forced"]
-            .into_iter()
-            .collect()
+        [
+            "drifted",
+            "folders_made",
+            "folders_removed",
+            "forced",
+            "links",
+            "left_behind"
+        ]
+        .into_iter()
+        .collect()
     );
     assert_eq!(
         forecast["properties"]["drifted"]["items"]["$ref"].as_str(),
@@ -3325,9 +3332,38 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "an answer refuses a key: {answer}"
         );
     }
-    let folder = schema_of::<FolderPath>();
-    assert_eq!(folder["type"].as_str(), Some("string"));
-    assert_eq!(folder["minLength"].as_u64(), Some(1));
+    assert_eq!(
+        forecast["properties"]["left_behind"]["items"]["$ref"].as_str(),
+        Some("#/$defs/FilePath")
+    );
+    assert_eq!(
+        forecast["properties"]["links"]["items"]["$ref"].as_str(),
+        Some("#/$defs/LinkAdvisory")
+    );
+    let advisories = definition(&forecast, "LinkAdvisory");
+    assert_eq!(
+        sorted(tag_constants(advisories, "advisory")),
+        sorted([
+            "skipped_ambiguous",
+            "skipped_unrepresentable",
+            "skipped_would_corrupt_frontmatter",
+            "skipped_not_rewritable",
+            "left_broken",
+            "made_ambiguous",
+            "retargeted"
+        ])
+    );
+    for advisory in branches(advisories) {
+        assert_eq!(
+            advisory["properties"]["link"]["$ref"].as_str(),
+            Some("#/$defs/LinkKey"),
+            "an advisory names its link otherwise than the change set: {advisory}"
+        );
+    }
+    for path in [schema_of::<FolderPath>(), schema_of::<FilePath>()] {
+        assert_eq!(path["type"].as_str(), Some("string"));
+        assert_eq!(path["minLength"].as_u64(), Some(1));
+    }
 }
 
 /// The reasons an apply's codes carry advertise their tags, and each apply
@@ -3346,7 +3382,23 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<UnresolvedReason>(), "kind")),
-        sorted(["part_landed", "no_longer_resolves", "requires_unresolved"])
+        sorted([
+            "part_landed",
+            "no_longer_resolves",
+            "requires_unresolved",
+            "has_backlinks",
+            "ambiguous_target"
+        ])
+    );
+    let reasons = schema_of::<UnresolvedReason>();
+    assert_eq!(
+        branch(&reasons, "kind", "ambiguous_target")["properties"]["candidates"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "an ambiguous target's candidates are not the one bounded head"
+    );
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "has_backlinks")),
+        ["kind", "holders", "total"].into_iter().collect()
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<InterruptionCause>(), "kind")),
