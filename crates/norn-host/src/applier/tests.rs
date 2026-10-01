@@ -21,6 +21,7 @@ use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
 mod cascade;
+mod differential;
 mod folder;
 
 pub(super) fn path(text: &str) -> DocumentPath {
