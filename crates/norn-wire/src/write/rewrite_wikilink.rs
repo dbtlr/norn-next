@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
 use crate::plan::document::AuthoredPlan;
+use crate::plan::document::is_false;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind};
 use crate::target::ResolutionTarget;
-use crate::write::{document_target, is_false};
+use crate::write::document_target;
 
 /// What a `rewrite_wikilink` request carries.
 ///

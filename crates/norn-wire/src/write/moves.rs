@@ -29,11 +29,11 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
-use crate::document::{DOCUMENT_EXTENSION, DocumentPath};
+use crate::document::{DOCUMENT_EXTENSION, DocumentPath, is_document_extension, leaf_extension};
 use crate::plan::document::AuthoredPlan;
+use crate::plan::document::is_false;
 use crate::plan::forecast::FolderPath;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind};
-use crate::write::is_false;
 
 /// What a `move` moves: one document, or every document a folder holds.
 ///
@@ -111,14 +111,9 @@ impl MoveSubject {
 }
 
 /// Whether `path` names a document: its last segment carries the document
-/// extension, in any ASCII case, after a dot that does not lead the segment —
-/// the rule the vault reads its documents by.
+/// extension, in any ASCII case — the rule the vault reads its documents by.
 fn names_a_document(path: &str) -> bool {
-    let leaf = path.rsplit('/').next().unwrap_or(path);
-    match leaf.rfind('.') {
-        Some(dot) if dot > 0 => leaf[dot + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION),
-        _ => false,
-    }
+    leaf_extension(path).is_some_and(is_document_extension)
 }
 
 /// Two ends that name no one move: a path either grammar refuses, or a

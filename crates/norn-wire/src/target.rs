@@ -140,6 +140,21 @@ impl ResolutionTarget {
     pub const fn anchor(&self) -> Option<&Anchor> {
         self.anchor.as_ref()
     }
+
+    /// The target, where it names a whole document, or why it does not: an
+    /// anchor names a place inside one. A link rewrite keeps the anchor each
+    /// link was written with, so a target naming a link's old or new
+    /// document carries none of its own — the one rule a wikilink rewrite's
+    /// ends and a delete's `rewrite_to` are read by, as an operation and as a
+    /// request.
+    pub(crate) fn whole_document(self) -> Result<Self, String> {
+        if self.anchor.is_some() {
+            return Err(format!(
+                "`{self}` names a place inside a document, and a link rewrite names the document alone: each link keeps the anchor it was written with"
+            ));
+        }
+        Ok(self)
+    }
 }
 
 impl fmt::Display for ResolutionTarget {

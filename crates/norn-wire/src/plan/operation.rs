@@ -747,25 +747,6 @@ impl LinkRewrite {
     }
 }
 
-impl From<LinkRewrite> for OperationKind {
-    /// A cascade's rewrite is the `rewrite_link` operation an author could
-    /// write for the same document.
-    fn from(rewrite: LinkRewrite) -> Self {
-        let LinkRewrite {
-            path,
-            syntax,
-            from,
-            to,
-        } = rewrite;
-        OperationKind::RewriteLink {
-            path,
-            syntax,
-            from,
-            to,
-        }
-    }
-}
-
 /// A fact about the vault an operation's author observed and requires to
 /// hold.
 ///
@@ -1082,20 +1063,19 @@ fn required_as<T, P: fmt::Display, E: serde::de::Error>(
     })
 }
 
-/// The resolution target `name` of a `kind` operation, which names a
-/// document and so carries no anchor (see the module's word on why).
-fn unanchored<E: serde::de::Error>(
+/// The resolution target `name` of a `kind` operation, read as the whole
+/// document it names ([`ResolutionTarget::whole_document`]).
+fn whole_document<E: serde::de::Error>(
     kind: KindName,
     name: &str,
     target: ResolutionTarget,
 ) -> Result<ResolutionTarget, E> {
-    if target.anchor().is_some() {
-        return Err(E::custom(format_args!(
-            "a `{}` operation's `{name}` names a document, not a place inside one: `{target}` carries an anchor",
+    target.whole_document().map_err(|problem| {
+        E::custom(format_args!(
+            "a `{}` operation's `{name}` is refused: {problem}",
             kind.as_str()
-        )));
-    }
-    Ok(target)
+        ))
+    })
 }
 
 /// The target of a `kind` operation, from its two keys: exactly one of them
@@ -1187,7 +1167,7 @@ impl KindFields {
                 OperationKind::DeleteDocument {
                     path: required(kind, "path", path)?,
                     rewrite_to: rewrite_to
-                        .map(|target| unanchored(kind, "rewrite_to", target))
+                        .map(|target| whole_document(kind, "rewrite_to", target))
                         .transpose()?,
                     allow_broken_links,
                 }
@@ -1203,8 +1183,8 @@ impl KindFields {
                 to: required(kind, "to", to)?,
             },
             KindName::RewriteWikilink => OperationKind::RewriteWikilink {
-                old: unanchored(kind, "old", required(kind, "old", old)?)?,
-                new: unanchored(kind, "new", required(kind, "new", new)?)?,
+                old: whole_document(kind, "old", required(kind, "old", old)?)?,
+                new: whole_document(kind, "new", required(kind, "new", new)?)?,
             },
             KindName::SetFrontmatter => OperationKind::SetFrontmatter {
                 target: target(kind, path, predicates)?,

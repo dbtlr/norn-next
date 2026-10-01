@@ -54,25 +54,13 @@ where
     Ok(members)
 }
 
-/// Whether a flag is left out of a request's bytes: `false`, which is what
-/// its absence reads as. serde hands the field by reference.
-const fn is_false(flag: &bool) -> bool {
-    !*flag
-}
-
-/// A resolution target read as the document it names: an anchor, which
-/// names a place inside one, is refused. A link rewrite keeps the anchor each
-/// link was written with, so a target that is a link's new or old document
-/// carries none of its own.
+/// A resolution target read as the whole document it names
+/// ([`ResolutionTarget::whole_document`]).
 fn document_target<'de, D>(deserializer: D) -> Result<ResolutionTarget, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let target = ResolutionTarget::deserialize(deserializer)?;
-    if target.anchor().is_some() {
-        return Err(D::Error::custom(format_args!(
-            "`{target}` names a place inside a document, and a write request names the document alone"
-        )));
-    }
-    Ok(target)
+    ResolutionTarget::deserialize(deserializer)?
+        .whole_document()
+        .map_err(D::Error::custom)
 }

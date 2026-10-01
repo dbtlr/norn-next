@@ -538,11 +538,7 @@ impl<'a> LinkAddress<'a> {
         else {
             return false;
         };
-        let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
-        match leaf.rfind('.') {
-            Some(dot) if dot > 0 => !leaf[dot + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION),
-            _ => false,
-        }
+        leaf_extension(address).is_some_and(|extension| !is_document_extension(extension))
     }
 
     /// How the address stands to judging the link: the one classification a
@@ -589,6 +585,24 @@ impl LinkAddressKind {
             LinkAddressKind::Document => "document",
         }
     }
+}
+
+/// The extension the last segment of `path` carries: what follows the last
+/// dot inside that segment. A dot leading the segment starts a name rather
+/// than an extension, so `.md` carries none. The one reading of a leaf's
+/// extension that a link's address and a `move` request's ends are judged
+/// by.
+pub(crate) fn leaf_extension(path: &str) -> Option<&str> {
+    let leaf = path.rsplit(SEPARATOR).next().unwrap_or(path);
+    match leaf.rfind('.') {
+        Some(dot) if dot > 0 => Some(&leaf[dot + 1..]),
+        _ => None,
+    }
+}
+
+/// Whether `extension` is [`DOCUMENT_EXTENSION`], in any ASCII case.
+pub(crate) fn is_document_extension(extension: &str) -> bool {
+    extension.eq_ignore_ascii_case(DOCUMENT_EXTENSION)
 }
 
 /// `target` with its query — from the first `?` — cut off.

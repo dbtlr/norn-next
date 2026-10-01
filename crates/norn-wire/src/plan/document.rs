@@ -658,8 +658,9 @@ struct DocumentFields {
     footnote: Option<String>,
 }
 
-/// Whether a flag is left out of a plan's bytes: `false`, which is what its
-/// absence reads as. serde hands the field by reference.
+/// Whether a flag is left out of a plan's or a write request's bytes:
+/// `false`, which is what its absence reads as. serde hands the field by
+/// reference.
 pub(crate) const fn is_false(flag: &bool) -> bool {
     !*flag
 }

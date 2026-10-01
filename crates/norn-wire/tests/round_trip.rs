@@ -9155,8 +9155,14 @@ fn a_cascade_travels_on_the_operation_that_caused_it() {
     round_trip(&moved);
     for rewrite in a_cascade() {
         round_trip(&rewrite);
-        let as_kind =
-            serde_json::to_value(OperationKind::from(rewrite.clone())).expect("a kind as JSON");
+        let LinkRewrite {
+            path,
+            syntax,
+            from,
+            to,
+        } = rewrite.clone();
+        let as_kind = serde_json::to_value(OperationKind::rewrite_link(path, syntax, from, to))
+            .expect("a kind as JSON");
         assert_eq!(as_kind["kind"], "rewrite_link");
         assert_eq!(
             as_kind["fields"],
