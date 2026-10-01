@@ -2052,6 +2052,13 @@ returned. A mint that refused is counted there for the reason it is here, and a 
 minted nothing, because it installed no coverage or parked coverage over a handle already
 standing, adds nothing.
 
+The read account also keeps what each preview spent judging its plan's links on the
+store's resolution door: every judgment its planning and the applier's check of it ran — a
+cascade's backlink pass and spelling probe, the change set, and the change set computed
+again — with what each judgment reported and the statements and steps its snapshot counted
+while it ran, added where the preview answers, whatever it answered. The move-cascade bar
+reads these, so what it holds to size independence is what a preview really ran.
+
 **A request is answered from one snapshot.** Every lane-1 statement a request runs takes its
 rows from the snapshot its hold established — the store counts the snapshots established
 through a reader, and an acquired request establishes exactly one — and the reading the
