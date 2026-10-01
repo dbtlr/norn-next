@@ -613,6 +613,53 @@ fn a_document_moved_then_deleted_has_its_backlinks_read_by_the_deletes_choice() 
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **A resolved plan whose delete says another link choice than its plan
+/// does is invalid**, judged from the set the applier computes again and
+/// nothing more. A plan previewed leaving `a.md`'s links broken, sent back
+/// with its delete forbidding them, records a link naming `a.md` that its
+/// delete forbids; a plan previewed rewriting them to `c`, sent back with
+/// its delete rewriting them to a name no document holds, or to `a` itself,
+/// names no one document to rewrite them to. Each answers
+/// `request/plan-invalid` naming the deleted document, and nothing is
+/// written.
+#[test]
+fn a_resolved_delete_whose_link_choice_its_plan_does_not_keep_is_invalid() {
+    let files = [("a.md", "A\n"), ("c.md", "C\n"), ("h.md", "[[a]]\n")];
+
+    let mut fixture = Fixture::new(&files);
+    let mut plan = fixture.plan(vec![breaking("a.md")]);
+    let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[0].kind else {
+        panic!(
+            "the plan's one operation is the delete: {:?}",
+            plan.operations
+        );
+    };
+    *backlinks = norn_wire::Backlinks::Forbidden;
+    assert_eq!(fixture.refuses_disagreeing(plan), [path("a.md")]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+
+    for retargeted in ["zzz", "a"] {
+        let mut fixture = Fixture::new(&files);
+        let mut plan = fixture.plan(vec![rewriting("a.md", "c")]);
+        let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[0].kind else {
+            panic!(
+                "the plan's one operation is the delete: {:?}",
+                plan.operations
+            );
+        };
+        *backlinks =
+            norn_wire::Backlinks::RewrittenTo(ResolutionTarget::new(retargeted).expect("a target"));
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            [path("a.md")],
+            "rewritten to {retargeted}"
+        );
+        assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+        assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+    }
+}
+
 /// **Re-sending an interrupted rewriting delete finishes its cascade.** One
 /// holder landed before the interruption, and the store took it in; the
 /// re-send finds it at its after-state, rewrites the holder that did not

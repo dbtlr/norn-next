@@ -2544,7 +2544,10 @@ condition entries the applier checks stay exact. The applier recomposes a
 plan's cascades and never generates one: a backlink another writer adds after planning is
 an entry the set computed again holds and the plan does not record, which refuses the
 plan, and the refusal's fresh plan generates the cascade afresh from the links standing
-then.
+then. The applier does not hold a resolved plan's cascade to the one planning would
+generate: a hand-built plan whose move or rewriting delete carries a cascade omitting a
+rewrite records the link that rewrite would have followed as the set computed again
+records it, and lands leaving it as written (NORN-297, an open question).
 
 **A document delete reads its backlinks the same way.** A link is a backlink of the document
 a delete removes where it resolves before the plan to exactly that document — wherever the
@@ -2569,7 +2572,12 @@ forecast says it was skipped for its ambiguity. Every link that named a removed 
 an entry of the change set, even where the path it named is refilled, so a backlink another
 writer adds after planning is an entry the plan does not record: the apply is refused, and
 the fresh plan rewrites the new backlink too or, for a delete saying neither flag, is left
-unresolved naming its holder.
+unresolved naming its holder. The applier holds a resolved plan's delete to its link choice
+from the set it computes again, reading nothing more: a delete forbidding the links naming
+its document whose plan records one, or one rewriting them whose `rewrite_to` names no one
+document where the plan leaves the vault, is one planning leaves unresolved, so the plan is
+`request/plan-invalid` (`transitions_disagree`, naming the deleted document); where the
+vault moved since planning, the refusal's fresh plan answers for it instead.
 
 **The resolution change set runs for every plan.**
 Planning records the set: every link whose resolution the plan changes, and every link a

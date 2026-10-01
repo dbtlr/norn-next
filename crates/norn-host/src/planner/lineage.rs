@@ -26,7 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{Backlinks, Operation, OperationKind};
+use norn_store::TargetNaming;
+use norn_wire::{Backlinks, Operation, OperationKind, Resolves};
 
 use super::compose::touches;
 
@@ -98,6 +99,29 @@ impl Removal {
         match &self.backlinks {
             Backlinks::RewrittenTo(target) => Some(target.address()),
             Backlinks::Forbidden | Backlinks::LeftBroken => None,
+        }
+    }
+
+    /// **The one rule a delete's link choice is held to** where the plan
+    /// leaves the vault, with `named` whether a link resolving before the
+    /// plan to exactly the document it removes holds an entry of the plan's
+    /// resolution change set, and `target` what its `rewrite_to` names
+    /// there: a delete forbidding the links naming its document is kept
+    /// where no link names it; one rewriting them, where its `rewrite_to`
+    /// names exactly one document — never the removed one, which stands
+    /// nowhere after the plan, though another may stand at its path; one
+    /// leaving them broken, always.
+    ///
+    /// Planning leaves a delete it does not keep unresolved, and the applier
+    /// refuses a resolved plan holding one; neither reads anything more than
+    /// the change set it computes.
+    pub(crate) fn kept_by(&self, named: bool, target: Option<&TargetNaming>) -> bool {
+        match &self.backlinks {
+            Backlinks::Forbidden => !named,
+            Backlinks::RewrittenTo(_) => {
+                target.is_some_and(|target| matches!(target.after, Resolves::One { .. }))
+            }
+            Backlinks::LeftBroken => true,
         }
     }
 }

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
 use norn_wire::{
-    DocumentPath, FileState, LinkAdvisory, PlanCondition, PlanFault, RefusedCheck, ResolvedPlan,
-    SchemaViolation, Transition,
+    DocumentPath, FileState, LinkAdvisory, OperationKind, PlanCondition, PlanFault, RefusedCheck,
+    ResolvedPlan, SchemaViolation, Transition,
 };
 
 use super::observe::{
@@ -317,7 +317,26 @@ pub(super) fn check(
     )
     .map_err(Unfit::Unread)?;
     drop(targets);
-    checks.extend(link_checks(&plan.conditions, &recomputed.entries));
+    let refused_links = link_checks(&plan.conditions, &recomputed.entries);
+    // A delete whose link choice the set it records contradicts — one
+    // forbidding the links naming its document that a recorded link names,
+    // or one rewriting them to no one document — is one planning leaves
+    // unresolved, so the plan is not what its operations do. Where the set
+    // moved since planning, the refusal's fresh plan answers for it instead.
+    // NORN-297: a move's or a rewriting delete's cascade omitting a rewrite
+    // planning would generate is not held here; the set records the link it
+    // leaves, and the plan lands as recorded.
+    if refused_links.is_empty() && !recomputed.unkept.is_empty() {
+        return Err(Unfit::Invalid(disagreement(
+            recomputed.unkept.iter().filter_map(|&position| {
+                match &plan.operations[position].kind {
+                    OperationKind::DeleteDocument { path, .. } => Some(path.clone()),
+                    _ => None,
+                }
+            }),
+        )));
+    }
+    checks.extend(refused_links);
     let schema = Judging {
         plan,
         states: &states,

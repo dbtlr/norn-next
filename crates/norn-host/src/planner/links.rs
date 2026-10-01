@@ -198,6 +198,11 @@ pub(crate) struct ChangeSet {
     /// What the plan does to a link a caller should look at, in the same
     /// order.
     pub(crate) advisories: Vec<LinkAdvisory>,
+    /// The position of each delete whose link choice the set contradicts
+    /// ([`Removal::kept_by`]), in order. Planning leaves every such delete
+    /// unresolved, so a plan it resolved holds none; the applier refuses a
+    /// resolved plan holding one as one that is not what its operations do.
+    pub(crate) unkept: Vec<usize>,
 }
 
 /// The resolution change set of the plan writing `targets`, whose content
@@ -257,6 +262,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         })
         .collect();
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
+    // Each delete a link naming its document contradicts.
+    let mut named: BTreeSet<usize> = BTreeSet::new();
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
@@ -275,6 +282,9 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // the plan does not write, since one it respells to a path it refills
         // reads as left behind from its new address.
         let removal = removed_by(&change.before, lineage, normalizer);
+        if let Some(removal) = removal {
+            named.insert(removal.position);
+        }
         let left_behind = unwritten
             && (left_behind(&change.before, &change.after, lineage, normalizer).is_some()
                 || removal.is_some_and(|removal| {
@@ -317,7 +327,19 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             (key, skip.reason)
         })
         .collect();
-    let mut set = ChangeSet::default();
+    let mut set = ChangeSet {
+        unkept: lineage
+            .removals()
+            .filter(|removal| {
+                !removal.kept_by(
+                    named.contains(&removal.position),
+                    rewritten_to.get(&removal.position),
+                )
+            })
+            .map(|removal| removal.position)
+            .collect(),
+        ..ChangeSet::default()
+    };
     let mut advised: BTreeMap<EntryKey, LinkAdvisory> = BTreeMap::new();
     for (entry, judged) in judged {
         if let Some(advisory) = judged.advisory(skips.get(&entry).copied()) {
@@ -1079,6 +1101,7 @@ mod tests {
                     Resolves::none(),
                 )],
                 advisories: Vec::new(),
+                unkept: Vec::new(),
             }
         );
     }
@@ -1144,6 +1167,7 @@ mod tests {
                     Resolves::one(path("x/b.md")),
                 )],
                 advisories: Vec::new(),
+                unkept: Vec::new(),
             }
         );
         assert!(super::reads_links_over([(true, true)], &operations));
