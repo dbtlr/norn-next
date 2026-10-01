@@ -58,7 +58,7 @@ use norn_wire::{
     Operation, OperationKind, PlanCondition, Resolves, Transition,
 };
 
-use super::compose::Skipped;
+use super::compose::{Composition, Skipped};
 use super::lineage::Lineage;
 use crate::derivation::document_links;
 
@@ -130,6 +130,23 @@ pub(crate) struct Target<'a> {
     /// What the document there holds after the plan, or `None` where none
     /// stands.
     pub(crate) after: Option<&'a [u8]>,
+}
+
+impl<'a> Target<'a> {
+    /// Every file `composition` writes, as the change set reads it: whether
+    /// a document stands there before the plan, and the bytes it composed
+    /// for after.
+    pub(crate) fn of(composition: &'a Composition) -> Vec<Target<'a>> {
+        composition
+            .targets
+            .iter()
+            .map(|(path, target)| Target {
+                path,
+                before: matches!(target.before, FileState::Present { .. }),
+                after: target.after.as_deref(),
+            })
+            .collect()
+    }
 }
 
 /// A plan's resolution change set, and the advisories its forecast carries
@@ -472,7 +489,7 @@ impl WrittenLinks {
 
 /// A link's address as written: its protocol prefix, then its target, with
 /// no anchor.
-fn address(link: &norn_store::LinkFact) -> String {
+pub(crate) fn address(link: &norn_store::LinkFact) -> String {
     match &link.protocol {
         Some(protocol) => format!("{protocol}://{}", link.target),
         None => link.target.clone(),
@@ -481,7 +498,7 @@ fn address(link: &norn_store::LinkFact) -> String {
 
 /// `path` as the store names it, where its grammar holds it; planning leaves
 /// an operation naming any other unresolved.
-fn stored_path(path: &DocumentPath) -> Option<norn_store::DocumentPath> {
+pub(crate) fn stored_path(path: &DocumentPath) -> Option<norn_store::DocumentPath> {
     norn_store::DocumentPath::new(path.as_str()).ok()
 }
 
@@ -490,7 +507,7 @@ fn wire_path(path: &norn_store::DocumentPath) -> DocumentPath {
     DocumentPath::new(path.as_str()).expect("a stored document path is a wire document path")
 }
 
-fn wire_family(family: norn_store::LinkFamily) -> LinkFamily {
+pub(crate) fn wire_family(family: norn_store::LinkFamily) -> LinkFamily {
     match family {
         norn_store::LinkFamily::Wikilink => LinkFamily::Wikilink,
         norn_store::LinkFamily::Markdown => LinkFamily::Markdown,
@@ -499,7 +516,7 @@ fn wire_family(family: norn_store::LinkFamily) -> LinkFamily {
 
 /// A syntax's name as the store spells it, which orders the change set's
 /// keys; `None` for a syntax the store holds no link of.
-fn family_name(family: LinkFamily) -> Option<&'static str> {
+pub(crate) fn family_name(family: LinkFamily) -> Option<&'static str> {
     match family {
         LinkFamily::Wikilink => Some(norn_store::LinkFamily::Wikilink.as_str()),
         LinkFamily::Markdown => Some(norn_store::LinkFamily::Markdown.as_str()),

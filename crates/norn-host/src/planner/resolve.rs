@@ -11,6 +11,7 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
+use super::cascade::generate;
 use super::compose::{Composition, compose, content_hash, touched};
 use super::edit;
 use super::forecast::forecast;
@@ -96,41 +97,61 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     let AuthoredPlan {
         plan: OperationsTag,
         vault,
-        operations,
+        mut operations,
         force,
         footnote,
     } = authored;
+    // Planning writes every cascade from the links the vault holds now, so
+    // one an operation arrives carrying — a refused plan's, re-resolved — is
+    // generated again rather than trusted.
+    for operation in &mut operations {
+        operation.cascade.clear();
+    }
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
-    let (order, composition) = loop {
+    let (order, lineage) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
         let failed =
             failures(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
-        if failed.is_empty() {
-            break (order, composition);
+        if !failed.is_empty() {
+            left_out.extend(failed);
+            leave_out_what_falls_with(&operations, &mut left_out, view);
+            continue;
         }
-        left_out.extend(failed);
+        let lineage = Lineage::of(&operations, &order, view.normalizer());
+        if let Some(cycle) = lineage.content_cycle() {
+            return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
+        }
+        // Each move that resolves generates its cascade from the plan as it
+        // composes without any, and a holder a left-out operation touches
+        // takes the move down with it, as any file two operations share
+        // does; what is left composes again, until nothing more falls.
+        let cascades = generate(&composition, &lineage, view.normalizer(), links)
+            .map_err(PlanningFailure::Links)?;
+        for (position, cascade) in cascades {
+            operations[position].cascade = cascade;
+        }
+        let standing = left_out.len();
         leave_out_what_falls_with(&operations, &mut left_out, view);
+        if left_out.len() == standing {
+            break (order, lineage);
+        }
+        for operation in &mut operations {
+            operation.cascade.clear();
+        }
     };
-    let lineage = Lineage::of(&operations, &order, view.normalizer());
-    if let Some(cycle) = lineage.content_cycle() {
-        return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
-    }
+    let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
+    debug_assert!(
+        composition.unresolvable.is_empty(),
+        "a cascade names only holders that stand, so it composes wherever its operation did"
+    );
     let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     // The resolution change set is recorded as the vault stands with every
     // target at its after-state, judged from the bytes composition wrote.
-    let targets: Vec<Target<'_>> = composition
-        .targets
-        .iter()
-        .map(|(path, target)| Target {
-            path,
-            before: matches!(target.before, FileState::Present { .. }),
-            after: target.after.as_deref(),
-        })
-        .collect();
+    let targets = Target::of(&composition);
     let changed = change_set(
         &targets,
         &lineage,

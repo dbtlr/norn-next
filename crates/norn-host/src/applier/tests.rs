@@ -20,6 +20,8 @@ use crate::planner::resolve::Resolution;
 use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
+mod cascade;
+
 pub(super) fn path(text: &str) -> DocumentPath {
     DocumentPath::new(text).expect("a legal document path")
 }
@@ -1831,12 +1833,14 @@ fn a_delete_records_the_links_it_breaks_and_applies() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **A plain move records the path links it breaks and the relative links
-/// its document holds, and applies.** `[x](notes/a.md)` in `b.md` names the
-/// moved document's source, and `[y](c.md)` in it is read from `notes/`
-/// before the move and from `archive/` after, where no `c.md` stands.
+/// **A move respells the path links it would break, and applies.**
+/// `[x](notes/a.md)` in `b.md` names the moved document's source, and is
+/// respelled to name it at `archive/a.md`; `[y](c.md)` in the moved document
+/// named `notes/c.md` from `notes/`, and is respelled to name it from
+/// `archive/`. Each rewritten link is a written entry keyed as the plan
+/// leaves it, and the store after the apply is a build from zero.
 #[test]
-fn a_move_records_the_links_it_breaks_and_applies() {
+fn a_move_respells_the_path_links_it_would_break_and_applies() {
     let mut fixture = Fixture::new(&[
         ("notes/a.md", "[y](c.md)\n"),
         ("notes/c.md", "c\n"),
@@ -1851,24 +1855,46 @@ fn a_move_records_the_links_it_breaks_and_applies() {
         )
     };
     assert_eq!(
+        plan.operations[0].cascade,
+        vec![
+            norn_wire::LinkRewrite::new(
+                path("archive/a.md"),
+                norn_wire::LinkFamily::Markdown,
+                "c.md",
+                "../notes/c.md"
+            ),
+            norn_wire::LinkRewrite::new(
+                path("b.md"),
+                norn_wire::LinkFamily::Markdown,
+                "notes/a.md",
+                "archive/a.md"
+            ),
+        ]
+    );
+    assert_eq!(
         plan.conditions,
         vec![
             markdown(
                 "archive/a.md",
-                "c.md",
+                "../notes/c.md",
                 norn_wire::Resolves::one(path("notes/c.md")),
-                norn_wire::Resolves::none(),
+                norn_wire::Resolves::one(path("notes/c.md")),
             ),
             markdown(
                 "b.md",
-                "notes/a.md",
-                norn_wire::Resolves::one(path("notes/a.md")),
+                "archive/a.md",
                 norn_wire::Resolves::none(),
+                norn_wire::Resolves::one(path("archive/a.md")),
             ),
         ]
     );
     applied(fixture.apply(plan));
-    assert_eq!(fixture.read("archive/a.md").as_deref(), Some("[y](c.md)\n"));
+    assert_eq!(
+        fixture.read("archive/a.md").as_deref(),
+        Some("[y](../notes/c.md)\n")
+    );
+    assert_eq!(fixture.read("b.md").as_deref(), Some("[x](archive/a.md)\n"));
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **The forecast advises as link health judges.** `[[v1.2]]` names an
@@ -1976,23 +2002,21 @@ fn a_foreign_link_to_a_moved_document_is_unrecorded() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("alpha\n"));
 }
 
-/// **A recorded entry whose before alone moved refuses the plan.** The move
-/// records `[x](c.md)` in its document going from `old/c.md` to `new/c.md`;
-/// once another writer removes `old/c.md`, the set computed again holds the
-/// link going from none to `new/c.md` — the after it recorded, another
-/// before — so the recorded entry fails and nothing is published.
+/// **A recorded entry whose before alone moved refuses the plan.** The plan
+/// creates two documents of the stem `[[c]]` names, so it records the link
+/// going from `old/c.md` to several; once another writer removes `old/c.md`,
+/// the set computed again holds the link going from none to several — the
+/// after it recorded, another before — so the recorded entry fails and
+/// nothing is published.
 #[test]
 fn a_foreign_change_moving_only_a_recorded_links_before_refuses_the_plan() {
-    let mut fixture = Fixture::new(&[
-        ("old/a.md", "[x](c.md)\n"),
-        ("old/c.md", "old\n"),
-        ("new/c.md", "new\n"),
-    ]);
-    let plan = fixture.plan(vec![moving("old/a.md", "new/a.md")]);
-    let recorded = norn_wire::PlanCondition::link_resolution(
-        norn_wire::LinkKey::new(path("new/a.md"), norn_wire::LinkFamily::Markdown, "c.md"),
+    let mut fixture = Fixture::new(&[("old/c.md", "old\n"), ("b.md", "[[c]]\n")]);
+    let plan = fixture.plan(vec![creating("z/c.md", "z\n"), creating("w/c.md", "w\n")]);
+    let recorded = link_entry(
+        "b.md",
+        "c",
         norn_wire::Resolves::one(path("old/c.md")),
-        norn_wire::Resolves::one(path("new/c.md")),
+        norn_wire::Resolves::several(),
     );
     assert_eq!(plan.conditions, vec![recorded.clone()]);
     std::fs::remove_file(fixture.vault.join("old/c.md")).expect("another writer removes it");
@@ -2003,7 +2027,7 @@ fn a_foreign_change_moving_only_a_recorded_links_before_refuses_the_plan() {
         refused.checks,
         vec![norn_wire::RefusedCheck::condition_failed(recorded)]
     );
-    assert_eq!(fixture.read("old/a.md").as_deref(), Some("[x](c.md)\n"));
+    assert_eq!(fixture.read("z/c.md"), None);
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 

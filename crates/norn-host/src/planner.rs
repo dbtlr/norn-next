@@ -120,6 +120,7 @@
 //! [`view::TreeView`], matching on a snapshot it takes there; and a preview
 //! plans the same way on its one snapshot, taking no claim (`crate::apply`).
 
+pub(crate) mod cascade;
 pub(crate) mod compose;
 pub(crate) mod edit;
 pub(crate) mod expand;

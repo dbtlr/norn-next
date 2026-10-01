@@ -1,0 +1,343 @@
+//! Link cascades planned over a vault on disk and the store beside it, then
+//! judged and applied by the applier: what a move respells, what it leaves
+//! as written and why, and that a planned cascade recomposes and its
+//! resolution change set reproduces.
+
+use std::collections::BTreeSet;
+
+use norn_wire::{
+    AuthoredPlan, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, Operation, PlanCondition,
+    Resolves, UnresolvedReason,
+};
+
+use super::{Fixture, applied, editing, moving, path};
+use crate::planner::resolve::Resolution;
+use crate::planner::view::TreeView;
+
+fn wikilink(holder: &str, from: &str, to: &str) -> LinkRewrite {
+    LinkRewrite::new(path(holder), LinkFamily::Wikilink, from, to)
+}
+
+fn markdown(holder: &str, from: &str, to: &str) -> LinkRewrite {
+    LinkRewrite::new(path(holder), LinkFamily::Markdown, from, to)
+}
+
+fn key(holder: &str, syntax: LinkFamily, address: &str) -> LinkKey {
+    LinkKey::new(path(holder), syntax, address)
+}
+
+impl Fixture {
+    /// `operations` planned against the vault, its links judged on the store
+    /// as it stands, whether or not every operation resolves.
+    fn planned(&self, operations: Vec<Operation>) -> Resolution {
+        let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
+        let links = self.links();
+        crate::planner::resolve::resolve(
+            AuthoredPlan::new(crate::planner::links::testing::vault(), operations),
+            self.root_identity(),
+            &BTreeSet::new(),
+            &view,
+            &links.index(),
+        )
+        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"))
+    }
+
+    /// Plan `operations`, apply the plan, and hand back the cascade each
+    /// operation carried, once the store is shown to be a build from zero
+    /// over what landed.
+    fn moved(&mut self, operations: Vec<Operation>) -> Vec<Vec<LinkRewrite>> {
+        let plan = self.plan(operations);
+        let cascades = plan
+            .operations
+            .iter()
+            .map(|operation| operation.cascade.clone())
+            .collect();
+        applied(self.apply(plan));
+        self.assert_store_is_a_build_from_zero();
+        cascades
+    }
+}
+
+/// **A move that changes its document's stem respells a bare backlink** to
+/// the shortest suffix naming the document alone where it lands.
+#[test]
+fn a_stem_changing_move_rewrites_a_bare_backlink() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "See [[a]] and ![[a#Part|it]].\n")]);
+    let cascades = fixture.moved(vec![moving("a.md", "x/b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "a", "b")]]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("See [[b]] and ![[b#Part|it]].\n")
+    );
+}
+
+/// **A move keeping its document's stem leaves a backlink naming it alone as
+/// written**: `[[a]]` names it where it lands, so nothing is rewritten, and
+/// the change of what the link names is recorded and not advised on.
+#[test]
+fn a_stem_preserving_move_leaves_a_unique_bare_backlink_alone() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let resolution = fixture.resolution(vec![moving("a.md", "x/a.md")]);
+    assert!(resolution.plan.operations[0].cascade.is_empty());
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![PlanCondition::link_resolution(
+            key("h.md", LinkFamily::Wikilink, "a"),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("x/a.md")),
+        )]
+    );
+    assert!(resolution.forecast.links.is_empty());
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+}
+
+/// **A backlink that would be ambiguous where the document lands takes the
+/// minimal suffix naming it alone**, keeping the extension only where the
+/// link was written with it.
+#[test]
+fn a_backlink_ambiguous_after_takes_the_minimal_suffix() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("y/b.md", "B\n"),
+        ("h.md", "[[a]] [[a.md]]\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("a.md", "x/b.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            wikilink("h.md", "a", "x/b"),
+            wikilink("h.md", "a.md", "x/b.md"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[x/b]] [[x/b.md]]\n")
+    );
+}
+
+/// **A path-qualified backlink stays path-qualified**: it is respelled to the
+/// shortest suffix of at least two segments naming the document alone, even
+/// where its stem alone would.
+#[test]
+fn a_path_qualified_backlink_stays_path_qualified() {
+    let mut fixture = Fixture::new(&[("notes/a.md", "A\n"), ("h.md", "[[notes/a]]\n")]);
+    let cascades = fixture.moved(vec![moving("notes/a.md", "archive/deep/b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "notes/a", "deep/b")]]);
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[deep/b]]\n"));
+}
+
+/// **A `vault://` backlink keeps its protocol** and names the document's root
+/// path where it lands, with the extension where it was written with one.
+#[test]
+fn a_vault_protocol_backlink_keeps_its_protocol() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "A\n"),
+        ("h.md", "[[vault://notes/a]] [[vault://notes/a.md]]\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("notes/a.md", "archive/b.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            wikilink("h.md", "vault://notes/a", "vault://archive/b"),
+            wikilink("h.md", "vault://notes/a.md", "vault://archive/b.md"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[vault://archive/b]] [[vault://archive/b.md]]\n")
+    );
+}
+
+/// **A Markdown backlink is respelled from its holder**: a relative one from
+/// the holder's folder, a rooted one from the root, each in the escaping it
+/// was written in, its anchor kept.
+#[test]
+fn a_markdown_backlink_is_respelled_from_its_holder() {
+    let mut fixture = Fixture::new(&[
+        ("notes/my a.md", "A\n"),
+        (
+            "sub/h.md",
+            "[r](../notes/my%20a.md#Part) [s](/notes/my%20a.md) [t](<../notes/my a.md>)\n",
+        ),
+    ]);
+    let cascades = fixture.moved(vec![moving("notes/my a.md", "archive/my b.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            markdown("sub/h.md", "../notes/my a.md", "../archive/my b.md"),
+            markdown("sub/h.md", "../notes/my%20a.md", "../archive/my%20b.md"),
+            markdown("sub/h.md", "/notes/my%20a.md", "/archive/my%20b.md"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("sub/h.md").as_deref(),
+        Some("[r](../archive/my%20b.md#Part) [s](/archive/my%20b.md) [t](<../archive/my b.md>)\n")
+    );
+}
+
+/// **An ambiguous backlink is skipped as ambiguous**: `[[a]]` names two
+/// documents, one of them moved, so which it names is not known; it is left
+/// as written, and the forecast says why in place of saying it is
+/// retargeted.
+#[test]
+fn an_ambiguous_backlink_is_skipped_ambiguous() {
+    let mut fixture = Fixture::new(&[("x/a.md", "X\n"), ("y/a.md", "Y\n"), ("h.md", "[[a]]\n")]);
+    let resolution = fixture.resolution(vec![moving("x/a.md", "z/c.md")]);
+    assert!(resolution.plan.operations[0].cascade.is_empty());
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_ambiguous(key(
+            "h.md",
+            LinkFamily::Wikilink,
+            "a"
+        ))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+}
+
+/// **A link the text layer cannot respell keeps its entry and says why**: a
+/// backlink in a single-quoted frontmatter value cannot carry a quote, so the
+/// moved document's new name leaves it as written, recorded going from the
+/// document to none, and advised on with the text layer's reason.
+#[test]
+fn a_backlink_the_text_layer_cannot_respell_is_left_with_its_reason() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "---\nsee: '[[a]]'\n---\nbody\n")]);
+    let resolution = fixture.resolution(vec![moving("a.md", "it's.md")]);
+    let link = key("h.md", LinkFamily::Wikilink, "a");
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![PlanCondition::link_resolution(
+            link.clone(),
+            Resolves::one(path("a.md")),
+            Resolves::none(),
+        )]
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::skipped_would_corrupt_frontmatter(link)]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("---\nsee: '[[a]]'\n---\nbody\n")
+    );
+}
+
+/// **A moved document's relative links reach the same files, attachments
+/// included**: each is read from where the document stood and respelled from
+/// where it lands, an anchor-only link and a wikilink left as they are.
+#[test]
+fn a_moved_documents_relative_links_reach_the_same_files_attachments_included() {
+    let mut fixture = Fixture::new(&[
+        (
+            "notes/a.md",
+            "# H\n[i](img.png) [c](./c.md) [s](#H) [[c]]\n",
+        ),
+        ("notes/img.png", "png"),
+        ("notes/c.md", "C\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("notes/a.md", "archive/deep/a.md")]);
+    assert_eq!(
+        cascades,
+        [vec![
+            markdown("archive/deep/a.md", "./c.md", "../../notes/c.md"),
+            markdown("archive/deep/a.md", "img.png", "../../notes/img.png"),
+        ]]
+    );
+    assert_eq!(
+        fixture.read("archive/deep/a.md").as_deref(),
+        Some("# H\n[i](../../notes/img.png) [c](../../notes/c.md) [s](#H) [[c]]\n")
+    );
+}
+
+/// **An edit that does not resolve on a holder leaves the move unresolved**:
+/// the move's cascade rewrites the holder, so the two stand or fall
+/// together, while a move whose holders nothing else touches resolves.
+#[test]
+fn an_unresolved_edit_on_a_holder_leaves_the_move_unresolved() {
+    let fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("b.md", "B\n"),
+        ("h.md", "[[a]]\n"),
+        ("k.md", "[[b]]\n"),
+    ]);
+    let operations = vec![
+        moving("a.md", "x/a2.md"),
+        editing("h.md", "missing", "x"),
+        moving("b.md", "x/b2.md"),
+    ];
+    let resolution = fixture.planned(operations.clone());
+    let left: Vec<&Operation> = resolution
+        .unresolved
+        .iter()
+        .map(|unresolved| &unresolved.operation)
+        .collect();
+    assert_eq!(left, [&operations[0], &operations[1]]);
+    let UnresolvedReason::NoLongerResolves { detail, .. } = &resolution.unresolved[0].reason else {
+        panic!("the move no longer resolves: {:?}", resolution.unresolved);
+    };
+    assert!(detail.contains("h.md"), "{detail}");
+    assert_eq!(
+        resolution.plan.operations,
+        [moving("b.md", "x/b2.md").with_cascade(vec![wikilink("k.md", "b", "b2")])]
+    );
+}
+
+/// **A planned cascade recomposes, and its set reproduces**: the applier's
+/// judgment of the plan — every holder recomposed from its before-state, the
+/// change set computed again — answers the same plan and the same link
+/// advisories its planning did, and the plan lands as previewed.
+#[test]
+fn a_planned_cascade_recomposes_and_its_set_reproduces() {
+    let mut fixture = Fixture::new(&[
+        ("x/a.md", "A [[c]]\n"),
+        ("y/a.md", "Y\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[x/a]] [[a]] [t](c.md)\n"),
+    ]);
+    let resolution = fixture.resolution(vec![
+        moving("x/a.md", "z/q.md"),
+        moving("c.md", "w/c2.md"),
+        editing("h.md", "[t]", "[u]"),
+    ]);
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .any(|operation| !operation.cascade.is_empty())
+    );
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the planned cascade previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[z/q]] [[a]] [u](w/c2.md)\n")
+    );
+    assert_eq!(fixture.read("z/q.md").as_deref(), Some("A [[c2]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A cascade is generated anew whenever a plan is planned**: a refused
+/// plan's move, re-resolved carrying the cascade it was planned with, plans
+/// the cascade the links hold now, never the one it carried.
+#[test]
+fn a_carried_cascade_is_planned_again_rather_than_trusted() {
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let carrying = moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "zzz", "b")]);
+    let resolution = fixture.planned(vec![carrying]);
+    assert!(
+        resolution.unresolved.is_empty(),
+        "{:?}",
+        resolution.unresolved
+    );
+    assert_eq!(
+        resolution.plan.operations,
+        [moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "a", "b")])]
+    );
+}
