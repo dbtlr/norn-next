@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
 use norn_wire::{
-    DocumentPath, FileState, PlanFault, RefusedCheck, ResolvedPlan, SchemaViolation, Transition,
+    DocumentPath, FileState, LinkAdvisory, PlanCondition, PlanFault, RefusedCheck, ResolvedPlan,
+    SchemaViolation, Transition,
 };
 
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
+    TargetState, Unit, failed_conditions, identity, is_create, is_removal, misread, observe,
     recorded_lineage, transition_index, units,
 };
 use super::recompose::{Recomposed, disagreement, recompose};
@@ -22,7 +23,13 @@ use super::shape::shape_disagrees;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
 use crate::planner::lineage::Lineage;
+use crate::planner::links::{LinkIndex, Target, change_set, entry_key};
 use crate::planner::view::{TreeView, VaultView, wire_hash};
+use crate::refusal::PageRefused;
+
+/// Where a plan's resolution change set is computed again: the snapshot the
+/// apply's intake left, or a preview's.
+pub(crate) type Links<'a> = &'a dyn LinkIndex<Error = PageRefused>;
 
 /// A plan every target of which is checked and staged: one fixed-size record
 /// per publication, in the order they publish, and nothing that holds a file
@@ -40,7 +47,7 @@ pub(super) struct StagedPlan {
 ///
 /// **Plain data.** The unit names the plan's transitions by index, and the
 /// kernel's record names the target, its root, its transition's hashes and
-/// its shadow; neither holds a handle or a byte of content (ADR 0031).
+/// its shadow; neither holds a handle or a byte of content (ADR 0032).
 #[derive(Debug)]
 pub(super) struct StagedTarget {
     pub(super) unit: Unit,
@@ -61,7 +68,7 @@ pub(super) enum Held {
 }
 
 /// When a publication runs: creates first, then replaces (a respell among
-/// them), then removals (ADR 0031).
+/// them), then removals (ADR 0032).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Phase {
     Create,
@@ -82,6 +89,8 @@ pub(super) enum Stop {
     RootReplaced,
     /// The machine failed, in words.
     Failed(String),
+    /// The snapshot the plan's links are judged on could not be read.
+    Unread(PageRefused),
 }
 
 /// Why a plan failed its checks, before anything was staged.
@@ -94,6 +103,8 @@ pub(super) enum Unfit {
     Invalid(PlanFault),
     /// The vault could not be read, in words.
     Failed(String),
+    /// The snapshot the plan's links are judged on could not be read.
+    Unread(PageRefused),
 }
 
 impl From<Unfit> for Stop {
@@ -102,6 +113,7 @@ impl From<Unfit> for Stop {
             Unfit::Refused(checks) => Stop::Refused(checks),
             Unfit::Invalid(fault) => Stop::Invalid(fault),
             Unfit::Failed(detail) => Stop::Failed(detail),
+            Unfit::Unread(refused) => Stop::Unread(refused),
         }
     }
 }
@@ -163,8 +175,9 @@ pub(super) fn check_and_stage(
     plan: &ResolvedPlan,
     view: &TreeView,
     declared: &Declared,
+    links: Links<'_>,
 ) -> Result<StagedPlan, Stop> {
-    let checked = check(plan, view, declared).map_err(Stop::from)?;
+    let checked = check(plan, view, declared, links).map_err(Stop::from)?;
     stage(anchor, root, shadows, plan, view.normalizer(), checked)
 }
 
@@ -175,6 +188,9 @@ pub(super) struct Checked {
     /// Every schema violation the plan's force let through: none for a plan
     /// that is not forced, which refuses on each instead.
     pub(super) forced: Vec<SchemaViolation>,
+    /// What the plan does to the links a caller should look at, from its
+    /// resolution change set computed again.
+    pub(super) links: Vec<LinkAdvisory>,
     units: Vec<Unit>,
     contents: Vec<Option<Arc<[u8]>>>,
     phases: Vec<Phase>,
@@ -191,12 +207,17 @@ pub(super) struct Checked {
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; no target
-/// drifted and every condition holds; the operations, run again from the
-/// before-states, are exactly the plan's transitions ([`recompose`]); and
-/// every result passes the vault schema, or, for a forced plan, has each
-/// violation it introduces listed rather than refused. A plan whose store paths, shape,
-/// target places or recomposition fail is not what its operations do: its own
+/// the vault gives it, at a place the vault reads documents at; the plan
+/// records whether each hash's bytes decode as a document one way, and as
+/// the bytes a target holds of its change decode ([`misread`]); no target
+/// drifted and every content condition holds; the
+/// operations, run again from the before-states, are exactly the plan's
+/// transitions ([`recompose`]); the plan's resolution change set, computed
+/// again from those results through `links` ([`link_checks`]), is exactly the
+/// one it records; and every result passes the vault schema, or, for a forced
+/// plan, has each violation it introduces listed rather than refused. A plan
+/// whose store paths, shape, target places, recorded decoding or
+/// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
 /// schema violation, a taken name, a replaced root and an I/O failure each
@@ -209,6 +230,7 @@ pub(super) fn check(
     plan: &ResolvedPlan,
     view: &TreeView,
     declared: &Declared,
+    links: Links<'_>,
 ) -> Result<Checked, Unfit> {
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
@@ -238,6 +260,10 @@ pub(super) fn check(
     if !unplaced.is_empty() {
         return Err(Unfit::Invalid(disagreement(unplaced)));
     }
+    let misread = misread(plan, &states);
+    if !misread.is_empty() {
+        return Err(Unfit::Invalid(disagreement(misread)));
+    }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
         failed_conditions(plan, view)
@@ -261,6 +287,31 @@ pub(super) fn check(
         .collect::<Result<_, _>>()
         .map_err(|path| Unfit::Invalid(disagreement([path])))?;
     drop(composition);
+    let mut after: Vec<Option<&[u8]>> = vec![None; plan.transitions.len()];
+    for (unit, content) in units.iter().zip(&contents) {
+        let written = match unit {
+            Unit::One(index) => *index,
+            Unit::Respell { new, .. } => *new,
+        };
+        after[written] = content.as_deref();
+    }
+    let targets: Vec<Target<'_>> = plan
+        .transitions
+        .iter()
+        .zip(after)
+        .map(|(transition, after)| {
+            Target::new(
+                &transition.path,
+                &transition.before,
+                &transition.after,
+                after,
+            )
+        })
+        .collect();
+    let recomputed = change_set(&targets, &lineage, normalizer, &plan.operations, links)
+        .map_err(Unfit::Unread)?;
+    drop(targets);
+    checks.extend(link_checks(&plan.conditions, &recomputed.entries));
     let schema = Judging {
         plan,
         states: &states,
@@ -288,6 +339,7 @@ pub(super) fn check(
     let phases: Vec<Phase> = units.iter().map(|unit| phase(plan, *unit)).collect();
     Ok(Checked {
         forced,
+        links: recomputed.advisories,
         units,
         contents,
         phases,
@@ -313,6 +365,7 @@ pub(super) fn stage(
 ) -> Result<StagedPlan, Stop> {
     let Checked {
         forced,
+        links: _,
         units,
         contents,
         phases,
@@ -399,6 +452,51 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
             _ => None,
         })
         .collect()
+}
+
+/// Every way the resolution change set a plan records differs from
+/// `recomputed`, the set computed again from the plan: each entry it records
+/// that the set does not hold with the same values fails, and each entry the
+/// set holds that it does not record is unrecorded. A content condition is
+/// not an entry, and is judged on its own.
+///
+/// **The set is exact** (ADR 0032): a link whose resolution the vault outside
+/// the plan moved since planning — a document created or removed there that
+/// a recorded link now names, or a new link to a document the plan moves —
+/// refuses the plan, and the refusal's fresh plan records the set as it
+/// stands now.
+fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<RefusedCheck> {
+    let entries = |conditions: &[PlanCondition]| -> BTreeMap<_, PlanCondition> {
+        conditions
+            .iter()
+            .filter_map(|condition| match condition {
+                PlanCondition::LinkResolution { link, .. } => {
+                    Some((entry_key(link), condition.clone()))
+                }
+                PlanCondition::ContentHash { .. } => None,
+            })
+            .collect()
+    };
+    let computed = entries(recomputed);
+    let recorded_keys = entries(recorded);
+    let mut checks: Vec<RefusedCheck> = recorded
+        .iter()
+        .filter(|condition| match condition {
+            PlanCondition::LinkResolution { link, .. } => {
+                computed.get(&entry_key(link)) != Some(*condition)
+            }
+            PlanCondition::ContentHash { .. } => false,
+        })
+        .cloned()
+        .map(RefusedCheck::condition_failed)
+        .collect();
+    checks.extend(
+        computed
+            .into_iter()
+            .filter(|(key, _)| !recorded_keys.contains_key(key))
+            .map(|(_, condition)| RefusedCheck::condition_unrecorded(condition)),
+    );
+    checks
 }
 
 /// The bytes `unit` publishes, where it writes any.
@@ -531,13 +629,13 @@ fn stage_one(
                 (FileState::Absent {}, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Create { content }
                 }
-                (FileState::Present { hash }, FileState::Present { .. }, Some(content)) => {
+                (FileState::Present { hash, .. }, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Replace {
                         before: kernel_hash(hash),
                         content,
                     }
                 }
-                (FileState::Present { hash }, FileState::Absent {}, _) => {
+                (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
                     norn_fs::Transition::Remove {
                         before: kernel_hash(hash),
                     }
@@ -548,10 +646,10 @@ fn stage_one(
         }
         Unit::Respell { old, new } => {
             let (old, new) = (&plan.transitions[old], &plan.transitions[new]);
-            let FileState::Present { hash } = &old.before else {
+            let FileState::Present { hash, .. } = &old.before else {
                 unreachable!("a respell's old spelling holds a document before");
             };
-            let content = if new.after == old.before {
+            let content = if new.after.same_content(&old.before) {
                 None
             } else {
                 content

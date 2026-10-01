@@ -576,3 +576,369 @@ fn a_forced_operations_plan_previews_its_violation_and_applies_the_same() {
         "---\ntags: [project, stray]\n---\n# Subject\n"
     );
 }
+
+/// The document holding a link to the subject by its stem, written beside it.
+const LINKER: &str = "apply-linker.md";
+
+/// A sandbox and a vault holding the subject and a document linking it.
+fn a_linked_vault(label: &str) -> (Sandbox, attach::Vault) {
+    let (sandbox, vault) = a_vault(label);
+    std::fs::write(vault.path().join(LINKER), "See [[apply-subject]].\n")
+        .expect("write the linker");
+    (sandbox, vault)
+}
+
+/// The key of the linker's one link.
+fn linkers_link() -> norn_wire::LinkKey {
+    norn_wire::LinkKey::new(
+        DocumentPath::new(LINKER).expect("a document path"),
+        norn_wire::LinkFamily::Wikilink,
+        "apply-subject",
+    )
+}
+
+/// **A previewed move records the link whose resolution it moves, and the
+/// plan sent back applies as it previewed.** The preview's plan records
+/// `[[apply-subject]]` going from the subject's old path to its new one, and
+/// advises nothing: a link naming one document before and after is neither
+/// broken, ambiguous nor retargeted. The apply computes the same set on its
+/// own snapshot after its intake, lands the plan, and answers with the plan
+/// it previewed.
+#[test]
+fn a_previewed_move_records_the_link_it_moves_and_applies_as_previewed() {
+    let (_sandbox, vault) = a_linked_vault("host-applies-move-links");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moved = DocumentPath::new("archive/apply-subject.md").expect("a document path");
+    let moving = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new(SUBJECT).expect("a document path"),
+            moved.clone(),
+        ))],
+    ));
+
+    let previewed = host
+        .apply(ApplyParams::new(ApplyMode::Preview, moving))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    assert_eq!(
+        plan.conditions,
+        vec![norn_wire::PlanCondition::link_resolution(
+            linkers_link(),
+            norn_wire::Resolves::one(DocumentPath::new(SUBJECT).unwrap()),
+            norn_wire::Resolves::one(moved.clone()),
+        )]
+    );
+    assert!(forecast.links.is_empty(), "{:?}", forecast.links);
+
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the previewed plan applies");
+    let ApplyReport::Applied {
+        plan: applied_plan, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(applied_plan, plan, "the apply answered another plan");
+    assert!(vault.path().join(moved.as_str()).exists());
+}
+
+/// **A previewed delete of a linked document advises that it leaves the link
+/// broken**, records the link going from the document to none, and the same
+/// operations applied plan and land the same set.
+#[test]
+fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
+    let (_sandbox, vault) = a_linked_vault("host-applies-delete-links");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let deleting = || {
+        PlanDocument::operations(AuthoredPlan::new(
+            VaultAddress::name(vault.name().clone()),
+            vec![Operation::new(OperationKind::delete_document(
+                DocumentPath::new(SUBJECT).expect("a document path"),
+            ))],
+        ))
+    };
+
+    let previewed = host
+        .apply(ApplyParams::new(ApplyMode::Preview, deleting()))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    assert_eq!(
+        forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(linkers_link())]
+    );
+    assert_eq!(
+        plan.conditions,
+        vec![norn_wire::PlanCondition::link_resolution(
+            linkers_link(),
+            norn_wire::Resolves::one(DocumentPath::new(SUBJECT).unwrap()),
+            norn_wire::Resolves::none(),
+        )]
+    );
+
+    let applied = host
+        .apply(ApplyParams::new(ApplyMode::Apply, deleting()))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the operations apply");
+    let ApplyReport::Applied {
+        plan: applied_plan, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(applied_plan, plan, "the apply planned another set");
+    assert!(!vault.path().join(SUBJECT).exists());
+}
+
+/// **A move among an ambiguous link's members advises that it retargets the
+/// link, which the plan records no entry for.** `[[apply-twin]]` names the
+/// two documents of that stem before the move and two after, one of them at
+/// the moved path: several on both sides is no change the set records, and
+/// the forecast says the members moved under it. The plan applies as
+/// previewed.
+#[test]
+fn a_move_among_an_ambiguous_links_members_advises_it_retargets_the_link() {
+    let (_sandbox, vault) = a_vault("host-applies-retargeted");
+    for (at, body) in [
+        ("twin-a/apply-twin.md", "a twin\n"),
+        ("twin-b/apply-twin.md", "b twin\n"),
+        ("apply-twin-linker.md", "See [[apply-twin]].\n"),
+    ] {
+        let at = vault.path().join(at);
+        std::fs::create_dir_all(at.parent().expect("a parent")).expect("make the folder");
+        std::fs::write(at, body).expect("write the document");
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moving = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new("twin-a/apply-twin.md").expect("a document path"),
+            DocumentPath::new("twin-c/apply-twin.md").expect("a document path"),
+        ))],
+    ));
+
+    let previewed = host
+        .apply(ApplyParams::new(ApplyMode::Preview, moving))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    assert_eq!(plan.conditions, vec![]);
+    assert_eq!(
+        forecast.links,
+        vec![norn_wire::LinkAdvisory::retargeted(
+            norn_wire::LinkKey::new(
+                DocumentPath::new("apply-twin-linker.md").expect("a document path"),
+                norn_wire::LinkFamily::Wikilink,
+                "apply-twin",
+            )
+        )]
+    );
+
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the previewed plan applies");
+    let ApplyReport::Applied {
+        plan: applied_plan, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(applied_plan, plan, "the apply answered another plan");
+}
+
+/// Bytes that do not decode as a vault document: the host quarantines a file
+/// holding them, derives no document from it, and reads every link naming it
+/// broken.
+const UNDECODABLE: &[u8] = b"\xff\xfe not utf-8\n";
+
+/// A sandbox and a vault holding a quarantined `apply-quarantined.md` and a
+/// document linking it by its stem.
+fn a_vault_linking_a_quarantined_file(label: &str) -> (Sandbox, attach::Vault) {
+    let (sandbox, vault) = a_vault(label);
+    std::fs::write(vault.path().join(LINKER), "See [[apply-quarantined]].\n")
+        .expect("write the linker");
+    std::fs::write(vault.path().join("apply-quarantined.md"), UNDECODABLE)
+        .expect("write the undecodable file");
+    (sandbox, vault)
+}
+
+/// `operations` previewed over `vault`, then sent back resolved and
+/// applied: the plan the preview answered and its forecast's link
+/// advisories, after asserting the apply answered that same plan.
+fn previewed_then_applied(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    operations: Vec<Operation>,
+) -> (norn_wire::ResolvedPlan, Vec<norn_wire::LinkAdvisory>) {
+    let previewed = host
+        .apply(ApplyParams::new(
+            ApplyMode::Preview,
+            PlanDocument::operations(AuthoredPlan::new(
+                VaultAddress::name(vault.name().clone()),
+                operations,
+            )),
+        ))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the previewed plan applies");
+    let ApplyReport::Applied {
+        plan: applied_plan, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(applied_plan, plan, "the apply answered another plan");
+    (plan, forecast.links)
+}
+
+/// **Deleting a quarantined document records no link change.** The host
+/// derives no document from `apply-quarantined.md`, so `[[apply-quarantined]]`
+/// reads broken before the plan as after it: the plan records no entry, the
+/// forecast advises nothing, and the apply computes the same empty set.
+#[test]
+fn deleting_a_quarantined_document_records_no_link_change() {
+    let (_sandbox, vault) = a_vault_linking_a_quarantined_file("host-applies-quarantine-delete");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let (plan, advised) = previewed_then_applied(
+        &host,
+        &vault,
+        vec![Operation::new(OperationKind::delete_document(
+            DocumentPath::new("apply-quarantined.md").expect("a document path"),
+        ))],
+    );
+    assert!(
+        !plan
+            .conditions
+            .iter()
+            .any(|condition| matches!(condition, norn_wire::PlanCondition::LinkResolution { .. })),
+        "{:?}",
+        plan.conditions
+    );
+    assert!(advised.is_empty(), "{advised:?}");
+    assert!(!plan.transitions[0].before.is_document());
+    assert!(!vault.path().join("apply-quarantined.md").exists());
+}
+
+/// **An apply whose plan read no links refuses with a fresh plan that reads
+/// them.** Deleting a quarantined file changes no document's presence, so
+/// the previewed plan carries no link condition and its apply needs no read
+/// handle before its check; another writer then repairs the file's bytes,
+/// so the check refuses the drift and the operations, resolved afresh,
+/// delete a document `[[apply-quarantined]]` resolves to. The apply answers
+/// `vault/plan-refused` with that fresh plan, carrying the link condition it
+/// now needs, and writes nothing.
+#[test]
+fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
+    let (_sandbox, vault) = a_vault_linking_a_quarantined_file("host-applies-quarantine-repaired");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let previewed = host
+        .apply(ApplyParams::new(
+            ApplyMode::Preview,
+            PlanDocument::operations(AuthoredPlan::new(
+                VaultAddress::name(vault.name().clone()),
+                vec![Operation::new(OperationKind::delete_document(
+                    DocumentPath::new("apply-quarantined.md").expect("a document path"),
+                ))],
+            )),
+        ))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    let reads_links = |plan: &ResolvedPlan| {
+        plan.conditions
+            .iter()
+            .any(|condition| matches!(condition, norn_wire::PlanCondition::LinkResolution { .. }))
+    };
+    assert!(!reads_links(&plan), "{:?}", plan.conditions);
+    std::fs::write(vault.path().join("apply-quarantined.md"), "# Repaired\n")
+        .expect("another writer repairs the quarantined file");
+
+    let refused = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect_err("a drifted plan applied");
+    assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused, "{refused:?}");
+    let ErrorDetail::PlanRefused { plan: fresh, .. } = refused.detail() else {
+        panic!("the refusal carries {:?}", refused.detail());
+    };
+    assert!(reads_links(fresh), "{:?}", fresh.conditions);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("apply-quarantined.md")).unwrap(),
+        "# Repaired\n"
+    );
+}
+
+/// **Moving a quarantined document records no link change**: no document
+/// stands at its source before the plan or at its destination after it.
+#[test]
+fn moving_a_quarantined_document_records_no_link_change() {
+    let (_sandbox, vault) = a_vault_linking_a_quarantined_file("host-applies-quarantine-move");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let (plan, advised) = previewed_then_applied(
+        &host,
+        &vault,
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new("apply-quarantined.md").expect("a document path"),
+            DocumentPath::new("elsewhere/apply-quarantined.md").expect("a document path"),
+        ))],
+    );
+    assert!(
+        !plan
+            .conditions
+            .iter()
+            .any(|condition| matches!(condition, norn_wire::PlanCondition::LinkResolution { .. })),
+        "{:?}",
+        plan.conditions
+    );
+    assert!(advised.is_empty(), "{advised:?}");
+    assert!(vault.path().join("elsewhere/apply-quarantined.md").exists());
+}

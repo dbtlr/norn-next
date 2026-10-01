@@ -1,10 +1,20 @@
 ---
-status: superseded
-superseded-by: 0032-a-file-state-says-whether-its-bytes-are-a-document.md
-date: 2026-09-27
+status: accepted
+date: 2026-10-01
 ---
 
-# 0031 — a plan resolves into per-file transitions, every target is checked and staged before any is published, and re-applying a resolved plan finishes it
+# 0032 — a plan resolves into per-file transitions whose states say whether their bytes are a document, every target is checked and staged before any is published, and re-applying a resolved plan finishes it
+
+Supersedes [ADR 0031](0031-a-plan-is-staged-whole-and-finished-by-reapplying.md), whose
+contract this decision restates whole. ADR 0031 ruled that each side of a transition is
+either absent or a content hash. A plan that moves, removes or replaces files also changes
+what other documents' links resolve to, and those resolutions are conditions the applier
+reads as the vault would stand at the plan's after-state. A file a hash names may be a
+document or a quarantined file whose bytes do not decode, and only a document can be a
+link's target. For a target an interrupted apply already landed, the applier no longer
+holds the before-bytes that would say which it was, so a hash alone cannot make the
+condition exact. **A present file state now records, beside its hash, whether its bytes
+decode as a vault document.** Everything else ADR 0031 ruled stands as it was.
 
 A plan that touches many documents cannot be published atomically: the filesystem offers
 one atomic publication per name, and `norn-fs`'s write protocol makes each of those safe on
@@ -25,14 +35,26 @@ one planner and the one applier invariant 4 names.
   The planner resolves the operations into a **resolved plan**: the operations, one
   **transition** per file they touch, the conditions the planning read and does not write,
   and the vault's root identity. A transition names a path, the state the file must hold
-  before the write, and the state it holds after; each state is either absent or a content
-  hash. Operations on one file compose in order at planning time and stand or fall
+  before the write, and the state it holds after; each state is either absent or present
+  with a content hash and whether those bytes decode as a vault document. Operations on one file compose in order at planning time and stand or fall
   together. An operation over a set of documents — a `set` over a query, a folder move —
   expands at planning time into one operation per document. A move's destination must be
   absent at planning, or vacated by another operation of the same plan, which the move then
   requires; on a root that folds case, a destination that differs from its source only in
   case names the source itself, and a case-only rename is that move, not an occupied
   name.
+- **A file state says whether its bytes are a document.** Whether bytes decode is a
+  function of the bytes alone, by the one rule the derivation quarantines by, so the
+  planner records it from the bytes it reads and composes, and every present state in a
+  plan that shares a hash carries the same answer. The applier checks the record against
+  every byte it holds for that hash; a record the bytes contradict is a plan whose
+  transitions disagree with its operations, answered as invalid. Only where no held bytes
+  pin a hash — a landed removal's or replacement's before-bytes — does the applier read the
+  record as given. A link condition counts a target as a candidate on a side only where
+  that side is a document, so a quarantined file a plan removes, moves or repairs changes
+  exactly the resolutions it changes, at planning and at the applier alike. The record is
+  written only for bytes that do not decode, so a plan holding only documents reads as
+  before.
 - **Everything a plan varies on is fixed at planning time.** Every template value — a
   `{{seq}}` identifier, a timestamp, a default — resolves into the resolved plan's
   operations and paths, so recomposing a target is a pure function of the before-states
@@ -148,6 +170,15 @@ one planner and the one applier invariant 4 names.
   publication to the four cases above; re-applying covers a crash or an I/O failure with no
   state beyond the plan, and the others are drift the caller re-plans, as anywhere else.
 
+- **Refuse to plan a removal, move or edit of a quarantined file** — every target would
+  then be a document and a hash would suffice. Rejected: removing, moving and repairing a
+  file norn cannot decode is exactly what a person or a Layer 5 repair needs to do with it.
+- **Read whether a target was a document from the derived store** — no wire change.
+  Rejected: once the store has taken in a landed removal, a removed document and a removed
+  quarantined file leave the same absence, and an edit that makes undecodable bytes decode
+  changes document-ness without changing presence, so the condition would be inexact in
+  both directions.
+
 ## Consequences
 
 - The `norn-fs` write protocol splits into a staging phase and a publishing phase. A create
@@ -162,5 +193,7 @@ one planner and the one applier invariant 4 names.
   previewed is what applies; for operations, the conditions the caller wrote are the
   confirmation. The obligation that a commit consume the snapshot its verb read is met by
   the states and conditions a plan carries rather than by the reader's connection.
+- A file state's wire form gains one field written only when true, so every plan whose
+  targets are all documents serializes as it did under ADR 0031.
 - Layer 5's repair emits the same plans, carrying the findings it skipped and the finding
   generation it read, and the same applier executes them.

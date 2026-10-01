@@ -13,7 +13,7 @@
 //! findings each concludes. No second reading of the schema is written for
 //! the applier. A link's health is not a schema violation: the store judges it
 //! with the changeset, and a link a plan breaks surfaces as a finding (ADR
-//! 0031).
+//! 0032).
 //!
 //! **What a violation is about** is its kind and its subject inside the
 //! document: the tag a tag breach names, or the whole document for a block
@@ -24,7 +24,7 @@
 //! came from.
 //!
 //! **A violation that stood before still refuses where the plan writes its
-//! subject** (ADR 0031). Two things write a subject:
+//! subject** (ADR 0032). Two things write a subject:
 //!
 //! - a frontmatter kind — set, remove, push or pop — names the field it
 //!   writes, and a violation standing on that field in the result refuses.

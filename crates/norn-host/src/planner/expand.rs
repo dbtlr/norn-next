@@ -62,6 +62,7 @@ use norn_wire::{
     UnresolvedReason, WriteTarget,
 };
 
+use super::links::LinkIndex;
 use super::resolve::{PlanningFailure, Resolution, resolve_leaving_out};
 use super::view::{Entry, Remembered, VaultView};
 
@@ -90,23 +91,33 @@ pub(crate) trait Matcher {
 }
 
 /// Why a plan was not planned: a failure of planning itself, or a snapshot
-/// the matcher could not read.
+/// the matcher or the link index could not read.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ExpandingFailure<V, M> {
     /// The plan's own shape, or the vault's files.
     Planning(PlanningFailure<V>),
-    /// The snapshot the `where` targets are matched on.
-    Match(M),
+    /// The one snapshot the `where` targets are matched on and the plan's
+    /// resolution change set is judged on.
+    Snapshot(M),
 }
 
 /// Plan `authored` against what `view` holds, its `where` targets expanded
-/// through `matcher` first.
-pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
+/// through `matcher` first, its resolution change set judged through `links`.
+///
+/// **The matcher and the link index read one snapshot**, so a link index
+/// that cannot be read refuses as the matcher's snapshot does.
+pub(crate) fn resolve_expanding<V, M, I>(
     authored: AuthoredPlan,
     root: RootIdentity,
     view: &V,
     matcher: &M,
-) -> Result<Resolution, ExpandingFailure<V::Error, M::Error>> {
+    links: &I,
+) -> Result<Resolution, ExpandingFailure<V::Error, M::Error>>
+where
+    V: VaultView,
+    M: Matcher,
+    I: LinkIndex<Error = M::Error> + ?Sized,
+{
     if let Some(fault) = authored
         .ordered_where_targets()
         .or_else(|| authored.misplaced_cascades())
@@ -137,7 +148,7 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
         } else {
             match matcher
                 .matching(predicates)
-                .map_err(ExpandingFailure::Match)?
+                .map_err(ExpandingFailure::Snapshot)?
             {
                 Ok(documents) if documents.is_empty() => Err(format!(
                     "no document matches the `where` target {}",
@@ -172,14 +183,17 @@ pub(crate) fn resolve_expanding<V: VaultView, M: Matcher>(
     let mut authored = AuthoredPlan::new(vault, expanded).with_force(force);
     authored.plan = plan;
     authored.footnote = footnote;
-    resolve_leaving_out(authored, root, &BTreeSet::new(), view, left_out).map_err(|failure| {
-        ExpandingFailure::Planning(match failure {
-            PlanningFailure::Fault(fault) => {
-                PlanningFailure::Fault(at_authored_positions(fault, &origin))
+    resolve_leaving_out(authored, root, &BTreeSet::new(), view, links, left_out).map_err(
+        |failure| match failure {
+            PlanningFailure::Fault(fault) => ExpandingFailure::Planning(PlanningFailure::Fault(
+                at_authored_positions(fault, &origin),
+            )),
+            PlanningFailure::View(error) => {
+                ExpandingFailure::Planning(PlanningFailure::View(error))
             }
-            other => other,
-        })
-    })
+            PlanningFailure::Links(refused) => ExpandingFailure::Snapshot(refused),
+        },
+    )
 }
 
 /// Why `document`'s expanded operation is left unresolved where the file
@@ -282,6 +296,7 @@ mod tests {
     };
 
     use super::super::compose::content_hash;
+    use super::super::links::testing::{EmptyStore, Untouched};
     use super::super::view::memory::MemoryVault;
     use super::*;
 
@@ -372,7 +387,8 @@ mod tests {
         operations: Vec<Operation>,
         matcher: &impl Matcher<Error = String>,
     ) -> Resolution {
-        match resolve_expanding(authored(operations), root(), vault, matcher) {
+        let links = (EmptyStore::new(), std::marker::PhantomData);
+        match resolve_expanding(authored(operations), root(), vault, matcher, &links) {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),
         }
@@ -566,6 +582,7 @@ mod tests {
             root(),
             &MemoryVault::with(&[("a.md", draft())]),
             &matcher,
+            &Untouched::new(),
         )
         .expect_err("an identified where is planned");
 
@@ -599,6 +616,7 @@ mod tests {
             root(),
             &MemoryVault::with(&[("a.md", draft())]),
             &matcher,
+            &Untouched::new(),
         )
         .expect_err("an authored cascade is planned");
 
@@ -629,6 +647,7 @@ mod tests {
             root(),
             &MemoryVault::with(&[("a.md", draft()), ("b.md", draft())]),
             &Answering::paths(&["a.md", "b.md"]),
+            &Untouched::new(),
         )
         .expect_err("a duplicate identifier is planned");
 
@@ -650,11 +669,12 @@ mod tests {
             root(),
             &MemoryVault::default(),
             &Unreadable,
+            &Untouched::new(),
         )
         .expect_err("an unreadable snapshot planned");
         assert_eq!(
             failure,
-            ExpandingFailure::Match("the store refused".to_string())
+            ExpandingFailure::Snapshot("the store refused".to_string())
         );
     }
 }

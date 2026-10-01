@@ -11,10 +11,11 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::compose::{Composition, compose, content_hash, touches};
+use super::compose::{Composition, compose, content_hash, holding, touches};
 use super::edit;
 use super::forecast::forecast;
-use super::lineage::content_cycle;
+use super::lineage::Lineage;
+use super::links::{LinkIndex, Target, change_set};
 use super::order::dependencies;
 use super::view::{self, Remembered, VaultView};
 
@@ -31,30 +32,51 @@ pub(crate) struct Resolution {
 }
 
 /// Why a plan was not planned at all.
+///
+/// A failure that reads no link index — the plan's order, its recomposition
+/// — names none, so `L` is the type no value has there.
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum PlanningFailure<E> {
+pub(crate) enum PlanningFailure<E, L = std::convert::Infallible> {
     /// The plan's own shape is wrong: `request/plan-invalid`.
     Fault(PlanFault),
     /// The vault could not be read.
     View(E),
+    /// The link index the plan's resolution change set is judged through
+    /// could not be read.
+    Links(L),
+}
+
+impl<E> PlanningFailure<E> {
+    /// The same failure, where a link index of error `L` was read beside it.
+    pub(crate) fn widen<L>(self) -> PlanningFailure<E, L> {
+        match self {
+            PlanningFailure::Fault(fault) => PlanningFailure::Fault(fault),
+            PlanningFailure::View(error) => PlanningFailure::View(error),
+        }
+    }
 }
 
 /// Plan `authored` against what `view` holds, under the root `root`.
 ///
 /// **`met` is what a refresh already landed.** A refused apply's fresh plan
 /// drops every operation whose targets all hold their after-states and
-/// re-resolves the rest (ADR 0031), so an operation that remains may require
+/// re-resolves the rest (ADR 0032), so an operation that remains may require
 /// one that was dropped. `met` names those: a requirement on one is
 /// satisfied, orders nothing, and is left off the operation the resolved plan
 /// carries, so the fresh plan is a whole plan that can be sent back as it is.
 /// An authored plan and a write verb's operations plan with nothing met.
-pub(crate) fn resolve<V: VaultView>(
+///
+/// **`links` is where the plan's resolution change set is judged** (see
+/// [`super::links`]): the links the store holds, read on the snapshot the
+/// request plans against.
+pub(crate) fn resolve<V: VaultView, I: LinkIndex + ?Sized>(
     authored: AuthoredPlan,
     root: RootIdentity,
     met: &BTreeSet<OperationId>,
     view: &V,
-) -> Result<Resolution, PlanningFailure<V::Error>> {
-    resolve_leaving_out(authored, root, met, view, BTreeMap::new())
+    links: &I,
+) -> Result<Resolution, PlanningFailure<V::Error, I::Error>> {
+    resolve_leaving_out(authored, root, met, view, links, BTreeMap::new())
 }
 
 /// Plan `authored` as [`resolve`] does, with the operations `left_out` names
@@ -63,13 +85,14 @@ pub(crate) fn resolve<V: VaultView>(
 /// **What `where` expansion could not expand is left out here**
 /// ([`super::expand`]): such an operation is never composed, falls with what
 /// it would take down with it, and is reported in plan order among the rest.
-pub(crate) fn resolve_leaving_out<V: VaultView>(
+pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     authored: AuthoredPlan,
     root: RootIdentity,
     met: &BTreeSet<OperationId>,
     view: &V,
+    links: &I,
     mut left_out: BTreeMap<usize, UnresolvedReason>,
-) -> Result<Resolution, PlanningFailure<V::Error>> {
+) -> Result<Resolution, PlanningFailure<V::Error, I::Error>> {
     let AuthoredPlan {
         plan: OperationsTag,
         vault,
@@ -78,7 +101,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView>(
         footnote,
     } = authored;
     let view = &Remembered::over(view);
-    let dependencies = dependencies(&operations, met, view)?;
+    let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
     let (order, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
@@ -91,22 +114,49 @@ pub(crate) fn resolve_leaving_out<V: VaultView>(
         left_out.extend(failed);
         leave_out_what_falls_with(&operations, &mut left_out, view);
     };
-    if let Some(cycle) = content_cycle(&operations, &order, view.normalizer()) {
+    let lineage = Lineage::of(&operations, &order, view.normalizer());
+    if let Some(cycle) = lineage.content_cycle() {
         return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
     }
-    let conditions =
+    let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     let transitions = composition
         .targets
-        .into_iter()
+        .iter()
         .map(|(path, target)| {
             let after = match &target.after {
-                Some(bytes) => FileState::present(content_hash(bytes)),
+                Some(bytes) => holding(bytes, content_hash(bytes)),
                 None => FileState::absent(),
             };
-            Transition::new(path, target.before, after)
+            Transition::new(path.clone(), target.before.clone(), after)
         })
         .collect::<Vec<_>>();
+    // The resolution change set is recorded as the vault stands with every
+    // target at its after-state, judged from the bytes composition wrote and
+    // from whether the plan's file states say a document stands.
+    let targets: Vec<Target<'_>> = transitions
+        .iter()
+        .zip(composition.targets.values())
+        .map(|(transition, target)| {
+            Target::new(
+                &transition.path,
+                &transition.before,
+                &transition.after,
+                target.after.as_deref(),
+            )
+        })
+        .collect();
+    let changed = change_set(
+        &targets,
+        &lineage,
+        view.normalizer(),
+        order.iter().map(|&position| &operations[position]),
+        links,
+    )
+    .map_err(PlanningFailure::Links)?;
+    drop(targets);
+    drop(composition);
+    conditions.extend(changed.entries);
     let carried: BTreeSet<&OperationId> = operations
         .iter()
         .filter_map(|operation| operation.id.as_ref())
@@ -136,7 +186,9 @@ pub(crate) fn resolve_leaving_out<V: VaultView>(
         .map(|(position, reason)| UnresolvedOperation::new(operations[position].clone(), reason))
         .collect();
     Ok(Resolution {
-        forecast: forecast(&plan.transitions, view).map_err(PlanningFailure::View)?,
+        forecast: forecast(&plan.transitions, view)
+            .map_err(PlanningFailure::View)?
+            .with_links(changed.advisories),
         plan,
         unresolved,
     })
@@ -157,7 +209,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView>(
 /// it stands rather than as a before-state.
 ///
 /// **A condition is judged as the vault stands at the plan's after-state**
-/// (ADR 0031): on a file the plan writes, against the before-state the plan
+/// (ADR 0032): on a file the plan writes, against the before-state the plan
 /// reads there, which it checks; on a file it does not write, against the file
 /// as it stands now, which the plan does not change.
 fn failures<V: VaultView>(
@@ -236,7 +288,7 @@ fn unmet_condition<V: VaultView>(
         return Ok(Some(detail));
     }
     let holds = match composition.before(&identity) {
-        Some(before) => *before == FileState::present(hash.clone()),
+        Some(before) => before.hash() == Some(hash),
         None => match view.entry(&identity)? {
             // The plan records the condition at the spelling the tree lists,
             // so that spelling is the one the index must be able to hold.
@@ -294,7 +346,7 @@ fn unmet_expectation<V: VaultView>(
         }
         view::Entry::Document { bytes, hash, .. } => {
             debug_assert!(
-                before.is_none_or(|before| *before == FileState::present(hash)),
+                before.is_none_or(|before| before.hash() == Some(&hash)),
                 "the view remembers the bytes a written document's before-state hashes"
             );
             edit::expectation_unmet(path, &bytes, field, expect)
@@ -450,6 +502,7 @@ mod tests {
     };
 
     use super::super::compose::content_hash;
+    use super::super::links::testing::resolve_over_files as resolve;
     use super::super::view::memory::MemoryVault;
     use super::*;
 

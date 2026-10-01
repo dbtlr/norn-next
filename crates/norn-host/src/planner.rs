@@ -40,7 +40,7 @@
 //!   otherwise land as a silent no-op. An edit that rewrites what its
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
-//!   is its before-state, which lands found (ADR 0031's landed rule).
+//!   is its before-state, which lands found (ADR 0032's landed rule).
 //! - [`resolve`] — the resolved plan: an operation that does not resolve, or
 //!   whose author's condition the vault no longer meets or names a file the
 //!   store's path grammar refuses, is left out, with
@@ -72,7 +72,7 @@
 //! [`view::VaultView`] exposes under the case behavior the root proved: two
 //! spellings of one file compose as one target, held at the spelling the
 //! tree lists. On a root that folds case a destination differing from its
-//! source only in case names the source itself (ADR 0031), so a case-only
+//! source only in case names the source itself (ADR 0032), so a case-only
 //! rename plans as a move — the old spelling from present to absent and the
 //! new one from absent to present — which the applier publishes as
 //! `norn-fs`'s respell. The name it arrives at is the one it vacates, so it
@@ -91,7 +91,7 @@
 //! documents; the files then say what each holds, and a matched document the
 //! files no longer hold does not resolve.
 //!
-//! **A create publishes before any removal.** ADR 0031 publishes creates
+//! **A create publishes before any removal.** ADR 0032 publishes creates
 //! first and removals last, so a name a removal of this plan vacates still
 //! stands when a create publishes: a create beneath a document the plan
 //! removes, or at a folder the plan empties, does not resolve, while a move
@@ -125,6 +125,7 @@ pub(crate) mod edit;
 pub(crate) mod expand;
 pub(crate) mod forecast;
 pub(crate) mod lineage;
+pub(crate) mod links;
 pub(crate) mod order;
 pub(crate) mod resolve;
 pub(crate) mod view;

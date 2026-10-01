@@ -90,8 +90,11 @@
 //!
 //! [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
 
+pub(crate) mod resolution;
+pub(crate) mod run;
 pub(crate) mod statement;
 
+use run::{OnWriter, ResolutionStatement, Runner};
 use statement::{After, Selected};
 
 use std::cmp::Ordering;
@@ -349,12 +352,13 @@ pub(crate) fn judge(
             let paths: BTreeSet<&str> = documents.iter().map(DocumentPath::as_str).collect();
             let values =
                 statement::documents_parameters(&paths.into_iter().collect::<Vec<&str>>())?;
-            let (links, _) = read_links(connection, work, key, Selected::Documents, values)?;
+            let writer = OnWriter { connection, work };
+            let (links, _) = read_links(&writer, key, Selected::Documents, values)?;
             findings = judge_links(connection, work, order, ignore, &links, summaries)?;
         }
         LinkSelection::Class(_) | LinkSelection::Path(_) => {
             let mut pages = Pages::new(selection);
-            while let Some(links) = pages.next(connection, work, key)? {
+            while let Some(links) = pages.next(&OnWriter { connection, work }, key)? {
                 findings.extend(judge_links(
                     connection, work, order, ignore, &links, summaries,
                 )?);
@@ -385,6 +389,11 @@ enum PagedBy<'a> {
     Written(i64),
     Class(&'a ClassKey),
     Path(&'a PathKey),
+    /// Exactly one key the link index holds, of either kind: a path key, or
+    /// a suffix key, which the index holds as written as it holds a path. The
+    /// resolution change set reads the links one changed key holds this way
+    /// ([`resolution`]).
+    Key(&'a str),
 }
 
 impl<'a> Pages<'a> {
@@ -412,11 +421,24 @@ impl<'a> Pages<'a> {
         }
     }
 
+    /// The pages of the links held under exactly `key`, of either kind,
+    /// read as a path key's are: an equality seek of the link index.
+    fn by_key(key: &'a str) -> Self {
+        Pages {
+            selected: Selected::Path,
+            by: PagedBy::Key(key),
+            after: Some(After {
+                text: key.to_string(),
+                first: -1,
+                second: -1,
+            }),
+        }
+    }
+
     /// The next page, or `None` once the selection is read through.
     fn next(
         &mut self,
-        connection: &Connection,
-        work: &ReadWork,
+        runner: &impl Runner,
         key: SuffixKey,
     ) -> Result<Option<Vec<Held>>, StoreError> {
         let Some(after) = self.after.take() else {
@@ -428,8 +450,9 @@ impl<'a> Pages<'a> {
             }
             PagedBy::Class(class) => statement::class_parameters(class, &after, LINK_HEALTH_CHUNK),
             PagedBy::Path(path) => statement::path_parameters(path, &after, LINK_HEALTH_CHUNK),
+            PagedBy::Key(key) => statement::key_parameters(key, &after, LINK_HEALTH_CHUNK),
         };
-        let (links, driven) = read_links(connection, work, key, self.selected, values)?;
+        let (links, driven) = read_links(runner, key, self.selected, values)?;
         // A page whose driver read as many rows as its bound may have one
         // after it; a shorter one is the last.
         self.after = driven
@@ -531,6 +554,10 @@ pub(crate) fn redecide(
     paths: &BTreeSet<PathKey>,
 ) -> Result<Redecided, StoreError> {
     let key = SuffixKey::under(order);
+    let writer = OnWriter {
+        connection: transaction,
+        work,
+    };
     let mut summaries = KeySummaries::default();
     let mut redecided = Redecided::default();
     let mut file = |links: Vec<Held>, summaries: &mut KeySummaries| -> Result<(), StoreError> {
@@ -556,14 +583,14 @@ pub(crate) fn redecide(
     };
 
     let mut written = Pages::written(generation);
-    while let Some(links) = written.next(transaction, work, key)? {
+    while let Some(links) = written.next(&writer, key)? {
         file(links, &mut summaries)?;
     }
     // A pass runs only over a key it could read something under, a chunk of
     // the keys asked about at a time.
     let listed: Vec<&ClassKey> = classes.iter().collect();
     for chunk in listed.chunks(LINK_HEALTH_CHUNK) {
-        let occupied = occupied(transaction, work, key, chunk, &[])?;
+        let occupied = occupied(&writer, key, chunk, &[])?;
         for (at, class) in chunk.iter().copied().enumerate() {
             // The findings standing under the class go first, where any
             // stands, a page at a time, and each link one of them was about is
@@ -602,7 +629,7 @@ pub(crate) fn redecide(
                 let findings: BTreeSet<i64> = page.iter().map(|(_, finding, _)| *finding).collect();
                 let links: BTreeSet<i64> = page.iter().filter_map(|(_, _, link)| *link).collect();
                 redecided.discarded += discard(transaction, &findings)?;
-                let mut links = read_links_by_id(transaction, work, key, &links)?;
+                let mut links = read_links_by_id(&writer, key, &links)?;
                 links.retain(|held| !reached_by_a_class(held, classes));
                 file(links, &mut summaries)?;
                 if last {
@@ -614,7 +641,7 @@ pub(crate) fn redecide(
                 continue;
             }
             let mut pages = Pages::new(LinkSelection::Class(class));
-            while let Some(mut links) = pages.next(transaction, work, key)? {
+            while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != generation
                         && !held.keys.iter().any(|(text, segments)| {
@@ -630,10 +657,10 @@ pub(crate) fn redecide(
     }
     let listed: Vec<&PathKey> = paths.iter().collect();
     for chunk in listed.chunks(LINK_HEALTH_CHUNK) {
-        let occupied = occupied(transaction, work, key, &[], chunk)?;
+        let occupied = occupied(&writer, key, &[], chunk)?;
         for path in occupied.paths.into_iter().map(|at| chunk[at]) {
             let mut pages = Pages::new(LinkSelection::Path(path));
-            while let Some(mut links) = pages.next(transaction, work, key)? {
+            while let Some(mut links) = pages.next(&writer, key)? {
                 links.retain(|held| {
                     held.generation != generation
                         && !held.keys.iter().any(|(text, segments)| {
@@ -676,17 +703,28 @@ struct Occupied {
 /// holds a key under a class or at a path, and no link holds one under a key
 /// whose pass is passed over.
 fn occupied(
-    connection: &Connection,
-    work: &ReadWork,
+    runner: &impl Runner,
     key: SuffixKey,
     classes: &[&ClassKey],
     paths: &[&PathKey],
 ) -> Result<Occupied, StoreError> {
-    let rows = Request::read_all_on(
-        connection,
-        work,
-        &statement::occupied_sql(key),
-        params_from_iter(statement::occupied_parameters(classes, paths)?),
+    let paths: Vec<&str> = paths.iter().map(|path| path.as_str()).collect();
+    occupied_keys(runner, key, classes, &paths)
+}
+
+/// [`occupied`] over `paths` given as the keys the link index holds, of
+/// either kind: the path arm's equality seek reads a suffix key as it reads
+/// a path key, since the index holds each as written.
+fn occupied_keys(
+    runner: &impl Runner,
+    key: SuffixKey,
+    classes: &[&ClassKey],
+    paths: &[&str],
+) -> Result<Occupied, StoreError> {
+    let rows = runner.read_all(
+        ResolutionStatement::Occupied,
+        statement::occupied_sql(key),
+        statement::occupied_parameters(classes, paths)?,
         |row| Ok(Ok((row.get::<_, i64>(0)?, row.get::<_, usize>(1)?))),
         "asking which keys a re-decision reaches anything under",
     )?;
@@ -735,8 +773,7 @@ fn discard(transaction: &Transaction<'_>, findings: &BTreeSet<i64>) -> Result<u6
 
 /// The links whose row ids `links` holds, read as [`read_links`] reads them.
 fn read_links_by_id(
-    connection: &Connection,
-    work: &ReadWork,
+    runner: &impl Runner,
     key: SuffixKey,
     links: &BTreeSet<i64>,
 ) -> Result<Vec<Held>, StoreError> {
@@ -745,8 +782,7 @@ fn read_links_by_id(
     }
     let ids: Vec<i64> = links.iter().copied().collect();
     let (links, _) = read_links(
-        connection,
-        work,
+        runner,
         key,
         Selected::Links,
         statement::ids_parameters(&ids)?,
@@ -830,17 +866,17 @@ fn judge_links(
 /// driver rows a paged read reached, in order, the last of which a page
 /// resumes past.
 fn read_links(
-    connection: &Connection,
-    work: &ReadWork,
+    runner: &impl Runner,
     key: SuffixKey,
     selected: Selected,
     values: Vec<Value>,
 ) -> Result<(Vec<Held>, BTreeSet<After>), StoreError> {
-    let rows = Request::read_all_on(
-        connection,
-        work,
-        &statement::links_sql(key, selected),
-        params_from_iter(values),
+    // A snapshot runs this only in the shape that pages one key's links, so
+    // that is the name it records; the writer records no name.
+    let rows = runner.read_all(
+        ResolutionStatement::KeyLinks,
+        statement::links_sql(key, selected),
+        values,
         |row| {
             let link = stored_link_row(row)?;
             let holder: String = row.get(13)?;

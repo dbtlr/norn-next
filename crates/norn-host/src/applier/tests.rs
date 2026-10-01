@@ -14,7 +14,9 @@ use norn_wire::{
 };
 
 use super::{Applier, ApplyOutcome, OwnWriteLedger};
-use crate::planner::resolve::resolve;
+use crate::apply::PlanSnapshot;
+use crate::planner::links::testing::{resolve_over_files as resolve, snapshot_of, vault};
+use crate::planner::resolve::Resolution;
 use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
@@ -67,6 +69,22 @@ pub(super) struct Fixture {
     pub(super) exclusions: Vec<PathBuf>,
     pub(super) store: Store,
     pub(super) recorded: Recorded,
+    /// The content model the store pins, which its links are judged under.
+    pub(super) declared: norn_store::ContentModel,
+}
+
+/// A snapshot of a fixture's store as it stands, and the declaration it
+/// pins: where a fixture's plans judge their links, as an apply job's
+/// snapshot after its intake.
+pub(super) struct Links {
+    snapshot: norn_store::Snapshot,
+    declared: norn_store::ContentModel,
+}
+
+impl Links {
+    pub(super) fn index(&self) -> PlanSnapshot<'_> {
+        PlanSnapshot::held(vault(), &self.snapshot, &self.declared)
+    }
 }
 
 impl Fixture {
@@ -116,16 +134,17 @@ impl Fixture {
             root,
             exclusions,
             store,
+            declared: norn_store::ContentModel::none(),
         }
     }
 
-    pub(super) fn write(&self, at: &str, content: &str) {
+    pub(super) fn write(&self, at: &str, content: impl AsRef<[u8]>) {
         write_at(&self.vault, at, content);
     }
 
     /// Another writer writes `content` at `at`, and the store takes it in as
     /// the watcher would deliver it before an apply's intake.
-    pub(super) fn foreign(&mut self, at: &str, content: &str) {
+    pub(super) fn foreign(&mut self, at: &str, content: impl AsRef<[u8]>) {
         self.write(at, content);
         heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
     }
@@ -138,22 +157,44 @@ impl Fixture {
         RootIdentity::from_device_and_inode(self.root.dev, self.root.ino)
     }
 
-    /// `operations` resolved against the vault, every one of them resolving.
-    pub(super) fn plan(&self, operations: Vec<Operation>) -> ResolvedPlan {
+    /// The store as it stands, as a link index.
+    pub(super) fn links(&self) -> Links {
+        Links {
+            snapshot: snapshot_of(&self.store),
+            declared: self.declared.clone(),
+        }
+    }
+
+    /// `operations` resolved against the vault, its links judged on the
+    /// store as it stands, every one of them resolving.
+    pub(super) fn resolution(&self, operations: Vec<Operation>) -> Resolution {
         let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
         let name = VaultName::new("notes").expect("a legal vault name");
         let authored = AuthoredPlan::new(VaultAddress::name(name), operations);
-        let resolution = resolve(authored, self.root_identity(), &BTreeSet::new(), &view)
-            .unwrap_or_else(|failure| panic!("the plan resolves: {failure:?}"));
+        let links = self.links();
+        let resolution = crate::planner::resolve::resolve(
+            authored,
+            self.root_identity(),
+            &BTreeSet::new(),
+            &view,
+            &links.index(),
+        )
+        .unwrap_or_else(|failure| panic!("the plan resolves: {failure:?}"));
         assert!(
             resolution.unresolved.is_empty(),
             "every operation resolves: {:?}",
             resolution.unresolved
         );
-        resolution.plan
+        resolution
+    }
+
+    /// `operations` resolved against the vault, every one of them resolving.
+    pub(super) fn plan(&self, operations: Vec<Operation>) -> ResolvedPlan {
+        self.resolution(operations).plan
     }
 
     pub(super) fn apply(&mut self, plan: ResolvedPlan) -> ApplyOutcome {
+        let links = self.links();
         let applier = Applier {
             anchor: &self.vault,
             root: self.root,
@@ -161,8 +202,9 @@ impl Fixture {
             shadows: &self.shadows,
             own_writes: &self.recorded,
             publishing: &|| true,
+            links: &links.index(),
         };
-        applier.apply(plan, &mut self.store)
+        applier.apply(plan, &std::cell::RefCell::new(&mut self.store))
     }
 
     /// Every document row and finding the store holds, with the generations
@@ -268,7 +310,7 @@ fn order_of(vault: &Path) -> StoredPathOrder {
     crate::stored_path_order(view.normalizer().case_sensitivity())
 }
 
-fn write_at(vault: &Path, at: &str, content: &str) {
+fn write_at(vault: &Path, at: &str, content: impl AsRef<[u8]>) {
     let full = vault.join(at);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).expect("a folder");
@@ -565,6 +607,10 @@ impl Fixture {
             .pin_vault_schema(schema.as_bytes(), "applier-test-schema")
             .expect("the schema pins");
         heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
+        self.declared = crate::production::pinned_declaration(&mut self.store)
+            .expect("a pin")
+            .content_model()
+            .clone();
     }
 }
 
@@ -716,7 +762,7 @@ fn each_publication_is_recorded_as_an_own_write_when_it_lands() {
 
 /// A target whose content is drawn from another target's before-state
 /// publishes before that source is replaced, whatever the plan's own order
-/// says (ADR 0031): moving `a.md` onto `b.md` and creating `a.md` afresh
+/// says (ADR 0032): moving `a.md` onto `b.md` and creating `a.md` afresh
 /// lands `b.md` first, so a crash between the two leaves the moved content
 /// standing at one of its names.
 #[test]
@@ -858,6 +904,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
     ]);
     let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
     let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
+    let links = fixture.links();
     let before = norn_testkit::process::open_fd_count().expect("a count");
     let staged = super::stage::check_and_stage(
         &fixture.vault,
@@ -866,6 +913,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
         &plan,
         &view,
         &declared,
+        &links.index(),
     )
     .expect("the plan stages");
     let between = norn_testkit::process::open_fd_count().expect("a count");
@@ -1616,6 +1664,7 @@ impl Fixture {
             at: PathBuf::from(at),
             leaves,
         };
+        let links = self.links();
         let applier = Applier {
             anchor: &self.vault,
             root: self.root,
@@ -1623,8 +1672,9 @@ impl Fixture {
             shadows: &self.shadows,
             own_writes: &meddling,
             publishing: &|| true,
+            links: &links.index(),
         };
-        applier.apply(plan, &mut self.store)
+        applier.apply(plan, &std::cell::RefCell::new(&mut self.store))
     }
 
     /// The content hash the store holds for `at`, where it holds a row.
@@ -1716,16 +1766,18 @@ fn a_plan_condition_another_writer_broke_refuses() {
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 
-/// **A link-resolution entry the applier cannot yet check refuses the plan
-/// (NORN-297).** Until the resolution change set is computed again at apply,
-/// an entry is never read as holding: the plan is refused naming it, and
-/// nothing is published.
+/// **A recorded entry the set computed again does not hold refuses the
+/// plan.** An edit changes no document's presence and writes no link, so its
+/// resolution change set is empty; an entry added to it is one the plan
+/// records and the set computed again does not hold, and the plan is refused
+/// naming it, with nothing published.
 #[test]
-fn a_link_resolution_entry_refuses_until_it_is_checked() {
+fn an_entry_the_set_computed_again_does_not_hold_refuses() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
-    let entry = norn_wire::PlanCondition::link_resolution(
-        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+    let entry = link_entry(
+        "b.md",
+        "a",
         norn_wire::Resolves::one(path("a.md")),
         norn_wire::Resolves::one(path("a.md")),
     );
@@ -1737,6 +1789,561 @@ fn a_link_resolution_entry_refuses_until_it_is_checked() {
     );
     assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
     assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// The entry for the wikilink of `holder` written `address`.
+fn link_entry(
+    holder: &str,
+    address: &str,
+    before: norn_wire::Resolves,
+    after: norn_wire::Resolves,
+) -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path(holder), norn_wire::LinkFamily::Wikilink, address),
+        before,
+        after,
+    )
+}
+
+/// **A plain delete records the links it breaks, and applies.** No cascade
+/// is planned yet, so `[[a]]` is left broken: the plan records it, from one
+/// document to none, the forecast says it is left broken, and the applier
+/// computes the same set again and lands the plan.
+#[test]
+fn a_delete_records_the_links_it_breaks_and_applies() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
+    let resolution = fixture.resolution(vec![deleting("a.md")]);
+    let entry = link_entry(
+        "b.md",
+        "a",
+        norn_wire::Resolves::one(path("a.md")),
+        norn_wire::Resolves::none(),
+    );
+    assert_eq!(resolution.plan.conditions, vec![entry]);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(
+            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a")
+        )]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A plain move records the path links it breaks and the relative links
+/// its document holds, and applies.** `[x](notes/a.md)` in `b.md` names the
+/// moved document's source, and `[y](c.md)` in it is read from `notes/`
+/// before the move and from `archive/` after, where no `c.md` stands.
+#[test]
+fn a_move_records_the_links_it_breaks_and_applies() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "[y](c.md)\n"),
+        ("notes/c.md", "c\n"),
+        ("b.md", "[x](notes/a.md)\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
+    let markdown = |holder: &str, address: &str, before, after| {
+        norn_wire::PlanCondition::link_resolution(
+            norn_wire::LinkKey::new(path(holder), norn_wire::LinkFamily::Markdown, address),
+            before,
+            after,
+        )
+    };
+    assert_eq!(
+        plan.conditions,
+        vec![
+            markdown(
+                "archive/a.md",
+                "c.md",
+                norn_wire::Resolves::one(path("notes/c.md")),
+                norn_wire::Resolves::none(),
+            ),
+            markdown(
+                "b.md",
+                "notes/a.md",
+                norn_wire::Resolves::one(path("notes/a.md")),
+                norn_wire::Resolves::none(),
+            ),
+        ]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("archive/a.md").as_deref(), Some("[y](c.md)\n"));
+}
+
+/// **The forecast advises as link health judges.** `[[v1.2]]` names an
+/// attachment by its extension, and link health judges such a link only
+/// where it resolves to a document, so a delete that leaves it resolving to
+/// none records the entry and advises nothing.
+#[test]
+fn a_delete_leaving_an_attachment_address_unresolved_records_it_and_advises_nothing() {
+    let mut fixture = Fixture::new(&[("v1.2.md", "version\n"), ("b.md", "[[v1.2]]\n")]);
+    let resolution = fixture.resolution(vec![deleting("v1.2.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "v1.2",
+            norn_wire::Resolves::one(path("v1.2.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+}
+
+/// **A create records the broken links it mends, and applies.**
+#[test]
+fn a_create_records_the_links_it_mends_and_applies() {
+    let mut fixture = Fixture::new(&[("b.md", "[[n]]\n")]);
+    let plan = fixture.plan(vec![creating("n.md", "n\n")]);
+    assert_eq!(
+        plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "n",
+            norn_wire::Resolves::none(),
+            norn_wire::Resolves::one(path("n.md")),
+        )]
+    );
+    applied(fixture.apply(plan));
+}
+
+/// **A document another writer creates that a recorded link now names
+/// refuses the plan.** The delete recorded `[[a]]` going from `x/a.md` to
+/// none; once the store takes in a foreign `z/a.md`, the set computed again
+/// holds it going from several documents to `z/a.md`, so the recorded entry
+/// fails, nothing is published, and the fresh plan records the set as it
+/// stands, advising that the plan retargets the link.
+#[test]
+fn a_foreign_create_moving_a_recorded_link_refuses_the_plan() {
+    let mut fixture = Fixture::new(&[("x/a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![deleting("x/a.md")]);
+    let recorded = link_entry(
+        "b.md",
+        "a",
+        norn_wire::Resolves::one(path("x/a.md")),
+        norn_wire::Resolves::none(),
+    );
+    assert_eq!(plan.conditions, vec![recorded.clone()]);
+    fixture.foreign("z/a.md", "zeta\n");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(recorded)]
+    );
+    assert_eq!(fixture.read("x/a.md").as_deref(), Some("alpha\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert_eq!(
+        refused.plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "a",
+            norn_wire::Resolves::several(),
+            norn_wire::Resolves::one(path("z/a.md")),
+        )]
+    );
+    assert_eq!(
+        refused.forecast.links,
+        vec![norn_wire::LinkAdvisory::retargeted(
+            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a")
+        )]
+    );
+}
+
+/// **A link another writer adds to a document the plan moves is an entry the
+/// plan does not record, and refuses it.** The move recorded nothing, since
+/// nothing linked `a.md`; a foreign `d.md` linking it is a link whose
+/// resolution the plan now changes.
+#[test]
+fn a_foreign_link_to_a_moved_document_is_unrecorded() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n")]);
+    let plan = fixture.plan(vec![moving("a.md", "c.md")]);
+    assert_eq!(plan.conditions, vec![]);
+    fixture.foreign("d.md", "[[a]]\n");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_unrecorded(link_entry(
+            "d.md",
+            "a",
+            norn_wire::Resolves::one(path("a.md")),
+            norn_wire::Resolves::none(),
+        ))]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("alpha\n"));
+}
+
+/// **A recorded entry whose before alone moved refuses the plan.** The move
+/// records `[x](c.md)` in its document going from `old/c.md` to `new/c.md`;
+/// once another writer removes `old/c.md`, the set computed again holds the
+/// link going from none to `new/c.md` — the after it recorded, another
+/// before — so the recorded entry fails and nothing is published.
+#[test]
+fn a_foreign_change_moving_only_a_recorded_links_before_refuses_the_plan() {
+    let mut fixture = Fixture::new(&[
+        ("old/a.md", "[x](c.md)\n"),
+        ("old/c.md", "old\n"),
+        ("new/c.md", "new\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("old/a.md", "new/a.md")]);
+    let recorded = norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path("new/a.md"), norn_wire::LinkFamily::Markdown, "c.md"),
+        norn_wire::Resolves::one(path("old/c.md")),
+        norn_wire::Resolves::one(path("new/c.md")),
+    );
+    assert_eq!(plan.conditions, vec![recorded.clone()]);
+    std::fs::remove_file(fixture.vault.join("old/c.md")).expect("another writer removes it");
+    heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(recorded)]
+    );
+    assert_eq!(fixture.read("old/a.md").as_deref(), Some("[x](c.md)\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// **A plan's own progress never changes what it records.** With the plan's
+/// create already landed by hand and taken in by the store, the re-send
+/// computes the set it recorded, and finishes.
+#[test]
+fn a_part_landed_resend_computes_the_set_it_recorded_and_finishes() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n\n[[n]]\n")]);
+    let plan = fixture.plan(vec![deleting("a.md"), creating("n.md", "n\n")]);
+    assert_eq!(
+        plan.conditions,
+        vec![
+            link_entry(
+                "b.md",
+                "a",
+                norn_wire::Resolves::one(path("a.md")),
+                norn_wire::Resolves::none(),
+            ),
+            link_entry(
+                "b.md",
+                "n",
+                norn_wire::Resolves::none(),
+                norn_wire::Resolves::one(path("n.md")),
+            ),
+        ]
+    );
+    fixture.foreign("n.md", "n\n");
+    assert_eq!(
+        fixture
+            .preview(plan.clone())
+            .map(|(previewed, _)| previewed),
+        Ok(plan.clone())
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// Bytes that do not decode as a vault document: a quarantined file.
+pub(super) const UNDECODABLE: &[u8] = b"\xff\xfe not utf-8\n";
+
+/// A fixture holding the linker `l.md`, whose `[[q]]` and `[[d]]` name the
+/// quarantined `q.md` and the document `d.md`, with the store holding no row
+/// for `q.md` and a quarantine finding naming it.
+pub(super) fn quarantined_fixture() -> Fixture {
+    let mut fixture = Fixture::new(&[("l.md", "See [[q]] and [[d]].\n"), ("d.md", "d\n")]);
+    fixture.foreign("q.md", UNDECODABLE);
+    fixture
+}
+
+fn quarantined(content: &[u8]) -> norn_wire::FileState {
+    norn_wire::FileState::quarantined(crate::planner::compose::content_hash(content))
+}
+
+/// **A delete of a quarantined file records no link change, and applies.**
+/// `[[q]]` names no document before the plan, since the store derives none
+/// from bytes that do not decode, and none after it: the plan records the
+/// file it removes as quarantined, no entry and no advisory, and the applier
+/// computes the same empty set.
+#[test]
+fn a_delete_of_a_quarantined_document_records_no_link_change_and_applies() {
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![deleting("q.md")]);
+    assert_eq!(
+        resolution.plan.transitions,
+        vec![norn_wire::Transition::new(
+            path("q.md"),
+            quarantined(UNDECODABLE),
+            norn_wire::FileState::absent(),
+        )]
+    );
+    assert_eq!(resolution.plan.conditions, vec![]);
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    assert!(!fixture.vault.join("q.md").exists());
+}
+
+/// **A move of a quarantined file records no link change, and applies**: it
+/// is a document on neither side, at its source or its destination.
+#[test]
+fn a_move_of_a_quarantined_document_records_no_link_change_and_applies() {
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![moving("q.md", "elsewhere/q.md")]);
+    assert_eq!(
+        resolution.plan.transitions,
+        vec![
+            norn_wire::Transition::new(
+                path("elsewhere/q.md"),
+                norn_wire::FileState::absent(),
+                quarantined(UNDECODABLE),
+            ),
+            norn_wire::Transition::new(
+                path("q.md"),
+                quarantined(UNDECODABLE),
+                norn_wire::FileState::absent(),
+            ),
+        ]
+    );
+    assert_eq!(resolution.plan.conditions, vec![]);
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("elsewhere/q.md"))
+            .ok()
+            .as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
+/// **Bytes that come to decode at a file put a document there, and bytes
+/// that stop decoding take one away**, though a file stands there
+/// throughout: a document moved over the quarantined `q.md` mends `[[q]]`,
+/// and the quarantined bytes moved over `d.md` leave `[[d]]` broken. Each
+/// plan applies, the applier computing the set it recorded.
+#[test]
+fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_applies() {
+    let mut fixture = quarantined_fixture();
+    fixture.foreign("n.md", "now a document\n");
+    let resolution = fixture.resolution(vec![deleting("q.md"), moving("n.md", "q.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "q",
+            norn_wire::Resolves::none(),
+            norn_wire::Resolves::one(path("q.md")),
+        )]
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "d",
+            norn_wire::Resolves::one(path("d.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(
+            norn_wire::LinkKey::new(path("l.md"), norn_wire::LinkFamily::Wikilink, "d")
+        )]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
+/// **Where a holder's content stood before the plan is a fact of its path
+/// and its lineage, not of whether its bytes decoded there.** A quarantined
+/// file repaired by an edit and moved holds a document only after the plan,
+/// and its relative link is read before the plan from where its content
+/// stood, `old/q.md`: the plan records `./d.md` at `new/q.md` going from
+/// `old/d.md` to `new/d.md`, and applies. (The source's quarantine finding
+/// outlives the apply until a heal, NORN-323, so the store is not compared
+/// with a build from zero here.)
+#[test]
+fn a_repaired_then_moved_holder_reads_its_links_before_the_plan_from_its_lineage_source() {
+    let mut fixture = Fixture::new(&[("old/d.md", "old target\n"), ("new/d.md", "new target\n")]);
+    fixture.foreign("old/q.md", b"\xc2X\xa0 [d](./d.md)\n");
+    let plan = fixture.plan(vec![
+        editing("old/q.md", "X", ""),
+        moving("old/q.md", "new/q.md"),
+    ]);
+    assert_eq!(
+        plan.conditions,
+        vec![norn_wire::PlanCondition::link_resolution(
+            norn_wire::LinkKey::new(path("new/q.md"), norn_wire::LinkFamily::Markdown, "./d.md"),
+            norn_wire::Resolves::one(path("old/d.md")),
+            norn_wire::Resolves::one(path("new/d.md")),
+        )]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(
+        fixture.read("new/q.md").as_deref(),
+        Some("\u{a0} [d](./d.md)\n")
+    );
+}
+
+/// **A holder whose bytes do not decode after the plan holds no links
+/// then**, and the links naming it are judged by whether it is a document
+/// on each side. A quarantined file edited and moved, still undecodable,
+/// records no entry for the relative link in its bytes nor for the links
+/// naming it at either spelling, being no document on either side; and a
+/// document holding a link that quarantined bytes are moved over loses that
+/// link with no entry, while `[[d]]`, naming a document before and none
+/// after, is left broken. Each plan applies. (A moved quarantined file's
+/// finding outlives the apply until a heal, NORN-323, so the store is not
+/// compared with a build from zero here.)
+#[test]
+fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_document_ness() {
+    let mut fixture = Fixture::new(&[
+        ("l.md", "[[q]] [[old/q]] [[new/q]]\n"),
+        ("old/d.md", "old target\n"),
+        ("new/d.md", "new target\n"),
+    ]);
+    fixture.foreign("old/q.md", b"\xffX [d](./d.md)\n");
+    let plan = fixture.plan(vec![
+        editing("old/q.md", "X", "Y"),
+        moving("old/q.md", "new/q.md"),
+    ]);
+    assert_eq!(plan.conditions, vec![]);
+    applied(fixture.apply(plan));
+    assert!(fixture.vault.join("new/q.md").exists());
+
+    let mut fixture = Fixture::new(&[
+        ("l.md", "[[d]]\n"),
+        ("d.md", "[x](./x.md)\n"),
+        ("x.md", "x\n"),
+    ]);
+    fixture.foreign("q.md", UNDECODABLE);
+    let plan = fixture.plan(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    assert_eq!(
+        plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "d",
+            norn_wire::Resolves::one(path("d.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
+/// **A recorded flag the bytes do not bear out is a plan whose transitions
+/// disagree with its operations**, wherever the applier holds the bytes of
+/// that side: a before-state the file still holds, an after-state composed
+/// again, and an after-state a target already holds. Each is
+/// `request/plan-invalid` naming the file, and nothing is published.
+#[test]
+fn a_recorded_flag_the_bytes_do_not_bear_out_is_invalid() {
+    // A before-state the file still holds, which decodes, said quarantined.
+    let mut fixture = quarantined_fixture();
+    let mut plan = fixture.plan(vec![deleting("d.md")]);
+    plan.transitions[0].before = quarantined(b"d\n");
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("d.md")]);
+
+    // One that does not decode, said to.
+    let mut plan = fixture.plan(vec![deleting("q.md")]);
+    plan.transitions[0].before =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("q.md")]);
+
+    // An after-state composed again, said quarantined.
+    let mut plan = fixture.plan(vec![creating("n.md", "n\n")]);
+    plan.transitions[0].after = quarantined(b"n\n");
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
+
+    // An after-state a target already holds, said to decode: the move landed
+    // by hand, so its destination is composed from no bytes the apply can
+    // see, and is judged on the bytes it holds — which pin its source's
+    // before-state too, recording the same bytes.
+    let mut plan = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    fixture.write("e/q.md", UNDECODABLE);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the move lands by hand");
+    let decoding =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+    plan.transitions[0].after = decoding.clone();
+    plan.transitions[1].before = decoding;
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+}
+
+/// **The bytes a hash names decode one way, so a plan records them one way
+/// wherever it carries them.** A moved file's source before the plan and its
+/// destination after it hold the same bytes: a plan recording them as
+/// decoding at one and not at the other is not what its operations do,
+/// whatever has landed, and is `request/plan-invalid` naming both. Landed by
+/// hand, the source's before-bytes are gone, and the destination's bytes are
+/// what pin them: a before-state said to decode where those bytes do not is
+/// refused although no bytes at the source are left to judge it on. The
+/// honest plan, landed, applies finding every target.
+#[test]
+fn a_moved_files_two_records_of_its_bytes_must_agree_with_each_other_and_the_bytes_held() {
+    let decoding =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+
+    // Not landed: the source's flag flipped, the destination's not.
+    let mut fixture = quarantined_fixture();
+    let mut plan = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    assert_eq!(plan.transitions[1].path, path("q.md"));
+    plan.transitions[1].before = decoding.clone();
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+
+    // Landed by hand: the source's before-bytes are gone.
+    let honest = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    fixture.write("e/q.md", UNDECODABLE);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the move lands by hand");
+    let mut plan = honest.clone();
+    plan.transitions[1].before = decoding;
+    assert_eq!(
+        fixture.refuses_disagreeing(plan),
+        vec![path("e/q.md"), path("q.md")]
+    );
+    let landed = applied(fixture.apply(honest));
+    assert!(
+        landed
+            .targets
+            .iter()
+            .all(|target| target.result == TargetResult::Found)
+    );
+}
+
+/// **A landed target's recorded flag stands for the bytes it no longer
+/// holds.** With a quarantined file's delete landed by hand, the applier
+/// cannot decode its before-bytes, so it reads the before-state the plan
+/// records — quarantined — computes the empty set the plan recorded, and
+/// finishes.
+#[test]
+fn a_landed_quarantined_targets_recorded_flag_stands_for_its_bytes() {
+    let mut fixture = quarantined_fixture();
+    let plan = fixture.plan(vec![deleting("q.md"), editing("d.md", "d", "dd")]);
+    assert_eq!(plan.conditions, vec![]);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the delete lands by hand");
+    assert_eq!(
+        fixture
+            .preview(plan.clone())
+            .map(|(previewed, _)| previewed),
+        Ok(plan.clone())
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("d.md").as_deref(), Some("dd\n"));
 }
 
 /// A plan that drops a condition its operations carry is refused: the
@@ -1790,6 +2397,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         deleting("c.md"),
     ]);
     let before = fixture.tree();
+    let links = fixture.links();
     let applier = Applier {
         anchor: &fixture.vault,
         root: fixture.root,
@@ -1797,8 +2405,9 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         shadows: &fixture.shadows,
         own_writes: &fixture.recorded,
         publishing: &|| false,
+        links: &links.index(),
     };
-    let outcome = applier.apply(plan.clone(), &mut fixture.store);
+    let outcome = applier.apply(plan.clone(), &std::cell::RefCell::new(&mut fixture.store));
     match outcome {
         ApplyOutcome::StoodDown => {}
         other => panic!("the apply answered {other:?}"),
@@ -1851,19 +2460,26 @@ fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
 impl Fixture {
     /// Preview `plan` as the apply seam previews a resolved plan: the same
     /// plan and its forecast, or the envelope the preview answers with.
-    fn preview(
+    pub(super) fn preview(
         &mut self,
         plan: ResolvedPlan,
     ) -> Result<(ResolvedPlan, norn_wire::Forecast), norn_wire::ErrorEnvelope> {
         let declared = crate::production::pinned_declaration(&mut self.store).expect("a pin");
-        super::preview(plan, &self.vault, self.root, &self.exclusions, &declared).map_err(
-            |outcome| {
-                outcome
-                    .into_wire()
-                    .expect("a preview never stands down")
-                    .expect_err("a preview's refusal is no report")
-            },
+        let links = self.links();
+        super::preview(
+            plan,
+            &self.vault,
+            self.root,
+            &self.exclusions,
+            &declared,
+            &links.index(),
         )
+        .map_err(|outcome| {
+            outcome
+                .into_wire()
+                .expect("a preview never stands down")
+                .expect_err("a preview's refusal is no report")
+        })
     }
 }
 
@@ -2482,7 +3098,7 @@ fn a_force_does_not_bypass_create_exclusivity_or_root_identity() {
 /// no-change transition, answered found**: a field set to the value it
 /// holds and a body replaced by itself resolve, their after-state is their
 /// before-state, and the apply writes nothing and reports each found, never
-/// wrote (ADR 0031's landed rule).
+/// wrote (ADR 0032's landed rule).
 #[test]
 fn an_edit_to_what_the_document_already_holds_lands_found() {
     let mut fixture = Fixture::new(&[

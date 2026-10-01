@@ -52,6 +52,12 @@ pub(crate) enum ApplyOutcome {
         /// The failure in words.
         detail: String,
     },
+    /// The snapshot the plan's resolution change set is judged on could not
+    /// be read, so nothing was published. A caller answers it as a read
+    /// meeting the same refusal is answered: a damaged store is published as
+    /// damage, with the rebuild it owes, before anything turns this into an
+    /// answer.
+    Unread(crate::refusal::PageRefused),
 }
 
 /// An applied plan.
@@ -209,6 +215,15 @@ impl ApplyOutcome {
                 format!("the filesystem refused the plan before anything landed: {detail}"),
                 ErrorDetail::write_failed(plan, detail),
             )),
+            ApplyOutcome::Unread(crate::refusal::PageRefused::Answered(refused)) => Err(refused),
+            // A caller publishes damage before it answers; one that answers
+            // it here answers as a read whose statement the store refused.
+            ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) => {
+                Err(ErrorEnvelope::new(
+                    "the store refused a statement this apply ran",
+                    ErrorDetail::read_failed(norn_wire::ReadFailure::statement(), detail),
+                ))
+            }
             ApplyOutcome::StoodDown => return None,
         })
     }
