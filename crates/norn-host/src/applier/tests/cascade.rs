@@ -341,3 +341,88 @@ fn a_carried_cascade_is_planned_again_rather_than_trusted() {
         [moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "a", "b")])]
     );
 }
+
+/// **A backlink another writer adds after the preview refuses the plan, and
+/// the fresh plan's cascade holds it.** The applier computes the set again
+/// and meets `k.md`'s link to the moved document as an entry the plan does
+/// not record; the fresh plan re-resolves the move, generating its cascade
+/// from the links that stand now, and applies.
+#[test]
+fn a_backlink_added_after_preview_refuses_and_the_fresh_cascade_holds_it() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![moving("a.md", "b.md")]);
+    assert_eq!(plan.operations[0].cascade, [wikilink("h.md", "a", "b")]);
+    fixture.foreign("k.md", "[[a]]\n");
+
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_unrecorded(
+            PlanCondition::link_resolution(
+                key("k.md", LinkFamily::Wikilink, "a"),
+                Resolves::one(path("a.md")),
+                Resolves::none(),
+            )
+        )]
+    );
+    assert!(refused.unresolved.is_empty(), "{:?}", refused.unresolved);
+    assert_eq!(
+        refused.plan.operations,
+        [moving("a.md", "b.md")
+            .with_cascade(vec![wikilink("h.md", "a", "b"), wikilink("k.md", "a", "b"),])]
+    );
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[b]]\n"));
+    assert_eq!(fixture.read("k.md").as_deref(), Some("[[b]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A landed holder with an unlanded destination is part-landed.** The
+/// holder already reads as the cascade leaves it and the move's destination
+/// does not; another writer then changes the source, so the apply refuses,
+/// and the move — one operation with its cascade — is listed as part-landed,
+/// carrying no cascade a caller would have to strip to send it again.
+#[test]
+fn a_landed_holder_with_an_unlanded_destination_is_part_landed() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![moving("a.md", "b.md")]);
+    fixture.foreign("h.md", "[[b]]\n");
+    fixture.foreign("a.md", "A, edited\n");
+
+    let refused = super::refused(fixture.apply(plan));
+    let [left] = &refused.unresolved[..] else {
+        panic!("the move is left unresolved: {:?}", refused.unresolved);
+    };
+    assert_eq!(left.reason, UnresolvedReason::part_landed());
+    assert_eq!(left.operation, moving("a.md", "b.md"));
+    assert!(refused.plan.operations.is_empty());
+    assert_eq!(fixture.read("a.md").as_deref(), Some("A, edited\n"));
+}
+
+/// **Re-sending an interrupted move finishes its cascade.** One holder and
+/// the destination landed before the interruption, and the store took them
+/// in; the re-send finds them at their after-states, rewrites the holder
+/// that did not land, removes the source, and commits what a build from zero
+/// holds.
+#[test]
+fn resending_an_interrupted_move_finishes_its_cascade() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("h.md", "[[a]]\n"),
+        ("k.md", "[[a]] too\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("a.md", "x/b.md")]);
+    assert_eq!(
+        plan.operations[0].cascade,
+        [wikilink("h.md", "a", "b"), wikilink("k.md", "a", "b")]
+    );
+    fixture.write("x/b.md", "A\n");
+    fixture.foreign("h.md", "[[b]]\n");
+
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("a.md"), None);
+    assert_eq!(fixture.read("x/b.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[b]]\n"));
+    assert_eq!(fixture.read("k.md").as_deref(), Some("[[b]] too\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}

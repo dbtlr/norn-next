@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{
-    AuthoredPlan, DocumentPath, Forecast, OperationId, RefusedCheck, ResolvedPlan,
+    AuthoredPlan, DocumentPath, Forecast, Operation, OperationId, RefusedCheck, ResolvedPlan,
     UnresolvedOperation, UnresolvedReason,
 };
 
@@ -35,7 +35,8 @@ enum Fate {
 /// **What the fresh plan holds** (ADR 0031): an operation whose targets all
 /// hold their after-states is dropped; an operation none of whose targets
 /// holds its after-state is resolved again against what the vault holds now,
-/// through the one planner; and an operation with one target landed and
+/// through the one planner, which generates a move's link cascade afresh from
+/// the links that stand now; and an operation with one target landed and
 /// another not, a move whose source another writer changed before its
 /// destination landed, an operation that no longer resolves, and one that
 /// requires an unresolved operation or touches a file one touches — since
@@ -49,7 +50,8 @@ enum Fate {
 /// what a preview of the fresh plan lists. The fresh plan records its own
 /// resolution change set, judged through `links`, and its forecast advises on
 /// the links that set reaches. Nothing is rebased: applying the fresh plan is
-/// the caller's decision.
+/// the caller's decision. An operation is listed, and resolved again, as its
+/// caller would author it: with no cascade, which planning writes.
 pub(super) fn refuse_and_refresh(
     plan: ResolvedPlan,
     view: &TreeView,
@@ -97,11 +99,16 @@ pub(super) fn refuse_and_refresh(
         .filter(|(_, fate)| matches!(fate, Fate::Resolved))
         .map(|(position, _)| position)
         .collect();
+    // An operation leaves the refused plan as its caller would author it,
+    // with no cascade: planning generates a move's cascade afresh from the
+    // links the vault holds now, and an authored plan carrying one is no
+    // plan.
+    let authored_again: Vec<Operation> = plan.operations.iter().map(uncascaded).collect();
     let mut authored = AuthoredPlan::new(
         plan.vault.clone(),
         again
             .iter()
-            .map(|&position| plan.operations[position].clone())
+            .map(|&position| authored_again[position].clone())
             .collect(),
     );
     authored.footnote = plan.footnote.clone();
@@ -113,7 +120,7 @@ pub(super) fn refuse_and_refresh(
         if let Fate::Unresolved(reason) = fate {
             unresolved.push((
                 position,
-                UnresolvedOperation::new(plan.operations[position].clone(), reason),
+                UnresolvedOperation::new(authored_again[position].clone(), reason),
             ));
         }
     }
@@ -124,7 +131,7 @@ pub(super) fn refuse_and_refresh(
                     .iter()
                     .copied()
                     .find(|&position| {
-                        plan.operations[position] == left.operation
+                        authored_again[position] == left.operation
                             && !unresolved.iter().any(|(taken, _)| *taken == position)
                     })
                     .unwrap_or(usize::MAX);
@@ -137,7 +144,7 @@ pub(super) fn refuse_and_refresh(
                 unresolved.push((
                     position,
                     UnresolvedOperation::new(
-                        plan.operations[position].clone(),
+                        authored_again[position].clone(),
                         UnresolvedReason::no_longer_resolves(format!(
                             "resolved again against what the vault holds, the operations left are no plan: {fault:?}"
                         )),
@@ -173,6 +180,14 @@ pub(super) fn refuse_and_refresh(
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
     }))
+}
+
+/// `operation` as its caller authored it: the same operation carrying no
+/// link cascade.
+fn uncascaded(operation: &Operation) -> Operation {
+    let mut authored = operation.clone();
+    authored.cascade.clear();
+    authored
 }
 
 /// The schema violations the forced `fresh` plan lets through, as a preview
