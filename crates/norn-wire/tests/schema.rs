@@ -2878,6 +2878,29 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
     ];
+    // A creation by rule names every part optionally: absent, the rule is the
+    // inbox and the rest are empty.
+    let by_rule = &branch(&schema, "kind", "create_by_rule")["properties"]["fields"];
+    assert_eq!(
+        property_names(by_rule),
+        ["rule", "variables", "fields", "body"]
+            .into_iter()
+            .collect(),
+        "the create_by_rule fields"
+    );
+    assert!(
+        required_names(by_rule).is_empty(),
+        "a create_by_rule requires a part: {by_rule}"
+    );
+    assert!(refuses_unknown_keys(by_rule), "{by_rule}");
+    assert_eq!(
+        by_rule["properties"]["variables"]["$ref"].as_str(),
+        Some("#/$defs/Variables")
+    );
+    assert_eq!(
+        by_rule["properties"]["fields"]["$ref"].as_str(),
+        Some("#/$defs/ValueMap")
+    );
     let delete = branch(&schema, "kind", "delete_document");
     let delete_fields = &delete["properties"]["fields"];
     assert_eq!(
@@ -2968,7 +2991,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
                 .iter()
                 .chain(&targeted)
                 .map(|(kind, _)| *kind)
-                .chain(["delete_document"])
+                .chain(["delete_document", "create_by_rule"])
         )
     );
     for (kind, own) in &targeted {
@@ -3520,6 +3543,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "content_cycle",
             "transitions_disagree",
             "unexpanded_target",
+            "unexpanded_rule",
             "expanded_target_ordered",
             "misplaced_cascade"
         ])
@@ -3677,8 +3701,19 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
         ),
         (
             schema_of::<NewParams>(),
-            vec!["vault", "mode", "path", "content", "conditions", "force"],
-            vec!["vault", "mode", "path", "content"],
+            vec![
+                "vault",
+                "mode",
+                "path",
+                "content",
+                "as",
+                "variables",
+                "fields",
+                "body",
+                "conditions",
+                "force",
+            ],
+            vec!["vault", "mode"],
         ),
         (
             schema_of::<MoveParams>(),
@@ -3802,5 +3837,119 @@ fn a_change_and_an_edit_advertise_their_tags() {
     assert_eq!(
         branch(&changes, "change", "set")["properties"]["value"]["$ref"].as_str(),
         Some("#/$defs/AuthoredValue")
+    );
+}
+
+/// **No key of a `new` or a `create_by_rule` advertises `null`.** The reader
+/// refuses `null` for every part, so a part is left out to be absent, and
+/// the schema says so rather than inviting a value the reader refuses.
+#[test]
+fn a_creation_by_rule_and_a_new_admit_no_null() {
+    let new = schema_of::<NewParams>();
+    let operation = schema_of::<Operation>();
+    let by_rule = &branch(&operation, "kind", "create_by_rule")["properties"]["fields"];
+    for (what, schema) in [("a new request", &new), ("a create_by_rule", by_rule)] {
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{what} describes no properties: {schema}"));
+        for (key, property) in properties {
+            assert!(
+                !admits_null(property) && property.get("default") != Some(&Value::Null),
+                "{what} advertises `null` for `{key}`: {property}"
+            );
+        }
+    }
+    let rule = &new["properties"]["as"];
+    assert_eq!(rule["type"].as_str(), Some("string"), "{rule}");
+    assert_eq!(rule["minLength"].as_u64(), Some(1), "{rule}");
+    let rule = &by_rule["properties"]["rule"];
+    assert_eq!(rule["type"].as_str(), Some("string"), "{rule}");
+    assert_eq!(rule["minLength"].as_u64(), Some(1), "{rule}");
+}
+
+/// Whether an object holding exactly the keys `present` satisfies the
+/// structure of `schema` the three-form rule is stated with: `required`,
+/// `not`, `anyOf` and `oneOf`. The crate holds no schema validator, so the
+/// subset its exclusivity is written in is evaluated here.
+fn admits_keys(schema: &Value, present: &BTreeSet<&str>) -> bool {
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_none_or(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .all(|name| present.contains(name))
+        });
+    let count = |keyword: &str| {
+        schema
+            .get(keyword)
+            .and_then(Value::as_array)
+            .map(|branches| branches.iter().filter(|b| admits_keys(b, present)).count())
+    };
+    required
+        && schema
+            .get("not")
+            .is_none_or(|forbidden| !admits_keys(forbidden, present))
+        && count("anyOf").is_none_or(|admitted| admitted >= 1)
+        && count("oneOf").is_none_or(|admitted| admitted == 1)
+}
+
+/// **A `new` schema admits exactly the three forms its reader reads**, and
+/// the seven mixes it refuses are refused by the schema too: `path` with
+/// `content` alone; `as` with optional `variables`, `fields` and `body`; and
+/// neither, with optional `fields` and `body`.
+#[test]
+fn a_new_request_schema_admits_exactly_its_three_forms() {
+    let schema = schema_of::<NewParams>();
+    // The reader and the schema must agree on every request here.
+    let admitted = |keys: &[&str]| {
+        let mut present: BTreeSet<&str> = keys.iter().copied().collect();
+        present.extend(["vault", "mode"]);
+        let mut request =
+            serde_json::json!({"vault": {"by": "name", "name": "notes"}, "mode": "preview"});
+        for key in keys {
+            request[*key] = match *key {
+                "variables" | "fields" => serde_json::json!({}),
+                "path" => serde_json::json!("a.md"),
+                _ => serde_json::json!("text"),
+            };
+        }
+        let read = serde_json::from_value::<NewParams>(request).is_ok();
+        let schema_admits = admits_keys(&schema, &present);
+        assert_eq!(
+            read, schema_admits,
+            "the reader and the schema disagree on {keys:?}"
+        );
+        schema_admits
+    };
+    for keys in [
+        vec!["path", "content"],
+        vec!["as"],
+        vec!["as", "variables"],
+        vec!["as", "variables", "fields", "body"],
+        vec![],
+        vec!["fields"],
+        vec!["body"],
+        vec!["fields", "body"],
+    ] {
+        assert!(admitted(&keys), "the schema refuses the form {keys:?}");
+    }
+    for keys in [
+        vec!["path"],
+        vec!["content"],
+        vec!["path", "as"],
+        vec!["path", "as", "content"],
+        vec!["as", "content"],
+        vec!["variables"],
+        vec!["path", "content", "body"],
+        vec!["path", "content", "fields"],
+        vec!["path", "content", "variables"],
+    ] {
+        assert!(!admitted(&keys), "the schema admits the mix {keys:?}");
+    }
+    assert_eq!(
+        required_names(&schema),
+        ["vault", "mode"].into_iter().collect()
     );
 }

@@ -31,7 +31,10 @@
 //! a resolved plan still carrying either is a fault in its shape, named by
 //! [`ResolvedPlan::unexpanded_targets`] and answered `request/plan-invalid`.
 //! It is judged rather than refused at the read, so it answers with that code
-//! and the operations it names.
+//! and the operations it names. A `create_by_rule` is expanded the same way,
+//! into one `create_document` holding the path and content its rule makes, so
+//! a resolved plan still carrying one is named by
+//! [`ResolvedPlan::unexpanded_rules`] and answered `request/plan-invalid`.
 //!
 //! **Planning writes a cascade; an author does not.** A resolved plan's
 //! document move, document removal and wikilink rewrite carry the link
@@ -638,6 +641,20 @@ impl ResolvedPlan {
             .map(|(position, _)| position)
             .collect();
         (!positions.is_empty()).then(|| PlanFault::unexpanded_target(positions))
+    }
+
+    /// The fault of a resolved plan whose operations still create a document
+    /// by rule, naming each such operation by its position; `None` where
+    /// planning expanded every one into a `create_document`.
+    pub fn unexpanded_rules(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| matches!(operation.kind, OperationKind::CreateByRule { .. }))
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::unexpanded_rule(positions))
     }
 
     /// The fault of a resolved plan whose operations carry a link cascade on

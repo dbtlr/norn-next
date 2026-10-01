@@ -2385,7 +2385,8 @@ sequenceDiagram
 A write verb compiles to a plan of its operations, one per change or edit it names, and
 enters the one `apply` path: `Host::set` (frontmatter changes to a path or a `where`
 target), `Host::edit` (section, body and text edits to one document),
-`Host::new_document` (a document created at a path, its folders made),
+`Host::new_document` (a document created at a path, its folders made, or by a
+creation rule or into the inbox, which compiles to a `create_by_rule`),
 `Host::move_path` (`move`: a document or every document a folder holds, with the link
 cascade that follows), `Host::delete` (one document, the links naming it forbidden,
 rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming one
@@ -2437,7 +2438,12 @@ the snapshot a planner read through
 ([ADR 0032](decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md)).
 
 Beside the four kinds that place, edit, move and remove whole documents, a plan carries
-document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
+`create_by_rule`, which names a schema's creation rule (the vault's inbox where it names
+none) with the variables, frontmatter fields and body it takes, and which planning is to
+expand into one `create_document` holding the path and content the rule makes; a resolved
+plan still carrying one is `request/plan-invalid` (`unexpanded_rule`), and until a planner
+expands it the operation is left unresolved, saying creation by rule is not planned yet.
+A plan also carries document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,
 which proves every splice by reading it back, and addresses a section through the one
@@ -2517,7 +2523,8 @@ becomes of the links naming its document: rewritten to `rewrite_to`, left broken
 `allow_broken_links` says so, or — saying neither — forbidden, so that a delete any link
 names does not resolve. The `move`, `delete` and `rewrite_wikilink` requests compile to
 one such operation each. A cascade on an authored operation or on a kind that does not
-cascade, and a folder move left in a resolved plan, are `request/plan-invalid`.
+cascade, a folder move left in a resolved plan and a `create_by_rule` left in one
+(`unexpanded_rule`) are `request/plan-invalid`.
 
 **A document move plans its cascade.** Planning composes the plan without any cascade
 first, and once every operation acts asks the store's resolution door, through the overlay
