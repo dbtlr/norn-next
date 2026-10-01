@@ -5841,7 +5841,9 @@ mod tests {
     /// **An apply's `where` match mints its read handle through the
     /// coverage's read seam and accounts the mint to the job account**: the
     /// store's read-only open reports two statements, and an apply naming no
-    /// `where` target mints nothing.
+    /// `where` target that changes no document's presence mints nothing.
+    /// **A delete mints one handle for the job**: its planning's resolution
+    /// change set and the applier's check of it read the one snapshot.
     #[test]
     fn an_apply_matching_a_where_accounts_its_reader_mint_to_the_job_account() {
         let f = Fixture::new("apply-mint-account");
@@ -5885,6 +5887,27 @@ mod tests {
             evidence.read().since(before).apply_mint_statements,
             2,
             "the apply's mint is missing from the job account"
+        );
+
+        let before = evidence.read();
+        host.apply(norn_wire::ApplyParams::new(
+            norn_wire::ApplyMode::Apply,
+            norn_wire::PlanDocument::operations(norn_wire::AuthoredPlan::new(
+                norn_wire::VaultAddress::name(name.clone()),
+                vec![norn_wire::Operation::new(
+                    norn_wire::OperationKind::delete_document(
+                        norn_wire::DocumentPath::new("a.md").unwrap(),
+                    ),
+                )],
+            )),
+        ))
+        .expect("a delete is admitted")
+        .wait()
+        .expect("a delete applies");
+        assert_eq!(
+            evidence.read().since(before).apply_mint_statements,
+            2,
+            "a delete's planning and check minted other than one read handle"
         );
     }
 
