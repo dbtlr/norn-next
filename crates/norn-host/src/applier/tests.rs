@@ -2161,6 +2161,41 @@ fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_app
     );
 }
 
+/// **A recorded flag the bytes do not bear out is a plan whose transitions
+/// disagree with its operations**, wherever the applier holds the bytes of
+/// that side: a before-state the file still holds, an after-state composed
+/// again, and an after-state a target already holds. Each is
+/// `request/plan-invalid` naming the file, and nothing is published.
+#[test]
+fn a_recorded_flag_the_bytes_do_not_bear_out_is_invalid() {
+    // A before-state the file still holds, which decodes, said quarantined.
+    let mut fixture = quarantined_fixture();
+    let mut plan = fixture.plan(vec![deleting("d.md")]);
+    plan.transitions[0].before = quarantined(b"d\n");
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("d.md")]);
+
+    // One that does not decode, said to.
+    let mut plan = fixture.plan(vec![deleting("q.md")]);
+    plan.transitions[0].before =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("q.md")]);
+
+    // An after-state composed again, said quarantined.
+    let mut plan = fixture.plan(vec![creating("n.md", "n\n")]);
+    plan.transitions[0].after = quarantined(b"n\n");
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
+
+    // An after-state a target already holds, said to decode: the move landed
+    // by hand, so its destination is composed from no bytes the apply can
+    // see, and is judged on the bytes it holds.
+    let mut plan = fixture.plan(vec![moving("q.md", "e/q.md")]);
+    fixture.write("e/q.md", UNDECODABLE);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the move lands by hand");
+    plan.transitions[0].after =
+        norn_wire::FileState::present(crate::planner::compose::content_hash(UNDECODABLE));
+    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("e/q.md")]);
+}
+
 /// **A landed target's recorded flag stands for the bytes it no longer
 /// holds.** With a quarantined file's delete landed by hand, the applier
 /// cannot decode its before-bytes, so it reads the before-state the plan

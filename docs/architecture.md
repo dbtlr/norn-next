@@ -2396,7 +2396,10 @@ missing, added, repeated or changed, every operation acting and every author con
 operations carry checked. A plan that fails this is not what its operations do, so its own
 shape is wrong: it answers `request/plan-invalid` with a `transitions_disagree` fault
 naming every file it disagrees at, and no fresh plan, since no target drifted and the
-caller's fix is to preview its operations again. Whether the transitions name exactly the
+caller's fix is to preview its operations again. A plan recording that a side's bytes
+decode, or do not, otherwise than the bytes the applier holds for that side — bytes a
+target still holds, or bytes composed again — answers the same; where a target already
+holds its change, its before-state's bytes are gone, and the record stands for them. Whether the transitions name exactly the
 files the operations touch, each once by the vault's own identity rule, is judged before
 the vault is read, so a transition no operation accounts for is never reported as drift,
 whatever before-state it guesses; a changed before-state on a file an operation touches is

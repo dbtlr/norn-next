@@ -6,8 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{FileState, PlanCondition, ResolvedPlan, Transition};
+use norn_wire::{DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
 
+use crate::derivation::decodes;
 use crate::planner::compose::holding;
 use crate::planner::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
@@ -208,8 +209,9 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
 }
 
 /// `holds` judged against `transition`'s two states by the bytes each holds
-/// ([`FileState::same_content`]). The after-state is asked first, so a
-/// transition whose two states agree is landed.
+/// ([`FileState::same_content`]): whether a side's bytes decode as a document
+/// is judged against them where they are held ([`misread`]). The after-state
+/// is asked first, so a transition whose two states agree is landed.
 fn judged(transition: &Transition, holds: FileState, bytes: Option<Arc<[u8]>>) -> TargetState {
     if holds.same_content(&transition.after) {
         TargetState::Landed(bytes)
@@ -263,6 +265,42 @@ fn respell<V: VaultView>(
         // while the rename had not landed.
         _ => (TargetState::Drifted(FileState::absent()), untouched),
     })
+}
+
+/// Every target whose recorded state says otherwise than the bytes it holds
+/// of whether they decode as a vault document.
+///
+/// **Whether a side's bytes decode is judged wherever the applier holds
+/// them.** A target at its before-state holds that side's bytes, and one
+/// that landed — or a respell's content halfway — holds its after-state's;
+/// each side holding those same bytes must say what they decode to, by the
+/// derivation's own rule ([`decodes`]). A side whose bytes are composed again
+/// is judged where the recomposition compares it. A side whose bytes are
+/// gone — a landed target's before-state — is read as the plan records it,
+/// which is all an apply can know of it. A plan disagreeing with its own
+/// bytes is not what its operations do, so it is invalid rather than drift.
+pub(super) fn misread(plan: &ResolvedPlan, states: &[TargetState]) -> Vec<DocumentPath> {
+    plan.transitions
+        .iter()
+        .zip(states)
+        .filter(|(transition, state)| {
+            let (side, bytes) = match state {
+                TargetState::AtBefore(Some(bytes)) => (&transition.before, bytes),
+                TargetState::Landed(Some(bytes)) | TargetState::Halfway(bytes)
+                    if matches!(transition.after, FileState::Present { .. }) =>
+                {
+                    (&transition.after, bytes)
+                }
+                _ => return false,
+            };
+            let document = decodes(bytes);
+            [&transition.before, &transition.after]
+                .into_iter()
+                .filter(|held| held.same_content(side))
+                .any(|held| held.is_document() != document)
+        })
+        .map(|(transition, _)| transition.path.clone())
+        .collect()
 }
 
 /// Mark drifted each source whose before-state is gone while a target drawing

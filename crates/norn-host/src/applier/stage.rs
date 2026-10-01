@@ -14,7 +14,7 @@ use norn_wire::{
 };
 
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
+    TargetState, Unit, failed_conditions, identity, is_create, is_removal, misread, observe,
     recorded_lineage, transition_index, units,
 };
 use super::recompose::{Recomposed, disagreement, recompose};
@@ -207,13 +207,15 @@ pub(super) struct Checked {
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; no target drifted and every content condition holds; the
+/// the vault gives it, at a place the vault reads documents at; every side
+/// whose bytes a target holds says whether they decode as a document as they
+/// do ([`misread`]); no target drifted and every content condition holds; the
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
 /// one it records; and every result passes the vault schema, or, for a forced
 /// plan, has each violation it introduces listed rather than refused. A plan
-/// whose store paths, shape, target places or
+/// whose store paths, shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
@@ -256,6 +258,10 @@ pub(super) fn check(
         .collect();
     if !unplaced.is_empty() {
         return Err(Unfit::Invalid(disagreement(unplaced)));
+    }
+    let misread = misread(plan, &states);
+    if !misread.is_empty() {
+        return Err(Unfit::Invalid(disagreement(misread)));
     }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
