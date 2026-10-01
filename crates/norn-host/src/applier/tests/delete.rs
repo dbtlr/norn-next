@@ -887,3 +887,51 @@ fn resending_an_interrupted_rewriting_delete_finishes_its_cascade() {
     assert_eq!(fixture.read("k.md").as_deref(), Some("[[c]] too\n"));
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// **A delete of a quarantined file is never refused for backlinks.** No
+/// link resolves to a file whose bytes do not decode, so `[[q]]`,
+/// `[x](q.md)` and `![[q]]` name nothing before the delete and are no
+/// backlinks of it: the plain delete, which forbids the links naming its
+/// document, resolves with no entry and no advisory, previews as planned,
+/// and applies with the linkers untouched.
+#[test]
+fn a_plain_delete_of_a_quarantined_file_is_never_refused_for_backlinks() {
+    let mut fixture = Fixture::new(&[("h.md", "[[q]] and [x](q.md)\n"), ("k.md", "![[q]]\n")]);
+    fixture.foreign("q.md", super::UNDECODABLE);
+    let resolution = fixture.planned(vec![deleting("q.md")]);
+    assert_eq!(resolution.unresolved, []);
+    assert_eq!(resolution.plan.operations, [deleting("q.md")]);
+    assert_eq!(resolution.plan.conditions, []);
+    assert!(resolution.forecast.links.is_empty());
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("q.md"), None);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[q]] and [x](q.md)\n")
+    );
+    assert_eq!(fixture.read("k.md").as_deref(), Some("![[q]]\n"));
+}
+
+/// **A `rewrite_to` naming a quarantined file names no document.** The
+/// bytes at `q.md` do not decode, so no link can be respelled toward them:
+/// a delete rewriting the links naming `a.md` to `q`, or to `q.md`, is left
+/// unresolved as one whose target names no one document, and writes
+/// nothing.
+#[test]
+fn a_rewrite_to_naming_a_quarantined_file_is_unresolved() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    fixture.foreign("q.md", super::UNDECODABLE);
+    for target in ["q", "q.md"] {
+        let resolution = fixture.planned(vec![rewriting("a.md", target)]);
+        assert!(
+            unresolved_detail(&resolution).contains("names no one document"),
+            "{resolution:?}"
+        );
+        assert!(resolution.plan.transitions.is_empty());
+    }
+}
