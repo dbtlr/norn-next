@@ -316,7 +316,8 @@ fn apply_over(
     }
     // One read handle for the job, minted the first time a `where` target or
     // a link resolution asks, and shared by the planning and the applier's
-    // check; the applier gives it back before it publishes.
+    // check; the applier holds it through staging and publication and gives
+    // it back just before the changeset commits.
     let source: &ProductionAttachment = attachment;
     let mint = || {
         let (snapshot, statements) = crate::apply::established_for_the_job(source);

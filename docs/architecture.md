@@ -2434,8 +2434,8 @@ order at the original's place. The match is the find builder's, run in process o
 snapshot the request plans against — a preview's read-hold snapshot, and for an apply a
 snapshot on a read handle the store mints for the job through the coverage's read seam the
 first time a `where` target or the plan's resolution change set asks, held inside the
-entry's claim for the job's planning and the applier's check, and given back before the
-apply's changeset commits — so a `where` matches what a `find` at that instant would answer. A mint
+entry's claim for the job's planning and the applier's check, held through staging and
+publication, and given back just before the apply's changeset commits — so a `where` matches what a `find` at that instant would answer. A mint
 that fails there answers reader-unavailable, as a read's does, and changes no trust label;
 what the mint ran is counted in the host's account of its jobs. The match set is not a condition: each expanded operation is guarded by the
 before-state of the bytes it composed from, as any write is, and a resolved plan sent again
