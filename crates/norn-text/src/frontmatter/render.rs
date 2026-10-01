@@ -128,15 +128,87 @@ impl ScalarStyle {
     }
 }
 
-/// The bytes that replace a field's `value_range` with the scalar `value`,
-/// keeping the author's quoting where the new value permits it and upgrading
-/// where it does not. A collection is never written into a span: it replaces
-/// the field's whole entry ([`render_entry`]).
+/// A scalar the model holds, borrowed: what a value span or a flow item is
+/// written from.
+///
+/// A collection has no scalar view, so the renderers that write into a span
+/// or a flow item cannot be handed one: a collection replaces a field's whole
+/// entry ([`render_entry`]) or is a block-list item ([`render_block_item`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Scalar<'a> {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(&'a str),
+}
+
+impl<'a> Scalar<'a> {
+    /// The scalar `value` is, or `None` for a collection.
+    pub(crate) fn of(value: &'a Value) -> Option<Self> {
+        match view(value) {
+            View::Scalar(scalar) => Some(scalar),
+            View::Sequence(_) | View::Map(_) => None,
+        }
+    }
+
+    /// The scalars `items` are, or `None` where any of them is a collection.
+    pub(crate) fn all(items: &'a [Value]) -> Option<Vec<Self>> {
+        items.iter().map(Scalar::of).collect()
+    }
+
+    fn to_value(self) -> Value {
+        match self {
+            Scalar::Null => Value::Null,
+            Scalar::Bool(value) => Value::Bool(value),
+            Scalar::Int(number) => Value::Int(number),
+            Scalar::Float(number) => Value::Float(number),
+            Scalar::String(text) => Value::String(text.to_string()),
+        }
+    }
+
+    /// The scalar spelled at quoting `rank`. A non-string scalar has one
+    /// spelling, whatever the rank.
+    fn spelled_at(self, rank: u8) -> String {
+        match self {
+            Scalar::Null => "~".to_string(),
+            Scalar::Bool(true) => "true".to_string(),
+            Scalar::Bool(false) => "false".to_string(),
+            Scalar::Int(number) => number.to_string(),
+            Scalar::Float(number) => render_float(number),
+            Scalar::String(text) => render_at_rank(text, rank),
+        }
+    }
+}
+
+/// What a value is to a writer: a scalar it spells, or a collection it lays
+/// out.
+enum View<'a> {
+    Scalar(Scalar<'a>),
+    Sequence(&'a [Value]),
+    Map(&'a Mapping),
+}
+
+fn view(value: &Value) -> View<'_> {
+    match value {
+        Value::Null => View::Scalar(Scalar::Null),
+        Value::Bool(value) => View::Scalar(Scalar::Bool(*value)),
+        Value::Int(number) => View::Scalar(Scalar::Int(*number)),
+        Value::Float(number) => View::Scalar(Scalar::Float(*number)),
+        Value::String(text) => View::Scalar(Scalar::String(text)),
+        Value::Sequence(items) => View::Sequence(items),
+        Value::Map(map) => View::Map(map),
+    }
+}
+
+/// The bytes that replace a field's `value_range` with `scalar`, keeping the
+/// author's quoting where the new value permits it and upgrading where it
+/// does not.
 pub(crate) fn render_scalar_in_span(
-    value: &Value,
+    scalar: Scalar<'_>,
     original: ScalarStyle,
 ) -> Result<String, RenderError> {
-    render_scalar(value, original.rank(), ScalarContext::Block)
+    render_scalar(scalar, original.rank(), ScalarContext::Block)
 }
 
 /// A sequence written inline: `[one, two]`. Each item is verified as a flow
@@ -144,13 +216,13 @@ pub(crate) fn render_scalar_in_span(
 ///
 /// Only a flat sequence is written inline: a sequence holding a collection is
 /// written in block style ([`render_entry`]) whatever style it replaces.
-pub(crate) fn render_flow_sequence(items: &[Value]) -> Result<String, RenderError> {
+pub(crate) fn render_flow_sequence(items: &[Scalar<'_>]) -> Result<String, RenderError> {
     let mut out = String::from("[");
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&render_scalar(item, RANK_PLAIN, ScalarContext::Flow)?);
+        out.push_str(&render_scalar(*item, RANK_PLAIN, ScalarContext::Flow)?);
     }
     out.push(']');
     Ok(out)
@@ -246,16 +318,16 @@ fn write_value(
     let mut body = String::new();
     // Whether `body` is block lines at `child`, each terminated, rather than
     // one inline value.
-    let block = match value {
-        Value::Sequence(items) if items.is_empty() => {
+    let block = match view(value) {
+        View::Sequence([]) => {
             body.push_str("[]");
             false
         }
-        Value::Map(map) if map.is_empty() => {
+        View::Map(map) if map.is_empty() => {
             body.push_str("{}");
             false
         }
-        Value::Sequence(items) => {
+        View::Sequence(items) => {
             for item in items {
                 body.push_str(&child);
                 body.push('-');
@@ -263,7 +335,7 @@ fn write_value(
             }
             true
         }
-        Value::Map(map) => {
+        View::Map(map) => {
             for (key, entry) in map.iter() {
                 body.push_str(&child);
                 body.push_str(&render_key(key)?);
@@ -272,7 +344,7 @@ fn write_value(
             }
             true
         }
-        scalar => {
+        View::Scalar(scalar) => {
             body.push_str(&render_scalar(scalar, RANK_PLAIN, ScalarContext::Block)?);
             false
         }
@@ -315,57 +387,33 @@ fn prove(reads_back: bool, rendered: &str) -> Result<(), RenderError> {
 /// comment and `a: b` invalid YAML, so both escalate; `123` and `true` escalate
 /// because they would stop being strings.
 pub(crate) fn render_key(field: &str) -> Result<String, RenderError> {
-    render_scalar(
-        &Value::String(field.to_string()),
-        RANK_PLAIN,
-        ScalarContext::Key,
-    )
+    render_scalar(Scalar::String(field), RANK_PLAIN, ScalarContext::Key)
 }
 
-/// Emit `value` — a scalar; a collection is [`write_value`]'s — at the
-/// least-quoted rank at or above `start` that reads back as exactly `value` in
-/// `context`, or refuse.
-fn render_scalar(value: &Value, start: u8, context: ScalarContext) -> Result<String, RenderError> {
-    let text = match value {
-        Value::String(text) => text.as_str(),
-        // A non-string scalar has one spelling, and it is still verified: a
-        // float that rendered as `1` would read back as an integer.
-        other => {
-            let rendered = render_non_string(other);
-            return if reparse_in_context(&rendered, context).as_ref() == Some(other) {
-                Ok(rendered)
-            } else {
-                Err(RenderError::NotRoundTrippable {
-                    text: rendered,
-                    context,
-                })
-            };
-        }
+/// Emit `scalar` at the least-quoted rank at or above `start` that reads back
+/// as exactly that scalar in `context`, or refuse. A non-string scalar has one
+/// spelling, and it is still verified: a float that rendered as `1` would read
+/// back as an integer.
+fn render_scalar(
+    scalar: Scalar<'_>,
+    start: u8,
+    context: ScalarContext,
+) -> Result<String, RenderError> {
+    let value = scalar.to_value();
+    let ranks = match scalar {
+        Scalar::String(_) => start..=RANK_DOUBLE,
+        _ => RANK_PLAIN..=RANK_PLAIN,
     };
-
-    for rank in start..=RANK_DOUBLE {
-        let rendered = render_at_rank(text, rank);
-        if reparse_in_context(&rendered, context).as_ref() == Some(value) {
+    for rank in ranks {
+        let rendered = scalar.spelled_at(rank);
+        if reparse_in_context(&rendered, context).as_ref() == Some(&value) {
             return Ok(rendered);
         }
     }
     Err(RenderError::NotRoundTrippable {
-        text: text.to_string(),
+        text: scalar.spelled_at(RANK_PLAIN),
         context,
     })
-}
-
-fn render_non_string(value: &Value) -> String {
-    match value {
-        Value::Null => "~".to_string(),
-        Value::Bool(true) => "true".to_string(),
-        Value::Bool(false) => "false".to_string(),
-        Value::Int(number) => number.to_string(),
-        Value::Float(number) => render_float(*number),
-        Value::String(_) | Value::Sequence(_) | Value::Map(_) => {
-            unreachable!("a non-string scalar only")
-        }
-    }
 }
 
 /// A float spelled so it reads back as a float: `1` would read back as an
@@ -486,4 +534,20 @@ pub fn render_document(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scalar;
+    use crate::value::{Mapping, Value};
+
+    /// **Only a scalar has a scalar view**, so a collection cannot reach the
+    /// renderers that write a value span or a flow item.
+    #[test]
+    fn a_collection_has_no_scalar_view() {
+        assert_eq!(Scalar::of(&Value::Int(1)), Some(Scalar::Int(1)));
+        assert_eq!(Scalar::of(&"a".into()), Some(Scalar::String("a")));
+        assert_eq!(Scalar::of(&Value::Sequence(Vec::new())), None);
+        assert_eq!(Scalar::of(&Value::Map(Mapping::new())), None);
+    }
 }

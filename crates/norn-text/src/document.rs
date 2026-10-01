@@ -15,7 +15,7 @@ use crate::frontmatter::list::{
     BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
 };
 use crate::frontmatter::render::{
-    RenderError, ScalarStyle, is_collection, is_nested, render_block_item, render_entry,
+    RenderError, Scalar, ScalarStyle, is_collection, is_nested, render_block_item, render_entry,
     render_flow_sequence, render_key, render_scalar_in_span,
 };
 use crate::heading::Heading;
@@ -1267,14 +1267,16 @@ impl<'a> Document<'a> {
         // author's quoting where the new value permits it. A scalar no span
         // names — a block scalar, an anchored or tagged one — is not
         // replaceable in place.
-        if !is_collection(value) && !held.is_some_and(is_collection) {
+        if let Some(scalar) = Scalar::of(value)
+            && !held.is_some_and(is_collection)
+        {
             let (Some(range), Some(style)) = (&located.value_range, ScalarStyle::of(located.style))
             else {
                 return Err(EditError::FieldNotEditable {
                     field: located.name.clone(),
                 });
             };
-            let mut rendered = render_scalar_in_span(value, style)?;
+            let mut rendered = render_scalar_in_span(scalar, style)?;
             if located.style == ValueStyle::EmptyValue {
                 // The span is the point just past the colon, so the separating
                 // space is part of what the splice writes.
@@ -1289,14 +1291,14 @@ impl<'a> Document<'a> {
         let flat_list = |value: &Value| matches!(value, Value::Sequence(_)) && !is_nested(value);
         if let Value::Sequence(items) = value
             && located.style.is_sequence()
-            && flat_list(value)
+            && let Some(scalars) = Scalar::all(items)
             && held.is_some_and(flat_list)
         {
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(
                     "{}: {}{}",
                     render_key(&located.name)?,
-                    render_flow_sequence(items)?,
+                    render_flow_sequence(&scalars)?,
                     self.line_ending.as_str()
                 )
             } else {
