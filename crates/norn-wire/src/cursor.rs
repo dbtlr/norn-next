@@ -114,11 +114,16 @@ pub enum FacetKind {
     TagPattern,
     /// What the vault says about a tag its facet does not admit.
     UndeclaredTags,
+    /// A named rule the vault's schema declares for making a document.
+    CreationRule,
+    /// Where the vault's schema says untyped capture lands.
+    Inbox,
 }
 
 impl FacetKind {
-    /// Every kind the vocabulary holds, in declaration order.
-    pub const ALL: [FacetKind; 7] = [
+    /// Every kind the vocabulary holds, in declaration order. A kind joins
+    /// at the end, so no kind's code moves.
+    pub const ALL: [FacetKind; 9] = [
         FacetKind::DeclaredField,
         FacetKind::ObservedField,
         FacetKind::DeclaredTag,
@@ -126,13 +131,15 @@ impl FacetKind {
         FacetKind::PathRule,
         FacetKind::TagPattern,
         FacetKind::UndeclaredTags,
+        FacetKind::CreationRule,
+        FacetKind::Inbox,
     ];
 
     /// Every kind, in the byte order of its code, which is the order a page
     /// of facets reads the kinds in: every facet of one kind before any of the
     /// next. It is the order a finding cursor reads its kinds in too, so every
     /// cursor that names a kind orders kinds one way.
-    pub fn in_code_order() -> [FacetKind; 7] {
+    pub fn in_code_order() -> [FacetKind; 9] {
         let mut kinds = Self::ALL;
         kinds.sort_unstable_by_key(|kind| kind.as_str());
         kinds
@@ -148,6 +155,8 @@ impl FacetKind {
             FacetKind::PathRule => "path_rule",
             FacetKind::TagPattern => "tag_pattern",
             FacetKind::UndeclaredTags => "undeclared_tags",
+            FacetKind::CreationRule => "creation_rule",
+            FacetKind::Inbox => "inbox",
         }
     }
 }

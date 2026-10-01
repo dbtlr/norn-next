@@ -992,6 +992,25 @@ fn facets() -> Vec<Facet> {
             .map(|rule| Facet::path_rule(rule, "archive/**")),
     );
     facets.extend(tag_stances().into_iter().map(Facet::undeclared_tags));
+    facets.push(Facet::creation_rule(
+        "task",
+        "tasks/{{var.project}}-{{seq}}.md",
+        vec!["project".to_string()],
+        ValueMap::new([
+            ("status".to_string(), AuthoredValue::string("todo")),
+            ("rank".to_string(), AuthoredValue::Integer(2)),
+        ])
+        .expect("each key once"),
+        Some("# {{var.project}}\n".to_string()),
+    ));
+    facets.push(Facet::creation_rule(
+        "note",
+        "notes/{{date}}.md",
+        Vec::new(),
+        ValueMap::default(),
+        None,
+    ));
+    facets.push(Facet::inbox("inbox/{{date}}-{{seq}}.md"));
     facets
 }
 
@@ -5083,6 +5102,28 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
         r#"{"facet":"undeclared_tags","stance":"report"}"#
     );
     assert_eq!(
+        wire(&Facet::creation_rule(
+            "task",
+            "tasks/{{seq}}.md",
+            vec!["title".to_string()],
+            ValueMap::new([
+                ("status".to_string(), AuthoredValue::string("todo")),
+                (
+                    "meta".to_string(),
+                    AuthoredValue::list([AuthoredValue::Integer(1), AuthoredValue::Null]),
+                ),
+            ])
+            .expect("each key once"),
+            Some("# {{var.title}}\n".to_string()),
+        )),
+        r##"{"facet":"creation_rule","name":"task","target":"tasks/{{seq}}.md","variables":["title"],"frontmatter_defaults":{"status":"todo","meta":[1,null]},"body":"# {{var.title}}\n"}"##,
+        "a creation rule reports its templates as their source text and its defaults as the values they are written as"
+    );
+    assert_eq!(
+        wire(&Facet::inbox("inbox/{{seq}}.md")),
+        r#"{"facet":"inbox","target":"inbox/{{seq}}.md"}"#
+    );
+    assert_eq!(
         wire(&Facet::observed_field(
             "aliases",
             [
@@ -5170,6 +5211,22 @@ fn every_facet_says_where_a_page_of_facets_stops_at_it() {
             Facet::undeclared_tags(TagStance::Report),
             FacetKind::UndeclaredTags,
             "report",
+        ),
+        (
+            Facet::creation_rule(
+                "task",
+                "tasks/{{seq}}.md",
+                Vec::new(),
+                ValueMap::default(),
+                None,
+            ),
+            FacetKind::CreationRule,
+            "task",
+        ),
+        (
+            Facet::inbox("inbox/{{seq}}.md"),
+            FacetKind::Inbox,
+            "inbox/{{seq}}.md",
         ),
     ] {
         let cursor_key = facet.cursor_key();
@@ -5367,7 +5424,7 @@ fn every_describe_setter_lands_in_the_bytes() {
         [
             r##"{"vault":"##,
             PINNED_VAULT,
-            r##","facets":["declared_field","observed_field","declared_tag","folder","path_rule","tag_pattern","undeclared_tags"],"limit":20,"after":""##,
+            r##","facets":["declared_field","observed_field","declared_tag","folder","path_rule","tag_pattern","undeclared_tags","creation_rule","inbox"],"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]

@@ -18,15 +18,23 @@
 //!
 //! **A facet's cursor key is the facet's own key.** [`Facet::cursor_key`] is
 //! the one function that turns a facet into the position a page stops at, and
-//! it states that position for every shape, so the seven keys cannot drift
+//! it states that position for every shape, so the nine keys cannot drift
 //! into two orders sharing a kind. What each shape is keyed by is stated
 //! there rather than restated here.
+//!
+//! **A creation rule is reported as it is written.** Its target, its body and
+//! every string in its frontmatter defaults are templates, and a facet carries
+//! each as its source text — `{{var.title}}`, not a value — because what a
+//! template fills to is fixed only when a document is made. The defaults
+//! cross as the [`ValueMap`] a write carries, so a number stays a number and
+//! a map keeps the order it is written in.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, CursorKey, FacetKind, Page};
+use crate::plan::value::ValueMap;
 
 /// The type a vault's schema declares a field under.
 ///
@@ -211,6 +219,28 @@ pub enum Facet {
         /// The stance the schema declares.
         stance: TagStance,
     },
+    /// A named rule the vault's schema declares for making a document.
+    #[non_exhaustive]
+    CreationRule {
+        /// The name a document is made under: `new --as task`.
+        name: String,
+        /// Where a document the rule makes is written, as a template.
+        target: String,
+        /// The variables a caller must supply, in the order declared.
+        variables: Vec<String>,
+        /// The frontmatter a document the rule makes starts with; every
+        /// string in it is a template.
+        frontmatter_defaults: ValueMap,
+        /// The body a document the rule makes starts with, as a template, and
+        /// `null` where the rule writes none.
+        body: Option<String>,
+    },
+    /// Where the vault's schema says untyped capture lands.
+    #[non_exhaustive]
+    Inbox {
+        /// Where a captured document is written, as a template.
+        target: String,
+    },
 }
 
 impl Facet {
@@ -282,6 +312,30 @@ impl Facet {
         Facet::UndeclaredTags { stance }
     }
 
+    /// The creation rule `name`, writing to `target`.
+    pub fn creation_rule(
+        name: impl Into<String>,
+        target: impl Into<String>,
+        variables: Vec<String>,
+        frontmatter_defaults: ValueMap,
+        body: Option<String>,
+    ) -> Self {
+        Facet::CreationRule {
+            name: name.into(),
+            target: target.into(),
+            variables,
+            frontmatter_defaults,
+            body,
+        }
+    }
+
+    /// The inbox, writing to `target`.
+    pub fn inbox(target: impl Into<String>) -> Self {
+        Facet::Inbox {
+            target: target.into(),
+        }
+    }
+
     /// What this facet is a facet of.
     ///
     /// The match carries no wildcard, so a facet minted without a kind does not
@@ -298,6 +352,8 @@ impl Facet {
             Facet::Folder { .. } => FacetKind::Folder,
             Facet::PathRule { .. } => FacetKind::PathRule,
             Facet::UndeclaredTags { .. } => FacetKind::UndeclaredTags,
+            Facet::CreationRule { .. } => FacetKind::CreationRule,
+            Facet::Inbox { .. } => FacetKind::Inbox,
         }
     }
 
@@ -305,8 +361,9 @@ impl Facet {
     ///
     /// The key is the one text the facet itself spells: a declared field's
     /// and an observed field's frontmatter key, a declared tag's name, a tag
-    /// pattern's and a path rule's pattern, a folder's path, and, for the
-    /// undeclared-tags facet, the stance spelling — `allow` or `report`.
+    /// pattern's and a path rule's pattern, a folder's path, a creation rule's
+    /// name, the inbox's target, and, for the undeclared-tags facet, the
+    /// stance spelling — `allow` or `report`.
     /// Beside the kind, that names one facet within its shape, which is what a
     /// continuation resumes after.
     ///
@@ -330,6 +387,14 @@ impl Facet {
             } => path.clone(),
             Facet::PathRule { rule: _, pattern } => pattern.clone(),
             Facet::UndeclaredTags { stance } => stance.as_str().to_string(),
+            Facet::CreationRule {
+                name,
+                target: _,
+                variables: _,
+                frontmatter_defaults: _,
+                body: _,
+            } => name.clone(),
+            Facet::Inbox { target } => target.clone(),
         };
         CursorKey::facet(self.kind(), key)
     }
