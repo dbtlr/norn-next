@@ -1062,6 +1062,41 @@ inbox:
         );
     }
 
+    /// A task conditioned on `guard.md`'s `status` reading `unlocked`.
+    fn guarded_task() -> Operation {
+        task().with_conditions(vec![norn_wire::AuthorCondition::expected_value(
+            DocumentPath::new("guard.md").expect("a path"),
+            "status",
+            norn_wire::ExpectedField::present(AuthoredValue::string("unlocked")),
+        )])
+    }
+
+    /// **The expanded create keeps the creation's conditions**: where they
+    /// hold it carries them, and where one fails it is left unresolved and
+    /// nothing is written.
+    #[test]
+    fn the_expanded_create_keeps_its_conditions() {
+        let holding = MemoryVault::with(&[("guard.md", "---\nstatus: unlocked\n---\n")]);
+        let resolution = planned(&holding, vec![guarded_task()]);
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.operations[0].conditions,
+            guarded_task().conditions
+        );
+
+        let failing = MemoryVault::with(&[("guard.md", "---\nstatus: locked\n---\n")]);
+        let resolution = planned(&failing, vec![guarded_task()]);
+        assert!(resolution.plan.transitions.is_empty());
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("the creation is unresolved: {:?}", resolution.unresolved);
+        };
+        assert_eq!(left.operation.conditions, guarded_task().conditions);
+    }
+
     /// **The expanded create keeps what the creation carries beyond its
     /// kind**: an operation requiring it by identifier requires the create.
     #[test]
