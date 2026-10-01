@@ -223,7 +223,7 @@ pub fn named_paths(link: &LinkFact, holder: &DocumentPath) -> Vec<String> {
 /// **The inverse of the reading, held to it.** The spelling climbs out of
 /// the holder's directory to the deepest folder it shares with `path` and
 /// down from there, one `..` per folder climbed, and is accepted only where
-/// [`joined`] — the one reading every Markdown path link is resolved by —
+/// `joined` — the one reading every Markdown path link is resolved by —
 /// reads it back as exactly `path` from the holder's directory.
 ///
 /// **The style is the written link's.** A destination written with a percent
@@ -263,7 +263,7 @@ pub fn relative_spelling(holder: &DocumentPath, path: &str, written: &str) -> Op
 /// not — or `None` where no spelling reads back as `path`.
 ///
 /// The style is [`relative_spelling`]'s, and so is the proof: the spelling is
-/// accepted only where [`joined`] reads it back from the root as exactly
+/// accepted only where `joined` reads it back from the root as exactly
 /// `path`.
 pub fn rooted_spelling(path: &str, written: &str) -> Option<String> {
     let (written_path, query) = split_query(written);
