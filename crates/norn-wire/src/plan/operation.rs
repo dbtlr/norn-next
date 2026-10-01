@@ -74,17 +74,16 @@
 //! operation of an authored plan, or on a kind that does not cascade, is a
 //! fault in the plan's shape rather than a refusal at the read.
 //!
-//! **Planning does not read backlinks yet, so the cascade is vocabulary
-//! ahead of its planner (NORN-297).** Until link cascades are planned, a
-//! plain `move_document` and a `delete_document` saying neither flag plan and
-//! land as they did before this vocabulary: with no cascade and no backlink
-//! check, so a move leaves the links naming its source as written and a
-//! delete leaves the links naming its document broken, the forecast advising
-//! on neither. Every other part of the vocabulary — a folder move, both link
-//! rewrites, a delete saying either flag, and an operation carrying a cascade
-//! — is left unresolved by the planner, naming that limit, and the applier
-//! refuses a resolved plan carrying one. Both limits close when the cascade
-//! is planned.
+//! **A move's cascade is planned; a delete's and a rewrite's are vocabulary
+//! ahead of their planner (NORN-297).** Planning generates a
+//! `move_document`'s cascade from the links the vault holds, and expands a
+//! `move_folder` into the document moves it makes. A `delete_document`
+//! saying neither flag plans and lands as it did before this vocabulary: with
+//! no cascade and no backlink check, so it leaves the links naming its
+//! document broken, the forecast advising on each. Both link rewrites and a
+//! delete saying either flag are left unresolved by the planner, naming that
+//! limit, and the applier refuses a resolved plan carrying one. The limits
+//! close when their cascades are planned.
 //!
 //! **A resolution target here names a document, never a place inside one.**
 //! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
@@ -234,8 +233,9 @@ pub enum OperationKind {
         to: DocumentPath,
     },
     /// Remove a document, saying what becomes of the links naming it. Until
-    /// link cascades are planned, a delete forbidding them plans with no
-    /// backlink check, and one rewriting or breaking them does not resolve.
+    /// a delete's link cascade is planned, a delete forbidding them plans with
+    /// no backlink check, and one rewriting or breaking them does not
+    /// resolve.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
@@ -419,8 +419,8 @@ impl OperationKind {
     }
 
     /// Remove the document at `path`, which no link may name — a limit the
-    /// planner does not yet hold: until link cascades are planned, the
-    /// delete lands whatever links name the document.
+    /// planner does not yet hold: until a delete's link cascade is planned,
+    /// the delete lands whatever links name the document.
     pub const fn delete_document(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,

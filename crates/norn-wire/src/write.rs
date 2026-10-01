@@ -12,12 +12,13 @@
 //! [`ApplyReport`](crate::ApplyReport). No write verb has a report or a code
 //! of its own.
 //!
-//! **`move`, `delete` and `rewrite_wikilink` are spelled ahead of their
-//! handlers (NORN-297).** Each is a registered verb with its request and its
-//! plan, but the host serves only `set`, `edit` and `new` so far, and its
-//! planner does not yet plan a link cascade: a caller sends the plan one of
-//! these requests compiles to through `apply`, and the module of each verb
-//! says what that plan does until cascades are planned.
+//! **`delete` and `rewrite_wikilink` are spelled ahead of their handlers
+//! (NORN-297).** Each is a registered verb with its request and its plan, but
+//! the host serves `set`, `edit`, `new` and `move` so far, and its planner
+//! plans a move's link cascade and not yet a delete's or a wikilink
+//! rewrite's: a caller sends the plan one of those two requests compiles to
+//! through `apply`, and the module of each says what that plan does until its
+//! cascade is planned.
 //!
 //! **A write states its mode, as `apply` does.** There is no default: a
 //! request naming neither `preview` nor `apply` does not read.

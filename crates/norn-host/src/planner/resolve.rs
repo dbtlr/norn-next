@@ -11,7 +11,8 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::compose::{Composition, compose, content_hash, holding, touches};
+use super::cascade::generate;
+use super::compose::{Composition, compose, content_hash, holding, touched, touches};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
@@ -93,70 +94,97 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     links: &I,
     mut left_out: BTreeMap<usize, UnresolvedReason>,
 ) -> Result<Resolution, PlanningFailure<V::Error, I::Error>> {
+    // Planning writes every cascade from the links the vault holds now, so
+    // an operation arriving with one is no operation its caller authored: a
+    // refusal's refresh hands planning its operations without the cascades
+    // they carried, and nothing else may hand planning one.
+    if let Some(fault) = authored.misplaced_cascades() {
+        return Err(PlanningFailure::Fault(fault));
+    }
     let AuthoredPlan {
         plan: OperationsTag,
         vault,
-        operations,
+        mut operations,
         force,
         footnote,
     } = authored;
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
-    let (order, composition) = loop {
+    let (order, lineage, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
         let failed =
             failures(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
-        if failed.is_empty() {
-            break (order, composition);
+        if !failed.is_empty() {
+            left_out.extend(failed);
+            leave_out_what_falls_with(&operations, &mut left_out, view);
+            continue;
         }
-        left_out.extend(failed);
+        let lineage = Lineage::of(&operations, &order, view.normalizer());
+        if let Some(cycle) = lineage.content_cycle() {
+            return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
+        }
+        // Each move that resolves generates its cascade from the plan as it
+        // composes without any, and a holder a left-out operation touches
+        // takes the move down with it, as any file two operations share
+        // does; what is left composes again, until nothing more falls.
+        let cascades = generate(&composition, &lineage, view.normalizer(), links)
+            .map_err(PlanningFailure::Links)?;
+        for (position, cascade) in cascades {
+            operations[position].cascade = cascade;
+        }
+        let standing = left_out.len();
         leave_out_what_falls_with(&operations, &mut left_out, view);
+        if left_out.len() == standing {
+            // A cascade names only holders that stand, so it composes
+            // wherever its operation did. Should one not, its operation is
+            // left out in the composition's words, in every build, rather
+            // than planned with a transition its cascade does not make.
+            let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
+            if composition.unresolvable.is_empty() {
+                break (order, lineage, composition);
+            }
+            for unresolvable in &composition.unresolvable {
+                left_out.entry(unresolvable.position).or_insert_with(|| {
+                    UnresolvedReason::no_longer_resolves(unresolvable.detail.clone())
+                });
+            }
+            leave_out_what_falls_with(&operations, &mut left_out, view);
+        }
+        for operation in &mut operations {
+            operation.cascade.clear();
+        }
     };
-    let lineage = Lineage::of(&operations, &order, view.normalizer());
-    if let Some(cycle) = lineage.content_cycle() {
-        return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
-    }
     let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
-    let transitions = composition
-        .targets
-        .iter()
-        .map(|(path, target)| {
-            let after = match &target.after {
-                Some(bytes) => holding(bytes, content_hash(bytes)),
-                None => FileState::absent(),
-            };
-            Transition::new(path.clone(), target.before.clone(), after)
-        })
-        .collect::<Vec<_>>();
     // The resolution change set is recorded as the vault stands with every
     // target at its after-state, judged from the bytes composition wrote and
     // from whether the plan's file states say a document stands.
-    let targets: Vec<Target<'_>> = transitions
-        .iter()
-        .zip(composition.targets.values())
-        .map(|(transition, target)| {
-            Target::new(
-                &transition.path,
-                &transition.before,
-                &transition.after,
-                target.after.as_deref(),
-            )
-        })
-        .collect();
+    let targets = Target::of(&composition);
     let changed = change_set(
         &targets,
         &lineage,
         view.normalizer(),
         order.iter().map(|&position| &operations[position]),
+        &composition.skipped,
+        &composition.kept,
         links,
     )
     .map_err(PlanningFailure::Links)?;
     drop(targets);
-    drop(composition);
     conditions.extend(changed.entries);
+    let transitions = composition
+        .targets
+        .into_iter()
+        .map(|(path, target)| {
+            let after = match &target.after {
+                Some(bytes) => holding(bytes, content_hash(bytes)),
+                None => FileState::absent(),
+            };
+            Transition::new(path, target.before, after)
+        })
+        .collect::<Vec<_>>();
     let carried: BTreeSet<&OperationId> = operations
         .iter()
         .filter_map(|operation| operation.id.as_ref())
@@ -395,6 +423,15 @@ fn requiring_closure(operations: &[Operation], failed: &BTreeSet<usize>) -> BTre
 /// touching a file a left-out operation touches, since operations on one file
 /// stand or fall together — each directly or through others. A file is its
 /// identity, so two spellings of one file are one file here too.
+///
+/// **A standing operation touches its cascade's holders; a left-out one does
+/// not.** An operation that stands touches every file its kind names and
+/// every holder its cascade rewrites ([`touched`]), so a holder a left-out
+/// operation touches takes down the move whose cascade rewrites it. A
+/// left-out operation's cascade is discarded with it — planning generates
+/// cascades again for what stands — so what it takes down is only what
+/// shares a file its kind names ([`touches`]): a holder only its cascade
+/// rewrote drags no other move down.
 fn leave_out_what_falls_with<V: VaultView>(
     operations: &[Operation],
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
@@ -404,7 +441,7 @@ fn leave_out_what_falls_with<V: VaultView>(
     let mut touching: BTreeMap<_, Vec<usize>> = BTreeMap::new();
     let mut requiring: BTreeMap<&OperationId, Vec<usize>> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
-        for path in touches(&operation.kind) {
+        for path in touched(operation) {
             touching.entry(identity(path)).or_default().push(position);
         }
         for required in &operation.requires {
@@ -817,18 +854,16 @@ mod tests {
     }
 
     /// **A link cascade is left unresolved until it is planned (NORN-297).**
-    /// A folder move, a link rewrite, a wikilink rewrite and a delete saying
-    /// what becomes of the links naming its document are each left
-    /// unresolved, naming the limit, and write nothing — never planned as
-    /// something they do not say, such as a delete that silently breaks
-    /// links its author asked to rewrite.
+    /// A link rewrite, a wikilink rewrite and a delete saying what becomes
+    /// of the links naming its document are each left unresolved, naming the
+    /// limit, and write nothing — never planned as something they do not
+    /// say, such as a delete that silently breaks links its author asked to
+    /// rewrite.
     #[test]
     fn a_link_cascade_is_left_unresolved_until_it_is_planned() {
         let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
         let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
-        let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
         for kind in [
-            OperationKind::move_folder(folder("notes"), folder("archive")),
             OperationKind::rewrite_link(
                 path("notes/a.md"),
                 norn_wire::LinkFamily::Wikilink,
@@ -841,31 +876,28 @@ mod tests {
         ] {
             let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
             let detail = unresolved_detail(&resolution);
-            assert!(
-                detail.contains("link cascades are not planned yet"),
-                "{kind:?}: {detail}"
-            );
+            assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
             assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
         }
-        // A refused plan's operations are re-resolved here as they were
-        // carried, so a move carrying its cascade falls whole.
-        let cascading = Operation::new(OperationKind::move_document(
-            path("notes/b.md"),
-            path("archive/b.md"),
-        ))
-        .with_cascade(vec![norn_wire::LinkRewrite::new(
-            path("notes/a.md"),
-            norn_wire::LinkFamily::Wikilink,
-            "b",
-            "archive/b",
-        )]);
-        let resolution = planned(&vault, vec![cascading]);
-        let detail = unresolved_detail(&resolution);
-        assert!(
-            detail.contains("link cascades are not planned yet"),
-            "{detail}"
+    }
+
+    /// **A folder move reaching planning unexpanded is left unresolved**,
+    /// saying it is planned only as the document moves it expands into, and
+    /// writes nothing: only a plan resolved without expansion meets one here.
+    #[test]
+    fn an_unexpanded_folder_move_is_left_unresolved() {
+        let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
+        let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+        let unexpanded = planned(
+            &vault,
+            vec![Operation::new(OperationKind::move_folder(
+                folder("notes"),
+                folder("archive"),
+            ))],
         );
-        assert!(resolution.plan.transitions.is_empty());
+        let detail = unresolved_detail(&unexpanded);
+        assert!(detail.contains("not expanded"), "{detail}");
+        assert!(unexpanded.plan.transitions.is_empty());
     }
 
     /// **An expected value of absent on a document the plan writes is judged

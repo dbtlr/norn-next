@@ -8,14 +8,16 @@
 //! plan here, through [`resolve::resolve`], so an operation means the same
 //! thing wherever it arrives from. A refresh names the operations an earlier
 //! apply already landed, which it drops, so a remaining operation's
-//! requirement on one of them is met rather than a fault. Planning is six
+//! requirement on one of them is met rather than a fault. Planning is seven
 //! steps, one module each:
 //!
 //! - [`expand`] — each `where` target turned into one operation per document
 //!   it matches, each naming its document by path, through the find builder
-//!   on the one snapshot the request holds; a `where` matching nothing, or
-//!   nothing as asked, is left unresolved in words. What follows plans only
-//!   path targets.
+//!   on the one snapshot the request holds, and each folder move into one
+//!   document move per document the folder holds, naming every file it
+//!   leaves behind; a `where` matching nothing, or nothing as asked, and a
+//!   folder move with nothing to move are left unresolved in words. What
+//!   follows plans only path targets.
 //! - [`order`] — the plan's shape: the order its operations compose in, and
 //!   the faults `request/plan-invalid` answers — an identifier carried twice,
 //!   a requirement nothing carries, a cycle of requirements, and a cycle of
@@ -41,6 +43,12 @@
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
 //!   is its before-state, which lands found (ADR 0032's landed rule).
+//! - [`cascade`] — each document move's link cascade: once every operation
+//!   acts, the links that would stop naming a moved document, read through
+//!   the store's resolution door as the change set reads them, each
+//!   respelled in its own style to the shortest spelling that reads back as
+//!   where the document lands, and carried on the move. A cascade's holder
+//!   is a file its move touches, so the two stand or fall together.
 //! - [`resolve`] — the resolved plan: an operation that does not resolve, or
 //!   whose author's condition the vault no longer meets or names a file the
 //!   store's path grammar refuses, is left out, with
@@ -120,6 +128,7 @@
 //! [`view::TreeView`], matching on a snapshot it takes there; and a preview
 //! plans the same way on its one snapshot, taking no claim (`crate::apply`).
 
+pub(crate) mod cascade;
 pub(crate) mod compose;
 pub(crate) mod edit;
 pub(crate) mod expand;

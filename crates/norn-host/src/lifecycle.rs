@@ -5698,6 +5698,12 @@ impl<O: EntryOps> Host<O> {
         self.shared.reads.read()
     }
 
+    /// Record what one preview spent judging its plan's links, in the read
+    /// account the preview's read hold is counted in.
+    pub(crate) fn count_preview_link_judgments(&self, cost: crate::evidence::LinkJudgmentCost) {
+        self.shared.reads.count_preview_link_judgments(cost);
+    }
+
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {

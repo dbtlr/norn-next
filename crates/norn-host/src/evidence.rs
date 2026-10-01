@@ -590,6 +590,7 @@ pub(crate) struct ReadEvidence {
     settle_waits: AtomicU64,
     settle_rounds: AtomicU64,
     settle_expiries: AtomicU64,
+    preview_link_judgments: LinkJudgmentAccount,
 }
 
 /// What one acquisition read off SQLite's count of its thread and off its
@@ -746,6 +747,9 @@ pub struct ReadReading {
     /// when their settle bound ran out: each is a
     /// [`ReadRefusal::Unsettled`](crate::ReadRefusal::Unsettled).
     pub settle_expiries: u64,
+    /// What the previews this host answered spent judging their plans' links
+    /// on the store's resolution door, over every judgment each ran.
+    pub preview_link_judgments: LinkJudgmentCost,
 }
 
 /// What happened between an earlier reading of a host's read account and a
@@ -786,6 +790,8 @@ pub struct ReadsSince {
     pub settle_rounds: u64,
     /// Acquisitions this window refused past their settle bound.
     pub settle_expiries: u64,
+    /// What this window's previews spent judging their plans' links.
+    pub preview_link_judgments: LinkJudgmentCost,
 }
 
 impl ReadReading {
@@ -812,6 +818,9 @@ impl ReadReading {
             settle_waits: self.settle_waits.saturating_sub(earlier.settle_waits),
             settle_rounds: self.settle_rounds.saturating_sub(earlier.settle_rounds),
             settle_expiries: self.settle_expiries.saturating_sub(earlier.settle_expiries),
+            preview_link_judgments: self
+                .preview_link_judgments
+                .since(earlier.preview_link_judgments),
         }
     }
 }
@@ -837,7 +846,14 @@ impl ReadEvidence {
             settle_waits: get(&self.settle_waits),
             settle_rounds: get(&self.settle_rounds),
             settle_expiries: get(&self.settle_expiries),
+            preview_link_judgments: self.preview_link_judgments.read(),
         }
+    }
+
+    /// Record what one preview spent judging its plan's links, where the
+    /// preview answers, whatever it answered.
+    pub(crate) fn count_preview_link_judgments(&self, cost: LinkJudgmentCost) {
+        self.preview_link_judgments.add(cost);
     }
 
     /// Record what one read's mint ran under the entry gate.
@@ -980,5 +996,139 @@ impl ReadEvidence {
     /// Record that one read was served.
     pub(crate) fn count_read(&self) {
         self.reads_served.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// What judging a plan's links on the store's resolution door cost, summed
+/// over every judgment one request ran: a link cascade's backlink pass and
+/// its spelling probe, the planning's resolution change set, and the
+/// applier's computation of it again.
+///
+/// **Read off the judgments the request really ran.** The plan's link index
+/// adds each judgment's own report ([`norn_store::ResolutionWork`]) and the
+/// difference its snapshot's counters moved by while the judgment ran, so a
+/// bar over a planned move reads what its planning cost rather than a copy of
+/// what that planning is thought to ask.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LinkJudgmentCost {
+    /// Judgments run: each one call of the resolution door.
+    pub judgments: u64,
+    /// Links judged, each once per judgment however many ways it was reached.
+    pub links_evaluated: u64,
+    /// Key resolutions the judgments ran.
+    pub keys_resolved: u64,
+    /// Rows the key resolutions read.
+    pub head_rows: u64,
+    /// Statements the judgments ran on their snapshot.
+    pub statements_executed: u64,
+    /// Virtual-machine steps those statements took.
+    pub vm_steps: u64,
+    /// Steps those statements took walking a table or an index end to end.
+    pub full_scan_steps: u64,
+}
+
+impl LinkJudgmentCost {
+    /// No judgment at all.
+    pub(crate) const NONE: LinkJudgmentCost = LinkJudgmentCost {
+        judgments: 0,
+        links_evaluated: 0,
+        keys_resolved: 0,
+        head_rows: 0,
+        statements_executed: 0,
+        vm_steps: 0,
+        full_scan_steps: 0,
+    };
+
+    /// One judgment that did `work` while its snapshot's counters moved from
+    /// `before` to `after`.
+    pub(crate) fn of(
+        work: &norn_store::ResolutionWork,
+        before: norn_store::SnapshotCounters,
+        after: norn_store::SnapshotCounters,
+    ) -> LinkJudgmentCost {
+        LinkJudgmentCost {
+            judgments: 1,
+            links_evaluated: work.links_evaluated,
+            keys_resolved: work.keys_resolved,
+            head_rows: work.head_rows,
+            statements_executed: after
+                .statements_executed()
+                .saturating_sub(before.statements_executed()),
+            vm_steps: after.vm_steps().saturating_sub(before.vm_steps()),
+            full_scan_steps: after
+                .full_scan_steps()
+                .saturating_sub(before.full_scan_steps()),
+        }
+    }
+
+    /// This cost and `other` together.
+    #[must_use]
+    pub(crate) fn plus(self, other: LinkJudgmentCost) -> LinkJudgmentCost {
+        LinkJudgmentCost {
+            judgments: self.judgments + other.judgments,
+            links_evaluated: self.links_evaluated + other.links_evaluated,
+            keys_resolved: self.keys_resolved + other.keys_resolved,
+            head_rows: self.head_rows + other.head_rows,
+            statements_executed: self.statements_executed + other.statements_executed,
+            vm_steps: self.vm_steps + other.vm_steps,
+            full_scan_steps: self.full_scan_steps + other.full_scan_steps,
+        }
+    }
+
+    /// What was spent between an earlier running total and this one.
+    #[must_use]
+    pub fn since(self, earlier: LinkJudgmentCost) -> LinkJudgmentCost {
+        LinkJudgmentCost {
+            judgments: self.judgments.saturating_sub(earlier.judgments),
+            links_evaluated: self.links_evaluated.saturating_sub(earlier.links_evaluated),
+            keys_resolved: self.keys_resolved.saturating_sub(earlier.keys_resolved),
+            head_rows: self.head_rows.saturating_sub(earlier.head_rows),
+            statements_executed: self
+                .statements_executed
+                .saturating_sub(earlier.statements_executed),
+            vm_steps: self.vm_steps.saturating_sub(earlier.vm_steps),
+            full_scan_steps: self.full_scan_steps.saturating_sub(earlier.full_scan_steps),
+        }
+    }
+}
+
+/// A running total of [`LinkJudgmentCost`]s, added to from any thread.
+#[derive(Debug, Default)]
+struct LinkJudgmentAccount {
+    judgments: AtomicU64,
+    links_evaluated: AtomicU64,
+    keys_resolved: AtomicU64,
+    head_rows: AtomicU64,
+    statements_executed: AtomicU64,
+    vm_steps: AtomicU64,
+    full_scan_steps: AtomicU64,
+}
+
+impl LinkJudgmentAccount {
+    fn add(&self, cost: LinkJudgmentCost) {
+        for (field, value) in [
+            (&self.judgments, cost.judgments),
+            (&self.links_evaluated, cost.links_evaluated),
+            (&self.keys_resolved, cost.keys_resolved),
+            (&self.head_rows, cost.head_rows),
+            (&self.statements_executed, cost.statements_executed),
+            (&self.vm_steps, cost.vm_steps),
+            (&self.full_scan_steps, cost.full_scan_steps),
+        ] {
+            field.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> LinkJudgmentCost {
+        let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
+        LinkJudgmentCost {
+            judgments: get(&self.judgments),
+            links_evaluated: get(&self.links_evaluated),
+            keys_resolved: get(&self.keys_resolved),
+            head_rows: get(&self.head_rows),
+            statements_executed: get(&self.statements_executed),
+            vm_steps: get(&self.vm_steps),
+            full_scan_steps: get(&self.full_scan_steps),
+        }
     }
 }

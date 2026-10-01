@@ -187,10 +187,10 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
-    // Minted with the link-cascade vocabulary before the planner reads
-    // backlinks (NORN-297): a later change of the same task plans a delete's
-    // backlinks and a wikilink rewrite's `old`, and is what answers these
-    // two. Until then nothing answers either: a delete saying neither flag
+    // Minted with the link-cascade vocabulary before the planner reads a
+    // delete's backlinks (NORN-297): a later change of the same task plans a
+    // delete's backlinks and a wikilink rewrite's `old`, and is what answers
+    // these two. Until then nothing answers either: a delete saying neither flag
     // plans and lands with no backlink check, leaving every link naming its
     // document broken, and a wikilink rewrite is left unresolved in words,
     // naming the limit.
@@ -405,15 +405,17 @@ pub enum PlanFault {
         /// The positions of the operations carrying a cascade they may not.
         positions: Vec<usize>,
     },
-    /// An authored operation with a `where` target carries an identifier or
-    /// requires another operation. Planning expands it into one operation
-    /// per document the vault matches before the plan, so it names no one
-    /// operation another could require, and nothing it requires changes what
-    /// it matches. Split the plan, or name its documents by path.
+    /// An authored operation planning expands — one with a `where` target,
+    /// or a folder move — carries an identifier or requires another
+    /// operation. Planning expands it into one operation per document the
+    /// vault matches, or the folder holds, before the plan, so it names no
+    /// one operation another could require, and nothing it requires changes
+    /// which documents it expands into. Split the plan, or name its documents
+    /// by path.
     #[non_exhaustive]
-    WhereTargetOrdered {
-        /// The positions of the `where` operations carrying an identifier
-        /// or a requirement.
+    ExpandedTargetOrdered {
+        /// The positions of the `where` operations and folder moves carrying
+        /// an identifier or a requirement.
         positions: Vec<usize>,
     },
 }
@@ -430,10 +432,11 @@ impl PlanFault {
         PlanFault::MisplacedCascade { positions }
     }
 
-    /// The `where` operations at `positions` carry an identifier or a
-    /// requirement, which an authored plan's `where` operations may not.
-    pub const fn where_target_ordered(positions: Vec<usize>) -> Self {
-        PlanFault::WhereTargetOrdered { positions }
+    /// The `where` operations and folder moves at `positions` carry an
+    /// identifier or a requirement, which an authored plan's operations
+    /// planning expands may not.
+    pub const fn expanded_target_ordered(positions: Vec<usize>) -> Self {
+        PlanFault::ExpandedTargetOrdered { positions }
     }
 
     /// The operations at `positions` all carry `id`.

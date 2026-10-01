@@ -156,6 +156,7 @@ pub use health::run::ResolutionStatement;
 pub use health::{KeySummaries, LinkSelection};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
+pub use link::{named_paths, relative_spelling, rooted_spelling};
 pub use read::{
     DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
     ReadStatement, TargetAmbiguity, page_limit,

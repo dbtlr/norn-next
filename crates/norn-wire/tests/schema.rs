@@ -3498,7 +3498,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "content_cycle",
             "transitions_disagree",
             "unexpanded_target",
-            "where_target_ordered",
+            "expanded_target_ordered",
             "misplaced_cascade"
         ])
     );

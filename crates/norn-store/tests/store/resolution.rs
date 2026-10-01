@@ -207,6 +207,42 @@ fn a_second_document_of_a_stem_makes_a_link_ambiguous() {
     });
 }
 
+/// **A link names the targets its keys could name before the plan**: an
+/// ambiguous `[[a]]` names the moved `x/a.md` among the plan's targets, as
+/// the stored `y/a.md` is not one, while a link whose keys name no target
+/// names none. The ambiguity-ignore set keeps a target it keeps out of a
+/// class out of this list too.
+#[test]
+fn a_link_names_the_targets_it_could_name_before_the_plan() {
+    both_orders("resolution-before-targets", |mut vault| {
+        vault.write(&[
+            ("x/a.md", "alpha\n"),
+            ("y/a.md", "alpha\n"),
+            ("archive/a.md", "alpha\n"),
+            ("b.md", "[[a]]\n"),
+        ]);
+        let moving = PathOverlay::new()
+            .with(path("x/a.md"), true, false)
+            .with(path("z/a.md"), false, true)
+            .with(path("archive/a.md"), true, false);
+        let snapshot = vault.snapshot();
+        let mut named = Vec::new();
+        snapshot
+            .resolution_changes(&moving, &[], &declared(), |change| {
+                named.push((
+                    change.link.target.clone(),
+                    change
+                        .before_targets
+                        .iter()
+                        .map(|target| target.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                ));
+            })
+            .expect("a judgment");
+        assert_eq!(named, [("a".to_string(), vec!["x/a.md".to_string()])]);
+    });
+}
+
 /// **A place the ambiguity-ignore set keeps out of a class stays out of it on
 /// either side.** Creating `archive/a.md` leaves `[[a]]` naming `x/a.md`
 /// alone, while `[[archive/a]]`, which names the ignored place, now resolves
@@ -289,6 +325,39 @@ fn a_written_link_is_handed_back_and_an_untouched_one_is_not() {
         let (untouched, work) = vault.judge(&plan, &[probed("b.md", "b.md", "[[a]]\n", false)]);
         assert_eq!(untouched, []);
         assert_eq!(work, ResolutionWork::default());
+    });
+}
+
+/// **A document replaced at a path its plan keeps filled is a change**: a
+/// plan that takes `a.md`'s document away and puts another there changes
+/// what `[[a]]` names though the path it resolves to is the same, so the
+/// link is handed back, its two sides alike, and what it names is said to
+/// have moved under it. Overlaid as standing on both sides and no more, the
+/// same path reaches nothing.
+#[test]
+fn a_document_replaced_at_its_path_reaches_the_links_naming_it() {
+    both_orders("resolution-replaced", |mut vault| {
+        vault.write(&[("a.md", "alpha\n"), ("h.md", "[[a]] [t](a.md)\n")]);
+        let kept = PathOverlay::new().with(path("a.md"), true, true);
+        let (untouched, _) = vault.judge(&kept, &[]);
+        assert_eq!(untouched, []);
+
+        let replaced = PathOverlay::new().replacing(path("a.md"));
+        let snapshot = vault.snapshot();
+        let mut reached = Vec::new();
+        snapshot
+            .resolution_changes(&replaced, &[], &declared(), |change| {
+                reached.push((read(&change), change.members_moved));
+            })
+            .unwrap_or_else(|refusal| panic!("a judgment: {refusal}"));
+        reached.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            reached,
+            [
+                (judged("h.md", "a", "one:a.md", "one:a.md"), true),
+                (judged("h.md", "a.md", "one:a.md", "one:a.md"), true),
+            ]
+        );
     });
 }
 

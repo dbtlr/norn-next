@@ -8,9 +8,10 @@
 //! is refused at the read. The flag is written only when `true`, as `force`
 //! is, so a request that omits it asks for the strict reading.
 //!
-//! **The strict reading is not held yet (NORN-297).** The planner does not
-//! read backlinks until link cascades are planned, so a delete saying
-//! neither plans and lands as `delete_document` always has, leaving every
+//! **The strict reading is not held yet (NORN-297).** The planner reads a
+//! move's backlinks to plan its cascade, and does not yet read a delete's,
+//! so a delete saying neither plans and lands as `delete_document` always
+//! has, leaving every
 //! link naming its document broken, and a delete saying either flag is left
 //! unresolved, naming that limit. The host serves no `delete` verb yet
 //! either: the request compiles to its plan, and a caller sends that plan

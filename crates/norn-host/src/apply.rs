@@ -24,10 +24,10 @@
 //! ([`PlanSnapshot`]), through the find builder in process, and where its
 //! resolution change set reads the links the store holds.
 //!
-//! **The write verbs enter here.** [`Host::set`], [`Host::edit`] and
-//! [`Host::new_document`] each compile their request to an authored plan and
-//! answer through [`Host::apply`], so a verb previews and applies exactly as
-//! the same operations sent as a plan do.
+//! **The write verbs enter here.** [`Host::set`], [`Host::edit`],
+//! [`Host::new_document`] and [`Host::move_path`] each compile their request
+//! to an authored plan and answer through [`Host::apply`], so a verb previews
+//! and applies exactly as the same operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -49,7 +49,7 @@
 //! longer stands, and trust withdrawn for the environment's refusal where it
 //! stands and cannot be read.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,13 +58,14 @@ use norn_fs::WatchError;
 use norn_store::{ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot};
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
-    FindParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams, TrustState,
-    UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams,
+    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
+use crate::evidence::LinkJudgmentCost;
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadRefusal, ReadSource,
     ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
@@ -193,10 +194,16 @@ pub(crate) fn resolve_on(
 /// mints none unless the applier refuses it and the plan resolved afresh does
 /// one of those. Either way the match is the find a caller would have been
 /// answered at the same instant, paged to its end.
+///
+/// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
+/// every judgment of the resolution door it runs adds what the door reported
+/// and what its snapshot's counters moved by, so a preview's account holds
+/// what its planning and its check really ran.
 pub(crate) struct PlanSnapshot<'a> {
     vault: VaultAddress,
     declared: &'a ContentModel,
     on: ReadOn<'a>,
+    judged: Cell<LinkJudgmentCost>,
 }
 
 /// Where a [`PlanSnapshot`] reads.
@@ -223,6 +230,7 @@ impl<'a> PlanSnapshot<'a> {
             vault,
             declared,
             on: ReadOn::Held(snapshot),
+            judged: Cell::new(LinkJudgmentCost::NONE),
         }
     }
 
@@ -240,7 +248,14 @@ impl<'a> PlanSnapshot<'a> {
                 mint,
                 established: RefCell::new(None),
             },
+            judged: Cell::new(LinkJudgmentCost::NONE),
         }
+    }
+
+    /// What every judgment of a plan's links run through this snapshot has
+    /// cost so far.
+    pub(crate) fn link_judgment_cost(&self) -> LinkJudgmentCost {
+        self.judged.get()
     }
 
     /// `read` over the snapshot. **A handle that cannot be minted refuses as
@@ -347,9 +362,16 @@ impl LinkIndex for PlanSnapshot<'_> {
         probed: &[ProbedLink],
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), PageRefused> {
-        self.reading(|snapshot| snapshot.resolution_changes(overlay, probed, self.declared, each))?
-            .map(|_| ())
-            .map_err(page_refusal)
+        let work = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .resolution_changes(overlay, probed, self.declared, each)
+                    .map(|work| LinkJudgmentCost::of(&work, before, snapshot.counters()))
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(())
     }
 
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
@@ -422,8 +444,15 @@ pub(crate) fn unreadable(name: &VaultName, error: impl std::fmt::Display) -> Err
 /// it, its links judged on `snapshot`: the same plan and its forecast, or the
 /// answer an apply of it would end in — damage the snapshot met included,
 /// which the caller publishes as a read's would be.
+///
+/// **What a folder move leaves behind is planning's to say.** A resolved
+/// plan carries only the document moves a folder move expanded into, so the
+/// applier's judgment cannot see the files the folder kept; the operations'
+/// planning read them, and hands them here as `left_behind` for the forecast
+/// to name. A resolved plan sent directly names none.
 fn preview_resolved(
     plan: norn_wire::ResolvedPlan,
+    left_behind: Vec<norn_wire::FilePath>,
     ground: &PlanGround,
     snapshot: &PlanSnapshot<'_>,
 ) -> Result<ApplyReport, PageRefused> {
@@ -435,7 +464,10 @@ fn preview_resolved(
         &ground.declared,
         snapshot,
     ) {
-        Ok((plan, forecast)) => Ok(ApplyReport::previewed(plan, forecast)),
+        Ok((plan, forecast)) => Ok(ApplyReport::previewed(
+            plan,
+            forecast.with_left_behind(left_behind),
+        )),
         Err(outcome) => match *outcome {
             applier::ApplyOutcome::Unread(refused) => Err(refused),
             outcome => Err(PageRefused::Answered(
@@ -490,6 +522,20 @@ where
         self.apply_operations(mode, params.plan())
     }
 
+    /// Answer a `move`: the document or folder `params` names, compiled to
+    /// one operation and previewed or applied through [`Host::apply`].
+    ///
+    /// **The move carries its link cascade.** Planning respells every link
+    /// that would stop naming a moved document, or leaves it as written with
+    /// the forecast saying why, and a folder move expands into one document
+    /// move per document the folder holds, its forecast naming every file it
+    /// leaves behind. `move` is a Rust keyword, so the verb's method is
+    /// named for what it moves.
+    pub fn move_path(&self, params: MoveParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
     /// A write verb's compiled `plan`, entering the one `apply` path.
     fn apply_operations(
         &self,
@@ -534,20 +580,30 @@ where
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let report = match plan {
+        let report = (|| match plan {
             // Planned as an apply plans it, then judged as an apply judges
             // what it planned: resolving checks no schema, so the plan it
             // answers goes through the same checks a resolved plan's does.
             PlanDocument::Operations(authored) => {
                 let resolution =
                     resolve_on(authored, &ground, name, &snapshot).map_err(answered)?;
-                preview_resolved(fully_resolved(resolution)?.plan, &ground, &snapshot)
-                    .map_err(answered)?
+                let resolution = fully_resolved(resolution)?;
+                preview_resolved(
+                    resolution.plan,
+                    resolution.forecast.left_behind,
+                    &ground,
+                    &snapshot,
+                )
+                .map_err(answered)
             }
             PlanDocument::Resolved(resolved) => {
-                preview_resolved(resolved, &ground, &snapshot).map_err(answered)?
+                preview_resolved(resolved, Vec::new(), &ground, &snapshot).map_err(answered)
             }
-        };
+        })();
+        // What the preview's link judgments cost is the read account's,
+        // however the preview answered.
+        self.count_preview_link_judgments(snapshot.link_judgment_cost());
+        let report = report?;
         drop(snapshot);
         drop(hold);
         Ok(VaultAnswer::new(reading, Vec::new(), report))

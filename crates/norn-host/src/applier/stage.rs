@@ -275,7 +275,7 @@ pub(super) fn check(
         return Err(Unfit::Refused(checks));
     }
     let lineage = recorded_lineage(plan, normalizer);
-    let composition = match recompose(plan, &states, &lineage, view)
+    let mut composition = match recompose(plan, &states, &lineage, view)
         .map_err(|error| Unfit::Failed(error.to_string()))?
     {
         Recomposed::Sound(composition) => composition,
@@ -286,6 +286,14 @@ pub(super) fn check(
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
         .map_err(|path| Unfit::Invalid(disagreement([path])))?;
+    // What the cascades left as written, matched or kept beside a link they
+    // wrote, is read off the recomposition, as planning read it off its own
+    // composition, so the two forecast alike for every holder not yet landed.
+    // A holder an interrupted apply already landed recomposes from stand-in
+    // bytes, so its skip advisory can be omitted or mislabelled; the limit is
+    // stated in the planner's links module.
+    let skipped = std::mem::take(&mut composition.skipped);
+    let kept = std::mem::take(&mut composition.kept);
     drop(composition);
     let mut after: Vec<Option<&[u8]>> = vec![None; plan.transitions.len()];
     for (unit, content) in units.iter().zip(&contents) {
@@ -308,8 +316,16 @@ pub(super) fn check(
             )
         })
         .collect();
-    let recomputed = change_set(&targets, &lineage, normalizer, &plan.operations, links)
-        .map_err(Unfit::Unread)?;
+    let recomputed = change_set(
+        &targets,
+        &lineage,
+        normalizer,
+        &plan.operations,
+        &skipped,
+        &kept,
+        links,
+    )
+    .map_err(Unfit::Unread)?;
     drop(targets);
     checks.extend(link_checks(&plan.conditions, &recomputed.entries));
     let schema = Judging {

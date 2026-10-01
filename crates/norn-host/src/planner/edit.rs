@@ -29,8 +29,10 @@
 
 use std::sync::Arc;
 
-use norn_text::{Document, EditError, Mapping, SectionError, Value};
-use norn_wire::{AuthoredValue, DocumentPath, ExpectedField, OperationKind, WriteTarget};
+use norn_text::{AddressRewrite, Document, EditError, Mapping, SectionError, SkippedLink, Value};
+use norn_wire::{
+    AuthoredValue, DocumentPath, ExpectedField, LinkFamily, LinkRewrite, OperationKind, WriteTarget,
+};
 
 use super::compose::Unresolved;
 use crate::derivation::document_source;
@@ -49,9 +51,10 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteSection { path, .. }
         | OperationKind::InsertBeforeHeading { path, .. }
         | OperationKind::InsertAfterHeading { path, .. } => return Some(Ok(path)),
-        // NORN-297: a `rewrite_link` edits one document where it stands, but
-        // its composition through `norn-text`'s link rewriter is not wired
-        // yet, so it is not read here as a document-local edit.
+        // NORN-297: a `rewrite_link` edits one document where it stands, and
+        // a cascade's rewrites compose through `norn-text`'s link rewriter
+        // ([`rewritten`]); an authored one is not planned yet, so it is not
+        // read here as a document-local edit.
         OperationKind::CreateDocument { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
@@ -164,6 +167,56 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
     result
         .map(|edited| Arc::from(edited.into_bytes()))
         .map_err(|error| refusal(&error))
+}
+
+/// `bytes` with every one of `rewrites` composed at once — each link of a
+/// rewrite's syntax whose address is its `from` respelled its `to` — through
+/// `norn-text`'s link rewriter, and each matching link the rewriter left as
+/// written, with why: everything a plan's link cascades write in one
+/// document.
+///
+/// **One batch over one parse.** Every link is matched against `bytes` as
+/// they are, so a rewrite whose `to` is another's `from` never respells a
+/// link the first one wrote: `[[a]]` respelled `b` while `[[b]]` is respelled
+/// `z` reads `[[b]] [[z]]`, whichever operation's cascade carries which. A
+/// holder's rewrites are composed by this one call however many operations'
+/// cascades name the holder ([`super::compose::compose`]), so the order the
+/// operations compose in says nothing about what the holder reads.
+///
+/// **A rewrite never fails.** A rewrite matching no link composes its
+/// document unchanged: the applier recomposes a cascade over the stand-in for
+/// a holder already holding its change, where nothing matches, and a link a
+/// foreign edit took away since planning is the change set's to notice, not
+/// composition's. Bytes that do not decode as a vault document
+/// ([`document_source`]) hold no link the index derives, so they are returned
+/// as they are, and a rewrite of a syntax the text layer reads no link of
+/// matches nothing.
+pub(crate) fn rewritten<'r>(
+    bytes: &Arc<[u8]>,
+    rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
+) -> (Arc<[u8]>, Vec<SkippedLink>) {
+    let batch: Vec<AddressRewrite> = rewrites
+        .into_iter()
+        .filter_map(|rewrite| {
+            let family = match rewrite.syntax {
+                LinkFamily::Wikilink => norn_text::LinkFamily::Wikilink,
+                LinkFamily::Markdown => norn_text::LinkFamily::Markdown,
+                _ => return None,
+            };
+            Some(AddressRewrite::new(family, &rewrite.from, &rewrite.to))
+        })
+        .collect();
+    let Ok(text) = document_source(bytes) else {
+        return (bytes.clone(), Vec::new());
+    };
+    if batch.is_empty() {
+        return (bytes.clone(), Vec::new());
+    }
+    let rewritten = Document::parse(text).rewrite_links(&batch);
+    if rewritten.rewritten == 0 {
+        return (bytes.clone(), rewritten.skipped);
+    }
+    (Arc::from(rewritten.text.into_bytes()), rewritten.skipped)
 }
 
 /// An edit refusal in the words an unresolved operation carries.

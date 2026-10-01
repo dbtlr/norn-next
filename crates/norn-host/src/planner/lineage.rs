@@ -68,6 +68,9 @@ pub(crate) struct Lineage {
     /// Each edit's position, and the file whose before-state the content it
     /// acted on was drawn from.
     edited: BTreeMap<usize, NormalizedPath>,
+    /// Each file whose before-state ends the plan at another file, and that
+    /// file: [`Self::at_end`] read the other way.
+    carried: BTreeMap<NormalizedPath, NormalizedPath>,
 }
 
 impl Lineage {
@@ -124,17 +127,36 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
-                // NORN-297: none of these kinds is planned yet, so none draws
-                // content from a before-state here. A hand-built resolved plan
-                // can still carry a wikilink rewrite this far, and recompose
-                // refuses it. A folder move will arrive expanded into moves,
-                // and a link rewrite is an edit in place, drawing on nothing.
+                // None of these draws content from a before-state. A folder
+                // move arrives expanded into the moves it makes, and a link
+                // rewrite — an authored one or a cascade's — is an edit in
+                // place, drawing on nothing. NORN-297: a wikilink rewrite is
+                // not planned yet; a hand-built resolved plan can still carry
+                // one this far, and recompose refuses it.
                 OperationKind::MoveFolder { .. }
                 | OperationKind::RewriteLink { .. }
                 | OperationKind::RewriteWikilink { .. } => {}
             }
         }
+        lineage.carried = lineage
+            .drawing()
+            .map(|(file, drawn)| (drawn.from.clone(), file.clone()))
+            .collect();
         lineage
+    }
+
+    /// Where the document standing at `from` before the plan ends it, where
+    /// the plan's moves carry it to another file, and how it got there; `None`
+    /// where it stays, or no file holds its content at the end of the plan.
+    ///
+    /// **What a link naming it follows.** A link that named the document
+    /// before a move names it after only where it still resolves to that
+    /// file, so a link cascade reads here which file each moved document's
+    /// links must name, and which move carried it there.
+    pub(crate) fn carried_to(&self, from: &NormalizedPath) -> Option<(&NormalizedPath, &Drawn)> {
+        let file = self.carried.get(from)?;
+        let drawn = self.at_end.get(file)?.as_ref()?;
+        Some((file, drawn))
     }
 
     /// The source of what `file` holds at the end of the plan, where its

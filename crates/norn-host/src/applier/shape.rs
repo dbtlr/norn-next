@@ -23,10 +23,11 @@ use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_wire::{DocumentPath, OperationKind, ResolvedPlan};
 
 use super::observe::identity;
-use crate::planner::compose::touches;
+use crate::planner::compose::touched;
 
 /// Every path at which `plan`'s transitions do not name exactly the files its
-/// operations touch: a transition for a file no operation touches or that the
+/// operations touch — each holder an operation's link cascade rewrites
+/// among them ([`touched`]): a transition for a file no operation touches or that the
 /// vault's rule names no file, a spelling named by more than one transition,
 /// a second spelling of a file no operation renames to itself, and each
 /// spelling an operation names a file by that no transition covers.
@@ -34,12 +35,12 @@ pub(super) fn shape_disagrees(
     plan: &ResolvedPlan,
     normalizer: &PathNormalizer,
 ) -> Vec<DocumentPath> {
-    let mut touched: BTreeMap<NormalizedPath, BTreeSet<&DocumentPath>> = BTreeMap::new();
+    let mut touching: BTreeMap<NormalizedPath, BTreeSet<&DocumentPath>> = BTreeMap::new();
     let mut respelled: BTreeSet<NormalizedPath> = BTreeSet::new();
     for operation in &plan.operations {
-        for path in touches(&operation.kind) {
+        for path in touched(operation) {
             if let Some(file) = identity(normalizer, path.as_str()) {
-                touched.entry(file).or_default().insert(path);
+                touching.entry(file).or_default().insert(path);
             }
         }
         if let OperationKind::MoveDocument { from, to } = &operation.kind
@@ -55,7 +56,7 @@ pub(super) fn shape_disagrees(
     for transition in &plan.transitions {
         let path = &transition.path;
         match identity(normalizer, path.as_str()) {
-            Some(file) if touched.contains_key(&file) => {
+            Some(file) if touching.contains_key(&file) => {
                 if !carried.entry(file).or_default().insert(path) {
                     disagreeing.push(path.clone());
                 }
@@ -71,7 +72,7 @@ pub(super) fn shape_disagrees(
             disagreeing.extend(spellings.iter().map(|path| (*path).clone()));
         }
     }
-    for (file, spellings) in &touched {
+    for (file, spellings) in &touching {
         if !carried.contains_key(file) {
             disagreeing.extend(spellings.iter().map(|path| (*path).clone()));
         }
@@ -106,6 +107,52 @@ mod tests {
 
     fn moving(from: &str, to: &str) -> Operation {
         Operation::new(OperationKind::move_document(path(from), path(to)))
+    }
+
+    fn cascading(from: &str, to: &str, holder: &str) -> Operation {
+        moving(from, to).with_cascade(vec![norn_wire::LinkRewrite::new(
+            path(holder),
+            norn_wire::LinkFamily::Wikilink,
+            "a",
+            "b",
+        )])
+    }
+
+    /// **A cascade's holder is a file its operation touches**, so a plan
+    /// carrying a transition at it is shaped as its operations are.
+    #[test]
+    fn a_cascade_holder_is_a_touched_file() {
+        let vault = MemoryVault::with(&[]);
+        let state = || FileState::absent();
+        let plan = plan(
+            vec![cascading("a.md", "b.md", "h.md")],
+            vec![
+                Transition::new(path("a.md"), state(), state()),
+                Transition::new(path("b.md"), state(), state()),
+                Transition::new(path("h.md"), state(), state()),
+            ],
+        );
+        assert!(shape_disagrees(&plan, VaultView::normalizer(&vault)).is_empty());
+    }
+
+    /// **A cascade's holder with no transition disagrees**, named by the
+    /// spelling the cascade gives it: the rewrite would be composed and never
+    /// published.
+    #[test]
+    fn a_cascade_holder_without_a_transition_is_plan_invalid() {
+        let vault = MemoryVault::with(&[]);
+        let state = || FileState::absent();
+        let plan = plan(
+            vec![cascading("a.md", "b.md", "h.md")],
+            vec![
+                Transition::new(path("a.md"), state(), state()),
+                Transition::new(path("b.md"), state(), state()),
+            ],
+        );
+        assert_eq!(
+            shape_disagrees(&plan, VaultView::normalizer(&vault)),
+            vec![path("h.md")]
+        );
     }
 
     /// A case-only rename on a folding root is one file at two spellings,

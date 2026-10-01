@@ -36,7 +36,7 @@ use norn_wire::{
 use super::observe::{TargetState, identity};
 use crate::derivation::decodes;
 use crate::planner::compose::{
-    Composition, compose, content_hash, edits_in_place, holding, touches,
+    Composition, compose, content_hash, edits_in_place, holding, touched,
 };
 use crate::planner::edit;
 use crate::planner::lineage::Lineage;
@@ -102,7 +102,7 @@ pub(super) fn recompose<V: VaultView>(
             .zip(&allowed)
             .filter(|(recorded, allowed)| recorded != allowed)
             .flat_map(|(&recorded, &allowed)| [recorded, allowed])
-            .flat_map(|position| touches(&plan.operations[position].kind).cloned());
+            .flat_map(|position| touched(&plan.operations[position]).cloned());
         return Ok(Recomposed::Invalid(disagreement(misplaced)));
     }
     if let Some(cycle) = lineage.content_cycle() {
@@ -121,8 +121,7 @@ pub(super) fn recompose<V: VaultView>(
             && lineage.edited(unresolvable.position).is_some_and(unseen);
         if !stood_in {
             inactive = true;
-            disagreeing.extend(touches(&operation.kind).cloned());
-            disagreeing.extend(operation.cascade.iter().map(|rewrite| rewrite.path.clone()));
+            disagreeing.extend(touched(operation).cloned());
         }
     }
     disagreeing.extend(transitions_differ(
@@ -395,6 +394,13 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<std::ffi::OsString>, V::Error> {
         self.view.folder_names(folder)
     }
+
+    fn folder_contents(
+        &self,
+        folder: &NormalizedPath,
+    ) -> Result<Option<crate::planner::view::FolderContents>, V::Error> {
+        self.view.folder_contents(folder)
+    }
 }
 
 /// The bytes standing in for a before-state this apply cannot see, which
@@ -402,7 +408,9 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
 /// exactly where the plan records that the bytes they stand in for do
 /// (`quarantined`): the before-state composed from them is then the
 /// recorded one, flag and all, which is all an apply can know of bytes that
-/// are gone. Nothing else composed from them is published or compared.
+/// are gone. Nothing else composed from them is published or compared; the
+/// one other thing read from them is a landed holder's skip advisories,
+/// which they leave empty, decoding or not.
 fn stand_in(quarantined: bool) -> Arc<[u8]> {
     let bytes: Arc<[u8]> = if quarantined {
         Arc::from(&b"\xff"[..])

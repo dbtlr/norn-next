@@ -707,14 +707,14 @@ fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
     assert!(!vault.path().join(SUBJECT).exists());
 }
 
-/// **A move among an ambiguous link's members advises that it retargets the
-/// link, which the plan records no entry for.** `[[apply-twin]]` names the
-/// two documents of that stem before the move and two after, one of them at
-/// the moved path: several on both sides is no change the set records, and
-/// the forecast says the members moved under it. The plan applies as
-/// previewed.
+/// **A move among an ambiguous link's members advises that its cascade
+/// skips the link, which the plan records no entry for.** `[[apply-twin]]`
+/// names the two documents of that stem before the move and two after, one
+/// of them at the moved path: which it names is not known, so the cascade
+/// leaves it as written and the forecast says why; several on both sides is
+/// no change the set records. The plan applies as previewed.
 #[test]
-fn a_move_among_an_ambiguous_links_members_advises_it_retargets_the_link() {
+fn a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link() {
     let (_sandbox, vault) = a_vault("host-applies-retargeted");
     for (at, body) in [
         ("twin-a/apply-twin.md", "a twin\n"),
@@ -746,7 +746,7 @@ fn a_move_among_an_ambiguous_links_members_advises_it_retargets_the_link() {
     assert_eq!(plan.conditions, vec![]);
     assert_eq!(
         forecast.links,
-        vec![norn_wire::LinkAdvisory::retargeted(
+        vec![norn_wire::LinkAdvisory::skipped_ambiguous(
             norn_wire::LinkKey::new(
                 DocumentPath::new("apply-twin-linker.md").expect("a document path"),
                 norn_wire::LinkFamily::Wikilink,
