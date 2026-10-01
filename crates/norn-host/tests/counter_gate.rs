@@ -953,12 +953,12 @@ fn moved_hub_path() -> String {
 /// calling thread, where a preview plans and judges its plan, reads the same
 /// documents through `norn-fs` at both scales: the hub and its twenty
 /// holders, each once while planning and once while the applier judges the
-/// plan. The two judgments generation runs on the store's resolution door —
-/// the backlink pass, with the hub overlaid as moved, and the spelling probe,
-/// every candidate spelling of the destination asked from each holder — are
-/// then counted directly on a snapshot of the attached store: the same
-/// links evaluated, keys resolved and head rows read, and no table or index
-/// stepped end to end, at `ambiguous` (300 documents) exactly as at
+/// plan. What the preview's judgments on the store's resolution door cost is
+/// read off the host's read account, as the preview really ran them — the
+/// cascade's backlink pass and spelling probe, the planning's change set and
+/// the applier's computation of it again: the same judgments, links
+/// evaluated, keys resolved, head rows, statements and steps, and no table or
+/// index stepped end to end, at `ambiguous` (300 documents) exactly as at
 /// `realistic` (2000).
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
@@ -974,6 +974,7 @@ fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
             ("rewrites_planned", HUB_IN_LINKS as u64),
             ("entries_written", HUB_IN_LINKS as u64),
             ("document_opens", 2 * (HUB_IN_LINKS as u64 + 1)),
+            ("judgments", 4),
             ("full_scan_steps", 0),
         ] {
             assert_eq!(
@@ -996,7 +997,8 @@ fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
 
 /// Attach `profile` with the hub and [`HUB_IN_LINKS`] in-links planted beside
 /// it, preview the hub's move through the host in a read window on this
-/// thread, and count the store's two judgments its cascade generation runs.
+/// thread, and read what the preview's link judgments cost off the host's
+/// read account.
 fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
@@ -1004,9 +1006,10 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
     std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
     let hub = norn_wire::DocumentPath::new(hub_path()).expect("a document path");
     let moved = norn_wire::DocumentPath::new(moved_hub_path()).expect("a document path");
-    let (rewrites, entries, read) = {
+    let (rewrites, entries, read, judged) = {
         let host = vault.host();
         let _lease = attach::attach_and_wait(&host, vault.name());
+        let account = host.read_evidence();
         let window = ReadWindow::open();
         let previewed = host
             .move_path(norn_wire::MoveParams::new(
@@ -1018,6 +1021,7 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
             .wait()
             .expect("the hub's move previews");
         let read = thread_reads(window.finish());
+        let judged = host.read_evidence().since(account).preview_link_judgments;
         let norn_wire::ApplyReport::Previewed { plan, .. } = previewed.report else {
             panic!("a preview answered {:?}", previewed.report);
         };
@@ -1034,7 +1038,7 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
                 )
             })
             .count() as u64;
-        (rewrites, entries, read)
+        (rewrites, entries, read, judged)
     };
 
     let mut store = vault.store();
@@ -1049,98 +1053,19 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
         "the move-cascade bar moves the hub to stem `{MOVED_HUB_STEM}`, and the attachment \
          already derived documents at it: {sharing:?}"
     );
-    let declared = the_pinned_declaration(&mut store);
-    let snapshot = std::sync::Arc::new(store.open_reader().reader.expect("a reader"))
-        .try_take()
-        .expect("a handle nothing is reading holds its connection")
-        .establish()
-        .expect("a snapshot");
-    let overlay = norn_store::PathOverlay::new()
-        .with(
-            DocumentPath::new(&hub_path()).expect("a document path"),
-            true,
-            false,
-        )
-        .with(
-            DocumentPath::new(&moved_hub_path()).expect("a document path"),
-            false,
-            true,
-        );
-    let before = snapshot.counters();
-    let mut holders = Vec::new();
-    let backlinks = snapshot
-        .resolution_changes(&overlay, &[], &declared, |change| {
-            holders.push(change.holder);
-        })
-        .expect("judging the hub's in-links");
-    assert_eq!(
-        holders.len(),
-        HUB_IN_LINKS,
-        "the hub's move over `{}` reached {} links",
-        profile.name,
-        holders.len()
-    );
-    // Every spelling of the destination a bare wikilink may take, the
-    // style it was written in first: the generator's one probe batch.
-    let candidates = [
-        MOVED_HUB_STEM.to_string(),
-        format!("hub-gate-moved/{MOVED_HUB_STEM}"),
-        format!("{MOVED_HUB_STEM}.md"),
-        format!("hub-gate-moved/{MOVED_HUB_STEM}.md"),
-    ];
-    let probes: Vec<norn_store::ProbedLink> = holders
-        .iter()
-        .flat_map(|holder| {
-            candidates
-                .iter()
-                .map(move |candidate| norn_store::ProbedLink {
-                    before_holder: holder.clone(),
-                    after_holder: holder.clone(),
-                    link: norn_store::LinkFact {
-                        family: norn_store::LinkFamily::Wikilink,
-                        embed: false,
-                        protocol: None,
-                        target: candidate.clone(),
-                        title: None,
-                        anchor: None,
-                        span: norn_store::Span {
-                            line: 0,
-                            column: 0,
-                            byte_offset: 0,
-                        },
-                    },
-                    written: true,
-                })
-        })
-        .collect();
-    let spellings = snapshot
-        .resolution_changes(&overlay, &probes, &declared, |_| {})
-        .expect("probing the destination's spellings");
-    let after = snapshot.counters();
     let counters: CounterSnapshot = [
         ("rewrites_planned", rewrites),
         ("entries_written", entries),
         ("document_opens", read.get("document_opens")),
         ("stats", read.get("stats")),
         ("walk_dirents", read.get("walk_dirents")),
-        (
-            "links_evaluated",
-            backlinks.links_evaluated + spellings.links_evaluated,
-        ),
-        (
-            "keys_resolved",
-            backlinks.keys_resolved + spellings.keys_resolved,
-        ),
-        ("head_rows", backlinks.head_rows + spellings.head_rows),
-        (
-            "statements_executed",
-            after.statements_executed() - before.statements_executed(),
-        ),
-        ("vm_steps", after.vm_steps() - before.vm_steps()),
-        (
-            "full_scan_steps",
-            after.full_scan_steps() - before.full_scan_steps(),
-        ),
+        ("judgments", judged.judgments),
+        ("links_evaluated", judged.links_evaluated),
+        ("keys_resolved", judged.keys_resolved),
+        ("head_rows", judged.head_rows),
+        ("statements_executed", judged.statements_executed),
+        ("vm_steps", judged.vm_steps),
+        ("full_scan_steps", judged.full_scan_steps),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_string(), value))

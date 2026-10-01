@@ -49,7 +49,7 @@
 //! longer stands, and trust withdrawn for the environment's refusal where it
 //! stands and cannot be read.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +65,7 @@ use norn_wire::{
 use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
+use crate::evidence::LinkJudgmentCost;
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, PendingApply, ReadRefusal, ReadSource, ReaderUnavailable,
     SnapshotSource, not_run, watcher_lost,
@@ -192,10 +193,16 @@ pub(crate) fn resolve_on(
 /// `where` target that changes no document's presence and writes no link
 /// mints none. Either way the match is the find a caller would have been
 /// answered at the same instant, paged to its end.
+///
+/// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
+/// every judgment of the resolution door it runs adds what the door reported
+/// and what its snapshot's counters moved by, so a preview's account holds
+/// what its planning and its check really ran.
 pub(crate) struct PlanSnapshot<'a> {
     vault: VaultAddress,
     declared: &'a ContentModel,
     on: ReadOn<'a>,
+    judged: Cell<LinkJudgmentCost>,
 }
 
 /// Where a [`PlanSnapshot`] reads.
@@ -222,6 +229,7 @@ impl<'a> PlanSnapshot<'a> {
             vault,
             declared,
             on: ReadOn::Held(snapshot),
+            judged: Cell::new(LinkJudgmentCost::NONE),
         }
     }
 
@@ -239,6 +247,7 @@ impl<'a> PlanSnapshot<'a> {
                 mint: Some(mint),
                 established: RefCell::new(None),
             },
+            judged: Cell::new(LinkJudgmentCost::NONE),
         }
     }
 
@@ -258,7 +267,14 @@ impl<'a> PlanSnapshot<'a> {
                 mint: None,
                 established: RefCell::new(snapshot),
             },
+            judged: Cell::new(LinkJudgmentCost::NONE),
         }
+    }
+
+    /// What every judgment of a plan's links run through this snapshot has
+    /// cost so far.
+    pub(crate) fn link_judgment_cost(&self) -> LinkJudgmentCost {
+        self.judged.get()
     }
 
     /// The job's snapshot, where one was established and not released.
@@ -382,9 +398,16 @@ impl LinkIndex for PlanSnapshot<'_> {
         probed: &[ProbedLink],
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), PageRefused> {
-        self.reading(|snapshot| snapshot.resolution_changes(overlay, probed, self.declared, each))?
-            .map(|_| ())
-            .map_err(page_refusal)
+        let work = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .resolution_changes(overlay, probed, self.declared, each)
+                    .map(|work| LinkJudgmentCost::of(&work, before, snapshot.counters()))
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(())
     }
 
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
@@ -593,7 +616,7 @@ where
                 self.withdraw_for_read_damage(&hold, detail).answer(name)
             }
         };
-        let report = match plan {
+        let report = (|| match plan {
             // Planned as an apply plans it, then judged as an apply judges
             // what it planned: resolving checks no schema, so the plan it
             // answers goes through the same checks a resolved plan's does.
@@ -607,12 +630,16 @@ where
                     &ground,
                     &snapshot,
                 )
-                .map_err(answered)?
+                .map_err(answered)
             }
             PlanDocument::Resolved(resolved) => {
-                preview_resolved(resolved, Vec::new(), &ground, &snapshot).map_err(answered)?
+                preview_resolved(resolved, Vec::new(), &ground, &snapshot).map_err(answered)
             }
-        };
+        })();
+        // What the preview's link judgments cost is the read account's,
+        // however the preview answered.
+        self.count_preview_link_judgments(snapshot.link_judgment_cost());
+        let report = report?;
         drop(snapshot);
         drop(hold);
         Ok(VaultAnswer::new(reading, Vec::new(), report))
