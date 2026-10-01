@@ -182,7 +182,9 @@ fn a_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again()
                 "{stage}@{ordinal}: every target lands"
             );
             assert_eq!(fixture.tree(), FINAL_TREE, "{stage}@{ordinal}");
-            assert_eq!(fixture.read("b.md").as_deref(), Some("# A\n[[b]]\n"));
+            // `a.md`'s `[[b]]` named the document the chain carries to
+            // `c.md`, and follows it there off the path `a.md` refills.
+            assert_eq!(fixture.read("b.md").as_deref(), Some("# A\n[[c]]\n"));
             assert_eq!(fixture.read("c.md").as_deref(), Some("# B\n"));
             assert!(
                 fixture
@@ -316,8 +318,9 @@ fn a_forced_create_whose_name_is_taken_after_staging_refuses() {
 }
 
 /// **A foreign edit on an interrupted move's source**, or on a chain's middle,
-/// leaves the move unresolved in the fresh plan a re-send answers with, and
-/// nothing foreign is removed.
+/// leaves the move unresolved in the fresh plan a re-send answers with, listed
+/// as the refused plan carried it, cascade and all, and nothing foreign is
+/// removed.
 #[test]
 fn a_foreign_edit_on_an_interrupted_moves_source_leaves_the_move_unresolved() {
     for (operations, foreign_at, edited) in [
@@ -331,7 +334,8 @@ fn a_foreign_edit_on_an_interrupted_moves_source_leaves_the_move_unresolved() {
         ),
     ] {
         let (mut fixture, _) = every_position();
-        let plan = fixture.plan(operations.clone());
+        let plan = fixture.plan(operations);
+        let carried = plan.operations.clone();
         let child = run_child(&fixture, &plan, &format!("foreign@{foreign_at}=edit"));
         let ErrorDetail::PlanInterrupted { cause, .. } = envelope(&child).detail() else {
             panic!("the apply is interrupted: {:?}", child.outcome);
@@ -346,7 +350,7 @@ fn a_foreign_edit_on_an_interrupted_moves_source_leaves_the_move_unresolved() {
                 .iter()
                 .map(|left| left.operation.clone())
                 .collect::<Vec<_>>(),
-            operations
+            carried
         );
         assert_eq!(
             fixture.read(edited).as_deref(),
