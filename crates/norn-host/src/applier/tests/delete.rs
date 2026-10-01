@@ -551,6 +551,68 @@ fn a_moved_holder_of_a_rewriting_deletes_backlink_names_its_target_from_where_it
     }
 }
 
+/// **A document moved and then deleted in one plan has the backlinks it had
+/// before the move**, read by the delete's choice and never by the move:
+/// `[[a]]` and `[x](a.md)` named `a.md`, which moves to `b.md` and is
+/// deleted there. Forbidding them, the delete is left unresolved naming
+/// their holder; rewriting them, each is respelled to the delete's target,
+/// never to `b.md`; leaving them broken, each is advised left broken, and
+/// the move carries no cascade toward a document the plan removes.
+#[test]
+fn a_document_moved_then_deleted_has_its_backlinks_read_by_the_deletes_choice() {
+    let files = [
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[a]] [x](a.md)\n"),
+    ];
+
+    let forbidden = Fixture::new(&files).planned(vec![moving("a.md", "b.md"), deleting("b.md")]);
+    assert!(
+        forbidden.unresolved.contains(&UnresolvedOperation::new(
+            deleting("b.md"),
+            UnresolvedReason::has_backlinks(vec![path("h.md")], 2),
+        )),
+        "{:?}",
+        forbidden.unresolved
+    );
+    assert!(forbidden.plan.transitions.is_empty());
+
+    let mut fixture = Fixture::new(&files);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md"), rewriting("b.md", "c")]);
+    assert!(resolution.plan.operations[0].cascade.is_empty());
+    assert_eq!(
+        resolution.plan.operations[1].cascade,
+        [markdown("h.md", "a.md", "c.md"), wikilink("h.md", "a", "c"),]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]] [x](c.md)\n"));
+    assert_eq!(fixture.read("a.md"), None);
+    assert_eq!(fixture.read("b.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = Fixture::new(&files);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md"), breaking("b.md")]);
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty()),
+        "{:?}",
+        resolution.plan.operations
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        [
+            LinkAdvisory::left_broken(key("h.md", LinkFamily::Markdown, "a.md")),
+            LinkAdvisory::left_broken(key("h.md", LinkFamily::Wikilink, "a")),
+        ]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]] [x](a.md)\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **Re-sending an interrupted rewriting delete finishes its cascade.** One
 /// holder landed before the interruption, and the store took it in; the
 /// re-send finds it at its after-state, rewrites the holder that did not
