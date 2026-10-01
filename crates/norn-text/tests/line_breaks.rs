@@ -501,6 +501,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../src/lib.rs")),
     ("src/line_ending.rs", include_str!("../src/line_ending.rs")),
     ("src/link.rs", include_str!("../src/link.rs")),
+    ("src/rewrite.rs", include_str!("../src/rewrite.rs")),
     ("src/section.rs", include_str!("../src/section.rs")),
     ("src/span.rs", include_str!("../src/span.rs")),
     ("src/tag.rs", include_str!("../src/tag.rs")),

@@ -6,8 +6,8 @@
 //! routes or validates anything, and no protocol is ever supplied or removed.
 
 use norn_text::{
-    BodyScan, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
-    wikilink_target_is_representable,
+    BodyScan, Document, Link, LinkFamily, Resolution, RewriteSkip, RewrittenLinks,
+    parse_wikilinks_in_text,
 };
 
 fn only(text: &str) -> Link {
@@ -18,6 +18,12 @@ fn only(text: &str) -> Link {
         "expected exactly one link in {text:?}"
     );
     link
+}
+
+/// `raw` rewritten through the one link rewrite, wikilinks addressed `from`
+/// respelled `to`.
+fn rewrite(raw: &str, from: &str, to: &str) -> RewrittenLinks {
+    Document::parse(raw).rewrite_links(LinkFamily::Wikilink, from, to)
 }
 
 fn only_markdown(body: &str) -> Link {
@@ -118,22 +124,21 @@ fn a_protocol_with_an_empty_stem_is_an_ordinary_target() {
 /// The sentinel is a prefix, not a separator, so whitespace behind it is
 /// padding on the stem's left the way `[[note #Head]]`'s space is padding on
 /// its right. Trimming one side only left the target `" Note"`, which no
-/// resolver matches and which `wikilink_target_is_representable` refuses — a
-/// token that could not round-trip to itself.
+/// resolver matches and which no rewrite can write back — a token that could
+/// not round-trip to itself.
 #[test]
 fn whitespace_behind_the_sentinel_is_padding_and_not_the_stem() {
     let link = only("[[vault:// Note]]");
     assert_eq!(link.protocol.as_deref(), Some("vault"));
     assert_eq!(link.target, "Note");
-    assert!(wikilink_target_is_representable(&link.target));
     assert_eq!(
-        reconstruct_wikilink(&link, &link.target).as_deref(),
-        Some("[[vault:// Note]]"),
+        rewrite("[[vault:// Note]]", "vault://Note", "vault://Note").text,
+        "[[vault:// Note]]",
         "the padding survives an identity rewrite"
     );
     assert_eq!(
-        reconstruct_wikilink(&link, "Renamed").as_deref(),
-        Some("[[vault:// Renamed]]")
+        rewrite("[[vault:// Note]]", "vault://Note", "vault://Renamed").text,
+        "[[vault:// Renamed]]"
     );
 
     // Padding on both sides of the whole target composes with it.
@@ -141,8 +146,13 @@ fn whitespace_behind_the_sentinel_is_padding_and_not_the_stem() {
     assert_eq!(padded.target, "Note");
     assert_eq!(padded.anchor.as_deref(), Some("Head"));
     assert_eq!(
-        reconstruct_wikilink(&padded, "New").as_deref(),
-        Some("[[ vault://  New #Head | Shown ]]")
+        rewrite(
+            "[[ vault://  Note #Head | Shown ]]",
+            "vault://Note",
+            "vault://New"
+        )
+        .text,
+        "[[ vault://  New #Head | Shown ]]"
     );
 }
 
@@ -212,8 +222,8 @@ fn an_absent_protocol_and_a_written_one_are_different_facts() {
     assert_eq!(written.raw, "[[vault://Note]]");
 }
 
-/// The bytes survive recognition: reconstructing a vault-addressed link with
-/// its own stem returns exactly what was written, padded or not.
+/// The bytes survive recognition: rewriting a vault-addressed link to its
+/// own address returns exactly what was written, padded or not.
 #[test]
 fn recognition_does_not_move_a_byte() {
     for raw in [
@@ -222,19 +232,18 @@ fn recognition_does_not_move_a_byte() {
         "[[ vault://Note | Shown ]]",
         "[[vault://Note#Heading|Shown]]",
     ] {
-        let link = only(raw);
-        assert_eq!(
-            reconstruct_wikilink(&link, &link.target).as_deref(),
-            Some(raw),
-            "reconstructing {raw:?}"
-        );
+        let out = rewrite(raw, "vault://Note", "vault://Note");
+        assert_eq!(out.text, raw, "rewriting {raw:?} to itself");
+        assert_eq!(out.rewritten, 1, "rewriting {raw:?} to itself");
     }
 
     // An external address is recognized just as losslessly and rewritten by
     // nobody, so its bytes survive by never being touched.
-    let external = only("[[https://example.com/a/b#frag]]");
-    assert_eq!(external.raw, "[[https://example.com/a/b#frag]]");
-    assert_eq!(reconstruct_wikilink(&external, &external.target), None);
+    let raw = "[[https://example.com/a/b#frag]]";
+    assert_eq!(only(raw).raw, raw);
+    let out = rewrite(raw, "https://example.com/a/b", "https://example.com/a/b");
+    assert_eq!(out.text, raw);
+    assert_eq!(out.rewritten, 0);
 }
 
 /// A rewrite changes the stem and leaves the protocol where the author put it.
@@ -242,19 +251,19 @@ fn recognition_does_not_move_a_byte() {
 #[test]
 fn a_rewrite_keeps_the_protocol_the_author_wrote() {
     assert_eq!(
-        reconstruct_wikilink(&only("[[vault://Old|Shown]]"), "New").as_deref(),
-        Some("[[vault://New|Shown]]")
+        rewrite("[[vault://Old|Shown]]", "vault://Old", "vault://New").text,
+        "[[vault://New|Shown]]"
     );
     assert_eq!(
-        reconstruct_wikilink(&only("[[ vault://Old #Heading]]"), "New").as_deref(),
-        Some("[[ vault://New #Heading]]")
+        rewrite("[[ vault://Old #Heading]]", "vault://Old", "vault://New").text,
+        "[[ vault://New #Heading]]"
     );
 }
 
-/// A rewrite of a non-`vault` protocol's stem is refused. `[[https://Old
+/// A non-`vault` protocol's stem is never rewritten. `[[https://Old
 /// Note|Docs]]` has a stem span, and splicing a rename over it edits somebody
-/// else's URL — the same corruption the target side already refuses, applied
-/// to the link being rewritten rather than to the name it is rewritten to.
+/// else's URL — so a link addressed outside the vault matches no rewrite, its
+/// own address spelled whole included.
 ///
 /// The reserved identifier is the exception: a `vault://` stem is a vault
 /// path, and renaming one is exactly what a rename is.
@@ -268,22 +277,22 @@ fn a_rewrite_of_a_non_vault_protocol_is_refused() {
     ] {
         let link = only(raw);
         assert!(link.stem_range.is_some(), "stem span of {raw:?}");
-        assert_eq!(
-            reconstruct_wikilink(&link, "Renamed"),
-            None,
-            "rewriting {raw:?}"
-        );
+        let from = format!("{}://{}", link.protocol.expect("a protocol"), link.target);
+        let out = rewrite(raw, &from, "Renamed");
+        assert_eq!(out.text, raw, "rewriting {raw:?}");
+        assert_eq!(out.rewritten, 0, "rewriting {raw:?}");
+        assert!(out.skipped.is_empty(), "rewriting {raw:?}");
     }
 
     assert_eq!(
-        reconstruct_wikilink(&only("[[vault://Old]]"), "New").as_deref(),
-        Some("[[vault://New]]")
+        rewrite("[[vault://Old]]", "vault://Old", "vault://New").text,
+        "[[vault://New]]"
     );
     // A single-colon form is no protocol at all, so it rewrites like the
     // ordinary target it is.
     assert_eq!(
-        reconstruct_wikilink(&only("[[note:draft]]"), "New").as_deref(),
-        Some("[[New]]")
+        rewrite("[[note:draft]]", "note:draft", "New").text,
+        "[[New]]"
     );
 }
 
@@ -292,18 +301,26 @@ fn a_rewrite_of_a_non_vault_protocol_is_refused() {
 /// than emitting something it cannot prove.
 #[test]
 fn a_protocol_bearing_stem_is_refused_as_a_target() {
-    let link = only("[[Old]]");
     for bad in ["vault://x", "https://example.com", "a://b"] {
-        assert!(!wikilink_target_is_representable(bad), "{bad:?}");
-        assert!(
-            reconstruct_wikilink(&link, bad).is_none(),
-            "reconstructing with {bad:?}"
+        let out = rewrite("[[Old]]", "Old", bad);
+        assert_eq!(out.text, "[[Old]]", "rewriting with {bad:?}");
+        assert_eq!(
+            out.skipped
+                .iter()
+                .map(|skip| skip.reason)
+                .collect::<Vec<_>>(),
+            [RewriteSkip::Unrepresentable],
+            "rewriting with {bad:?}"
         );
     }
 
     // The forms that are not protocols are ordinary targets and rewrite fine.
     for fine in ["note:draft", "HTTPS://x", "vault:/x"] {
-        assert!(wikilink_target_is_representable(fine), "{fine:?}");
+        assert_eq!(
+            rewrite("[[Old]]", "Old", fine).text,
+            format!("[[{fine}]]"),
+            "{fine:?}"
+        );
     }
 }
 
@@ -332,8 +349,5 @@ fn the_reserved_identifier_is_recognized_and_never_supplied() {
     assert_eq!(only("[[vault://Note]]").protocol.as_deref(), Some("vault"));
     assert_eq!(only("[[Note]]").protocol, None);
     assert_eq!(only("[[vault:Note]]").protocol, None);
-    assert_eq!(
-        reconstruct_wikilink(&only("[[Note]]"), "Other").as_deref(),
-        Some("[[Other]]")
-    );
+    assert_eq!(rewrite("[[Note]]", "Note", "Other").text, "[[Other]]");
 }

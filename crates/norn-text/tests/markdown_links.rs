@@ -2,7 +2,7 @@
 //! with wikilinks, the resolution that tells them apart, and the fence around
 //! the forms that stay characterized rather than implemented.
 
-use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution, reconstruct_wikilink};
+use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution};
 
 fn markdown_links(body: &str) -> Vec<Link> {
     BodyScan::new(body)
@@ -359,24 +359,22 @@ fn a_token_reports_where_it_starts_and_how_far_it_runs() {
     assert_eq!(link.span.column, 5);
 }
 
-// ── Rewriting is not a token substitution here ───────────────────────────
+// ── Rewriting is not a wikilink substitution ────────────────────────────
 
-/// A wikilink rewrite refuses a Markdown link even though its stem is
+/// A wikilink rewrite never touches a Markdown link even though its stem is
 /// nameable. Its target is relative to the document it sits in, so one move
-/// produces different bytes per referencing file — a per-document computation
-/// rather than a splice, and it belongs to the layer that knows where
-/// documents are. The span is what that layer writes over; it is not a licence
-/// for this one to.
+/// produces different bytes per referencing file — a target computed for each
+/// document by the layer that knows where documents are, and written by a
+/// rewrite of the Markdown family. The span is what that rewrite writes over;
+/// it is not a licence for a wikilink one to.
 #[test]
-fn a_markdown_link_is_not_rewritten_by_the_wikilink_splicer() {
+fn a_markdown_link_is_not_rewritten_as_a_wikilink() {
     let link = only("[t](./old.md)\n");
     assert_eq!(link.stem_range, Some(4..12));
-    assert_eq!(reconstruct_wikilink(&link, "./new.md"), None);
-    assert_eq!(reconstruct_wikilink(&link, "new"), None);
 
-    let body = "[t](./old.md) and [[old]]\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "new"));
-    assert_eq!(out, "[t](./old.md) and [[new]]\n");
+    let body = "[t](./old.md) and [[./old.md]]\n";
+    let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, "./old.md", "new");
+    assert_eq!(out.text, "[t](./old.md) and [[new]]\n");
 }
 
 // ── Frontmatter parity: wikilinks only, by design ────────────────────────
@@ -585,16 +583,21 @@ fn a_definition_line_and_an_undefined_reference_are_invisible() {
 /// backslash escape is resolved. What the parse does *not* answer is which
 /// hash the author wrote, so a destination whose bytes it changed carries no
 /// stem sub-span — a span that is not certainly right is absent rather than
-/// guessed.
+/// guessed. The angle brackets are delimiters rather than bytes the parse
+/// changed, so a bracketed destination with no escape in it keeps its span.
 #[test]
 fn a_destination_is_the_parsers_and_a_rewritten_one_carries_no_stem_span() {
     let angled = only("[t](<my file.md>)\n");
     assert_eq!(angled.target, "my file.md");
     assert_eq!(angled.raw, "[t](<my file.md>)");
-    assert_eq!(angled.stem_range, None);
+    assert_eq!(angled.stem_range, Some(5..15));
 
     let escaped = only("[t](note\\#draft.md)\n");
     assert_eq!(escaped.stem_range, None);
+
+    let escaped_in_brackets = only("[t](<my\\_file.md>)\n");
+    assert_eq!(escaped_in_brackets.target, "my_file.md");
+    assert_eq!(escaped_in_brackets.stem_range, None);
 }
 
 /// The fragment split runs over the destination's *source* bytes. An escaped

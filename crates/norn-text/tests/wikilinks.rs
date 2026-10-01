@@ -8,8 +8,7 @@
 //! meaning — is somebody else's layer.
 
 use norn_text::{
-    BlockId, BodyScan, Link, SourceSpan, parse_wikilinks_in_text, reconstruct_wikilink,
-    splice_wikilinks_in_text, wikilink_target_is_representable,
+    BlockId, BodyScan, Document, Link, LinkFamily, RewriteSkip, SourceSpan, parse_wikilinks_in_text,
 };
 
 fn only(text: &str) -> Link {
@@ -109,10 +108,6 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
     assert_eq!(blank.target, "");
     assert_eq!(blank.title, None);
     assert_eq!(blank.anchor, None);
-    assert_eq!(
-        reconstruct_wikilink(&blank, "new").as_deref(),
-        Some("[[   new]]")
-    );
 
     // `[[|]]` is a token with an empty target and an empty title.
     let piped = only("[[|]]");
@@ -131,17 +126,11 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
     assert_eq!(titled.target, "a");
     assert_eq!(titled.title.as_deref(), Some(""));
 
-    // None of the three has a representable target to be rewritten to, and
-    // reconstructing the two that do keeps the empty part they carry.
-    assert!(!wikilink_target_is_representable(&piped.target));
-    assert_eq!(
-        reconstruct_wikilink(&anchored, "new").as_deref(),
-        Some("[[new#]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&titled, "new").as_deref(),
-        Some("[[new|]]")
-    );
+    // Rewriting the two that carry a target keeps the empty part they carry.
+    for (raw, expected) in [("[[a#]]", "[[new#]]"), ("[[a|]]", "[[new|]]")] {
+        let out = Document::parse(raw).rewrite_links(LinkFamily::Wikilink, "a", "new");
+        assert_eq!(out.text, expected, "rewriting {raw:?}");
+    }
 }
 
 /// A soft break does not interrupt recognition. Two tokens on two lines of one
@@ -164,13 +153,18 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
     let straddling = "before [[Target\nOther]] after\n";
     let link = only(straddling);
     assert_eq!(link.target, "Target\nOther");
-    assert!(!wikilink_target_is_representable(&link.target));
-    assert_eq!(reconstruct_wikilink(&link, &link.target), None);
-    assert_eq!(reconstruct_wikilink(&link, "new"), None);
-    assert_eq!(
-        BodyScan::new(straddling).splice_wikilinks(|link| reconstruct_wikilink(link, "new")),
-        straddling
-    );
+    for to in ["new", link.target.as_str()] {
+        let out = Document::parse(straddling).rewrite_links(LinkFamily::Wikilink, &link.target, to);
+        assert_eq!(out.text, straddling, "rewriting to {to:?}");
+        assert_eq!(
+            out.skipped
+                .iter()
+                .map(|skip| skip.reason)
+                .collect::<Vec<_>>(),
+            [RewriteSkip::LinkNotRewritable],
+            "rewriting to {to:?}"
+        );
+    }
 }
 
 /// The reason the refusal is not pedantry: an unclosed `[[` swallows every
@@ -178,13 +172,13 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
 /// a one-line stem over that token would delete two paragraphs and the blank
 /// line between them, and report success.
 #[test]
-fn a_token_that_swallowed_two_paragraphs_is_a_no_op_splice() {
+fn a_token_that_swallowed_two_paragraphs_is_never_rewritten() {
     let body = "an unclosed [[link here\n\nand a later ]] closer\n\nplus [[Real]]\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "new"));
-    assert_eq!(
-        out,
-        "an unclosed [[link here\n\nand a later ]] closer\n\nplus [[new]]\n"
-    );
+    let swallowed = BodyScan::new(body).wikilinks().remove(0);
+    let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, &swallowed.target, "new");
+    assert_eq!(out.text, body);
+    assert_eq!(out.rewritten, 0);
+    assert_eq!(out.skipped.len(), 1);
 }
 
 // ── One splitter, and the bare caret (NRN-433, NRN-440) ──────────────────
@@ -197,11 +191,13 @@ fn a_bare_caret_is_an_ordinary_target_character() {
     let link = only("[[a^b]]");
     assert_eq!(link.target, "a^b");
     assert_eq!(link.block_ref, None);
-    assert!(wikilink_target_is_representable("a^b"));
-    assert_eq!(
-        reconstruct_wikilink(&link, "renamed").as_deref(),
-        Some("[[renamed]]")
-    );
+    let rewrite = |from: &str, to: &str| {
+        Document::parse("[[a^b]]")
+            .rewrite_links(LinkFamily::Wikilink, from, to)
+            .text
+    };
+    assert_eq!(rewrite("a^b", "renamed"), "[[renamed]]");
+    assert_eq!(rewrite("a^b", "c^d"), "[[c^d]]");
 }
 
 #[test]
@@ -279,64 +275,6 @@ fn one_fence_is_opaque_to_every_body_parser() {
     assert_eq!(targets(&scan.wikilinks()), ["real-link"]);
     assert!(scan.block_ids().is_empty());
     assert!(scan.headings().is_empty());
-}
-
-// ── Splicing (NRN-424, NRN-432, NRN-484) ─────────────────────────────────
-//
-// What a rewrite preserves and what it refuses is `rewrite_fidelity.rs`. What
-// a splice selects is here.
-
-#[test]
-fn a_splice_rewrites_only_the_tokens_it_selects() {
-    let body = "[[keep]] and [[old]] and [[old|Title]]\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| {
-        (link.target == "old")
-            .then(|| reconstruct_wikilink(link, "new"))
-            .flatten()
-    });
-    assert_eq!(out, "[[keep]] and [[new]] and [[new|Title]]\n");
-}
-
-/// NRN-432: a fenced sample was the first occurrence in the file, so a
-/// textual rewriter changed it and left the prose link dangling.
-#[test]
-fn a_splice_over_a_body_never_touches_a_fenced_sample() {
-    let body = "```\n[[old]]\n```\n\nprose [[old]]\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| {
-        (link.target == "old")
-            .then(|| reconstruct_wikilink(link, "new"))
-            .flatten()
-    });
-    assert_eq!(out, "```\n[[old]]\n```\n\nprose [[new]]\n");
-}
-
-/// NRN-484 needs occurrence selection, and the splice's callback is `FnMut`
-/// precisely so it is expressible.
-#[test]
-fn a_splice_can_rewrite_the_first_match_only() {
-    let body = "[[old]] then [[old]]\n";
-    let mut done = false;
-    let out = BodyScan::new(body).splice_wikilinks(|link| {
-        if !done && link.target == "old" {
-            done = true;
-            reconstruct_wikilink(link, "new")
-        } else {
-            None
-        }
-    });
-    assert_eq!(out, "[[new]] then [[old]]\n");
-}
-
-#[test]
-fn a_splice_over_raw_text_has_no_code_exclusion() {
-    let out = splice_wikilinks_in_text("`[[old]]`", |link| reconstruct_wikilink(link, "new"));
-    assert_eq!(out, "`[[new]]`");
-}
-
-#[test]
-fn a_splice_that_selects_nothing_returns_the_text_unchanged() {
-    let body = "prose [[a]] and [[b]]\n";
-    assert_eq!(BodyScan::new(body).splice_wikilinks(|_| None), body);
 }
 
 // ── Block ids (NRN-350) ──────────────────────────────────────────────────
