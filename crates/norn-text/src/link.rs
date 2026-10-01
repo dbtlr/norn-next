@@ -591,6 +591,9 @@ pub enum RewriteSkip {
     /// references, whose target is not the bytes it was written as, or one
     /// whose destination could not be located in the token at all.
     LinkNotRewritable,
+    /// The batch names the link's address twice, with two different `to`s,
+    /// and which one the link should carry is not this crate's to choose.
+    ConflictingRewrites,
 }
 
 /// `link`'s own bytes with `to` written over its stem, or why the link cannot

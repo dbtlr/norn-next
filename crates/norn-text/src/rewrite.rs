@@ -84,7 +84,12 @@ impl Document<'_> {
     ///
     /// A batch names each address — a family, a protocol and a target — once.
     /// Naming one twice with the same `to` says the same thing twice and is
-    /// one rewrite.
+    /// one rewrite. Naming one twice with different `to`s contradicts itself,
+    /// and no choice between the two is this crate's to make: every link under
+    /// that address is left as written and skipped as
+    /// [`RewriteSkip::ConflictingRewrites`], whatever else would have refused
+    /// it, and the rest of the batch is rewritten as if the address were not
+    /// named.
     ///
     /// # The match is the index's
     ///
@@ -331,7 +336,12 @@ impl Rules {
                 Entry::Vacant(entry) => {
                     entry.insert(Ok(to));
                 }
-                Entry::Occupied(_) => {}
+                Entry::Occupied(mut entry) => {
+                    let rule = entry.get_mut();
+                    if rule.as_ref().is_ok_and(|named| *named != to) {
+                        *rule = Err(RewriteSkip::ConflictingRewrites);
+                    }
+                }
             }
         }
         Rules(rules)

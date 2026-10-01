@@ -964,6 +964,39 @@ fn a_rewrite_repeated_in_a_batch_respells_each_link_once() {
     assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
 }
 
+/// A batch naming one address twice with two `to`s contradicts itself, and no
+/// choice between them is the caller's: every link keyed by that address — in
+/// the frontmatter and the body, whatever else would have refused it — is
+/// left as written and skipped as conflicting, and the rest of the batch is
+/// rewritten.
+#[test]
+fn two_rewrites_of_one_address_to_different_targets_skip_its_links() {
+    let source = "---\nup: '[[a]]'\n---\n[[a]] [[c]] [[a|x\ny]] [t](a)\n";
+    let out = batch(
+        source,
+        &[
+            (LinkFamily::Wikilink, "a", "b"),
+            (LinkFamily::Wikilink, "c", "d"),
+            (LinkFamily::Markdown, "a", "m.md"),
+            (LinkFamily::Wikilink, "a", "e"),
+        ],
+    );
+    assert_eq!(
+        out.text,
+        "---\nup: '[[a]]'\n---\n[[a]] [[d]] [[a|x\ny]] [t](m.md)\n"
+    );
+    assert_eq!(out.rewritten, 2);
+    assert_eq!(reasons(&out), [RewriteSkip::ConflictingRewrites; 3]);
+    let at: Vec<&str> = out
+        .skipped
+        .iter()
+        .map(|skip| &source[skip.link.range()])
+        .collect();
+    assert_eq!(at, ["[[a]]", "[[a]]", "[[a|x\ny]]"]);
+}
+
+// ── Links sharing bytes ──────────────────────────────────────────────────
+
 /// `[[a]](b)` is a wikilink and a Markdown link sharing their outer brackets,
 /// and their stems do not touch: one batch respells both, and the Markdown
 /// link's text reads the wikilink's new token.
