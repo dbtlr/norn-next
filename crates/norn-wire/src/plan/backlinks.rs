@@ -11,15 +11,18 @@
 //! read, and the schema states the same exclusion as a `not`.
 //!
 //! **What each plans.** A link naming the document is one held where the
-//! plan leaves the vault that resolved, before the plan, to the document
-//! alone: a link naming several documents names none of them, a link the
-//! document holds goes with it, a link in a holder the plan removes or
-//! edits away is none, and one the plan writes is one. A delete
+//! plan leaves the vault that itself resolved, before the plan, to the
+//! document alone: a link naming several documents names none of them, a
+//! link the document holds goes with it, a link in a holder the plan removes
+//! or edits away is none, and one the plan adds is one. A link a link
+//! rewrite respells is judged by the text it had, never by what its new
+//! spelling named before the plan, so a link that another document's move
+//! respells to the deleted document's name is none. A delete
 //! forbidding the links does not resolve while one names its document, and
 //! is left unresolved naming every holder and how many links. One rewriting
 //! them carries the cascade respelling each, in its own form, to name
 //! `rewrite_to`, which must name one document where the plan leaves the
-//! vault. One leaving them broken lands, its forecast advising on each.
+//! vault, at a path a link can be respelled toward. One leaving them broken lands, its forecast advising on each.
 //!
 //! **`rewrite_to` names a whole document.** Each rewritten link keeps the
 //! anchor it was written with, so an anchor on `rewrite_to` is refused

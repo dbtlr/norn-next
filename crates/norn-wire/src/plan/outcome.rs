@@ -367,8 +367,11 @@ pub enum PlanFault {
     /// its requirements allow, an author condition its operations carry is
     /// not one the plan checks, or a delete is recorded acting where its link
     /// choice leaves it unresolved — forbidding the links naming its document
-    /// while the plan records one, or rewriting them to a `rewrite_to` naming
-    /// no one document where the plan leaves the vault. Planning never makes such a plan; one sent
+    /// while the plan records one that itself named the document before the
+    /// plan, or rewriting them to a `rewrite_to` naming no one document a
+    /// link can be respelled toward where the plan leaves the vault, by the
+    /// one rule planning resolves a delete by. Planning never makes such a
+    /// plan; one sent
     /// back altered is refused whole, since none of its transitions can be
     /// trusted to say what would land. Preview its operations again.
     ///
