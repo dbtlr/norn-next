@@ -663,3 +663,35 @@ fn an_own_relative_link_still_reaching_its_file_is_left_as_written() {
     assert_eq!(cascades, [Vec::<LinkRewrite>::new()]);
     assert_eq!(fixture.read("b/a.md").as_deref(), Some("[n](../b/n.md)\n"));
 }
+
+/// **A path-qualified backlink to a document moved to the vault root is
+/// respelled bare**: the root holds no folder to qualify it with, so its one
+/// segment is the most it can keep.
+#[test]
+fn a_path_qualified_backlink_to_a_document_moved_to_the_root_is_respelled_bare() {
+    let mut fixture = Fixture::new(&[("x/a.md", "A\n"), ("h.md", "[[x/a]]\n")]);
+    let cascades = fixture.moved(vec![moving("x/a.md", "b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "x/a", "b")]]);
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[b]]\n"));
+}
+
+/// **A move that makes a link to a document it does not move ambiguous
+/// rewrites nothing**: `[[n]]` named `p/n.md`, which stays where it is, and
+/// the moved document landing as another `n.md` makes it ambiguous, which the
+/// forecast says; the link is no backlink of the moved document.
+#[test]
+fn a_move_making_a_link_to_an_unmoved_document_ambiguous_rewrites_nothing() {
+    let mut fixture = Fixture::new(&[("p/n.md", "P\n"), ("a.md", "A\n"), ("h.md", "[[n]]\n")]);
+    let resolution = fixture.resolution(vec![moving("a.md", "q/n.md")]);
+    assert_eq!(resolution.plan.operations[0].cascade, []);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::made_ambiguous(key(
+            "h.md",
+            LinkFamily::Wikilink,
+            "n"
+        ))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]]\n"));
+}
