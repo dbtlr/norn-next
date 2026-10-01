@@ -34,6 +34,7 @@ use norn_wire::{
 };
 
 use super::observe::{TargetState, identity};
+use crate::derivation::decodes;
 use crate::planner::compose::{
     Composition, compose, content_hash, edits_in_place, holding, touches,
 };
@@ -397,17 +398,19 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
 }
 
 /// The bytes standing in for a before-state this apply cannot see, which
-/// decode as a vault document exactly where the plan records that the bytes
-/// they stand in for do (`quarantined`): the before-state composed from them
-/// is then the recorded one, flag and all, which is all an apply can know of
-/// bytes that are gone. Nothing else composed from them is published or
-/// compared.
+/// decode as a vault document by the derivation's one rule ([`decodes`])
+/// exactly where the plan records that the bytes they stand in for do
+/// (`quarantined`): the before-state composed from them is then the
+/// recorded one, flag and all, which is all an apply can know of bytes that
+/// are gone. Nothing else composed from them is published or compared.
 fn stand_in(quarantined: bool) -> Arc<[u8]> {
-    if quarantined {
+    let bytes: Arc<[u8]> = if quarantined {
         Arc::from(&b"\xff"[..])
     } else {
         Arc::from(&b""[..])
-    }
+    };
+    debug_assert_eq!(decodes(&bytes), !quarantined);
+    bytes
 }
 
 #[cfg(test)]
