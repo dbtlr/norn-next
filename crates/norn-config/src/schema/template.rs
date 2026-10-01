@@ -24,7 +24,18 @@
 //! — `{{seq}}` only in a target's file name, a variable only where the rule
 //! declares it — is the creation rule's to judge, because it depends on which
 //! part of a rule the template is.
+//!
+//! # Filling
+//!
+//! [`Template::fill`] turns a template into text from a [`TemplateValues`]:
+//! the variables a caller supplied, one [`LocalTimestamp`], and the sequence
+//! number where one is allocated. **A fill reads no clock.** The caller reads
+//! the clock once and hands the reading over, so every template one plan
+//! fills states the same instant, and the same values fill the same text on
+//! every machine. A fill here never refuses for what a value holds; what a
+//! target's path refuses is [`Target::fill`](super::Target::fill)'s.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A template's text, read into the literal runs and tokens it is made of.
@@ -111,6 +122,22 @@ impl Template {
             .count()
     }
 
+    /// The text this template fills to under `values`.
+    ///
+    /// Every value is taken as it is, after its filter: a body or a
+    /// frontmatter string holds whatever it is supplied. A variable `values`
+    /// does not supply, and `{{seq}}` where it carries no sequence number, are
+    /// refused.
+    pub fn fill(&self, values: &TemplateValues) -> Result<String, FillError> {
+        self.parts.iter().try_fold(String::new(), |mut text, part| {
+            match part {
+                Part::Literal(literal) => text.push_str(literal),
+                Part::Token(token) => text.push_str(&token.fill(values)?),
+            }
+            Ok(text)
+        })
+    }
+
     pub(crate) fn parts(&self) -> &[Part] {
         &self.parts
     }
@@ -124,6 +151,22 @@ impl Template {
 }
 
 impl Token {
+    /// The value this token fills to under `values`, after its filter.
+    pub(crate) fn fill(&self, values: &TemplateValues) -> Result<String, FillError> {
+        let value = match &self.slot {
+            Slot::Seq => values.seq.ok_or(FillError::NoSeq)?.to_string(),
+            Slot::Var(name) => values
+                .variables
+                .get(name)
+                .cloned()
+                .ok_or_else(|| FillError::MissingVariable { name: name.clone() })?,
+            Slot::Now => values.at.rfc3339(),
+            Slot::Date => values.at.date(),
+            Slot::Time => values.at.time(),
+        };
+        Ok(if self.slug { slug(&value) } else { value })
+    }
+
     /// Reads the text between a token's braces.
     fn read(inner: &str) -> Result<Self, TemplateError> {
         let (name, slug) = match inner.split_once('|') {
@@ -159,6 +202,45 @@ impl Token {
     }
 }
 
+/// The token as it is written between its braces: `var.title|slug`.
+impl fmt::Display for Token {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.slot {
+            Slot::Seq => formatter.write_str("seq")?,
+            Slot::Var(name) => write!(formatter, "var.{name}")?,
+            Slot::Now => formatter.write_str("now")?,
+            Slot::Date => formatter.write_str("date")?,
+            Slot::Time => formatter.write_str("time")?,
+        }
+        if self.slug {
+            formatter.write_str("|slug")?;
+        }
+        Ok(())
+    }
+}
+
+/// `text` as a slug: lowercased, its letters and digits kept, and every run
+/// of anything else between them one `-`, with none leading or trailing.
+///
+/// Letters and digits are Unicode's, so `Straße` keeps its `ß` and `日本語`
+/// its characters. Text holding no letter and no digit slugs to nothing.
+fn slug(text: &str) -> String {
+    let mut slug = String::with_capacity(text.len());
+    let mut separated = false;
+    for character in text.chars().flat_map(char::to_lowercase) {
+        if character.is_alphabetic() || character.is_numeric() {
+            if separated && !slug.is_empty() {
+                slug.push('-');
+            }
+            separated = false;
+            slug.push(character);
+        } else {
+            separated = true;
+        }
+    }
+    slug
+}
+
 /// Whether `name` is a name a variable or a creation rule may have: an ASCII
 /// letter or `_`, then ASCII letters, digits, `_` and `-`.
 ///
@@ -173,6 +255,196 @@ pub(crate) fn is_identifier(name: &str) -> bool {
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_' || rest == '-')
 }
+
+/// One clock reading in the local zone: the calendar day, the time to the
+/// second, and the offset from UTC that zone stood at.
+///
+/// It is a reading, not a clock. The host reads the clock once for a plan and
+/// builds one of these; every template the plan fills reads the same one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalTimestamp {
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    offset_minutes: i16,
+}
+
+impl LocalTimestamp {
+    /// The reading of `year-month-day hour:minute:second` at
+    /// `offset_minutes` east of UTC, or the refusal of one no calendar and
+    /// clock have: a year outside `0..=9999`, which `{{date}}` cannot write
+    /// in four digits; a day the month does not have; a time outside the day
+    /// or a leap second; or an offset a day or more from UTC.
+    pub fn new(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        offset_minutes: i16,
+    ) -> Result<Self, NotALocalTimestamp> {
+        let in_calendar = (0..=9999).contains(&year)
+            && (1..=12).contains(&month)
+            && day >= 1
+            && i64::from(day) <= super::typed::days_in_month(year.into(), month.into());
+        let in_clock = hour < 24 && minute < 60 && second < 60;
+        let in_offset = offset_minutes.unsigned_abs() < 24 * 60;
+        if !(in_calendar && in_clock && in_offset) {
+            return Err(NotALocalTimestamp);
+        }
+        Ok(LocalTimestamp {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            offset_minutes,
+        })
+    }
+
+    /// `{{date}}`: `YYYY-MM-DD`.
+    fn date(self) -> String {
+        format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+
+    /// `{{time}}`: `HH:MM`.
+    fn time(self) -> String {
+        format!("{:02}:{:02}", self.hour, self.minute)
+    }
+
+    /// `{{now}}`: RFC 3339 to the second with the local offset, which is
+    /// written `+00:00` at UTC rather than `Z`, so every reading states its
+    /// offset one way.
+    fn rfc3339(self) -> String {
+        let sign = if self.offset_minutes < 0 { '-' } else { '+' };
+        let offset = self.offset_minutes.unsigned_abs();
+        format!(
+            "{}T{:02}:{:02}:{:02}{sign}{:02}:{:02}",
+            self.date(),
+            self.hour,
+            self.minute,
+            self.second,
+            offset / 60,
+            offset % 60
+        )
+    }
+}
+
+/// A reading no calendar and clock have.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NotALocalTimestamp;
+
+impl fmt::Display for NotALocalTimestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "a local timestamp is a day the calendar has in years 0 to 9999, a time inside that day, and an offset less than a day from UTC",
+        )
+    }
+}
+
+impl std::error::Error for NotALocalTimestamp {}
+
+/// What a template is filled from: the variables a caller supplied, one
+/// clock reading, and the sequence number where one is allocated.
+#[derive(Clone, Debug)]
+pub struct TemplateValues {
+    variables: BTreeMap<String, String>,
+    at: LocalTimestamp,
+    seq: Option<u64>,
+}
+
+impl TemplateValues {
+    /// `variables` by name, read at `at`, with no sequence number.
+    pub fn new(variables: BTreeMap<String, String>, at: LocalTimestamp) -> Self {
+        TemplateValues {
+            variables,
+            at,
+            seq: None,
+        }
+    }
+
+    /// The same values, numbered `seq`.
+    #[must_use]
+    pub fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = Some(seq);
+        self
+    }
+
+    pub(crate) fn seq(&self) -> Option<u64> {
+        self.seq
+    }
+}
+
+/// Why a template does not fill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FillError {
+    /// A token names a variable no value is supplied for. A schema read
+    /// already holds every variable a rule names to one it declares, so this
+    /// is a caller that did not supply a declared one.
+    MissingVariable {
+        /// The variable, as the rule declares it.
+        name: String,
+    },
+    /// `{{seq}}` is filled with no sequence number supplied.
+    NoSeq,
+    /// A value would break the target's path.
+    UnsafeValue {
+        /// The token, as written between its braces: `var.title|slug`.
+        token: String,
+        /// The value it filled to, after its filter.
+        value: String,
+        /// How it would break the path.
+        problem: UnsafeValue,
+    },
+}
+
+/// How a value would break a target's path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsafeValue {
+    /// It holds `/` or `\`, so it would name a folder the target does not.
+    Separator,
+    /// It is `.` or `..`, so it would name the folder it stands in or climb
+    /// out of it.
+    DotSegment,
+    /// It is empty, so it would leave a segment or a file name with nothing
+    /// where it stands.
+    Empty,
+}
+
+impl fmt::Display for FillError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FillError::MissingVariable { name } => {
+                write!(formatter, "no value is supplied for the variable `{name}`")
+            }
+            FillError::NoSeq => formatter.write_str("`{{seq}}` is filled with no sequence number"),
+            FillError::UnsafeValue {
+                token,
+                value,
+                problem,
+            } => {
+                let why = match problem {
+                    UnsafeValue::Separator => "holds `/` or `\\`, which would name another folder",
+                    UnsafeValue::DotSegment => {
+                        "is a `.` or `..` segment, which would leave the folder it stands in"
+                    }
+                    UnsafeValue::Empty => "is empty, which would leave nothing where it stands",
+                };
+                write!(
+                    formatter,
+                    "`{{{{{token}}}}}` fills the target with `{value}`, which {why}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FillError {}
 
 /// Why text is not a template.
 #[derive(Clone, Debug, Eq, PartialEq)]
