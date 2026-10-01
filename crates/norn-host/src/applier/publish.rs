@@ -152,7 +152,7 @@ impl Publisher<'_> {
                 let old_path = &plan.transitions[old].path;
                 self.own_writes
                     .published(Path::new(old_path.as_str()), &interrupted.published);
-                if let FileState::Present { hash } = &plan.transitions[new].after {
+                if let FileState::Present { hash, .. } = &plan.transitions[new].after {
                     progress.effects.push(PlanEffect {
                         path: publishing.stored[old].clone(),
                         holds: Some(kernel_hash(hash)),
@@ -211,7 +211,7 @@ impl Publishing<'_> {
             progress.effects.push(PlanEffect {
                 path: self.stored[index].clone(),
                 holds: match &transition.after {
-                    FileState::Present { hash } => Some(kernel_hash(hash)),
+                    FileState::Present { hash, .. } => Some(kernel_hash(hash)),
                     FileState::Absent {} => None,
                 },
             });

@@ -360,7 +360,7 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
             .find(|&index| self.plan.transitions[index].before != FileState::absent())
             .unwrap_or(indices[0]);
         let transition = &self.plan.transitions[index];
-        let FileState::Present { hash } = &transition.before else {
+        let FileState::Present { hash, .. } = &transition.before else {
             return Ok(Entry::Absent {
                 at: transition.path.clone(),
             });

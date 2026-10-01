@@ -619,13 +619,13 @@ fn stage_one(
                 (FileState::Absent {}, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Create { content }
                 }
-                (FileState::Present { hash }, FileState::Present { .. }, Some(content)) => {
+                (FileState::Present { hash, .. }, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Replace {
                         before: kernel_hash(hash),
                         content,
                     }
                 }
-                (FileState::Present { hash }, FileState::Absent {}, _) => {
+                (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
                     norn_fs::Transition::Remove {
                         before: kernel_hash(hash),
                     }
@@ -636,7 +636,7 @@ fn stage_one(
         }
         Unit::Respell { old, new } => {
             let (old, new) = (&plan.transitions[old], &plan.transitions[new]);
-            let FileState::Present { hash } = &old.before else {
+            let FileState::Present { hash, .. } = &old.before else {
                 unreachable!("a respell's old spelling holds a document before");
             };
             let content = if new.after == old.before {

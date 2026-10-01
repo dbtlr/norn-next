@@ -3228,6 +3228,21 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
     for state in ["absent", "present"] {
         assert!(refuses_unknown_keys(branch(&states, "state", state)));
     }
+    // Whether a present file's bytes decode as a document is advertised and
+    // optional, since its absence reads as the bytes decoding.
+    let present = branch(&states, "state", "present");
+    assert_eq!(
+        property_names(present),
+        ["state", "hash", "quarantined"].into_iter().collect()
+    );
+    assert_eq!(
+        required_names(present),
+        ["state", "hash"].into_iter().collect()
+    );
+    assert_eq!(
+        present["properties"]["quarantined"]["type"].as_str(),
+        Some("boolean")
+    );
 }
 
 /// A plan document is one of the two plans, each advertising its own `plan`
