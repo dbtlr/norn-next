@@ -426,3 +426,16 @@ fn resending_an_interrupted_move_finishes_its_cascade() {
     assert_eq!(fixture.read("k.md").as_deref(), Some("[[b]] too\n"));
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// **A link written twice in one holder is one rewrite**: the cascade
+/// respells every link of its key at once, so it carries the key once.
+#[test]
+fn a_link_written_twice_is_one_rewrite() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]] then [[a|again]]\n")]);
+    let cascades = fixture.moved(vec![moving("a.md", "b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "a", "b")]]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("[[b]] then [[b|again]]\n")
+    );
+}

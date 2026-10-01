@@ -44,7 +44,7 @@
 //! holder's final bytes ([`super::compose::compose`]), the same bytes it was
 //! read from here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
@@ -107,13 +107,16 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
 
     // Every spelling each breaking link could take, probed from its holder
     // in one judgment.
+    // A link written twice in one holder is one key, asked about once.
     let mut asked: Vec<(usize, Vec<String>)> = Vec::new();
     let mut probes: Vec<ProbedLink> = Vec::new();
+    let mut seen: BTreeSet<EntryKey> = BTreeSet::new();
     for (at, broken) in breaking.iter().enumerate() {
         let Some(holder) = wire_path(&broken.holder) else {
             continue;
         };
-        if rewrites.contains_key(&entry(&holder, &broken.link)) {
+        let key = entry(&holder, &broken.link);
+        if rewrites.contains_key(&key) || !seen.insert(key) {
             continue;
         }
         let candidates = cascade.candidates(broken);
