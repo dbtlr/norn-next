@@ -3645,17 +3645,31 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             Some("#/$defs/ApplyMode")
         );
     }
+    // A move's two ends admit what its reader refuses: a document moved to a
+    // name that is not a document's, and a folder to one that is. Which
+    // grammar reads `to` is decided by `from`'s last segment, a rule the
+    // schema states in words rather than as a pattern on each end, so the
+    // over-admission is pinned here and changes only on purpose.
     let move_schema = schema_of::<MoveParams>();
     for end in ["from", "to"] {
-        assert_eq!(
-            move_schema["properties"][end]["type"].as_str(),
-            Some("string")
+        let schema = &move_schema["properties"][end];
+        assert_eq!(schema["type"].as_str(), Some("string"));
+        assert_eq!(schema["minLength"].as_u64(), Some(1));
+        assert!(
+            schema.get("pattern").is_none(),
+            "a move's `{end}` advertises a pattern: {schema}"
         );
-        assert_eq!(
-            move_schema["properties"][end]["minLength"].as_u64(),
-            Some(1)
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("document extension")),
+            "a move's `{end}` does not state in words what decides its grammar: {schema}"
         );
     }
+    assert!(
+        move_schema.get("if").is_none() && move_schema.get("oneOf").is_none(),
+        "a move's schema now relates its two ends; unpin the over-admission: {move_schema}"
+    );
     let delete = schema_of::<DeleteParams>();
     assert_names_a_whole_document(
         &delete["properties"]["rewrite_to"],
