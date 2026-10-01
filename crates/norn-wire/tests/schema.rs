@@ -3179,7 +3179,7 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
     let key = definition(&conditions, "LinkKey");
     assert_eq!(
         property_names(key),
-        ["holder", "syntax", "target"].into_iter().collect()
+        ["holder", "syntax", "address"].into_iter().collect()
     );
     assert!(refuses_unknown_keys(key), "{key} admits any key");
     let resolves = definition(&conditions, "Resolves");

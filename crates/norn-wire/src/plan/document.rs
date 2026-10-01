@@ -142,8 +142,14 @@ impl Transition {
 /// One link, as a plan names it: the document holding it, its syntax and its
 /// address — what decides which documents it resolves to.
 ///
+/// **A key names a link as it stands at the plan's after-state.** A link a
+/// cascade rewrites is keyed by its new address, not the one it is written
+/// with before the plan. A link the after-state no longer holds — an old
+/// address a rewrite replaced, a link in a removed document — has no key: its
+/// disappearance is the plan's own transition, guarded by that file's hashes.
+///
 /// On the wire a key is one object:
-/// `{"holder":"notes/c.md","syntax":"wikilink","target":"vault://notes/a"}`.
+/// `{"holder":"notes/c.md","syntax":"wikilink","address":"vault://notes/a"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkKey {
@@ -153,18 +159,20 @@ pub struct LinkKey {
     pub syntax: LinkFamily,
     /// The link's address, exactly as written, its protocol prefix included:
     /// `vault://notes/a` for a link written with the `vault` protocol, and
-    /// `notes/a` for one written with none.
-    pub target: String,
+    /// `notes/a` for one written with none. An anchor-only link, `[[#h]]`,
+    /// has the empty address, and resolves to its holder wherever that
+    /// stands.
+    pub address: String,
 }
 
 impl LinkKey {
-    /// The link of `syntax` in the document at `holder`, written with the
-    /// address `target`.
-    pub fn new(holder: DocumentPath, syntax: LinkFamily, target: impl Into<String>) -> Self {
+    /// The link of `syntax` in the document at `holder`, written with
+    /// `address`.
+    pub fn new(holder: DocumentPath, syntax: LinkFamily, address: impl Into<String>) -> Self {
         LinkKey {
             holder,
             syntax,
-            target: target.into(),
+            address: address.into(),
         }
     }
 }
@@ -216,6 +224,13 @@ impl Resolves {
 /// link a cascade rewrites has an entry — so it is not a fact about a file
 /// the plan leaves alone.
 ///
+/// **An entry is keyed at the after-state.** Its key names the link
+/// as the plan leaves it: a rewritten link by its new address, its `before`
+/// being what that key resolved to from its holder before the plan. A link
+/// the after-state does not hold — an old address a rewrite replaced, a link
+/// in a removed document — is no entry: its disappearance is the plan's own
+/// transition, which that file's hashes guard.
+///
 /// **The change set is exact.** It holds one entry for every link whose
 /// resolution the plan changes, and no other, so the applier computes it
 /// again and refuses on any difference: an entry the plan records that the
@@ -236,11 +251,13 @@ pub enum PlanCondition {
         hash: ContentHash,
     },
     /// One link resolves as recorded before the plan, and as recorded after
-    /// it: one entry of the plan's resolution change set.
+    /// it: one entry of the plan's resolution change set, keyed by the link
+    /// as it stands at the plan's after-state.
     LinkResolution {
-        /// The link.
+        /// The link, as it stands at the plan's after-state.
         link: LinkKey,
-        /// What it resolves to with every target at its before-state.
+        /// What its key resolves to from its holder with every target at its
+        /// before-state.
         before: Resolves,
         /// What it resolves to with every target at its after-state.
         after: Resolves,

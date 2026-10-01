@@ -436,8 +436,8 @@ impl OperationKind {
         OperationKind::MoveFolder { from, to }
     }
 
-    /// In the document at `path`, respell every link of `syntax` whose target
-    /// text is `from` to `to`.
+    /// In the document at `path`, respell every link of `syntax` whose
+    /// address is `from` to `to`.
     pub fn rewrite_link(
         path: DocumentPath,
         syntax: LinkFamily,

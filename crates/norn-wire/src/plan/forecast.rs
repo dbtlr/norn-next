@@ -161,7 +161,7 @@ vault_relative_path!(
 ///
 /// On the wire an advisory is an object tagged `advisory`, naming its link by
 /// the key the change set holds it under:
-/// `{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","target":"b"}}`.
+/// `{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","address":"b"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "advisory", rename_all = "snake_case")]
 #[non_exhaustive]

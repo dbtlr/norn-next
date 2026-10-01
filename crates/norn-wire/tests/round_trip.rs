@@ -6855,9 +6855,9 @@ fn resolved_plan_json() -> String {
             r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
             r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
             r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}},"#,
-            r#"{{"condition":"link_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","target":"a"}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","address":"a"}},"#,
             r#""before":{{"resolves":"one","path":"notes/a.md"}},"after":{{"resolves":"none"}}}},"#,
-            r#"{{"condition":"link_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","target":"vault://notes/a"}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","address":"vault://notes/a"}},"#,
             r#""before":{{"resolves":"several"}},"after":{{"resolves":"one","path":"archive/a.md"}}}}],"#,
             r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
             r#""footnote":"finish the draft"}}"#
@@ -7163,9 +7163,17 @@ fn a_link_resolution_is_one_entry_of_the_change_set() {
         Resolves::several(),
         Resolves::one(path("notes/a.md")),
     );
-    let json = r#"{"condition":"link_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","target":"a"},"before":{"resolves":"several"},"after":{"resolves":"one","path":"notes/a.md"}}"#;
+    let json = r#"{"condition":"link_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"},"before":{"resolves":"several"},"after":{"resolves":"one","path":"notes/a.md"}}"#;
     assert_eq!(wire(&entry), json);
     round_trip(&entry);
+    // An anchor-only link has the empty address, and its resolution changes
+    // when its holder moves, so the empty address is a key: here of a link
+    // whose holder moved from `notes/c.md`, named where it stands after.
+    round_trip(&PlanCondition::link_resolution(
+        LinkKey::new(path("archive/c.md"), LinkFamily::Wikilink, ""),
+        Resolves::one(path("notes/c.md")),
+        Resolves::one(path("archive/c.md")),
+    ));
     assert_eq!(
         wire(&RefusedCheck::condition_unrecorded(entry.clone())),
         format!(r#"{{"check":"condition_unrecorded","condition":{json}}}"#)
@@ -7180,7 +7188,7 @@ fn a_link_resolution_is_one_entry_of_the_change_set() {
             r#""resolves":"one","path":"notes/a.md""#,
             r#""resolves":"one""#,
         ),
-        json.replace(r#""target":"a""#, r#""target":"a","anchor":"x""#),
+        json.replace(r#""address":"a""#, r#""address":"a","anchor":"x""#),
         json.replace(r#""syntax":"wikilink","#, ""),
     ] {
         assert!(
@@ -8012,7 +8020,7 @@ fn file(text: &str) -> FilePath {
 fn a_forecast_advises_on_links_by_their_key_and_names_files_left_behind() {
     assert_eq!(
         wire(&LinkAdvisory::left_broken(a_link_key())),
-        r#"{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","target":"a"}}"#
+        r#"{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"}}"#
     );
     let json = wire(&a_forecast_of_links());
     assert!(!json.contains("resolves"), "{json}");
@@ -8630,12 +8638,12 @@ fn plan_check(condition: &PlanCondition) -> String {
                 LinkKey {
                     holder,
                     syntax,
-                    target,
+                    address,
                 },
             before,
             after,
         } => format!(
-            "{syntax:?} {target} in {holder}: {} to {}",
+            "{syntax:?} {address} in {holder}: {} to {}",
             resolution_check(before),
             resolution_check(after)
         ),
