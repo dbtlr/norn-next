@@ -267,8 +267,9 @@ impl Vault {
         })
     }
 
-    /// The name of every entry directly inside the folder at `relative`,
-    /// whatever its kind, or `None` where the walk reaches no folder there.
+    /// The name of every entry directly inside the folder at `relative` —
+    /// the vault root where `relative` is empty — whatever its kind, or
+    /// `None` where the walk reaches no folder there.
     ///
     /// **The folder is reached the way [`reach`](Self::reach) reaches a
     /// name**: an excluded root covering it, and a name above or at it the
@@ -281,14 +282,18 @@ impl Vault {
     /// something that keeps it standing.
     #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
     pub fn folder_names(&self, relative: &Path) -> Result<Option<Vec<OsString>>, WalkError> {
-        let folder = self.normalize(relative)?;
-        if self.exclusions.covering_root(&folder).is_some() {
-            return Ok(None);
-        }
-        let Descent::Reached { directory, .. } = self.descend(folder.as_path())? else {
-            return Ok(None);
+        let (directory, access) = if relative.as_os_str().is_empty() {
+            (self.root_fd.clone(), self.root.to_path_buf())
+        } else {
+            let folder = self.normalize(relative)?;
+            if self.exclusions.covering_root(&folder).is_some() {
+                return Ok(None);
+            }
+            let Descent::Reached { directory, .. } = self.descend(folder.as_path())? else {
+                return Ok(None);
+            };
+            (directory, self.root.join(folder.as_path()))
         };
-        let access = self.root.join(folder.as_path());
         let entries = Dir::read_from(&directory)
             .map_err(|source| environment_errno("reading directory", &access, source))?;
         let mut names = Vec::new();
@@ -3266,6 +3271,30 @@ mod tests {
         assert_eq!(names("dir/a.md/under"), None, "a name beneath a document");
         assert_eq!(names("dir/link"), None, "a symbolic link");
         assert_eq!(names("excluded"), None, "an excluded root");
+    }
+
+    /// **The vault root lists its own names when asked by the empty path**,
+    /// whatever their kind, an excluded root's among them.
+    #[test]
+    fn the_vault_root_lists_its_own_names() {
+        let scratch = Scratch::new("vault-root-names");
+        scratch.directory("vault/dir");
+        scratch.directory("vault/excluded");
+        scratch.place("a.md", b"a");
+
+        let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
+        let mut names = vault
+            .folder_names(Path::new(""))
+            .expect("a decided folder")
+            .expect("the root stands");
+        names.sort();
+        assert_eq!(
+            names,
+            ["a.md", "dir", "excluded"]
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
     }
 
     /// **A name the walk never descends to stands at nothing, for every

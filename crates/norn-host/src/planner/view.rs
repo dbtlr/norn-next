@@ -41,6 +41,10 @@ pub(crate) trait VaultView {
     /// empty. Nothing where no folder stands.
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, Self::Error>;
 
+    /// The name of every entry directly inside the vault root, as
+    /// [`folder_names`](Self::folder_names) lists a folder's.
+    fn root_names(&self) -> Result<Vec<OsString>, Self::Error>;
+
     /// Everything beneath `folder`, at any depth, as a folder move takes it
     /// ([`FolderContents`]); `None` where no folder stands there.
     fn folder_contents(
@@ -204,6 +208,10 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
 
     fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, V::Error> {
         self.view.folder_names(folder)
+    }
+
+    fn root_names(&self) -> Result<Vec<OsString>, V::Error> {
+        self.view.root_names()
     }
 
     fn folder_contents(&self, folder: &NormalizedPath) -> Result<Option<FolderContents>, V::Error> {
@@ -383,6 +391,14 @@ impl VaultView for TreeView {
         Ok(self
             .vault
             .folder_names(folder.as_path())
+            .map_err(TreeViewError::Walk)?
+            .unwrap_or_default())
+    }
+
+    fn root_names(&self) -> Result<Vec<OsString>, TreeViewError> {
+        Ok(self
+            .vault
+            .folder_names(Path::new(""))
             .map_err(TreeViewError::Walk)?
             .unwrap_or_default())
     }
@@ -611,6 +627,16 @@ pub(crate) mod memory {
                 .collect();
             Ok(names.into_iter().collect())
         }
+
+        fn root_names(&self) -> Result<Vec<OsString>, Infallible> {
+            let names: BTreeSet<OsString> = self
+                .every_name()
+                .filter_map(|name| {
+                    Some(Path::new(name).components().next()?.as_os_str().to_owned())
+                })
+                .collect();
+            Ok(names.into_iter().collect())
+        }
     }
 }
 
@@ -682,6 +708,14 @@ mod tests {
             view.folder_names(&folder).expect("a readable tree"),
             vec![OsString::from("a.md")]
         );
+    }
+
+    #[test]
+    fn the_tree_view_lists_the_root_s_names() {
+        let (_scratch, view) = tree();
+        let mut names = view.root_names().expect("a readable tree");
+        names.sort();
+        assert_eq!(names, vec![OsString::from("folder"), OsString::from("link")]);
     }
 
     /// On a volume that folds case, a spelling the fold equates is the

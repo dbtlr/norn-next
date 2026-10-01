@@ -80,6 +80,7 @@ use crate::planner::expand::{
 };
 use crate::planner::links::LinkIndex;
 use crate::planner::resolve::{PlanningFailure, Resolution};
+use crate::planner::rule::Rules;
 use crate::planner::view::TreeView;
 use crate::read::every_page;
 use crate::refusal::{PageRefused, page_refusal, reader_unavailable};
@@ -164,20 +165,33 @@ pub(crate) fn resolve_on(
 ) -> Result<Resolution, PageRefused> {
     let view = TreeView::open(&ground.root, &ground.exclusions)
         .map_err(|error| PageRefused::Answered(unreadable(name, error)))?;
-    resolve_expanding(authored, ground.root_identity(), &view, snapshot, snapshot).map_err(
-        |failure| match failure {
-            ExpandingFailure::Planning(PlanningFailure::Fault(fault)) => {
-                PageRefused::Answered(ErrorEnvelope::new(
-                    "the plan's operations are no plan: nothing was planned",
-                    ErrorDetail::plan_invalid(fault),
-                ))
-            }
-            ExpandingFailure::Planning(PlanningFailure::View(error)) => {
-                PageRefused::Answered(unreadable(name, error))
-            }
-            ExpandingFailure::Snapshot(refused) => refused,
-        },
+    // The creation rules are the pinned schema's, the declaration the
+    // applier's schema check judges the plan's results under, and the clock
+    // is read at most once for the plan.
+    let rules = Rules {
+        schema: ground.declared.schema(),
+        clock: &crate::clock::local_now,
+    };
+    resolve_expanding(
+        authored,
+        ground.root_identity(),
+        &view,
+        snapshot,
+        snapshot,
+        &rules,
     )
+    .map_err(|failure| match failure {
+        ExpandingFailure::Planning(PlanningFailure::Fault(fault)) => {
+            PageRefused::Answered(ErrorEnvelope::new(
+                "the plan's operations are no plan: nothing was planned",
+                ErrorDetail::plan_invalid(fault),
+            ))
+        }
+        ExpandingFailure::Planning(PlanningFailure::View(error)) => {
+            PageRefused::Answered(unreadable(name, error))
+        }
+        ExpandingFailure::Snapshot(refused) => refused,
+    })
 }
 
 /// The one snapshot a request plans against: where a plan's `where` targets

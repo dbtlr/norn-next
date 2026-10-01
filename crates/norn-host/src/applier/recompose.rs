@@ -395,6 +395,10 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
         self.view.folder_names(folder)
     }
 
+    fn root_names(&self) -> Result<Vec<std::ffi::OsString>, V::Error> {
+        self.view.root_names()
+    }
+
     fn folder_contents(
         &self,
         folder: &NormalizedPath,

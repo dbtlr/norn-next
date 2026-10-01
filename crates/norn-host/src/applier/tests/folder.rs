@@ -37,6 +37,7 @@ impl Fixture {
             &view,
             &index,
             &index,
+            &crate::planner::rule::testing::no_rules(),
         )
         .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
         assert!(

@@ -19,18 +19,10 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 /// zone whose offset is a day or more from UTC, which POSIX allows and
 /// RFC 3339 cannot write, reads as UTC here.
 ///
-/// **A dormant carrier.** Its consuming layer is the planner's expansion of a
-/// create-by-rule operation into the document it makes (NORN-298), which
-/// reads the clock once per plan and fills every template of the plan from
-/// this one reading. No operation that creates by rule is planned yet, so
-/// nothing in the call graph reads the clock.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a dormant carrier: the create-by-rule planner is its consumer"
-    )
-)]
+/// **Read once per plan**, and only by a plan that creates by rule: the
+/// planner's expansion of a create-by-rule operation into the document it
+/// makes (`crate::planner::rule`) reads it the first time such an operation
+/// asks and fills every template of the plan from that one reading.
 pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
     local_timestamp(Timestamp::now(), &TimeZone::system())
 }

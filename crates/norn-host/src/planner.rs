@@ -139,4 +139,5 @@ pub(crate) mod lineage;
 pub(crate) mod links;
 pub(crate) mod order;
 pub(crate) mod resolve;
+pub(crate) mod rule;
 pub(crate) mod view;

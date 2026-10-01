@@ -75,6 +75,7 @@ use norn_wire::{
 
 use super::links::LinkIndex;
 use super::resolve::{PlanningFailure, Resolution, resolve_leaving_out};
+use super::rule::{self, Rules};
 use super::view::{Entry, Remembered, VaultView};
 
 /// What a `where` target's predicates match: the documents, in path order,
@@ -113,7 +114,8 @@ pub(crate) enum ExpandingFailure<V, M> {
 }
 
 /// Plan `authored` against what `view` holds, its `where` targets expanded
-/// through `matcher` first, its resolution change set judged through `links`.
+/// through `matcher` first and its creations by rule made by `rules`, its
+/// resolution change set judged through `links`.
 ///
 /// **The matcher and the link index read one snapshot**, so a link index
 /// that cannot be read refuses as the matcher's snapshot does.
@@ -123,6 +125,7 @@ pub(crate) fn resolve_expanding<V, M, I>(
     view: &V,
     matcher: &M,
     links: &I,
+    rules: &Rules<'_>,
 ) -> Result<Resolution, ExpandingFailure<V::Error, M::Error>>
 where
     V: VaultView,
@@ -209,6 +212,8 @@ where
             }
         }
     }
+    rule::expand(&mut expanded, &mut left_out, rules, view)
+        .map_err(|error| ExpandingFailure::Planning(PlanningFailure::View(error)))?;
     let mut authored = AuthoredPlan::new(vault, expanded).with_force(force);
     authored.plan = plan;
     authored.footnote = footnote;
@@ -426,6 +431,7 @@ mod tests {
 
     use super::super::compose::content_hash;
     use super::super::links::testing::{EmptyStore, Untouched};
+    use super::super::rule::testing::no_rules;
     use super::super::view::memory::MemoryVault;
     use super::*;
 
@@ -517,7 +523,14 @@ mod tests {
         matcher: &impl Matcher<Error = String>,
     ) -> Resolution {
         let links = (EmptyStore::new(), std::marker::PhantomData);
-        match resolve_expanding(authored(operations), root(), vault, matcher, &links) {
+        match resolve_expanding(
+            authored(operations),
+            root(),
+            vault,
+            matcher,
+            &links,
+            &no_rules(),
+        ) {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),
         }
@@ -712,6 +725,7 @@ mod tests {
             &MemoryVault::with(&[("a.md", draft())]),
             &matcher,
             &Untouched::new(),
+            &no_rules(),
         )
         .expect_err("an identified where is planned");
 
@@ -746,6 +760,7 @@ mod tests {
             &MemoryVault::with(&[("a.md", draft())]),
             &matcher,
             &Untouched::new(),
+            &no_rules(),
         )
         .expect_err("an authored cascade is planned");
 
@@ -777,6 +792,7 @@ mod tests {
             &MemoryVault::with(&[("a.md", draft()), ("b.md", draft())]),
             &Answering::paths(&["a.md", "b.md"]),
             &Untouched::new(),
+            &no_rules(),
         )
         .expect_err("a duplicate identifier is planned");
 
@@ -799,6 +815,7 @@ mod tests {
             &MemoryVault::default(),
             &Unreadable,
             &Untouched::new(),
+            &no_rules(),
         )
         .expect_err("an unreadable snapshot planned");
         assert_eq!(
@@ -889,6 +906,7 @@ mod tests {
             &MemoryVault::with(&[("notes/a.md", "a\n")]),
             &Answering::paths(&[]),
             &Untouched::new(),
+            &no_rules(),
         )
         .expect_err("an identified folder move is planned");
         assert_eq!(

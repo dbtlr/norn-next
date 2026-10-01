@@ -343,6 +343,7 @@ fn trial(seed: u64, failures: &mut Vec<String>) -> bool {
             &view,
             &index,
             &index,
+            &crate::planner::rule::testing::no_rules(),
         )
         .unwrap_or_else(|failure| panic!("{tag}: planning failed: {failure:?}"))
     };
