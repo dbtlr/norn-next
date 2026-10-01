@@ -10,9 +10,10 @@
 //! `rewrite_to` beside an `allow_broken_links` of `true` is refused at the
 //! read, and the schema states the same exclusion as a `not`.
 //!
-//! **Only the first is planned yet (NORN-297).** Until link cascades are
-//! planned, a delete forbidding its links plans with no backlink check, and
-//! one rewriting or breaking them is left unresolved, naming that limit.
+//! **Only the first is planned yet (NORN-297).** Until a delete's link
+//! cascade is planned — a move's is — a delete forbidding its links plans
+//! with no backlink check, and one rewriting or breaking them is left
+//! unresolved, naming that limit.
 //!
 //! **`rewrite_to` names a whole document.** Each rewritten link keeps the
 //! anchor it was written with, so an anchor on `rewrite_to` is refused
@@ -34,8 +35,9 @@ use crate::target::{ResolutionTarget, whole_document_schema};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Backlinks {
     /// No link may name the document: a delete any link names does not
-    /// resolve. Until link cascades are planned the planner does not read
-    /// backlinks, so such a delete lands whatever links name the document.
+    /// resolve. Until a delete's link cascade is planned the planner does not
+    /// read its backlinks, so such a delete lands whatever links name the
+    /// document.
     Forbidden,
     /// Every link naming the document is rewritten to name this one.
     RewrittenTo(ResolutionTarget),

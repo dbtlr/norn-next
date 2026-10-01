@@ -50,9 +50,10 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteSection { path, .. }
         | OperationKind::InsertBeforeHeading { path, .. }
         | OperationKind::InsertAfterHeading { path, .. } => return Some(Ok(path)),
-        // NORN-297: a `rewrite_link` edits one document where it stands, but
-        // its composition through `norn-text`'s link rewriter is not wired
-        // yet, so it is not read here as a document-local edit.
+        // NORN-297: a `rewrite_link` edits one document where it stands, and
+        // a cascade's rewrites compose through `norn-text`'s link rewriter
+        // ([`rewritten`]); an authored one is not planned yet, so it is not
+        // read here as a document-local edit.
         OperationKind::CreateDocument { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }

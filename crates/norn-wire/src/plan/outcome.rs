@@ -187,10 +187,10 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
-    // Minted with the link-cascade vocabulary before the planner reads
-    // backlinks (NORN-297): a later change of the same task plans a delete's
-    // backlinks and a wikilink rewrite's `old`, and is what answers these
-    // two. Until then nothing answers either: a delete saying neither flag
+    // Minted with the link-cascade vocabulary before the planner reads a
+    // delete's backlinks (NORN-297): a later change of the same task plans a
+    // delete's backlinks and a wikilink rewrite's `old`, and is what answers
+    // these two. Until then nothing answers either: a delete saying neither flag
     // plans and lands with no backlink check, leaving every link naming its
     // document broken, and a wikilink rewrite is left unresolved in words,
     // naming the limit.

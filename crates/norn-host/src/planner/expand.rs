@@ -45,11 +45,22 @@
 //! unresolved, saying the plan should be re-sent once the vault has indexed
 //! the change; the others resolve. A preview and an apply judge alike.
 //!
+//! **A folder move expands the same way, from the files.** A `move_folder`
+//! is turned into one `move_document` per document beneath its folder, at
+//! any depth, in path order, each to the same place beneath its destination
+//! and keeping the original's conditions, read through the view's own walk
+//! of the folder ([`VaultView::folder_contents`]): a folder's contents are
+//! the files', as a move's before-states are. Every other file beneath it,
+//! and every place there the walk does not enter, is left behind, and the
+//! forecast names each. A folder moved onto itself, to another spelling of
+//! itself, or beneath itself, and one naming no folder or a folder holding no
+//! document, is left unresolved in words.
+//!
 //! **Expansion keeps what an operation says beyond its target.** Each
 //! expanded operation carries the original's kind and author conditions, in
 //! the order the matcher answers, which is path order, at the original's
-//! place in the plan. An authored `where` operation carrying an identifier or
-//! a requirement is a fault in the plan's shape
+//! place in the plan. An authored `where` operation or folder move carrying an
+//! identifier or a requirement is a fault in the plan's shape
 //! ([`AuthoredPlan::ordered_expanded_targets`]), so no expansion is ever
 //! required by, or orders after, another operation. A fault found in the
 //! expanded plan names the authored positions of the operations it concerns.

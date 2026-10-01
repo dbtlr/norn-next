@@ -52,7 +52,10 @@
 //!   among them. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together. Every read pair has a control that
 //!   grows with the vault, run at the same two attachments, and each control
-//!   must read more at the larger scale on the counts it names.
+//!   must read more at the larger scale on the counts it names. A plan's
+//!   links are held the same way: judging the links a hub's delete reaches,
+//!   and generating the cascade a hub's move plans, each cost the hub's
+//!   in-links at both scales.
 //! - **Reads contend on one entry and run only their establishment under its
 //!   gate.** Under the `overlapping reads on one entry` workload, eight reads
 //!   start while a ninth holds the entry's one connection, and the hold is let

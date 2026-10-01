@@ -365,11 +365,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             // are left unresolved in words rather than planned as something
             // they do not say.
             OperationKind::DeleteDocument { path, .. } => Err(format!(
-                "a delete rewriting or breaking the links naming `{path}` is not planned yet: link cascades are not planned yet"
+                "a delete rewriting or breaking the links naming `{path}` is not planned yet: a delete's link cascade is not planned yet"
             )),
             OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
                 Err(format!(
-                    "a `{}` operation is not planned yet: link cascades are not planned yet",
+                    "a `{}` operation is not planned yet: only a move's link cascade is planned yet",
                     kind.name()
                 ))
             }

@@ -2372,9 +2372,10 @@ sequenceDiagram
 
 A write verb compiles to a plan of its operations, one per change or edit it names, and
 enters the one `apply` path: `Host::set` (frontmatter changes to a path or a `where`
-target), `Host::edit` (section, body and text edits to one document) and
-`Host::new_document` (a document created at a path, its folders made) each compile their
-request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
+target), `Host::edit` (section, body and text edits to one document),
+`Host::new_document` (a document created at a path, its folders made) and
+`Host::move_path` (`move`: a document or every document a folder holds, with the link
+cascade that follows) each compile their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
@@ -2468,28 +2469,61 @@ the shape a refusal carries, on the preview's forecast, the applied report, and 
 interruption for the targets that landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
-Link cascades are spelled in the plan vocabulary ahead of the planning that reads
-them. A document move, a document removal and a wikilink rewrite change what links
-elsewhere in the vault resolve to. In a resolved plan each is to carry its cascade, one
-`rewrite_link` per document, syntax and address among the links it changes, which an
-author may also write as an operation of its own; the plan is to record every link whose
-resolution it changes as a condition naming the link as the plan leaves it — by its
-holder, its syntax and its address as written, protocol prefix included — with what it
-resolves to before and after the plan, a link the plan removes or respells away being
-no entry, since that file's hashes guard it; and the forecast is to name the links the
-plan leaves as written, leaves broken, makes ambiguous or retargets, and the files a
-folder move leaves behind. A folder move expands at planning into one document move per
-document, as a `where` target does. A delete says what becomes of the links naming its
-document: rewritten to `rewrite_to`, left broken where `allow_broken_links` says so, or
-— saying neither — forbidden, so that a delete any link names does not resolve. The
-`move`, `delete` and `rewrite_wikilink` requests compile to one such operation each. A
-cascade on an authored operation or on a kind that does not cascade, and a folder move
-left in a resolved plan, are `request/plan-invalid`.
+Link cascades follow what a plan moves. A document move, a document removal and a
+wikilink rewrite change what links elsewhere in the vault resolve to. In a resolved plan
+each carries its cascade, one `rewrite_link` per document, syntax and address among the
+links it changes, which an author may also write as an operation of its own; the plan
+records every link whose resolution it changes as a condition naming the link as the plan
+leaves it — by its holder, its syntax and its address as written, protocol prefix
+included — with what it resolves to before and after the plan, a link the plan removes or
+respells away being no entry, since that file's hashes guard it; and the forecast names
+the links the plan leaves as written, leaves broken, makes ambiguous or retargets, and the
+files a folder move leaves behind. A folder move expands at planning into one document
+move per document the folder holds, at any depth and in path order, as a `where` target
+does, each keeping what the folder move carries beyond its kind; every other file beneath
+the folder, and every place there the vault's walk does not enter, is left behind and
+named. A folder moved onto itself, to another spelling of itself, beneath itself, or
+naming no folder or one holding no document is left unresolved in words, and an authored
+folder move carrying an identifier or a requirement is `request/plan-invalid`
+(`expanded_target_ordered`), as a `where` operation carrying one is. A delete says what
+becomes of the links naming its document: rewritten to `rewrite_to`, left broken where
+`allow_broken_links` says so, or — saying neither — forbidden, so that a delete any link
+names does not resolve. The `move`, `delete` and `rewrite_wikilink` requests compile to
+one such operation each. A cascade on an authored operation or on a kind that does not
+cascade, and a folder move left in a resolved plan, are `request/plan-invalid`.
 
-**The resolution change set runs today; the cascade does not.** Planning records the
-set: every link whose resolution the plan changes, and every link a `rewrite_link` of the
-plan writes, each with what its key resolves to from its holder's lineage source before the
-plan and from its holder after it. Both sides are read on the request's one snapshot, the
+**A document move plans its cascade.** Planning composes the plan without any cascade
+first, and once every operation acts asks the store's resolution door, through the overlay
+and probes the change set itself reads, which links resolve before the plan to exactly a
+document a move carries away and after it not to exactly the file the move lands it at.
+Each is respelled in its own style to the shortest spelling of that file its syntax and
+protocol write — for a bare wikilink the shortest suffix naming it alone, at least two
+segments where the link was path-qualified, its extension kept only where it was written
+with one; for a `vault://` wikilink its root path; for a Markdown link its path from the
+holder's folder, or from the root where the link was written from the root, in the link's
+own escaping — each candidate probed through the same door from the holder where it stands
+after the plan, and the first that reads back as that file written. A moved document's
+own relative links are read from where it stood and respelled toward the same files, or
+where the plan carries them, attachments included. A link ambiguous before the plan is
+never rewritten, and a move keeping its document's stem, or a relative link between two
+documents one folder move carries together, needs no rewrite. Each rewrite rides the move
+landing the document it names, at its holder's after-state path, and composes after every
+operation on the holder's final bytes through `norn-text`'s link rewriter — the bytes
+planning read it from — so a cascade's holder is a file its move touches: the two stand or
+fall together, and a holder an operation that does not resolve touches takes the move down
+with it. The forecast says of a link a move's cascade did not follow why it stayed — the
+text layer's reason, unrepresentable where no spelling read back, or ambiguous — in place of
+what its resolution alone would say; the link keeps its entry. The applier recomposes a
+plan's cascades and never generates one: a backlink another writer adds after planning is
+an entry the set computed again holds and the plan does not record, which refuses the
+plan, and the refusal's fresh plan generates the cascade afresh from the links standing
+then.
+
+**The resolution change set runs for every plan; a delete's cascade does not yet.**
+Planning records the set: every link whose resolution the plan changes, and every link a
+rewrite of the plan writes — a `rewrite_link`'s or one of a cascade's — each with what its
+key resolves to from its holder's lineage source before the plan and from its holder
+after it. Both sides are read on the request's one snapshot, the
 store's documents with every target of the plan overlaid both ways — present before where
 it stands before, present after where it stands after — so a store that has already taken
 in a target the plan landed reads the same two vaults. A document the plan writes is read
@@ -2508,15 +2542,13 @@ that comes to resolve to no document is recorded and not advised broken. The app
 snapshot after its intake, and refuses on any difference: an entry the plan records that
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.
-The planner does not read backlinks to compose a cascade: a plain document move and a
-delete saying neither flag plan and land with no cascade and no backlink check, so the
-move leaves the links naming its source as written and the delete leaves the links naming
-its document broken — each such link recorded in the set, and advised on. The planner
-leaves a folder move, both link rewrites, a delete saying either flag and any operation
-carrying a cascade unresolved, naming that limit. The applier refuses a resolved plan
-carrying any of them as `request/plan-invalid` — a folder move as an unexpanded target,
-and every other as an operation that does not act, which refuses the plan even where it
-touches no file. The host serves no `move`, `delete` or `rewrite_wikilink` verb: those
+The planner does not read a delete's backlinks yet: a delete saying neither flag plans and
+lands with no cascade and no backlink check, so it leaves the links naming its document
+broken — each such link recorded in the set, and advised on. The planner leaves both link
+rewrites and a delete saying either flag unresolved, naming that limit. The applier
+refuses a resolved plan carrying any of them as `request/plan-invalid`, as an operation
+that does not act, which refuses the plan even where it touches no file. The host serves
+`move` through `Host::move_path`; it serves no `delete` or `rewrite_wikilink` verb: those
 requests compile to plans a caller sends through `apply`.
 
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a

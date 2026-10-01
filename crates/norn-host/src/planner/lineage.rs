@@ -127,11 +127,12 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
-                // NORN-297: none of these kinds is planned yet, so none draws
-                // content from a before-state here. A hand-built resolved plan
-                // can still carry a wikilink rewrite this far, and recompose
-                // refuses it. A folder move will arrive expanded into moves,
-                // and a link rewrite is an edit in place, drawing on nothing.
+                // None of these draws content from a before-state. A folder
+                // move arrives expanded into the moves it makes, and a link
+                // rewrite — an authored one or a cascade's — is an edit in
+                // place, drawing on nothing. NORN-297: a wikilink rewrite is
+                // not planned yet; a hand-built resolved plan can still carry
+                // one this far, and recompose refuses it.
                 OperationKind::MoveFolder { .. }
                 | OperationKind::RewriteLink { .. }
                 | OperationKind::RewriteWikilink { .. } => {}

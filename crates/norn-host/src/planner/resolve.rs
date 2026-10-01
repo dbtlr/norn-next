@@ -868,10 +868,7 @@ mod tests {
         ] {
             let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
             let detail = unresolved_detail(&resolution);
-            assert!(
-                detail.contains("link cascades are not planned yet"),
-                "{kind:?}: {detail}"
-            );
+            assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
             assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
         }
     }
