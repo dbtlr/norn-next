@@ -432,6 +432,50 @@ fn a_rewriting_delete_cut_short_in_its_cascade_is_finished_by_sending_it_again()
     assert_eq!(fired, 6, "every position was reached");
 }
 
+/// **A wikilink rewrite cut short anywhere in its cascade is finished by
+/// sending it again.** The rewrite retargets `[[a]]` in two holders to name
+/// `c.md`: two publications, each a replacement followed by a folder sync.
+/// For each step the process ends there; the re-send lands what did not, and
+/// the store equals a build from zero over the vault it leaves, every holder
+/// naming `c.md` and `a.md` untouched.
+#[test]
+fn a_wikilink_rewrite_cut_short_in_its_cascade_is_finished_by_sending_it_again() {
+    let mut fired = 0;
+    for armed in [
+        "swap@1=ends",
+        "swap@2=ends",
+        "parent-sync@1=ends",
+        "parent-sync@2=ends",
+    ] {
+        let mut fixture = Fixture::new(&[
+            ("a.md", "# A\n"),
+            ("c.md", "# C\n"),
+            ("h.md", "[[a]]\n"),
+            ("k.md", "see ![[a#A]]\n"),
+        ]);
+        let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
+        let plan = fixture.plan(vec![Operation::new(
+            norn_wire::OperationKind::rewrite_wikilink(target("a"), target("c")),
+        )]);
+        assert_eq!(plan.operations[0].cascade.len(), 2, "{armed}");
+        let child = run_child(&fixture, &plan, armed);
+        assert!(!child.hits.is_empty(), "{armed}: the arm fired");
+        assert!(!child.lived, "{armed}: the child outlived its end");
+        fired += 1;
+        applied(fixture.apply(plan));
+        assert_eq!(fixture.tree(), ["a.md", "c.md", "h.md", "k.md"], "{armed}");
+        assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"), "{armed}");
+        assert_eq!(
+            fixture.read("k.md").as_deref(),
+            Some("see ![[c#A]]\n"),
+            "{armed}"
+        );
+        assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"), "{armed}");
+        fixture.assert_store_is_a_build_from_zero();
+    }
+    assert_eq!(fired, 4, "every position was reached");
+}
+
 /// On a root that folds case, a respell that dies at either of its steps is
 /// finished by a re-send; one whose rename fails after its content landed is
 /// interrupted, and the changeset carries that first step at the old
