@@ -295,6 +295,19 @@ fn a_key_no_parser_will_read_back_refuses_rather_than_emitting_unproven_bytes() 
     ));
 }
 
+/// **A refusal says what would not read back, and where.** It claims no more
+/// than that: the text, and the context it was to be read in.
+#[test]
+fn a_refusal_names_the_text_and_the_context_it_would_not_read_back_in() {
+    let key = "k".repeat(2000);
+    let fields: Mapping = [(key.clone(), Value::Int(1))].into_iter().collect();
+    let refusal = render_document(&fields, "", LineEnding::Lf).expect_err("a refusal");
+    assert_eq!(
+        refusal.to_string(),
+        format!("{key:?} cannot be written to read back unchanged as a mapping key")
+    );
+}
+
 // ── Minimal, and never a downgrade ───────────────────────────────────────
 
 #[test]

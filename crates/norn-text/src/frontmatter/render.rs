@@ -38,11 +38,13 @@ use crate::line_ending::LineEnding;
 use crate::span::trailing_break;
 use crate::value::{Mapping, Value};
 
-/// The YAML lexical context a scalar is emitted into.
+/// The YAML lexical context a value is emitted into, and proven in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarContext {
-    /// A mapping value: `key: <scalar>`.
+    /// A mapping value: `key: <value>`.
     Block,
+    /// An item of a block list: `- <value>`.
+    Item,
     /// An item of a flow collection: `key: [<scalar>]`.
     Flow,
     /// A mapping key: `<scalar>: value`.
@@ -53,6 +55,7 @@ impl fmt::Display for ScalarContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             ScalarContext::Block => "block value",
+            ScalarContext::Item => "block-list item",
             ScalarContext::Flow => "flow item",
             ScalarContext::Key => "mapping key",
         })
@@ -62,11 +65,13 @@ impl fmt::Display for ScalarContext {
 /// Why frontmatter bytes could not be emitted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
-    /// No quoting style renders this text so that it reads back unchanged in
-    /// this context. The refusal that replaces writing an unproven render.
+    /// This text cannot be written so that it reads back unchanged in this
+    /// context. The refusal that replaces writing an unproven render.
     ///
-    /// A collection is proven whole, as a block value, and a collection that
-    /// does not read back names its whole rendering as the text.
+    /// For a scalar, `text` is the scalar, and no quoting style reads back as
+    /// it. For a collection, `text` is the block layout it was written in,
+    /// which is the only one this crate writes, and which read back as some
+    /// other value.
     NotRoundTrippable {
         text: String,
         context: ScalarContext,
@@ -78,7 +83,7 @@ impl fmt::Display for RenderError {
         match self {
             RenderError::NotRoundTrippable { text, context } => write!(
                 f,
-                "no quoting style renders {text:?} so that it reads back unchanged as a {context}"
+                "{text:?} cannot be written to read back unchanged as a {context}"
             ),
         }
     }
@@ -261,13 +266,23 @@ pub(crate) fn render_entry(
 ) -> Result<String, RenderError> {
     let mut out = render_key(field)?;
     out.push(':');
+    let value_start = out.len();
     write_value(value, Slot::Key, "", line_ending.as_str(), &mut out)?;
+    // A backstop: every scalar and key inside the collection is already
+    // proven in its own context, and no input is known to lay out a
+    // collection that reads back as another value. It stays because it is
+    // `render_document`'s only proof of the whole value: an edit re-reads
+    // the document it produces, but nothing re-reads a rendered one.
     if is_collection(value) {
         let read = match reparse(&out) {
             Some(Value::Map(map)) if map.len() == 1 => map.get(field).cloned(),
             _ => None,
         };
-        prove(read.as_ref() == Some(value), &out)?;
+        prove(
+            read.as_ref() == Some(value),
+            &out[value_start..],
+            ScalarContext::Block,
+        )?;
     }
     Ok(out)
 }
@@ -286,13 +301,19 @@ pub(crate) fn render_block_item(
     terminator: &str,
 ) -> Result<String, RenderError> {
     let mut out = format!("{indent}-");
+    let item_start = out.len();
     write_value(item, Slot::Item, indent, terminator, &mut out)?;
+    // A backstop, as in `render_entry`: no input is known to reach it.
     if is_collection(item) {
         let read = match reparse(&out) {
             Some(Value::Sequence(items)) if items.len() == 1 => items.into_iter().next(),
             _ => None,
         };
-        prove(read.as_ref() == Some(item), &out)?;
+        prove(
+            read.as_ref() == Some(item),
+            &out[item_start..],
+            ScalarContext::Item,
+        )?;
     }
     Ok(out)
 }
@@ -345,7 +366,11 @@ fn write_value(
             true
         }
         View::Scalar(scalar) => {
-            body.push_str(&render_scalar(scalar, RANK_PLAIN, ScalarContext::Block)?);
+            let context = match slot {
+                Slot::Key => ScalarContext::Block,
+                Slot::Item => ScalarContext::Item,
+            };
+            body.push_str(&render_scalar(scalar, RANK_PLAIN, context)?);
             false
         }
     };
@@ -369,14 +394,14 @@ fn write_value(
     Ok(())
 }
 
-/// `rendered`, refused unless it `reads_back`.
-fn prove(reads_back: bool, rendered: &str) -> Result<(), RenderError> {
+/// A collection `rendered` as a `context`, refused unless it `reads_back`.
+fn prove(reads_back: bool, rendered: &str, context: ScalarContext) -> Result<(), RenderError> {
     if reads_back {
         Ok(())
     } else {
         Err(RenderError::NotRoundTrippable {
             text: rendered.to_string(),
-            context: ScalarContext::Block,
+            context,
         })
     }
 }
@@ -445,6 +470,10 @@ fn reparse_in_context(rendered: &str, context: ScalarContext) -> Option<Value> {
     match context {
         ScalarContext::Block => match reparse(&format!("k: {rendered}"))? {
             Value::Map(map) if map.len() == 1 => map.get("k").cloned(),
+            _ => None,
+        },
+        ScalarContext::Item => match reparse(&format!("- {rendered}"))? {
+            Value::Sequence(items) if items.len() == 1 => items.into_iter().next(),
             _ => None,
         },
         // A flow item reads back only if it is the sole element: a value that
