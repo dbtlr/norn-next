@@ -1766,16 +1766,18 @@ fn a_plan_condition_another_writer_broke_refuses() {
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 
-/// **A link-resolution entry the applier cannot yet check refuses the plan
-/// (NORN-297).** Until the resolution change set is computed again at apply,
-/// an entry is never read as holding: the plan is refused naming it, and
-/// nothing is published.
+/// **A recorded entry the set computed again does not hold refuses the
+/// plan.** An edit changes no document's presence and writes no link, so its
+/// resolution change set is empty; an entry added to it is one the plan
+/// records and the set computed again does not hold, and the plan is refused
+/// naming it, with nothing published.
 #[test]
-fn a_link_resolution_entry_refuses_until_it_is_checked() {
+fn an_entry_the_set_computed_again_does_not_hold_refuses() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
-    let entry = norn_wire::PlanCondition::link_resolution(
-        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+    let entry = link_entry(
+        "b.md",
+        "a",
         norn_wire::Resolves::one(path("a.md")),
         norn_wire::Resolves::one(path("a.md")),
     );
@@ -1787,6 +1789,206 @@ fn a_link_resolution_entry_refuses_until_it_is_checked() {
     );
     assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
     assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// The entry for the wikilink of `holder` written `address`.
+fn link_entry(
+    holder: &str,
+    address: &str,
+    before: norn_wire::Resolves,
+    after: norn_wire::Resolves,
+) -> norn_wire::PlanCondition {
+    norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path(holder), norn_wire::LinkFamily::Wikilink, address),
+        before,
+        after,
+    )
+}
+
+/// **A plain delete records the links it breaks, and applies.** No cascade
+/// is planned yet, so `[[a]]` is left broken: the plan records it, from one
+/// document to none, the forecast says it is left broken, and the applier
+/// computes the same set again and lands the plan.
+#[test]
+fn a_delete_records_the_links_it_breaks_and_applies() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
+    let resolution = fixture.resolution(vec![deleting("a.md")]);
+    let entry = link_entry(
+        "b.md",
+        "a",
+        norn_wire::Resolves::one(path("a.md")),
+        norn_wire::Resolves::none(),
+    );
+    assert_eq!(resolution.plan.conditions, vec![entry]);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(
+            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a")
+        )]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A plain move records the path links it breaks and the relative links
+/// its document holds, and applies.** `[x](notes/a.md)` in `b.md` names the
+/// moved document's source, and `[y](c.md)` in it is read from `notes/`
+/// before the move and from `archive/` after, where no `c.md` stands.
+#[test]
+fn a_move_records_the_links_it_breaks_and_applies() {
+    let mut fixture = Fixture::new(&[
+        ("notes/a.md", "[y](c.md)\n"),
+        ("notes/c.md", "c\n"),
+        ("b.md", "[x](notes/a.md)\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
+    let markdown = |holder: &str, address: &str, before, after| {
+        norn_wire::PlanCondition::link_resolution(
+            norn_wire::LinkKey::new(path(holder), norn_wire::LinkFamily::Markdown, address),
+            before,
+            after,
+        )
+    };
+    assert_eq!(
+        plan.conditions,
+        vec![
+            markdown(
+                "archive/a.md",
+                "c.md",
+                norn_wire::Resolves::one(path("notes/c.md")),
+                norn_wire::Resolves::none(),
+            ),
+            markdown(
+                "b.md",
+                "notes/a.md",
+                norn_wire::Resolves::one(path("notes/a.md")),
+                norn_wire::Resolves::none(),
+            ),
+        ]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("archive/a.md").as_deref(), Some("[y](c.md)\n"));
+}
+
+/// **A create records the broken links it mends, and applies.**
+#[test]
+fn a_create_records_the_links_it_mends_and_applies() {
+    let mut fixture = Fixture::new(&[("b.md", "[[n]]\n")]);
+    let plan = fixture.plan(vec![creating("n.md", "n\n")]);
+    assert_eq!(
+        plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "n",
+            norn_wire::Resolves::none(),
+            norn_wire::Resolves::one(path("n.md")),
+        )]
+    );
+    applied(fixture.apply(plan));
+}
+
+/// **A document another writer creates that a recorded link now names
+/// refuses the plan.** The delete recorded `[[a]]` going from `x/a.md` to
+/// none; once the store takes in a foreign `z/a.md`, the set computed again
+/// holds it going from several documents to `z/a.md`, so the recorded entry
+/// fails, nothing is published, and the fresh plan records the set as it
+/// stands, advising that the plan retargets the link.
+#[test]
+fn a_foreign_create_moving_a_recorded_link_refuses_the_plan() {
+    let mut fixture = Fixture::new(&[("x/a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![deleting("x/a.md")]);
+    let recorded = link_entry(
+        "b.md",
+        "a",
+        norn_wire::Resolves::one(path("x/a.md")),
+        norn_wire::Resolves::none(),
+    );
+    assert_eq!(plan.conditions, vec![recorded.clone()]);
+    fixture.foreign("z/a.md", "zeta\n");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(recorded)]
+    );
+    assert_eq!(fixture.read("x/a.md").as_deref(), Some("alpha\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert_eq!(
+        refused.plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "a",
+            norn_wire::Resolves::several(),
+            norn_wire::Resolves::one(path("z/a.md")),
+        )]
+    );
+    assert_eq!(
+        refused.forecast.links,
+        vec![norn_wire::LinkAdvisory::retargeted(
+            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a")
+        )]
+    );
+}
+
+/// **A link another writer adds to a document the plan moves is an entry the
+/// plan does not record, and refuses it.** The move recorded nothing, since
+/// nothing linked `a.md`; a foreign `d.md` linking it is a link whose
+/// resolution the plan now changes.
+#[test]
+fn a_foreign_link_to_a_moved_document_is_unrecorded() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n")]);
+    let plan = fixture.plan(vec![moving("a.md", "c.md")]);
+    assert_eq!(plan.conditions, vec![]);
+    fixture.foreign("d.md", "[[a]]\n");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_unrecorded(link_entry(
+            "d.md",
+            "a",
+            norn_wire::Resolves::one(path("a.md")),
+            norn_wire::Resolves::none(),
+        ))]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("alpha\n"));
+}
+
+/// **A plan's own progress never changes what it records.** With the plan's
+/// create already landed by hand and taken in by the store, the re-send
+/// computes the set it recorded, and finishes.
+#[test]
+fn a_part_landed_resend_computes_the_set_it_recorded_and_finishes() {
+    let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n\n[[n]]\n")]);
+    let plan = fixture.plan(vec![deleting("a.md"), creating("n.md", "n\n")]);
+    assert_eq!(
+        plan.conditions,
+        vec![
+            link_entry(
+                "b.md",
+                "a",
+                norn_wire::Resolves::one(path("a.md")),
+                norn_wire::Resolves::none(),
+            ),
+            link_entry(
+                "b.md",
+                "n",
+                norn_wire::Resolves::none(),
+                norn_wire::Resolves::one(path("n.md")),
+            ),
+        ]
+    );
+    fixture.foreign("n.md", "n\n");
+    assert_eq!(
+        fixture
+            .preview(plan.clone())
+            .map(|(previewed, _)| previewed),
+        Ok(plan.clone())
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// A plan that drops a condition its operations carry is refused: the
