@@ -33,7 +33,7 @@
 
 use std::fmt;
 
-use crate::frontmatter::fields::{ValueStyle, reparse};
+use crate::frontmatter::fields::{ValueStyle, reparse_admitted};
 use crate::line_ending::LineEnding;
 use crate::span::trailing_break;
 use crate::value::{Mapping, Value};
@@ -274,7 +274,7 @@ pub(crate) fn render_entry(
     // `render_document`'s only proof of the whole value: an edit re-reads
     // the document it produces, but nothing re-reads a rendered one.
     if is_collection(value) {
-        let read = match reparse(&out) {
+        let read = match reparse_admitted(&out) {
             Some(Value::Map(map)) if map.len() == 1 => map.get(field).cloned(),
             _ => None,
         };
@@ -305,7 +305,7 @@ pub(crate) fn render_block_item(
     write_value(item, Slot::Item, indent, terminator, &mut out)?;
     // A backstop, as in `render_entry`: no input is known to reach it.
     if is_collection(item) {
-        let read = match reparse(&out) {
+        let read = match reparse_admitted(&out) {
             Some(Value::Sequence(items)) if items.len() == 1 => items.into_iter().next(),
             _ => None,
         };
@@ -468,17 +468,17 @@ fn render_at_rank(text: &str, rank: u8) -> String {
 /// Read `rendered` back as the value it would be in `context`.
 fn reparse_in_context(rendered: &str, context: ScalarContext) -> Option<Value> {
     match context {
-        ScalarContext::Block => match reparse(&format!("k: {rendered}"))? {
+        ScalarContext::Block => match reparse_admitted(&format!("k: {rendered}"))? {
             Value::Map(map) if map.len() == 1 => map.get("k").cloned(),
             _ => None,
         },
-        ScalarContext::Item => match reparse(&format!("- {rendered}"))? {
+        ScalarContext::Item => match reparse_admitted(&format!("- {rendered}"))? {
             Value::Sequence(items) if items.len() == 1 => items.into_iter().next(),
             _ => None,
         },
         // A flow item reads back only if it is the sole element: a value that
         // would split on `,` or `]` fails here and escalates to a quote.
-        ScalarContext::Flow => match reparse(&format!("k: [{rendered}]"))? {
+        ScalarContext::Flow => match reparse_admitted(&format!("k: [{rendered}]"))? {
             Value::Map(map) if map.len() == 1 => match map.get("k") {
                 Some(Value::Sequence(items)) if items.len() == 1 => Some(items[0].clone()),
                 _ => None,
@@ -487,7 +487,7 @@ fn reparse_in_context(rendered: &str, context: ScalarContext) -> Option<Value> {
         },
         // A key reads back only if the mapping has exactly the one entry, its
         // value is the sentinel, and its key is a string.
-        ScalarContext::Key => match reparse(&format!("{rendered}: x\n"))? {
+        ScalarContext::Key => match reparse_admitted(&format!("{rendered}: x\n"))? {
             Value::Map(map) if map.len() == 1 => match map.iter().next() {
                 Some((key, Value::String(sentinel))) if sentinel == "x" => {
                     Some(Value::String(key.to_string()))

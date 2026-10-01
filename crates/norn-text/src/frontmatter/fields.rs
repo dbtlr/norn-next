@@ -441,8 +441,11 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
     clean_value(crate::frontmatter::extract::parse_block(text).ok()?)
 }
 
-/// [`reparse`] past the size gate, for an admitted block re-read with a few
-/// bytes changed ([`crate::frontmatter::extract::parse_admitted`]).
+/// [`reparse`] past the size gate, for bytes read to ask what they mean: an
+/// admitted block re-read with a few bytes changed, or a rendering proven by
+/// reading it back ([`crate::frontmatter::extract::parse_admitted`]). A value
+/// too large for the block is then refused for the bound, by name, rather
+/// than for its spelling.
 pub(crate) fn reparse_admitted(text: &str) -> Option<Value> {
     clean_value(crate::frontmatter::extract::parse_admitted(text).ok()?)
 }

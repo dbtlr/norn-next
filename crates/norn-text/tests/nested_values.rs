@@ -718,3 +718,33 @@ fn setting_a_field_to_its_own_value_in_an_unsplittable_block_changes_no_byte() {
         );
     }
 }
+
+// ── Past the size bound ──────────────────────────────────────────────────
+
+/// **A value too large for the block is refused for the bound, not for its
+/// spelling.** Every read-back that proves a rendering is a proof of meaning,
+/// so it reads past the size gate; the bound is judged once, on the edited
+/// block, and the refusal names it.
+#[test]
+fn a_value_past_the_bound_is_refused_for_the_bound() {
+    let source = "---\ntitle: t\nrows:\n  - a: 1\n---\nbody\n";
+    let long = Value::String("x".repeat(FRONTMATTER_MAX_BYTES + 1));
+    let past_bound = |result: Result<String, EditError>| matches!(result, Err(EditError::FrontmatterPastBound { bound, .. }) if bound == FRONTMATTER_MAX_BYTES);
+
+    let refusal = |result: &Result<String, EditError>| match result {
+        Ok(_) => "landed".to_string(),
+        Err(error) => format!("{:?}", std::mem::discriminant(error)),
+    };
+
+    let scalar = set(source, "title", &long);
+    assert!(past_bound(scalar.clone()), "a scalar: {}", refusal(&scalar));
+    let nested = map([("note", long.clone())]);
+    let set_map = set(source, "meta", &nested);
+    assert!(past_bound(set_map.clone()), "a map: {}", refusal(&set_map));
+    let pushed = Document::parse(source).push_to_list("rows", &nested);
+    assert!(
+        past_bound(pushed.clone()),
+        "a pushed map: {}",
+        refusal(&pushed)
+    );
+}
