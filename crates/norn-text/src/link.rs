@@ -604,8 +604,8 @@ pub enum RewriteSkip {
     /// around it.
     Unrepresentable,
     /// The link is written in a frontmatter value that cannot hold `to` and
-    /// still read as the same YAML with only the target changed — a quote
-    /// character inside a quoted scalar, text a plain scalar cannot carry, or
+    /// still read as the same YAML with only the target changed — the quote
+    /// the scalar is quoted with, text a plain scalar cannot carry, or
     /// a block grown past its byte bound.
     WouldCorruptFrontmatter,
     /// The link's own bytes give no place to write any target: a wikilink
