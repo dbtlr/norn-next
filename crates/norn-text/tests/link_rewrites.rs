@@ -448,6 +448,23 @@ fn a_target_a_bare_destination_cannot_spell_is_skipped() {
     }
 }
 
+/// A `|` ends a table cell in the editors that render tables, and this crate
+/// reads no tables, so it cannot see whether a destination stands in one: a
+/// Markdown `to` holding one is skipped wherever the link is.
+#[test]
+fn a_markdown_target_holding_a_pipe_is_skipped() {
+    for source in [
+        "| h | i |\n|---|---|\n| [x](old.md) | y |\n",
+        "[t](old.md)\n",
+        "[t](<old.md>)\n",
+    ] {
+        let out = rewrite(source, LinkFamily::Markdown, "old.md", "a|b.md");
+        assert_eq!(out.text, source, "{source:?}");
+        assert_eq!(out.rewritten, 0, "{source:?}");
+        assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable], "{source:?}");
+    }
+}
+
 /// A destination written with an escape is read through it, so its target is
 /// not the bytes it was written as and there is no stem to write over.
 #[test]

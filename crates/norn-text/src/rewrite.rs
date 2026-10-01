@@ -82,7 +82,9 @@ impl Document<'_> {
     /// Markdown destination's angle brackets — survives byte for byte, and so
     /// does every byte outside the links rewritten. A rewrite never changes
     /// how a link is addressed: a `to` whose protocol is not the matched
-    /// link's is [`RewriteSkip::Unrepresentable`] there. A matching link that
+    /// link's is [`RewriteSkip::Unrepresentable`] there. So is a Markdown `to`
+    /// holding `|`, which would end a table cell this crate does not read
+    /// tables to see. A matching link that
     /// cannot carry `to` is left exactly as written and reported in
     /// [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that says why; it
     /// is never forced. A rewrite that respells nothing returns the document's

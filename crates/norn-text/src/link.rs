@@ -631,11 +631,15 @@ pub enum RewriteSkip {
 /// [`wikilink_target_is_representable`] accepts, and a wikilink token carrying
 /// a line break takes nothing: `[[Target\nOther]]` is recognized, and an
 /// unclosed `[[` can make one span two paragraphs, so splicing a one-line
-/// replacement over those bytes would reflow the text the token swallowed. A Markdown
-/// destination takes any `to` that is non-empty and on one line, because
-/// CommonMark forbids a line ending inside a destination and an empty one
-/// would turn a link to a document into a link to the document holding it;
-/// whether the bytes then read back as `to` in the place they were written —
+/// replacement over those bytes would reflow the text the token swallowed.
+///
+/// A Markdown destination takes any `to` that is non-empty, on one line and
+/// free of `|`. CommonMark forbids a line ending inside a destination; an
+/// empty one would turn a link to a document into a link to the document
+/// holding it; and a `|` ends a GFM table cell, which the editors this vault
+/// is written in render while this crate reads no tables, so whether a
+/// destination stands in one is not something a re-read can see. Whether the
+/// bytes then read back as `to` in the place they were written —
 /// a space in a bare destination, a `)` that closes it early — is a question
 /// about the whole document, answered by re-reading it.
 ///
@@ -653,7 +657,7 @@ pub(crate) fn respelled(link: &Link, to: &str) -> Result<String, RewriteSkip> {
             }
             wikilink_target_is_representable(to)
         }
-        LinkFamily::Markdown => !to.is_empty() && !to.contains(['\n', '\r']),
+        LinkFamily::Markdown => !to.is_empty() && !to.contains(['\n', '\r', '|']),
     };
     let stem = link
         .stem_range
