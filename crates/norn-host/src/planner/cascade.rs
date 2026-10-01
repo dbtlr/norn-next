@@ -94,12 +94,14 @@
 //!
 //! **Every effect of the plan on a link is read by one rule.** Which file a
 //! link must name after the plan ([`Cascade::final_document`]) counts the
-//! wikilink rewrites, the moves and the rewriting deletes alike, in that
-//! precedence ([`decider`]), so a link reached several ways — a backlink of
-//! a deleted document in a holder the plan moves, or a wikilink a rewrite
-//! retargets whose document a move carries away — is respelled once: to the
-//! rewrite's `new` where a wikilink rewrite names it, else to the delete's
-//! target, from where its holder lands.
+//! authored link rewrites, the wikilink rewrites, the rewriting deletes and
+//! the moves alike, in that precedence ([`decider`]), so a link reached
+//! several ways — a backlink of a deleted document in a holder the plan
+//! moves, or a wikilink a rewrite retargets whose document a move carries
+//! away — is respelled once: by its author where an authored link rewrite
+//! names it, which no cascade then respells; else to the rewrite's `new`
+//! where a wikilink rewrite names it; else to the delete's target, from
+//! where its holder lands.
 //!
 //! **A cascade travels on the operation it serves.** Each rewrite is one
 //! `rewrite_link` per holder, syntax and address, named at the holder's
@@ -237,8 +239,8 @@ impl Deletes {
 ///   cascades ([`Deletes::unkept`]).
 /// - **Each wikilink rewrite**: its `old` must name one document or none
 ///   before the plan, and its `new` one other document after it
-///   ([`RetargetNaming::destination`]); where they do, every wikilink naming `old`
-///   that does not already name `new` after the plan ([`respells`]) is
+///   ([`RetargetNaming::destination`]); where they do, every wikilink naming
+///   `old` that does not already name `new` after the plan ([`respells`]) is
 ///   respelled to name it, by the same spellings, and a rewrite retargeting
 ///   none is left unresolved ([`unmatched`]), as is one selecting a wikilink
 ///   an earlier rewrite selects ([`overlaps`]).

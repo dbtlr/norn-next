@@ -152,11 +152,14 @@ impl Removal {
     /// Planning resolves every delete by this rule, leaving one it does not
     /// keep unresolved, and the applier refuses a resolved plan holding one
     /// by it again; neither reads anything more than the links and the
-    /// target it judges. Planning reads `named` before any cascade writes a
-    /// link, and the change set after, reading each link a rewrite writes as
-    /// the text that rewrite matched, from where its holder's content stood,
-    /// so the two read the same backlinks: one a cascade respells — away
-    /// from the document, or from where its moved holder lands — stays one.
+    /// target it judges. Planning reads the backlinks before any cascade
+    /// writes a link and judges each delete once the plan composes with its
+    /// cascades, and the change set reads each link a rewrite writes as the
+    /// text that rewrite matched, from where its holder's content stood, so
+    /// the two read the same backlinks: one a cascade respells — away from
+    /// the document, or from where its moved holder lands — stays one, while
+    /// one an authored link rewrite or a wikilink rewrite respells, whose
+    /// author said what it names, is none.
     pub(crate) fn kept_by(
         &self,
         named: bool,
