@@ -10,10 +10,9 @@
 //! states the planner's own refusal: an append or insert of empty content,
 //! which a splice would otherwise perform as a silent no-op. Every refusal is
 //! an operation that does not resolve, in words, never a fault in the plan's
-//! shape. An edit whose
-//! result is the bytes it was given — a field set to the value it holds, a
-//! body or a section replaced by itself — is no refusal: it composes to its
-//! document unchanged, which lands found.
+//! shape. An edit whose result is the bytes it was given — a field set to the
+//! value it holds, a body or a section replaced by itself — is no refusal: it
+//! composes to its document unchanged, which lands found.
 //!
 //! **What the planner refuses before any splice.** A frontmatter kind whose
 //! target is still a `where` list, which planning expands into path targets
