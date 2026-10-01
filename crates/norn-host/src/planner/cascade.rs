@@ -54,29 +54,54 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkFact, ProbedLink};
-use norn_wire::{DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkRewrite, Resolves};
+use norn_wire::{
+    Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkRewrite, Operation,
+    OperationKind, Resolves, UnresolvedReason,
+};
 
 use super::compose::Composition;
 use super::lineage::Lineage;
 use super::links::{
     EntryKey, LinkIndex, Target, WrittenLinks, address, family_name, left_behind, reach,
-    stored_path, wire_family,
+    removed_by, stored_path, wire_family,
 };
 use crate::derivation::document_links;
 
-/// The link cascade each move of the plan `composition` composed generates,
-/// by the move's position: every link that names a document the plan's moves
-/// carry away, as `lineage` follows them, and would not name it after,
-/// respelled to name it where it lands, judged through `index`. Empty, and
-/// the index never asked, where no move carries a document.
+/// What a plan's moves and deletes generate from the links naming what they
+/// carry away or remove.
+#[derive(Debug, Default)]
+pub(crate) struct Generated {
+    /// The link cascade of each operation that carries one, by its position.
+    pub(crate) cascades: BTreeMap<usize, Vec<LinkRewrite>>,
+    /// Each delete whose backlinks leave it unresolved, by its position, and
+    /// why: one forbidding them, which a link names.
+    pub(crate) unresolved: BTreeMap<usize, UnresolvedReason>,
+}
+
+/// What the plan `composition` composed from `operations` generates from the
+/// links naming what it carries away or removes, judged through `index`:
+/// each move's cascade, by its position — every link that names a document
+/// the plan's moves carry away, as `lineage` follows them, and would not
+/// name it after, respelled to name it where it lands — and each delete
+/// forbidding the links naming its document that a link names, left
+/// unresolved naming every holder ([`backlinks`]). Empty, and the index never
+/// asked, where no move carries a document and no delete forbids its links.
 pub(crate) fn generate<I: LinkIndex + ?Sized>(
+    operations: &[Operation],
     composition: &Composition,
     lineage: &Lineage,
     normalizer: &PathNormalizer,
     index: &I,
-) -> Result<BTreeMap<usize, Vec<LinkRewrite>>, I::Error> {
-    if lineage.drawing().next().is_none() {
-        return Ok(BTreeMap::new());
+) -> Result<Generated, I::Error> {
+    let choice = |position: usize| match &operations[position].kind {
+        OperationKind::DeleteDocument { backlinks, .. } => Some(backlinks),
+        _ => None,
+    };
+    let reads_backlinks = lineage
+        .removals()
+        .any(|position| choice(position).is_some_and(|choice| *choice != Backlinks::LeftBroken));
+    if lineage.drawing().next().is_none() && !reads_backlinks {
+        return Ok(Generated::default());
     }
     let cascade = Cascade {
         composition,
@@ -87,9 +112,15 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     let (overlay, probed) = reach(&targets, lineage, normalizer, &WrittenLinks::default());
 
     // The links the moves leave behind, each with the file it must name
-    // after and the move that lands that file.
+    // after and the move that lands that file; and every backlink of a
+    // document a delete removes, by the delete's position.
     let mut breaking: Vec<Breaking> = Vec::new();
+    let mut removing: BTreeMap<usize, Vec<norn_store::DocumentPath>> = BTreeMap::new();
     index.changes(&overlay, &probed, &mut |change| {
+        if let Some(position) = removed_by(&change.before, lineage, normalizer) {
+            removing.entry(position).or_default().push(change.holder);
+            return;
+        }
         let Some((to, drawn)) = left_behind(&change.before, &change.after, lineage, normalizer)
         else {
             return;
@@ -104,6 +135,13 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
             owner,
         });
     })?;
+
+    let mut unresolved = BTreeMap::new();
+    for (position, holders) in removing {
+        if choice(position) == Some(&Backlinks::Forbidden) {
+            unresolved.insert(position, backlinks(holders));
+        }
+    }
 
     let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> = cascade.own_relative_links();
 
@@ -172,7 +210,20 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     for (owner, rewrite) in rewrites.into_values() {
         cascades.entry(owner).or_default().push(rewrite);
     }
-    Ok(cascades)
+    Ok(Generated {
+        cascades,
+        unresolved,
+    })
+}
+
+/// Why a delete forbidding the links naming its document does not resolve,
+/// each of `held` the holder of one such link where it stands after the
+/// plan: every holding document, each once and in path order, and how many
+/// links name it.
+fn backlinks(held: Vec<norn_store::DocumentPath>) -> UnresolvedReason {
+    let total = held.len() as u64;
+    let holders: BTreeSet<DocumentPath> = held.iter().filter_map(wire_path).collect();
+    UnresolvedReason::has_backlinks(holders.into_iter().collect(), total)
 }
 
 /// One link a move breaks: where it is held after the plan, as it is

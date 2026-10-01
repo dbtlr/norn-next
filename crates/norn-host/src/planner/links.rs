@@ -436,6 +436,23 @@ pub(crate) fn left_behind<'l>(
     }
 }
 
+/// **The one rule a delete's backlinks are read by**: where a link resolved
+/// before the plan to exactly one document a delete of the plan removes, the
+/// position of that delete. A link resolving to several documents is a
+/// backlink of none of them, and a link a removed document holds is gone with
+/// it, so neither is ever handed here.
+pub(crate) fn removed_by(
+    before: &Resolves,
+    lineage: &Lineage,
+    normalizer: &PathNormalizer,
+) -> Option<usize> {
+    let Resolves::One { path } = before else {
+        return None;
+    };
+    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
+    lineage.removed_by(&file)
+}
+
 /// What a link-resolution entry is ordered and matched by: its holder, its
 /// syntax as the store names it — `None` for a syntax the store holds no link
 /// of — then its address.

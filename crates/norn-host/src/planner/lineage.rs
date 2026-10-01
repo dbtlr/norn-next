@@ -71,6 +71,9 @@ pub(crate) struct Lineage {
     /// Each file whose before-state ends the plan at another file, and that
     /// file: [`Self::at_end`] read the other way.
     carried: BTreeMap<NormalizedPath, NormalizedPath>,
+    /// Each file whose before-state a delete of the plan removes, wherever
+    /// the plan's moves carried it first, and that delete's position.
+    removed: BTreeMap<NormalizedPath, usize>,
 }
 
 impl Lineage {
@@ -86,9 +89,16 @@ impl Lineage {
         for &position in order {
             let kind = &operations[position].kind;
             match kind {
-                OperationKind::CreateDocument { path, .. }
-                | OperationKind::DeleteDocument { path, .. } => {
+                OperationKind::CreateDocument { path, .. } => {
                     if let Some(file) = identity(path.as_str()) {
+                        lineage.at_end.insert(file, None);
+                    }
+                }
+                OperationKind::DeleteDocument { path, .. } => {
+                    if let Some(file) = identity(path.as_str()) {
+                        if let Some(drawn) = lineage.source(&file) {
+                            lineage.removed.insert(drawn.from, position);
+                        }
                         lineage.at_end.insert(file, None);
                     }
                 }
@@ -157,6 +167,23 @@ impl Lineage {
         let file = self.carried.get(from)?;
         let drawn = self.at_end.get(file)?.as_ref()?;
         Some((file, drawn))
+    }
+
+    /// The position of the delete that removes the document standing at
+    /// `from` before the plan — at `from`, or wherever the plan's moves
+    /// carried it first — and `None` where no delete of the plan removes it.
+    ///
+    /// **What a delete's backlinks are.** A link that named the document
+    /// before the plan names nothing of it after, so the delete reads here
+    /// which of the links the store's resolution door reaches are its own.
+    pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<usize> {
+        self.removed.get(from).copied()
+    }
+
+    /// The position of every delete of the plan that removes a document
+    /// standing before it.
+    pub(crate) fn removals(&self) -> impl Iterator<Item = usize> + '_ {
+        self.removed.values().copied()
     }
 
     /// The source of what `file` holds at the end of the plan, where its

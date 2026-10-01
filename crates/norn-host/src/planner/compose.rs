@@ -394,20 +394,22 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 }
             },
             OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
+            // What becomes of the links naming the document is its link
+            // cascade's, which composes after every operation, and planning's
+            // to judge (`super::cascade`): the removal is the same whatever
+            // the delete says of them.
             OperationKind::DeleteDocument {
                 path,
-                backlinks: Backlinks::Forbidden,
+                backlinks: Backlinks::Forbidden | Backlinks::LeftBroken,
             } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: a delete's own link cascade and both link rewrites are
-            // vocabulary before they are planned. Until the planner plans a
-            // delete's backlinks and an authored rewrite, a delete saying what
-            // becomes of the links naming its document and both link rewrites
-            // are left unresolved in words rather than planned as something
-            // they do not say.
+            // NORN-297: a delete rewriting its links is planned by a later
+            // change of this task, and both link rewrites by another; until
+            // then each is left unresolved in words rather than planned as
+            // something it does not say.
             OperationKind::DeleteDocument { path, .. } => Err(format!(
-                "a delete rewriting or breaking the links naming `{path}` is not planned yet: a delete's link cascade is not planned yet"
+                "a delete rewriting the links naming `{path}` is not planned yet: a delete's link cascade is not planned yet"
             )),
             OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
                 Err(format!(

@@ -774,8 +774,8 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 }
 
 /// **The resolution change set's bar over a hub's in-links (NORN-297).**
-/// Deleting the document [`HUB_IN_LINKS`] others link by its bare stem
-/// records exactly their links, and judging them costs the same at both
+/// Deleting the document [`HUB_IN_LINKS`] others link by its bare stem,
+/// leaving their links broken, records exactly those links, and judging them costs the same at both
 /// per-PR scales: a plan's change set costs the links it reaches and the
 /// candidates they resolve against, never the vault around them. The bar
 /// stands where no member of a key's class is kept out by the
@@ -783,8 +783,8 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 /// (NORN-320); the profiles declare no ignore set.
 ///
 /// The hub and its planted in-links are derived by the attach heal beside
-/// each profile's generated tree. A preview of the delete through the host
-/// records one entry per in-link. The judgment the preview's planning and
+/// each profile's generated tree. A preview of the delete through the host,
+/// saying the links may be left broken, records one entry per in-link. The judgment the preview's planning and
 /// an apply's check each run — the store's resolution door, on a snapshot
 /// of the attached store, with the hub overlaid as removed — is then counted
 /// directly: it judges the twenty in-links, resolves the one key they share
@@ -844,7 +844,7 @@ fn one_hub_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnaps
                 norn_wire::PlanDocument::operations(norn_wire::AuthoredPlan::new(
                     VaultAddress::name(vault.name().clone()),
                     vec![norn_wire::Operation::new(
-                        norn_wire::OperationKind::delete_document(hub.clone()),
+                        norn_wire::OperationKind::delete_document_breaking_links(hub.clone()),
                     )],
                 )),
             ))

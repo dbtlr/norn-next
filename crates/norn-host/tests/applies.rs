@@ -654,9 +654,10 @@ fn a_previewed_move_records_the_link_it_moves_and_applies_as_previewed() {
     assert!(vault.path().join(moved.as_str()).exists());
 }
 
-/// **A previewed delete of a linked document advises that it leaves the link
-/// broken**, records the link going from the document to none, and the same
-/// operations applied plan and land the same set.
+/// **A previewed delete leaving the links naming its document broken
+/// advises that it leaves the link broken**, records the link going from the
+/// document to none, and the same operations applied plan and land the same
+/// set.
 #[test]
 fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
     let (_sandbox, vault) = a_linked_vault("host-applies-delete-links");
@@ -665,9 +666,11 @@ fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
     let deleting = || {
         PlanDocument::operations(AuthoredPlan::new(
             VaultAddress::name(vault.name().clone()),
-            vec![Operation::new(OperationKind::delete_document(
-                DocumentPath::new(SUBJECT).expect("a document path"),
-            ))],
+            vec![Operation::new(
+                OperationKind::delete_document_breaking_links(
+                    DocumentPath::new(SUBJECT).expect("a document path"),
+                ),
+            )],
         ))
     };
 
