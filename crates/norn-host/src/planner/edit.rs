@@ -35,6 +35,7 @@ use norn_wire::{
 };
 
 use super::compose::Unresolved;
+use crate::derivation::document_source;
 
 /// The document path a document-local kind names, or why it names none yet;
 /// `None` for a kind that is not document-local.
@@ -122,7 +123,7 @@ fn nested(value: &AuthoredValue, element: bool) -> Option<Unresolved> {
 /// `bytes`, the document the operation names as it stands so far, edited as
 /// the document-local `kind` edits it; or why it cannot be.
 pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Unresolved> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return Err(
             "the document is not UTF-8 text, so its frontmatter and sections cannot be edited"
                 .to_string(),
@@ -188,9 +189,10 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// none before it gets here ([`super::compose::compose`]): the applier recomposes a cascade over the stand-in for
 /// a holder already holding its change, where nothing matches, and a link a
 /// foreign edit took away since planning is the change set's to notice, not
-/// composition's. Bytes that are not UTF-8 hold no link the index derives, so
-/// they are returned as they are, and a rewrite of a syntax the text layer
-/// reads no link of matches nothing.
+/// composition's. Bytes that do not decode as a vault document
+/// ([`document_source`]) hold no link the index derives, so they are returned
+/// as they are, and a rewrite of a syntax the text layer reads no link of
+/// matches nothing.
 pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
     rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
@@ -206,7 +208,7 @@ pub(crate) fn rewritten<'r>(
             Some(AddressRewrite::new(family, &rewrite.from, &rewrite.to))
         })
         .collect();
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return (bytes.clone(), Vec::new());
     };
     if batch.is_empty() {
@@ -286,7 +288,7 @@ pub(crate) fn expectation_unmet(
             "the expected value of `{field}` in `{path}` cannot be judged: {refusal}"
         ));
     }
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return Some(format!(
             "`{path}` is not UTF-8 text, so its field `{field}` cannot be observed"
         ));

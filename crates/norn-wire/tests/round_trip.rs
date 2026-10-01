@@ -6744,7 +6744,11 @@ fn plan_conditions() -> Vec<PlanCondition> {
 
 /// Every state a side of a transition holds.
 fn file_states() -> Vec<FileState> {
-    vec![FileState::absent(), FileState::present(content_hash(0x01))]
+    vec![
+        FileState::absent(),
+        FileState::present(content_hash(0x01)),
+        FileState::quarantined(content_hash(0x02)),
+    ]
 }
 
 /// The link cascade a move of `notes/a.md` to `archive/a.md` carries: one
@@ -7150,6 +7154,63 @@ fn a_file_state_is_an_object_tagged_state() {
         wire(&FileState::present(content_hash(0x01))),
         format!(r#"{{"state":"present","hash":"{}"}}"#, hash_text(0x01))
     );
+}
+
+/// **A present file is quarantined only where it says so.** Bytes that do
+/// not decode as a vault document write `"quarantined":true` beside their
+/// hash and read back quarantined; a file that decodes leaves the flag out,
+/// and a state written without it — every plan made before it existed —
+/// reads as one that decodes. `null`, another type and a second flag are
+/// refused.
+#[test]
+fn a_present_file_is_quarantined_only_where_it_says_so() {
+    let hash = hash_text(0x01);
+    let quarantined = FileState::quarantined(content_hash(0x01));
+    let json = format!(r#"{{"state":"present","hash":"{hash}","quarantined":true}}"#);
+    assert_eq!(wire(&quarantined), json);
+    round_trip(&quarantined);
+    assert!(!quarantined.is_document());
+    assert_eq!(
+        serde_json::from_str::<FileState>(&format!(r#"{{"state":"present","hash":"{hash}"}}"#))
+            .ok(),
+        Some(FileState::present(content_hash(0x01)))
+    );
+    assert_eq!(
+        serde_json::from_str::<FileState>(&format!(
+            r#"{{"state":"present","hash":"{hash}","quarantined":false}}"#
+        ))
+        .ok(),
+        Some(FileState::present(content_hash(0x01)))
+    );
+    assert!(FileState::present(content_hash(0x01)).is_document());
+    assert!(!FileState::absent().is_document());
+    for state in [
+        format!(r#"{{"state":"present","hash":"{hash}","quarantined":null}}"#),
+        format!(r#"{{"state":"present","hash":"{hash}","quarantined":"yes"}}"#),
+        format!(r#"{{"state":"present","hash":"{hash}","quarantined":true,"quarantined":false}}"#),
+        r#"{"state":"absent","quarantined":true}"#.to_string(),
+    ] {
+        assert!(
+            serde_json::from_str::<FileState>(&state).is_err(),
+            "{state} read as a file state"
+        );
+    }
+}
+
+/// **Two states hold the same content where both are absent or both hash
+/// alike**, whatever either says of whether the bytes decode: that follows
+/// from the bytes, so it is no part of which bytes a file holds.
+#[test]
+fn two_states_hold_the_same_content_by_their_hash_alone() {
+    let present = FileState::present(content_hash(0x01));
+    let quarantined = FileState::quarantined(content_hash(0x01));
+    assert!(present.same_content(&quarantined));
+    assert!(present.same_content(&present));
+    assert!(FileState::absent().same_content(&FileState::absent()));
+    assert!(!present.same_content(&FileState::present(content_hash(0x02))));
+    assert!(!present.same_content(&FileState::absent()));
+    assert_eq!(quarantined.hash(), Some(&content_hash(0x01)));
+    assert_eq!(FileState::absent().hash(), None);
 }
 
 /// **A link is keyed by its holder, its syntax and its address as written,
@@ -8674,7 +8735,14 @@ fn resolution_check(resolves: &Resolves) -> String {
 fn state_check(state: &FileState) -> String {
     match state {
         FileState::Absent {} => "absent".to_string(),
-        FileState::Present { hash } => format!("present at {hash}"),
+        FileState::Present {
+            hash,
+            quarantined: false,
+        } => format!("present at {hash}"),
+        FileState::Present {
+            hash,
+            quarantined: true,
+        } => format!("quarantined at {hash}"),
     }
 }
 
@@ -8783,7 +8851,8 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         file_states().iter().map(state_check).collect::<Vec<_>>(),
         [
             "absent".to_string(),
-            format!("present at {}", hash_text(0x01))
+            format!("present at {}", hash_text(0x01)),
+            format!("quarantined at {}", hash_text(0x02)),
         ]
     );
 }

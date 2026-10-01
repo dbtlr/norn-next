@@ -14,7 +14,7 @@ use norn_wire::{
 };
 
 use super::observe::{
-    TargetState, Unit, failed_conditions, identity, is_create, is_removal, observe,
+    TargetState, Unit, failed_conditions, identity, is_create, is_removal, misread, observe,
     recorded_lineage, transition_index, units,
 };
 use super::recompose::{Recomposed, disagreement, recompose};
@@ -47,7 +47,7 @@ pub(super) struct StagedPlan {
 ///
 /// **Plain data.** The unit names the plan's transitions by index, and the
 /// kernel's record names the target, its root, its transition's hashes and
-/// its shadow; neither holds a handle or a byte of content (ADR 0031).
+/// its shadow; neither holds a handle or a byte of content (ADR 0032).
 #[derive(Debug)]
 pub(super) struct StagedTarget {
     pub(super) unit: Unit,
@@ -68,7 +68,7 @@ pub(super) enum Held {
 }
 
 /// When a publication runs: creates first, then replaces (a respell among
-/// them), then removals (ADR 0031).
+/// them), then removals (ADR 0032).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Phase {
     Create,
@@ -207,14 +207,17 @@ pub(super) struct Checked {
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; no target
-/// drifted and every content condition holds; the operations, run again from
-/// the before-states, are exactly the plan's transitions ([`recompose`]); the
-/// plan's resolution change set, computed again from those results through
-/// `links` ([`link_checks`]), is exactly the one it records; and every result
-/// passes the vault schema, or, for a forced plan, has each violation it
-/// introduces listed rather than refused. A plan whose store paths, shape,
-/// target places or recomposition fail is not what its operations do: its own
+/// the vault gives it, at a place the vault reads documents at; the plan
+/// records whether each hash's bytes decode as a document one way, and as
+/// the bytes a target holds of its change decode ([`misread`]); no target
+/// drifted and every content condition holds; the
+/// operations, run again from the before-states, are exactly the plan's
+/// transitions ([`recompose`]); the plan's resolution change set, computed
+/// again from those results through `links` ([`link_checks`]), is exactly the
+/// one it records; and every result passes the vault schema, or, for a forced
+/// plan, has each violation it introduces listed rather than refused. A plan
+/// whose store paths, shape, target places, recorded decoding or
+/// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
 /// schema violation, a taken name, a replaced root and an I/O failure each
@@ -256,6 +259,10 @@ pub(super) fn check(
         .collect();
     if !unplaced.is_empty() {
         return Err(Unfit::Invalid(disagreement(unplaced)));
+    }
+    let misread = misread(plan, &states);
+    if !misread.is_empty() {
+        return Err(Unfit::Invalid(disagreement(misread)));
     }
     let mut checks: Vec<RefusedCheck> = drifted_checks(plan, &states);
     checks.extend(
@@ -300,10 +307,13 @@ pub(super) fn check(
         .transitions
         .iter()
         .zip(after)
-        .map(|(transition, after)| Target {
-            path: &transition.path,
-            before: matches!(transition.before, FileState::Present { .. }),
-            after,
+        .map(|(transition, after)| {
+            Target::new(
+                &transition.path,
+                &transition.before,
+                &transition.after,
+                after,
+            )
         })
         .collect();
     let recomputed = change_set(
@@ -487,7 +497,7 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// set holds that it does not record is unrecorded. A content condition is
 /// not an entry, and is judged on its own.
 ///
-/// **The set is exact** (ADR 0031): a link whose resolution the vault outside
+/// **The set is exact** (ADR 0032): a link whose resolution the vault outside
 /// the plan moved since planning — a document created or removed there that
 /// a recorded link now names, or a new link to a document the plan moves —
 /// refuses the plan, and the refusal's fresh plan records the set as it
@@ -656,13 +666,13 @@ fn stage_one(
                 (FileState::Absent {}, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Create { content }
                 }
-                (FileState::Present { hash }, FileState::Present { .. }, Some(content)) => {
+                (FileState::Present { hash, .. }, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Replace {
                         before: kernel_hash(hash),
                         content,
                     }
                 }
-                (FileState::Present { hash }, FileState::Absent {}, _) => {
+                (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
                     norn_fs::Transition::Remove {
                         before: kernel_hash(hash),
                     }
@@ -673,10 +683,10 @@ fn stage_one(
         }
         Unit::Respell { old, new } => {
             let (old, new) = (&plan.transitions[old], &plan.transitions[new]);
-            let FileState::Present { hash } = &old.before else {
+            let FileState::Present { hash, .. } = &old.before else {
                 unreachable!("a respell's old spelling holds a document before");
             };
-            let content = if new.after == old.before {
+            let content = if new.after.same_content(&old.before) {
                 None
             } else {
                 content

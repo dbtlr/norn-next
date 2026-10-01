@@ -5,7 +5,7 @@
 //! **What the applier owns.** Invariant 4 names one plan vocabulary and one
 //! applier; this is that applier, and every write — a verb's one operation, a
 //! caller's plan, a repair — reaches the vault through it once it is resolved
-//! ([ADR 0031]). The flow is four phases, one module each:
+//! ([ADR 0032]). The flow is four phases, one module each:
 //!
 //! - [`observe`] — what each target holds now, at the exact spelling the plan
 //!   writes: its before-state, its after-state (landed, whichever writer put
@@ -64,7 +64,7 @@
 //! targets; no is a teardown, and the applier removes every shadow and
 //! publishes nothing.
 //!
-//! [ADR 0031]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md
+//! [ADR 0032]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md
 
 mod observe;
 mod outcome;

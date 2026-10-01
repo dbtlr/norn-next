@@ -17,7 +17,9 @@ use norn_wire::{
     ApplyReport, ErrorDetail, ErrorEnvelope, InterruptionCause, Operation, ResolvedPlan,
 };
 
-use super::tests::{Fixture, applied, breaking, creating, deleting, editing, moving, path};
+use super::tests::{
+    Fixture, applied, breaking, creating, deleting, editing, moving, path, quarantined_fixture,
+};
 
 const CHILD: &str = "NORN_APPLIER_CHILD";
 const VAULT: &str = "NORN_APPLIER_VAULT";
@@ -604,4 +606,50 @@ fn a_target_found_inside_its_publication_whose_folder_is_not_synced_interrupts_t
         Some("# Gone\n"),
         "nothing after it published"
     );
+}
+
+/// **A quarantined file's delete or move cut short at any publication is
+/// finished by sending it again, computing the set it recorded.** The plan
+/// records no link change, since no document stands at the file on either
+/// side; once part of it landed, the applier reads a target whose
+/// before-bytes are gone as the plan records it — quarantined — and one
+/// whose bytes it holds by those bytes, so the re-send previews as the plan
+/// it is and lands.
+#[test]
+fn a_quarantined_files_delete_or_move_cut_short_is_finished_by_sending_it_again() {
+    let mut fired = 0;
+    for operations in [
+        vec![deleting("q.md"), editing("d.md", "d", "dd")],
+        vec![moving("q.md", "elsewhere/q.md")],
+    ] {
+        for armed in [
+            "swap@1=ends",
+            "unlink@2=ends",
+            "parent-sync@1=ends",
+            "parent-sync@2=ends",
+        ] {
+            let mut fixture = quarantined_fixture();
+            let plan = fixture.plan(operations.clone());
+            assert_eq!(plan.conditions, vec![], "{armed}");
+            let child = run_child(&fixture, &plan, armed);
+            if child.hits.is_empty() {
+                assert!(child.lived, "{armed}: the child died unarmed");
+            } else {
+                fired += 1;
+                assert!(!child.lived, "{armed}: the child outlived its end");
+            }
+            assert_eq!(
+                fixture
+                    .preview(plan.clone())
+                    .map(|(previewed, _)| previewed),
+                Ok(plan.clone()),
+                "{armed}"
+            );
+            applied(fixture.apply(plan));
+            assert!(!fixture.vault.join("q.md").exists(), "{armed}");
+        }
+    }
+    // Each plan publishes twice — a rename, then the removal's unlink — and
+    // syncs after each.
+    assert_eq!(fired, 2 * 4, "every position was reached");
 }

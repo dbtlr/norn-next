@@ -12,7 +12,7 @@ use norn_wire::{
 };
 
 use super::cascade::generate;
-use super::compose::{Composition, compose, content_hash, touched, touches};
+use super::compose::{Composition, compose, content_hash, holding, touched, touches};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
@@ -61,7 +61,7 @@ impl<E> PlanningFailure<E> {
 ///
 /// **`met` is what a refresh already landed.** A refused apply's fresh plan
 /// drops every operation whose targets all hold their after-states and
-/// re-resolves the rest (ADR 0031), so an operation that remains may require
+/// re-resolves the rest (ADR 0032), so an operation that remains may require
 /// one that was dropped. `met` names those: a requirement on one is
 /// satisfied, orders nothing, and is left off the operation the resolved plan
 /// carries, so the fresh plan is a whole plan that can be sent back as it is.
@@ -177,7 +177,8 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
     // The resolution change set is recorded as the vault stands with every
-    // target at its after-state, judged from the bytes composition wrote.
+    // target at its after-state, judged from the bytes composition wrote and
+    // from whether the plan's file states say a document stands.
     let targets = Target::of(&composition);
     let changed = change_set(
         &targets,
@@ -196,7 +197,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         .into_iter()
         .map(|(path, target)| {
             let after = match &target.after {
-                Some(bytes) => FileState::present(content_hash(bytes)),
+                Some(bytes) => holding(bytes, content_hash(bytes)),
                 None => FileState::absent(),
             };
             Transition::new(path, target.before, after)
@@ -254,7 +255,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
 /// it stands rather than as a before-state.
 ///
 /// **A condition is judged as the vault stands at the plan's after-state**
-/// (ADR 0031): on a file the plan writes, against the before-state the plan
+/// (ADR 0032): on a file the plan writes, against the before-state the plan
 /// reads there, which it checks; on a file it does not write, against the file
 /// as it stands now, which the plan does not change.
 fn failures<V: VaultView>(
@@ -333,7 +334,7 @@ fn unmet_condition<V: VaultView>(
         return Ok(Some(detail));
     }
     let holds = match composition.before(&identity) {
-        Some(before) => *before == FileState::present(hash.clone()),
+        Some(before) => before.hash() == Some(hash),
         None => match view.entry(&identity)? {
             // The plan records the condition at the spelling the tree lists,
             // so that spelling is the one the index must be able to hold.
@@ -391,7 +392,7 @@ fn unmet_expectation<V: VaultView>(
         }
         view::Entry::Document { bytes, hash, .. } => {
             debug_assert!(
-                before.is_none_or(|before| *before == FileState::present(hash)),
+                before.is_none_or(|before| before.hash() == Some(&hash)),
                 "the view remembers the bytes a written document's before-state hashes"
             );
             edit::expectation_unmet(path, &bytes, field, expect)
