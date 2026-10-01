@@ -9,15 +9,19 @@
 //! thing wherever it arrives from. A refresh names the operations an earlier
 //! apply already landed, which it drops, so a remaining operation's
 //! requirement on one of them is met rather than a fault. Planning is seven
-//! steps, one module each:
+//! steps, each its own module, expansion two:
 //!
 //! - [`expand`] — each `where` target turned into one operation per document
 //!   it matches, each naming its document by path, through the find builder
 //!   on the one snapshot the request holds, and each folder move into one
 //!   document move per document the folder holds, naming every file it
 //!   leaves behind; a `where` matching nothing, or nothing as asked, and a
-//!   folder move with nothing to move are left unresolved in words. What
-//!   follows plans only path targets.
+//!   folder move with nothing to move are left unresolved in words; then
+//!   [`rule`] turns each creation by rule into the one `create_document` its
+//!   rule makes, at its place, its path filled and numbered and its content
+//!   composed from the pinned schema's rule and one clock reading for the
+//!   plan, or leaves it unresolved naming why. What follows plans only path
+//!   targets and concrete creates.
 //! - [`order`] — the plan's shape: the order its operations compose in, and
 //!   the faults `request/plan-invalid` answers — an identifier carried twice,
 //!   a requirement nothing carries, a cycle of requirements, and a cycle of
@@ -139,4 +143,5 @@ pub(crate) mod lineage;
 pub(crate) mod links;
 pub(crate) mod order;
 pub(crate) mod resolve;
+pub(crate) mod rule;
 pub(crate) mod view;

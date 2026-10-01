@@ -451,11 +451,13 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::MoveFolder { from, .. } => Err(format!(
                 "the folder move from `{from}` is planned only as the document moves it expands into, and was not expanded"
             )),
-            // Creation by a schema's rule is NORN-298's planner to expand
-            // into a `create_document`; until it lands, no rule names a path
-            // or composes content, so the operation is left unresolved.
+            // Planning expands a creation by rule into the `create_document`
+            // its rule makes before anything composes (`super::rule`), so
+            // only a plan resolved without expansion meets one here, which
+            // the applier refuses first as an unexpanded rule.
             OperationKind::CreateByRule { .. } => Err(
-                "creating a document by a creation rule is not planned yet (NORN-298)".to_string(),
+                "a creation by rule is planned only as the `create_document` it expands into, and was not expanded"
+                    .to_string(),
             ),
             OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }

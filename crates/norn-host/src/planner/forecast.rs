@@ -3,6 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use norn_fs::NormalizedPath;
@@ -87,13 +88,15 @@ fn folders_removed<V: VaultView>(
     let mut removed = BTreeSet::new();
     for (folder, spelled) in candidates {
         let mut emptied = true;
-        for name in view.folder_names(&folder)? {
+        view.visit_folder_names(&folder, &mut |name| {
             let inside = identity(&folder.as_path().join(name), view);
-            if !inside.is_some_and(|inside| gone.contains(&inside)) {
+            if inside.is_some_and(|inside| gone.contains(&inside)) {
+                ControlFlow::Continue(())
+            } else {
                 emptied = false;
-                break;
+                ControlFlow::Break(())
             }
-        }
+        })?;
         if emptied {
             gone.insert(folder);
             removed.insert(spelled);

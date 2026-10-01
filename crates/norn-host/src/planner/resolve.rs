@@ -890,11 +890,12 @@ mod tests {
         assert!(unexpanded.plan.transitions.is_empty());
     }
 
-    /// **A creation by rule is left unresolved until a planner expands it**,
-    /// saying it is not planned yet, and writes nothing: no rule names a path
-    /// or composes content here.
+    /// **A creation by rule reaching planning unexpanded is left
+    /// unresolved**, saying it is planned only as the create it expands
+    /// into, and writes nothing: only a plan resolved without expansion
+    /// meets one here.
     #[test]
-    fn a_creation_by_rule_is_left_unresolved_until_it_is_planned() {
+    fn an_unexpanded_creation_by_rule_is_left_unresolved() {
         let vault = MemoryVault::with(&[("notes/a.md", "a\n")]);
         let by_rule = planned(
             &vault,
@@ -906,7 +907,7 @@ mod tests {
             ))],
         );
         let detail = unresolved_detail(&by_rule);
-        assert!(detail.contains("NORN-298"), "{detail}");
+        assert!(detail.contains("not expanded"), "{detail}");
         assert!(by_rule.plan.transitions.is_empty());
     }
 
