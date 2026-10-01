@@ -25,7 +25,13 @@
 //! that document ([`removed_by`]): an ambiguous link is a backlink of none, a
 //! link the document holds goes with it, and a link in a holder the plan
 //! removes or edits away is none where the plan leaves the vault, while one
-//! the plan writes is. Saying neither flag, a delete a backlink names is left
+//! the plan adds is. Backlinks are read here before any cascade writes a
+//! link, so every link is judged by the text it had, as the change set
+//! judges a link a cascade writes by the text that cascade matched: one a
+//! move's cascade respells to the deleted document's name is none, and one
+//! that named it is one however it is respelled. Each delete is
+//! resolved by the one rule its link choice is held to
+//! ([`Removal::kept_by`]). Saying neither flag, a delete a backlink names is left
 //! unresolved naming every holder and how many links; leaving them broken it
 //! generates nothing. Rewriting them, its `rewrite_to` is read through the
 //! same door where the plan leaves the vault ([`rewrite_targets`]) and must
@@ -117,9 +123,9 @@ use norn_wire::{
 use super::compose::{Composition, Skipped};
 use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
-    Decider, EntryKey, LinkIndex, Named, RetargetNaming, Target, WrittenLinks, address, decider,
-    family_name, reach, reaching, removed_by, respells, retarget_namings, rewrite_targets,
-    selecting, stored_path, wire_family,
+    Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Target, WrittenLinks, address,
+    decider, family_name, reach, reaching, removed_by, respells, retarget_namings,
+    rewrite_destination, rewrite_targets, selecting, spelled, stored_path, wire_family,
 };
 use crate::derivation::document_links;
 
@@ -129,17 +135,85 @@ use crate::derivation::document_links;
 pub(crate) struct Generated {
     /// The link cascade of each operation that carries one, by its position.
     pub(crate) cascades: BTreeMap<usize, Vec<LinkRewrite>>,
-    /// Each operation the links it reads leave unresolved, by its position,
-    /// and why: a delete whose `rewrite_to` names no one document, or which
-    /// forbids its backlinks while a link names its document; and a wikilink
-    /// rewrite whose ends name no one document each, or which retargets no
-    /// wikilink.
+    /// Each wikilink rewrite the links it reads leave unresolved, by its
+    /// position, and why: one whose ends name no one document each, or which
+    /// retargets no wikilink, or one an earlier rewrite selecting its
+    /// wikilink leaves out.
     pub(crate) unresolved: BTreeMap<usize, UnresolvedReason>,
+    /// What each delete's link choice is judged by once the plan composes
+    /// with its cascades ([`Deletes::unkept`]).
+    pub(crate) deletes: Deletes,
+}
+
+/// What each delete of a plan is resolved by, read before any cascade writes
+/// a link and judged once the plan composes with its cascades, by the one
+/// rule its link choice is held to ([`Removal::kept_by`]).
+#[derive(Debug, Default)]
+pub(crate) struct Deletes {
+    /// What each rewriting delete's `rewrite_to` names, by its position.
+    rewritten_to: BTreeMap<usize, TargetNaming>,
+    /// The holder of each backlink of a document a delete forbidding them
+    /// removes that the plan leaves as written whatever composes, by the
+    /// delete's position.
+    held: BTreeMap<usize, Vec<norn_store::DocumentPath>>,
     /// Each backlink of a document a delete forbidding them removes that a
     /// wikilink rewrite's cascade respells instead, keyed as the change set
-    /// keys it, by the delete's position. Composition may yet leave one as
-    /// written, which then holds the delete back ([`held_back`]).
-    pub(crate) contested: BTreeMap<usize, Vec<EntryKey>>,
+    /// keys it, by the delete's position: no backlink once respelled, and
+    /// one still where composition leaves it as written.
+    contested: BTreeMap<usize, Vec<EntryKey>>,
+}
+
+impl Deletes {
+    /// Why each delete the plan its cascades composed into does not keep to
+    /// its link choice is left unresolved, by its position: `skipped` says
+    /// which links composition left as written, so a contested backlink
+    /// among them still names the removed document. **The one point
+    /// planning decides a delete at**, by the rule the applier holds a
+    /// resolved plan's deletes to again ([`Removal::kept_by`]).
+    pub(crate) fn unkept(
+        &self,
+        skipped: &[Skipped],
+        lineage: &Lineage,
+        normalizer: &PathNormalizer,
+    ) -> BTreeMap<usize, UnresolvedReason> {
+        let left: BTreeSet<EntryKey> = skipped
+            .iter()
+            .map(|skip| {
+                (
+                    skip.holder.as_str().to_string(),
+                    family_name(skip.syntax),
+                    skip.address.clone(),
+                )
+            })
+            .collect();
+        let mut unkept = BTreeMap::new();
+        for removal in lineage.removals() {
+            let mut holders = self
+                .held
+                .get(&removal.position)
+                .cloned()
+                .unwrap_or_default();
+            holders.extend(
+                self.contested
+                    .get(&removal.position)
+                    .into_iter()
+                    .flatten()
+                    .filter(|key| left.contains(*key))
+                    .filter_map(|(holder, _, _)| norn_store::DocumentPath::new(holder).ok()),
+            );
+            let named = self.rewritten_to.get(&removal.position);
+            if removal.kept_by(!holders.is_empty(), named, normalizer) {
+                continue;
+            }
+            let reason = if holders.is_empty() {
+                unnamed(removal, named, lineage, normalizer)
+            } else {
+                backlinks(holders)
+            };
+            unkept.insert(removal.position, reason);
+        }
+        unkept
+    }
 }
 
 /// What the plan `composition` composed generates from the links naming what
@@ -150,13 +224,16 @@ pub(crate) struct Generated {
 ///   would not name it after, respelled to name it where it lands.
 /// - **Each delete rewriting the links naming its document**: its
 ///   `rewrite_to` must name one document where the plan leaves the vault
-///   ([`rewrite_targets`]), else the delete is left unresolved ([`unnamed`]);
-///   where it does, every link naming the removed document that does not
-///   already name the target after the plan ([`rewritten_for`]) is respelled
-///   to name the target, by the same spellings a move's cascade writes.
-/// - **Each delete forbidding the links naming its document** that a link
-///   names is left unresolved, naming every holder ([`backlinks`]). A delete
-///   leaving them broken generates nothing.
+///   ([`rewrite_targets`]), else the delete is unkept ([`unnamed`]); where it
+///   does, every link naming the removed document that does not already name
+///   the target after the plan ([`super::links::rewritten_for`]) is
+///   respelled to name the target, by the same spellings a move's cascade
+///   writes.
+/// - **Each delete forbidding the links naming its document**: every
+///   backlink of it the plan leaves as written, which unkeeps it naming
+///   every holder ([`backlinks`]). A delete leaving them broken generates
+///   nothing. Each delete is judged once the plan composes with its
+///   cascades ([`Deletes::unkept`]).
 /// - **Each wikilink rewrite**: its `old` must name one document or none
 ///   before the plan, and its `new` one other document after it
 ///   ([`retarget_destination`]); where they do, every wikilink naming `old`
@@ -191,44 +268,20 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         destinations: BTreeMap::new(),
     };
     let targets = Target::of(composition);
-    let (overlay, probed) = reach(&targets, lineage, normalizer, &WrittenLinks::default());
+    let Reached {
+        overlay, probed, ..
+    } = reach(&targets, lineage, normalizer, &WrittenLinks::default());
 
-    // What each rewriting delete's target names after the plan: the one
-    // document its links are respelled to, or why the delete is left
-    // unresolved.
+    // What each rewriting delete's target names after the plan, and the one
+    // document its links are respelled toward where it names one a link can
+    // name.
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
-    let mut unresolved: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     for removal in lineage.removals() {
-        let Some(named) = rewritten_to.get(&removal.position) else {
-            continue;
-        };
-        match &named.after {
-            Resolves::One { path } => {
-                match (cascade.identity(path.as_str()), stored_path(path)) {
-                    (Some(file), Some(at)) => {
-                        cascade.destinations.insert(removal.position, (file, at));
-                    }
-                    // A document the store names that the vault's rule does
-                    // not, or the other way round, is no file a link can be
-                    // respelled toward: the delete is left out saying so,
-                    // never landed leaving the links it was to rewrite.
-                    _ => {
-                        let address = removal.rewrite_to().unwrap_or_default();
-                        unresolved.insert(
-                            removal.position,
-                            UnresolvedReason::no_longer_resolves(format!(
-                                "`rewrite_to` `{address}` names `{path}`, which is no path the links naming the removed document can be rewritten toward"
-                            )),
-                        );
-                    }
-                }
-            }
-            _ => {
-                unresolved.insert(
-                    removal.position,
-                    unnamed(removal, named, lineage, normalizer),
-                );
-            }
+        if let Some(destination) = rewritten_to
+            .get(&removal.position)
+            .and_then(|named| rewrite_destination(named, normalizer))
+        {
+            cascade.destinations.insert(removal.position, destination);
         }
     }
 
@@ -236,6 +289,7 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     // wikilinks are retargeted to, or why the rewrite is left unresolved;
     // the links naming its `old` are reached though the plan changes nothing
     // they name.
+    let mut unresolved: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     cascade.namings = retarget_namings(lineage, &overlay, index)?;
     for retarget in lineage.retargets() {
         match retarget_destination(retarget, &cascade.namings[&retarget.position], normalizer) {
@@ -414,9 +468,6 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
             None => forbidden.entry(position).or_default().push(holder),
         }
     }
-    for (position, holders) in forbidden {
-        unresolved.insert(position, backlinks(holders));
-    }
 
     let mut cascades: BTreeMap<usize, Vec<LinkRewrite>> = BTreeMap::new();
     for (owner, rewrite) in rewrites.into_values() {
@@ -425,63 +476,53 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
     Ok(Generated {
         cascades,
         unresolved,
-        contested: respelled,
+        deletes: Deletes {
+            rewritten_to,
+            held: forbidden,
+            contested: respelled,
+        },
     })
 }
 
-/// Why each delete forbidding the links naming its document does not
-/// resolve where composition left as written a backlink of it a wikilink
-/// rewrite's cascade was to respell (`contested`, by the delete's position),
-/// `skipped` saying which links composition left: the link still names the
-/// removed document, so every holder of such a link, and how many, hold the
-/// delete back as the applier would judge them.
-pub(crate) fn held_back(
-    contested: &BTreeMap<usize, Vec<EntryKey>>,
-    skipped: &[Skipped],
-) -> BTreeMap<usize, UnresolvedReason> {
-    let left: BTreeSet<EntryKey> = skipped
-        .iter()
-        .map(|skip| {
-            (
-                skip.holder.as_str().to_string(),
-                family_name(skip.syntax),
-                skip.address.clone(),
-            )
-        })
-        .collect();
-    contested
-        .iter()
-        .filter_map(|(&position, keys)| {
-            let held: Vec<norn_store::DocumentPath> = keys
-                .iter()
-                .filter(|key| left.contains(*key))
-                .filter_map(|(holder, _, _)| norn_store::DocumentPath::new(holder).ok())
-                .collect();
-            (!held.is_empty()).then(|| (position, backlinks(held)))
-        })
-        .collect()
-}
-
 /// Why the delete `removal` rewriting the links naming its document does not
-/// resolve, its `rewrite_to` naming not one document but `named` after the
-/// plan: several, headed as a read heads an ambiguous target; or none — the
-/// document the delete removes itself, said so, or no document at all.
+/// resolve, its `rewrite_to` naming `named` after the plan rather than one
+/// document a link can be respelled toward: one at a path the vault's rule or
+/// the store's grammar refuses, said so; several, headed as a read heads an
+/// ambiguous target; or none — the document the delete removes itself, said
+/// so, or no document at all.
 fn unnamed(
     removal: &Removal,
-    named: &TargetNaming,
+    named: Option<&TargetNaming>,
     lineage: &Lineage,
     normalizer: &PathNormalizer,
 ) -> UnresolvedReason {
     let address = removal.rewrite_to().unwrap_or_default();
-    if let (Resolves::Several {}, Some(candidates)) = (&named.after, &named.candidates) {
-        return UnresolvedReason::ambiguous_target(AmbiguousEnd::Target, candidates.clone());
+    if let Some(named) = named {
+        match (&named.after, &named.candidates) {
+            // A document the store names that the vault's rule does not, or
+            // the other way round, is no file a link can be respelled toward:
+            // the delete is left out saying so, never landed leaving the
+            // links it was to rewrite.
+            (Resolves::One { path }, _) => {
+                return UnresolvedReason::no_longer_resolves(format!(
+                    "`rewrite_to` `{address}` names `{path}`, which is no path the links naming the removed document can be rewritten toward"
+                ));
+            }
+            (Resolves::Several {}, Some(candidates)) => {
+                return UnresolvedReason::ambiguous_target(
+                    AmbiguousEnd::Target,
+                    candidates.clone(),
+                );
+            }
+            _ => {}
+        }
     }
-    let itself = match &named.before {
+    let itself = named.and_then(|named| match &named.before {
         Resolves::One { path } => removed_by(&named.before, lineage, normalizer)
             .is_some_and(|removes| removes.position == removal.position)
             .then_some(path),
         _ => None,
-    };
+    });
     UnresolvedReason::no_longer_resolves(match itself {
         Some(path) => format!(
             "`rewrite_to` `{address}` names `{path}`, the document the delete removes, so it leaves no document for the links naming it to name"
@@ -794,24 +835,6 @@ fn strip_extension(path: &str) -> Option<&str> {
     leaf[dot + 1..]
         .eq_ignore_ascii_case(DOCUMENT_EXTENSION)
         .then(|| &path[..path.len() - (leaf.len() - dot)])
-}
-
-/// `link` written with the target `target`, its protocol kept and nothing
-/// else of it: what a candidate spelling is probed as.
-fn spelled(link: &LinkFact, target: &str) -> LinkFact {
-    LinkFact {
-        family: link.family,
-        embed: false,
-        protocol: link.protocol.clone(),
-        target: target.to_string(),
-        title: None,
-        anchor: None,
-        span: norn_store::Span {
-            line: 0,
-            column: 0,
-            byte_offset: 0,
-        },
-    }
 }
 
 /// A stored path as the wire names it.

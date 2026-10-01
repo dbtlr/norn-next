@@ -320,8 +320,9 @@ pub(super) fn check(
     let refused_links = link_checks(&plan.conditions, &recomputed.entries);
     // A delete whose link choice the set it records contradicts — one
     // forbidding the links naming its document that a recorded link names,
-    // or one rewriting them to no one document — is one planning leaves
-    // unresolved, so the plan is not what its operations do. Where the set
+    // or one rewriting them to no one document a link can be respelled
+    // toward — is one planning leaves unresolved by the same rule
+    // (`Removal::kept_by`), so the plan is not what its operations do. Where the set
     // moved since planning, the refusal's fresh plan answers for it instead.
     // NORN-297: a move's or a rewriting delete's cascade omitting a rewrite
     // planning would generate is not held here; the set records the link it

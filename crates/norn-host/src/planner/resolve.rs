@@ -11,7 +11,7 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::cascade::{generate, held_back};
+use super::cascade::generate;
 use super::compose::{Composition, compose, content_hash, touched, touches};
 use super::edit;
 use super::forecast::forecast;
@@ -128,12 +128,12 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // Each move that resolves generates its cascade from the plan as it
         // composes without any, and a holder a left-out operation touches
         // takes the move down with it, as any file two operations share
-        // does; a delete forbidding the links naming its document falls
-        // where one does. What is left composes again, until nothing more
-        // falls.
+        // does; a delete its link choice does not keep falls once the plan
+        // composes with its cascades. What is left composes again, until
+        // nothing more falls.
         let generated = generate(&composition, &lineage, view.normalizer(), links)
             .map_err(PlanningFailure::Links)?;
-        let contested = generated.contested;
+        let deletes = generated.deletes;
         for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;
         }
@@ -146,14 +146,15 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             // left out in the composition's words, in every build, rather
             // than planned with a transition its cascade does not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-            // A forbidding delete's backlink a wikilink rewrite's cascade was
-            // to respell, and composition left as written, still names the
-            // removed document, so it holds the delete back.
-            let held = held_back(&contested, &composition.skipped);
-            if composition.unresolvable.is_empty() && held.is_empty() {
+            // Each delete is decided here, by the one rule its link choice
+            // is held to, from the backlinks the composed plan leaves: one a
+            // wikilink rewrite's cascade was to respell, and composition left
+            // as written, still names the removed document.
+            let unkept = deletes.unkept(&composition.skipped, &lineage, view.normalizer());
+            if composition.unresolvable.is_empty() && unkept.is_empty() {
                 break (order, lineage, composition);
             }
-            for (position, reason) in held {
+            for (position, reason) in unkept {
                 left_out.entry(position).or_insert(reason);
             }
             for unresolvable in &composition.unresolvable {
