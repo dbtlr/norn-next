@@ -1667,6 +1667,29 @@ fn a_plan_condition_another_writer_broke_refuses() {
     assert!(fixture.recorded.calls.borrow().is_empty());
 }
 
+/// **A link-resolution entry the applier cannot yet check refuses the plan
+/// (NORN-297).** Until the resolution change set is computed again at apply,
+/// an entry is never read as holding: the plan is refused naming it, and
+/// nothing is published.
+#[test]
+fn a_link_resolution_entry_refuses_until_it_is_checked() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let entry = norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+        norn_wire::Resolves::one(path("a.md")),
+        norn_wire::Resolves::one(path("a.md")),
+    );
+    plan.conditions.push(entry.clone());
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(entry)]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
 /// A plan that drops a condition its operations carry is refused: the
 /// condition is what its author's operation depends on.
 #[test]

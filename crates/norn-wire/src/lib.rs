@@ -559,8 +559,8 @@ pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::document::{
-    AuthoredPlan, FileState, OperationsTag, PlanCondition, PlanDocument, Provenance, ResolvedPlan,
-    ResolvedTag, SkippedFinding, Transition,
+    AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
+    ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,
 };
 pub use plan::forecast::{FolderPath, Forecast};
 pub use plan::hash::{ContentHash, IllegalContentHash};

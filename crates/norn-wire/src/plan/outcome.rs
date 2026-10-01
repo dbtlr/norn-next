@@ -43,10 +43,21 @@ pub enum RefusedCheck {
         /// What it holds.
         holds: FileState,
     },
-    /// A condition the plan carries does not hold.
+    /// A condition the plan carries does not hold: a file holds other
+    /// bytes, or the plan's resolution change set, computed again, does not
+    /// hold a link entry the plan records.
     #[non_exhaustive]
     ConditionFailed {
         /// The condition.
+        condition: PlanCondition,
+    },
+    /// The plan's resolution change set, computed again, holds an entry the
+    /// plan does not record: a link whose resolution the plan now changes,
+    /// which it did not when it was planned.
+    #[non_exhaustive]
+    ConditionUnrecorded {
+        /// The entry the change set holds, as the plan would have recorded
+        /// it.
         condition: PlanCondition,
     },
     /// A target's result would violate the vault schema where the plan writes,
@@ -74,6 +85,12 @@ impl RefusedCheck {
     /// The plan's `condition` does not hold.
     pub const fn condition_failed(condition: PlanCondition) -> Self {
         RefusedCheck::ConditionFailed { condition }
+    }
+
+    /// The plan's resolution change set holds `condition`, which the plan
+    /// does not record.
+    pub const fn condition_unrecorded(condition: PlanCondition) -> Self {
+        RefusedCheck::ConditionUnrecorded { condition }
     }
 
     /// The result at `path` would be filed under `kind`, about `target`,

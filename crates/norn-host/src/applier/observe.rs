@@ -323,22 +323,31 @@ pub(super) fn transition_index(
 
 /// Every condition the plan carries that the vault no longer meets.
 ///
-/// A condition is on a file the plan does not write, so it reads the same
-/// whatever of the plan has landed: it is judged against the file as it
-/// stands.
+/// A content-hash condition is on a file the plan does not write, so it reads
+/// the same whatever of the plan has landed: it is judged against the file as
+/// it stands.
+///
+/// **A link-resolution entry is not checked yet, so it fails (NORN-297).**
+/// Checking one means computing the plan's resolution change set again, which
+/// lands with link cascades; until then no planning records one, and a plan
+/// carrying one is refused rather than applied with a condition nobody read.
 pub(super) fn failed_conditions<V: VaultView>(
     plan: &ResolvedPlan,
     view: &V,
 ) -> Result<Vec<PlanCondition>, V::Error> {
     let mut failed = Vec::new();
     for condition in &plan.conditions {
-        let PlanCondition::ContentHash { path, hash } = condition;
-        let holds = match identity(view.normalizer(), path.as_str()) {
-            Some(identity) => matches!(
-                view.entry(&identity)?,
-                Entry::Document { at, hash: held, .. } if at == *path && held == *hash
-            ),
-            None => false,
+        let holds = match condition {
+            PlanCondition::ContentHash { path, hash } => {
+                match identity(view.normalizer(), path.as_str()) {
+                    Some(identity) => matches!(
+                        view.entry(&identity)?,
+                        Entry::Document { at, hash: held, .. } if at == *path && held == *hash
+                    ),
+                    None => false,
+                }
+            }
+            PlanCondition::LinkResolution { .. } => false,
         };
         if !holds {
             failed.push(condition.clone());

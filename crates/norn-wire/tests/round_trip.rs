@@ -25,23 +25,23 @@ use norn_wire::{
     FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
     FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
     HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRewrite, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams,
-    NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
-    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
-    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer,
-    VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet,
+    NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
+    OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    ResolvedTag, Resolves, RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet,
+    RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams,
+    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
+    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition,
+    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
+    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
+    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap,
+    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
+    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -6711,12 +6711,27 @@ fn author_conditions() -> Vec<AuthorCondition> {
     ]
 }
 
-/// Every condition a resolved plan carries.
+/// The link `[[a]]` in `notes/c.md`.
+fn a_link_key() -> LinkKey {
+    LinkKey::new(path("notes/c.md"), LinkFamily::Wikilink, "a")
+}
+
+/// Every condition a resolved plan carries: a file's content, and an entry of
+/// the resolution change set over every resolution on each side.
 fn plan_conditions() -> Vec<PlanCondition> {
-    vec![PlanCondition::content_hash(
-        path("notes/c.md"),
-        content_hash(0xcd),
-    )]
+    vec![
+        PlanCondition::content_hash(path("notes/c.md"), content_hash(0xcd)),
+        PlanCondition::link_resolution(
+            a_link_key(),
+            Resolves::one(path("notes/a.md")),
+            Resolves::none(),
+        ),
+        PlanCondition::link_resolution(
+            LinkKey::new(path("notes/d.md"), LinkFamily::Markdown, "vault://notes/a"),
+            Resolves::several(),
+            Resolves::one(path("archive/a.md")),
+        ),
+    ]
 }
 
 /// Every state a side of a transition holds.
@@ -6831,7 +6846,11 @@ fn resolved_plan_json() -> String {
             r#""operations":[{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}}],"#,
             r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
             r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
-            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}}],"#,
+            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","target":"a"}},"#,
+            r#""before":{{"resolves":"one","path":"notes/a.md"}},"after":{{"resolves":"none"}}}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","target":"vault://notes/a"}},"#,
+            r#""before":{{"resolves":"several"}},"after":{{"resolves":"one","path":"archive/a.md"}}}}],"#,
             r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
             r#""footnote":"finish the draft"}}"#
         ),
@@ -7061,8 +7080,46 @@ fn a_file_state_is_an_object_tagged_state() {
     );
 }
 
+/// **A link is keyed by its holder, its syntax and its address as written,
+/// protocol prefix included**, and an entry of the resolution change set
+/// names what that link resolves to on each side of the plan; a refusal names
+/// an entry computed again that the plan does not record in the same shape.
+#[test]
+fn a_link_resolution_is_one_entry_of_the_change_set() {
+    let entry = PlanCondition::link_resolution(
+        a_link_key(),
+        Resolves::several(),
+        Resolves::one(path("notes/a.md")),
+    );
+    let json = r#"{"condition":"link_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","target":"a"},"before":{"resolves":"several"},"after":{"resolves":"one","path":"notes/a.md"}}"#;
+    assert_eq!(wire(&entry), json);
+    round_trip(&entry);
+    assert_eq!(
+        wire(&RefusedCheck::condition_unrecorded(entry.clone())),
+        format!(r#"{{"check":"condition_unrecorded","condition":{json}}}"#)
+    );
+    for refused in [
+        json.replace(r#""resolves":"several""#, r#""resolves":"many""#),
+        json.replace(
+            r#""resolves":"several""#,
+            r#""resolves":"several","path":"a.md""#,
+        ),
+        json.replace(
+            r#""resolves":"one","path":"notes/a.md""#,
+            r#""resolves":"one""#,
+        ),
+        json.replace(r#""target":"a""#, r#""target":"a","anchor":"x""#),
+        json.replace(r#""syntax":"wikilink","#, ""),
+    ] {
+        assert!(
+            serde_json::from_str::<PlanCondition>(&refused).is_err(),
+            "{refused} read as a condition"
+        );
+    }
+}
+
 /// An author's condition and a plan's condition are two types, each tagged
-/// `condition`, and today each says what one file holds.
+/// `condition`.
 #[test]
 fn a_condition_is_an_object_tagged_condition() {
     assert_eq!(
@@ -7162,6 +7219,10 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         "/transitions/0/before",
         "/transitions/0/after",
         "/conditions/0",
+        "/conditions/1",
+        "/conditions/1/link",
+        "/conditions/1/before",
+        "/conditions/1/after",
         "/provenance",
         "/provenance/skipped/0",
     ] {
@@ -7532,6 +7593,11 @@ fn refused_checks() -> Vec<RefusedCheck> {
         RefusedCheck::condition_failed(PlanCondition::content_hash(
             path("notes/c.md"),
             content_hash(0xcd),
+        )),
+        RefusedCheck::condition_unrecorded(PlanCondition::link_resolution(
+            a_link_key(),
+            Resolves::one(path("notes/a.md")),
+            Resolves::several(),
         )),
         RefusedCheck::schema_violation(
             path("notes/a.md"),
@@ -8407,6 +8473,28 @@ fn value_decision(value: &AuthoredValue) -> String {
 fn plan_check(condition: &PlanCondition) -> String {
     match condition {
         PlanCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
+        PlanCondition::LinkResolution {
+            link:
+                LinkKey {
+                    holder,
+                    syntax,
+                    target,
+                },
+            before,
+            after,
+        } => format!(
+            "{syntax:?} {target} in {holder}: {} to {}",
+            resolution_check(before),
+            resolution_check(after)
+        ),
+    }
+}
+
+fn resolution_check(resolves: &Resolves) -> String {
+    match resolves {
+        Resolves::One { path } => format!("one {path}"),
+        Resolves::None {} => "none".to_string(),
+        Resolves::Several {} => "several".to_string(),
     }
 }
 
@@ -8512,7 +8600,11 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
     );
     assert_eq!(
         plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
-        [format!("notes/c.md at {}", hash_text(0xcd))]
+        [
+            format!("notes/c.md at {}", hash_text(0xcd)),
+            "Wikilink a in notes/c.md: one notes/a.md to none".to_string(),
+            "Markdown vault://notes/a in notes/d.md: several to one archive/a.md".to_string(),
+        ]
     );
     assert_eq!(
         file_states().iter().map(state_check).collect::<Vec<_>>(),

@@ -9,7 +9,8 @@
 //! a plan this build cannot read is refused rather than migrated.
 //!
 //! **Three kinds of fact, three places.** An author's condition sits on an
-//! operation; the conditions a resolved plan carries are [`PlanCondition`]s,
+//! operation; the conditions a resolved plan carries are [`PlanCondition`]s —
+//! a file's content, or one entry of the plan's resolution change set —
 //! checked when it is applied; and [`Provenance`] records what a plan was
 //! planned from and is never checked. Keeping them three types means a
 //! condition cannot be mistaken for provenance, and an author's condition
@@ -77,7 +78,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
-use crate::document::DocumentPath;
+use crate::document::{DocumentPath, LinkFamily};
 use crate::plan::hash::ContentHash;
 use crate::plan::operation::{Operation, OperationKind, written};
 use crate::plan::outcome::PlanFault;
@@ -138,11 +139,92 @@ impl Transition {
     }
 }
 
-/// A fact about a file the plan does not write, which must still hold when the
-/// plan is applied.
+/// One link, as a plan names it: the document holding it, its syntax and its
+/// address — what decides which documents it resolves to.
+///
+/// On the wire a key is one object:
+/// `{"holder":"notes/c.md","syntax":"wikilink","target":"vault://notes/a"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkKey {
+    /// The document holding the link.
+    pub holder: DocumentPath,
+    /// The syntax the link is written in.
+    pub syntax: LinkFamily,
+    /// The link's address, exactly as written, its protocol prefix included:
+    /// `vault://notes/a` for a link written with the `vault` protocol, and
+    /// `notes/a` for one written with none.
+    pub target: String,
+}
+
+impl LinkKey {
+    /// The link of `syntax` in the document at `holder`, written with the
+    /// address `target`.
+    pub fn new(holder: DocumentPath, syntax: LinkFamily, target: impl Into<String>) -> Self {
+        LinkKey {
+            holder,
+            syntax,
+            target: target.into(),
+        }
+    }
+}
+
+/// What one link resolves to: exactly one document, none, or several.
+///
+/// On the wire a resolution is an object tagged `resolves`:
+/// `{"resolves":"one","path":"notes/a.md"}`, `{"resolves":"none"}`,
+/// `{"resolves":"several"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "resolves", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Resolves {
+    /// The link resolves to exactly this document.
+    One {
+        /// The document it resolves to.
+        path: DocumentPath,
+    },
+    /// The link resolves to no document: it is broken.
+    None {},
+    /// The link resolves to more than one document: it is ambiguous.
+    Several {},
+}
+
+impl Resolves {
+    /// The link resolves to the document at `path`.
+    pub const fn one(path: DocumentPath) -> Self {
+        Resolves::One { path }
+    }
+
+    /// The link resolves to no document.
+    pub const fn none() -> Self {
+        Resolves::None {}
+    }
+
+    /// The link resolves to more than one document.
+    pub const fn several() -> Self {
+        Resolves::Several {}
+    }
+}
+
+/// A fact a resolved plan depends on, which must still hold when it is
+/// applied.
+///
+/// **Two kinds of fact.** A content hash is a fact about a file the plan does
+/// not write. A link resolution is one entry of the plan's resolution change
+/// set: how one link resolves with every target of the plan at its
+/// before-state, and with every target at its after-state, so a plan's own
+/// progress never changes it. Its link may sit in a file the plan writes — a
+/// link a cascade rewrites has an entry — so it is not a fact about a file
+/// the plan leaves alone.
+///
+/// **The change set is exact.** It holds one entry for every link whose
+/// resolution the plan changes, and no other, so the applier computes it
+/// again and refuses on any difference: an entry the plan records that the
+/// set computed again does not hold, and an entry the set computed again
+/// holds that the plan does not record.
 ///
 /// On the wire a condition is an object tagged `condition`:
-/// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`.
+/// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
+/// `{"condition":"link_resolution","link":{…},"before":{"resolves":"one","path":"a.md"},"after":{"resolves":"none"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanCondition {
@@ -153,12 +235,31 @@ pub enum PlanCondition {
         /// The hash of what it must hold.
         hash: ContentHash,
     },
+    /// One link resolves as recorded before the plan, and as recorded after
+    /// it: one entry of the plan's resolution change set.
+    LinkResolution {
+        /// The link.
+        link: LinkKey,
+        /// What it resolves to with every target at its before-state.
+        before: Resolves,
+        /// What it resolves to with every target at its after-state.
+        after: Resolves,
+    },
 }
 
 impl PlanCondition {
     /// The file at `path` holds the bytes whose hash is `hash`.
     pub const fn content_hash(path: DocumentPath, hash: ContentHash) -> Self {
         PlanCondition::ContentHash { path, hash }
+    }
+
+    /// `link` resolves to `before` before the plan and to `after` after it.
+    pub const fn link_resolution(link: LinkKey, before: Resolves, after: Resolves) -> Self {
+        PlanCondition::LinkResolution {
+            link,
+            before,
+            after,
+        }
     }
 }
 

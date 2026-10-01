@@ -207,8 +207,13 @@ fn conditions_differ<V: VaultView>(
     let carried: Vec<(NormalizedPath, &norn_wire::ContentHash)> = plan
         .conditions
         .iter()
-        .filter_map(|PlanCondition::ContentHash { path, hash }| {
-            Some((identity(normalizer, path.as_str())?, hash))
+        .filter_map(|condition| match condition {
+            PlanCondition::ContentHash { path, hash } => {
+                Some((identity(normalizer, path.as_str())?, hash))
+            }
+            // A link entry says how a link resolves, not what a file holds,
+            // so no author condition is carried by one.
+            PlanCondition::LinkResolution { .. } => None,
         })
         .collect();
     let carries = |file: &NormalizedPath, hash: Option<&norn_wire::ContentHash>| {

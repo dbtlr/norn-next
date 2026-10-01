@@ -3114,9 +3114,34 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         sorted(["content_hash", "expected_value"])
     );
     assert_eq!(
-        tag_constants(&schema_of::<PlanCondition>(), "condition"),
-        ["content_hash"]
+        sorted(tag_constants(&schema_of::<PlanCondition>(), "condition")),
+        sorted(["content_hash", "link_resolution"])
     );
+    let conditions = schema_of::<PlanCondition>();
+    let entry = branch(&conditions, "condition", "link_resolution");
+    assert_eq!(
+        required_names(entry),
+        ["condition", "link", "before", "after"]
+            .into_iter()
+            .collect()
+    );
+    assert!(refuses_unknown_keys(entry), "{entry} admits any key");
+    let key = definition(&conditions, "LinkKey");
+    assert_eq!(
+        property_names(key),
+        ["holder", "syntax", "target"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(key), "{key} admits any key");
+    let resolves = definition(&conditions, "Resolves");
+    assert_eq!(
+        sorted(tag_constants(resolves, "resolves")),
+        sorted(["one", "none", "several"])
+    );
+    for resolution in ["one", "none", "several"] {
+        assert!(refuses_unknown_keys(branch(
+            resolves, "resolves", resolution
+        )));
+    }
     for schema in [schema_of::<AuthorCondition>(), schema_of::<PlanCondition>()] {
         let branch = branch(&schema, "condition", "content_hash");
         assert!(refuses_unknown_keys(branch), "{branch} admits any key");
@@ -3314,6 +3339,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
         sorted([
             "drifted",
             "condition_failed",
+            "condition_unrecorded",
             "schema_violation",
             "name_taken"
         ])
