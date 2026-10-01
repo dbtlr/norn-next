@@ -144,8 +144,9 @@ pub struct Link {
     /// right is absent rather than guessed.
     ///
     /// A span being present is not a licence to splice one family's grammar
-    /// over the other's: [`reconstruct_wikilink`] still refuses a Markdown
-    /// link, whose target is relative to the document it sits in.
+    /// over the other's: a rewrite names one family, and a wikilink rewrite
+    /// never reaches a Markdown link, whose target is relative to the
+    /// document it sits in. See [`Document::rewrite_links`](crate::Document::rewrite_links).
     pub stem_range: Option<Range<usize>>,
     /// The display title, trimmed — after `|` for a wikilink, the bracket text
     /// for a Markdown link. A Markdown link always has one, `Some("")`
@@ -553,8 +554,8 @@ fn split_at_hash(raw: &str, hash: Option<usize>) -> (&str, Option<&str>, Option<
     }
 }
 
-/// Whether `target` can be written as a wikilink stem — reconstructing a link
-/// with it and re-parsing yields the same target.
+/// Whether `target` can be written as a wikilink stem — writing a link with it
+/// and re-parsing yields the same target.
 ///
 /// The delimiter bytes a target must not contain are `|` (begins the title),
 /// `#` (begins the anchor or block reference) and `[` / `]` (the fences). A
@@ -575,50 +576,11 @@ fn split_at_hash(raw: &str, hash: Option<usize>) -> (&str, Option<&str>, Option<
 /// author wrote, and changing that protocol is not a target rewrite.
 ///
 /// Every other byte, a bare `^` included, round-trips.
-pub fn wikilink_target_is_representable(target: &str) -> bool {
+pub(crate) fn wikilink_target_is_representable(target: &str) -> bool {
     !target.is_empty()
         && target.trim() == target
         && !target.contains(['|', '#', '[', ']', '\n', '\r'])
         && split_protocol(target).0.is_none()
-}
-
-/// Reconstruct a wikilink's text with `new_target` in place of its stem.
-///
-/// **Only the stem's bytes change.** The result is the token's own bytes with
-/// `new_target` spliced over [`Link::stem_range`], so the embed marker, the
-/// padding the author wrote, the protocol prefix, the fragment and the title
-/// all survive as written: `[[ Old | Title ]]` becomes `[[ New | Title ]]`.
-/// Minimal diffs are this crate's identity, and a rename cascade whose hunks
-/// read as exactly the rename is what that identity is for.
-///
-/// Returns `None` when `new_target` is not representable
-/// ([`wikilink_target_is_representable`]): emitting it would corrupt the link
-/// into a different shape, so the caller refuses or skips instead. Also `None`
-/// for an inline Markdown link, and for a hand-built fact whose span does not
-/// index its own bytes. A Markdown target is relative to the document it sits
-/// in, so one move respells it differently in every referencing file, and
-/// whether its new bytes read back as written depends on the document around
-/// them: [`Document::rewrite_links`](crate::Document::rewrite_links) is where
-/// a destination is respelled, with a target computed for its document and
-/// the whole document read back.
-///
-/// Three more refusals, each the other half of something this crate already
-/// recognizes:
-///
-/// - **A token carrying a line break.** `[[Target\nOther]]` is recognized, and
-///   an unclosed `[[` can make one span two paragraphs. Splicing a single-line
-///   replacement over those bytes reflows the text the token swallowed, so the
-///   recognize-and-refuse pair is real rather than documented.
-/// - **A non-`vault` protocol.** `[[https://Old Note|Docs]]` has a stem, but
-///   the stem is part of a URL and a vault rename has no business in it. The
-///   reserved `vault` is the exception: a `vault://` stem *is* a vault path.
-/// - The target-side mirror of that rule, which
-///   [`wikilink_target_is_representable`] already applies.
-pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
-    if link.family != LinkFamily::Wikilink || !addresses_the_vault(link) {
-        return None;
-    }
-    respelled(link, new_target).ok()
 }
 
 /// Whether `link` addresses the vault: written with no protocol, or with the
@@ -654,9 +616,19 @@ pub enum RewriteSkip {
 /// `link`'s own bytes with `to` written over its stem, or why the link cannot
 /// carry it — the one stem splice both families' rewrites go through.
 ///
+/// Only the stem's bytes change, so the embed marker, the padding the author
+/// wrote, the protocol prefix, the fragment and the title all survive as
+/// written: `[[ Old | Title ]]` becomes `[[ New | Title ]]`. Minimal diffs are
+/// this crate's identity, and a rename cascade whose hunks read as exactly the
+/// rename is what that identity is for. Callers reach this only through
+/// [`Document::rewrite_links`](crate::Document::rewrite_links), which proves
+/// what it splices by reading the whole document back.
+///
 /// What may be written depends on the family. A wikilink takes only a target
 /// [`wikilink_target_is_representable`] accepts, and a wikilink token carrying
-/// a line break takes nothing ([`reconstruct_wikilink`] says why). A Markdown
+/// a line break takes nothing: `[[Target\nOther]]` is recognized, and an
+/// unclosed `[[` can make one span two paragraphs, so splicing a one-line
+/// replacement over those bytes would reflow the text the token swallowed. A Markdown
 /// destination takes any `to` that is non-empty and on one line, because
 /// CommonMark forbids a line ending inside a destination and an empty one
 /// would turn a link to a document into a link to the document holding it;
@@ -666,7 +638,10 @@ pub enum RewriteSkip {
 ///
 /// A link whose stem has no span inside its own bytes cannot be written over
 /// at all: a Markdown destination written with escapes or entity references,
-/// or a hand-built fact whose span does not index it.
+/// or one the parse could not locate in its token. A span that does not index
+/// the token's bytes is refused the same way rather than sliced, because
+/// [`Link`]'s fields are public and the relationship is checked where it is
+/// used.
 pub(crate) fn respelled(link: &Link, to: &str) -> Result<String, RewriteSkip> {
     let fits = match link.family {
         LinkFamily::Wikilink => {

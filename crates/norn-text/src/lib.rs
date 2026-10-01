@@ -148,10 +148,7 @@ pub use frontmatter::{
 };
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
-pub use link::{
-    BlockId, Link, LinkFamily, Resolution, RewriteSkip, parse_wikilinks_in_text,
-    reconstruct_wikilink, wikilink_target_is_representable,
-};
+pub use link::{BlockId, Link, LinkFamily, Resolution, RewriteSkip, parse_wikilinks_in_text};
 pub use rewrite::{RewrittenLinks, SkippedLink};
 pub use section::{
     AnchorReadings, Duplicates, SectionAddress, SectionError, SectionSpan, anchor_readings,

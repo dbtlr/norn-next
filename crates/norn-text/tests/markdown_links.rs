@@ -2,7 +2,7 @@
 //! with wikilinks, the resolution that tells them apart, and the fence around
 //! the forms that stay characterized rather than implemented.
 
-use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution, reconstruct_wikilink};
+use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution};
 
 fn markdown_links(body: &str) -> Vec<Link> {
     BodyScan::new(body)
@@ -361,7 +361,7 @@ fn a_token_reports_where_it_starts_and_how_far_it_runs() {
 
 // ── Rewriting is not a wikilink substitution ────────────────────────────
 
-/// A wikilink rewrite refuses a Markdown link even though its stem is
+/// A wikilink rewrite never touches a Markdown link even though its stem is
 /// nameable. Its target is relative to the document it sits in, so one move
 /// produces different bytes per referencing file — a target computed for each
 /// document by the layer that knows where documents are, and written by a
@@ -371,8 +371,6 @@ fn a_token_reports_where_it_starts_and_how_far_it_runs() {
 fn a_markdown_link_is_not_rewritten_as_a_wikilink() {
     let link = only("[t](./old.md)\n");
     assert_eq!(link.stem_range, Some(4..12));
-    assert_eq!(reconstruct_wikilink(&link, "./new.md"), None);
-    assert_eq!(reconstruct_wikilink(&link, "new"), None);
 
     let body = "[t](./old.md) and [[./old.md]]\n";
     let out = Document::parse(body).rewrite_links(LinkFamily::Wikilink, "./old.md", "new");

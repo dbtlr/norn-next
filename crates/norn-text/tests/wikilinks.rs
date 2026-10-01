@@ -8,8 +8,7 @@
 //! meaning — is somebody else's layer.
 
 use norn_text::{
-    BlockId, BodyScan, Document, Link, LinkFamily, SourceSpan, parse_wikilinks_in_text,
-    reconstruct_wikilink, wikilink_target_is_representable,
+    BlockId, BodyScan, Document, Link, LinkFamily, RewriteSkip, SourceSpan, parse_wikilinks_in_text,
 };
 
 fn only(text: &str) -> Link {
@@ -109,10 +108,6 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
     assert_eq!(blank.target, "");
     assert_eq!(blank.title, None);
     assert_eq!(blank.anchor, None);
-    assert_eq!(
-        reconstruct_wikilink(&blank, "new").as_deref(),
-        Some("[[   new]]")
-    );
 
     // `[[|]]` is a token with an empty target and an empty title.
     let piped = only("[[|]]");
@@ -131,17 +126,11 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
     assert_eq!(titled.target, "a");
     assert_eq!(titled.title.as_deref(), Some(""));
 
-    // None of the three has a representable target to be rewritten to, and
-    // reconstructing the two that do keeps the empty part they carry.
-    assert!(!wikilink_target_is_representable(&piped.target));
-    assert_eq!(
-        reconstruct_wikilink(&anchored, "new").as_deref(),
-        Some("[[new#]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&titled, "new").as_deref(),
-        Some("[[new|]]")
-    );
+    // Rewriting the two that carry a target keeps the empty part they carry.
+    for (raw, expected) in [("[[a#]]", "[[new#]]"), ("[[a|]]", "[[new|]]")] {
+        let out = Document::parse(raw).rewrite_links(LinkFamily::Wikilink, "a", "new");
+        assert_eq!(out.text, expected, "rewriting {raw:?}");
+    }
 }
 
 /// A soft break does not interrupt recognition. Two tokens on two lines of one
@@ -164,15 +153,18 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
     let straddling = "before [[Target\nOther]] after\n";
     let link = only(straddling);
     assert_eq!(link.target, "Target\nOther");
-    assert!(!wikilink_target_is_representable(&link.target));
-    assert_eq!(reconstruct_wikilink(&link, &link.target), None);
-    assert_eq!(reconstruct_wikilink(&link, "new"), None);
-    assert_eq!(
-        Document::parse(straddling)
-            .rewrite_links(LinkFamily::Wikilink, &link.target, "new")
-            .text,
-        straddling
-    );
+    for to in ["new", link.target.as_str()] {
+        let out = Document::parse(straddling).rewrite_links(LinkFamily::Wikilink, &link.target, to);
+        assert_eq!(out.text, straddling, "rewriting to {to:?}");
+        assert_eq!(
+            out.skipped
+                .iter()
+                .map(|skip| skip.reason)
+                .collect::<Vec<_>>(),
+            [RewriteSkip::LinkNotRewritable],
+            "rewriting to {to:?}"
+        );
+    }
 }
 
 /// The reason the refusal is not pedantry: an unclosed `[[` swallows every
@@ -199,11 +191,13 @@ fn a_bare_caret_is_an_ordinary_target_character() {
     let link = only("[[a^b]]");
     assert_eq!(link.target, "a^b");
     assert_eq!(link.block_ref, None);
-    assert!(wikilink_target_is_representable("a^b"));
-    assert_eq!(
-        reconstruct_wikilink(&link, "renamed").as_deref(),
-        Some("[[renamed]]")
-    );
+    let rewrite = |from: &str, to: &str| {
+        Document::parse("[[a^b]]")
+            .rewrite_links(LinkFamily::Wikilink, from, to)
+            .text
+    };
+    assert_eq!(rewrite("a^b", "renamed"), "[[renamed]]");
+    assert_eq!(rewrite("a^b", "c^d"), "[[c^d]]");
 }
 
 #[test]
