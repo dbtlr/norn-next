@@ -58,7 +58,7 @@ impl Publisher<'_> {
     /// **Any landing not synced stops publication**: a later target may draw
     /// on this one's content, and a source is not replaced or removed until
     /// every target drawing on it durably landed, its folders synced (ADR
-    /// 0031). What stops is discarded, and nothing after it publishes.
+    /// 0032). What stops is discarded, and nothing after it publishes.
     pub(super) fn publish(
         &self,
         plan: &ResolvedPlan,

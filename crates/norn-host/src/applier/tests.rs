@@ -762,7 +762,7 @@ fn each_publication_is_recorded_as_an_own_write_when_it_lands() {
 
 /// A target whose content is drawn from another target's before-state
 /// publishes before that source is replaced, whatever the plan's own order
-/// says (ADR 0031): moving `a.md` onto `b.md` and creating `a.md` afresh
+/// says (ADR 0032): moving `a.md` onto `b.md` and creating `a.md` afresh
 /// lands `b.md` first, so a crash between the two leaves the moved content
 /// standing at one of its names.
 #[test]
@@ -3098,7 +3098,7 @@ fn a_force_does_not_bypass_create_exclusivity_or_root_identity() {
 /// no-change transition, answered found**: a field set to the value it
 /// holds and a body replaced by itself resolve, their after-state is their
 /// before-state, and the apply writes nothing and reports each found, never
-/// wrote (ADR 0031's landed rule).
+/// wrote (ADR 0032's landed rule).
 #[test]
 fn an_edit_to_what_the_document_already_holds_lands_found() {
     let mut fixture = Fixture::new(&[

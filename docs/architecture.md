@@ -2418,7 +2418,7 @@ waits for the outcome through `PendingApply::wait`, after admission, and a calle
 waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
 the snapshot a planner read through
-([ADR 0031](decisions/0031-a-plan-is-staged-whole-and-finished-by-reapplying.md)).
+([ADR 0032](decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md)).
 
 Beside the four kinds that place, edit, move and remove whole documents, a plan carries
 document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body

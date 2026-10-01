@@ -376,7 +376,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     ///
     /// **A case-only rename is a move.** On a root that folds case a
     /// destination differing from its source only in case names the source
-    /// itself (ADR 0031), so the destination is not an occupied name: the
+    /// itself (ADR 0032), so the destination is not an occupied name: the
     /// document is written at the new spelling and taken away at the old, two
     /// transitions the applier publishes as one respell. A destination whose
     /// spelling is the source's own is a move onto itself, which names no

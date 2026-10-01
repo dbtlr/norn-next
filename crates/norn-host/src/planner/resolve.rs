@@ -60,7 +60,7 @@ impl<E> PlanningFailure<E> {
 ///
 /// **`met` is what a refresh already landed.** A refused apply's fresh plan
 /// drops every operation whose targets all hold their after-states and
-/// re-resolves the rest (ADR 0031), so an operation that remains may require
+/// re-resolves the rest (ADR 0032), so an operation that remains may require
 /// one that was dropped. `met` names those: a requirement on one is
 /// satisfied, orders nothing, and is left off the operation the resolved plan
 /// carries, so the fresh plan is a whole plan that can be sent back as it is.
@@ -209,7 +209,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
 /// it stands rather than as a before-state.
 ///
 /// **A condition is judged as the vault stands at the plan's after-state**
-/// (ADR 0031): on a file the plan writes, against the before-state the plan
+/// (ADR 0032): on a file the plan writes, against the before-state the plan
 /// reads there, which it checks; on a file it does not write, against the file
 /// as it stands now, which the plan does not change.
 fn failures<V: VaultView>(

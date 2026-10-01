@@ -47,7 +47,7 @@ pub(super) struct StagedPlan {
 ///
 /// **Plain data.** The unit names the plan's transitions by index, and the
 /// kernel's record names the target, its root, its transition's hashes and
-/// its shadow; neither holds a handle or a byte of content (ADR 0031).
+/// its shadow; neither holds a handle or a byte of content (ADR 0032).
 #[derive(Debug)]
 pub(super) struct StagedTarget {
     pub(super) unit: Unit,
@@ -68,7 +68,7 @@ pub(super) enum Held {
 }
 
 /// When a publication runs: creates first, then replaces (a respell among
-/// them), then removals (ADR 0031).
+/// them), then removals (ADR 0032).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Phase {
     Create,
@@ -460,7 +460,7 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// set holds that it does not record is unrecorded. A content condition is
 /// not an entry, and is judged on its own.
 ///
-/// **The set is exact** (ADR 0031): a link whose resolution the vault outside
+/// **The set is exact** (ADR 0032): a link whose resolution the vault outside
 /// the plan moved since planning — a document created or removed there that
 /// a recorded link now names, or a new link to a document the plan moves —
 /// refuses the plan, and the refusal's fresh plan records the set as it

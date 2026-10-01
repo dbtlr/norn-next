@@ -144,7 +144,7 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
 /// after-state.** The applier replaces or removes a source only after every
 /// target drawing on it durably landed, so a source whose before-state is gone
 /// while a target whose content the plan's moves carry from it has not landed
-/// was changed by another writer (ADR 0031): the source is marked drifted,
+/// was changed by another writer (ADR 0032): the source is marked drifted,
 /// holding what it holds, and the moves that carry it are named. A chain is
 /// followed whole, through names the plan makes and takes away again.
 pub(super) fn observe<V: VaultView>(

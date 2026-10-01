@@ -5,7 +5,7 @@
 //!
 //! **One computation, two callers.** The planner records the set a plan
 //! resolves to, and the applier computes it again, after its intake, from the
-//! resolved plan alone and refuses on any difference (ADR 0031): an entry the
+//! resolved plan alone and refuses on any difference (ADR 0032): an entry the
 //! plan records that the set computed again does not hold, or holds with
 //! other values, and an entry the set computed again holds that the plan
 //! does not record. Both compute it here, from the same inputs — the plan's
