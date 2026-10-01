@@ -597,13 +597,15 @@ fn linkers_link() -> norn_wire::LinkKey {
     )
 }
 
-/// **A previewed move records the link it retargets, and the plan sent back
-/// applies as it previewed.** The preview's plan records `[[apply-subject]]`
-/// going from the subject's old path to its new one; the apply computes the
-/// same set on its own snapshot after its intake, lands the plan, and answers
-/// with the plan it previewed.
+/// **A previewed move records the link whose resolution it moves, and the
+/// plan sent back applies as it previewed.** The preview's plan records
+/// `[[apply-subject]]` going from the subject's old path to its new one, and
+/// advises nothing: a link naming one document before and after is neither
+/// broken, ambiguous nor retargeted. The apply computes the same set on its
+/// own snapshot after its intake, lands the plan, and answers with the plan
+/// it previewed.
 #[test]
-fn a_previewed_move_records_the_link_it_retargets_and_applies_as_previewed() {
+fn a_previewed_move_records_the_link_it_moves_and_applies_as_previewed() {
     let (_sandbox, vault) = a_linked_vault("host-applies-move-links");
     let host = vault.host();
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -703,4 +705,69 @@ fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
     };
     assert_eq!(applied_plan, plan, "the apply planned another set");
     assert!(!vault.path().join(SUBJECT).exists());
+}
+
+/// **A move among an ambiguous link's members advises that it retargets the
+/// link, which the plan records no entry for.** `[[apply-twin]]` names the
+/// two documents of that stem before the move and two after, one of them at
+/// the moved path: several on both sides is no change the set records, and
+/// the forecast says the members moved under it. The plan applies as
+/// previewed.
+#[test]
+fn a_move_among_an_ambiguous_links_members_advises_it_retargets_the_link() {
+    let (_sandbox, vault) = a_vault("host-applies-retargeted");
+    for (at, body) in [
+        ("twin-a/apply-twin.md", "a twin\n"),
+        ("twin-b/apply-twin.md", "b twin\n"),
+        ("apply-twin-linker.md", "See [[apply-twin]].\n"),
+    ] {
+        let at = vault.path().join(at);
+        std::fs::create_dir_all(at.parent().expect("a parent")).expect("make the folder");
+        std::fs::write(at, body).expect("write the document");
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let moving = PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![Operation::new(OperationKind::move_document(
+            DocumentPath::new("twin-a/apply-twin.md").expect("a document path"),
+            DocumentPath::new("twin-c/apply-twin.md").expect("a document path"),
+        ))],
+    ));
+
+    let previewed = host
+        .apply(ApplyParams::new(ApplyMode::Preview, moving))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the plan previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = previewed.report else {
+        panic!("a preview answered {:?}", previewed.report);
+    };
+    assert_eq!(plan.conditions, vec![]);
+    assert_eq!(
+        forecast.links,
+        vec![norn_wire::LinkAdvisory::retargeted(
+            norn_wire::LinkKey::new(
+                DocumentPath::new("apply-twin-linker.md").expect("a document path"),
+                norn_wire::LinkFamily::Wikilink,
+                "apply-twin",
+            )
+        )]
+    );
+
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan.clone()),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the previewed plan applies");
+    let ApplyReport::Applied {
+        plan: applied_plan, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(applied_plan, plan, "the apply answered another plan");
 }

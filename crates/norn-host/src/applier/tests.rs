@@ -1976,6 +1976,37 @@ fn a_foreign_link_to_a_moved_document_is_unrecorded() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("alpha\n"));
 }
 
+/// **A recorded entry whose before alone moved refuses the plan.** The move
+/// records `[x](c.md)` in its document going from `old/c.md` to `new/c.md`;
+/// once another writer removes `old/c.md`, the set computed again holds the
+/// link going from none to `new/c.md` — the after it recorded, another
+/// before — so the recorded entry fails and nothing is published.
+#[test]
+fn a_foreign_change_moving_only_a_recorded_links_before_refuses_the_plan() {
+    let mut fixture = Fixture::new(&[
+        ("old/a.md", "[x](c.md)\n"),
+        ("old/c.md", "old\n"),
+        ("new/c.md", "new\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("old/a.md", "new/a.md")]);
+    let recorded = norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path("new/a.md"), norn_wire::LinkFamily::Markdown, "c.md"),
+        norn_wire::Resolves::one(path("old/c.md")),
+        norn_wire::Resolves::one(path("new/c.md")),
+    );
+    assert_eq!(plan.conditions, vec![recorded.clone()]);
+    std::fs::remove_file(fixture.vault.join("old/c.md")).expect("another writer removes it");
+    heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions).expect("a heal");
+
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(recorded)]
+    );
+    assert_eq!(fixture.read("old/a.md").as_deref(), Some("[x](c.md)\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
 /// **A plan's own progress never changes what it records.** With the plan's
 /// create already landed by hand and taken in by the store, the re-send
 /// computes the set it recorded, and finishes.

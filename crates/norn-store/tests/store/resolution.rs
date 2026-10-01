@@ -313,6 +313,26 @@ fn a_store_holding_landed_targets_answers_as_before_they_landed() {
     });
 }
 
+/// **A landed target heading its class still leaves two stored documents
+/// to read.** The store has taken in `n.md`, a create the plan made, which
+/// heads the class `[[n]]` reads, beside `a/n.md` and `z/n.md`. The head is
+/// read two rows past the one target the key names, so with the target
+/// dropped two documents are left, and the link resolved to several before
+/// the plan as after it.
+#[test]
+fn a_landed_target_heading_a_class_leaves_two_stored_documents_to_read() {
+    both_orders("resolution-landed-head", |mut vault| {
+        vault.write(&[
+            ("n.md", "landed\n"),
+            ("a/n.md", "a\n"),
+            ("z/n.md", "z\n"),
+            ("b.md", "[[n]]\n"),
+        ]);
+        let (judged_links, _) = vault.judge(&overlay(&["n.md"], &[]), &[]);
+        assert_eq!(judged_links, [judged("b.md", "n", "several", "several")]);
+    });
+}
+
 /// **On a root that folds case, the store's spelling of a target is the
 /// target.** The store holds `Notes/A.md`; a plan removing it under the
 /// spelling `notes/a.md` leaves no stored row standing in for it.
