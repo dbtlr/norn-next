@@ -41,7 +41,8 @@
 //! one document, the door reaches every link naming that document though the
 //! plan changes nothing there, and every wikilink resolving to exactly it
 //! before the plan, whatever its spelling, is retargeted; where `old` names
-//! none, every broken wikilink filed under `old` in any case is
+//! none, every broken wikilink filed under exactly `old`'s keys as the root
+//! reads them is
 //! ([`selecting`](super::links::selecting)). A wikilink already naming `new`'s document after the
 //! plan is left alone, one resolving to several documents is never rewritten
 //! and the forecast says so, and a Markdown link is no wikilink. An `old`

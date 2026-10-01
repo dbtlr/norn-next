@@ -6,7 +6,8 @@
 //! never checked against the vault here. Planning reads it as the vault
 //! stands before the plan: naming one document, every wikilink resolving to
 //! that document is retargeted, whatever its spelling; naming none, every
-//! broken wikilink filed under `old` in any case is; naming several, the
+//! broken wikilink filed under exactly `old`'s keys as the root reads them —
+//! its case folded only where the root folds ASCII case — is; naming several, the
 //! operation is unresolved with the head of its candidates. `new` must name
 //! one document where the plan leaves the vault. Each retargeted wikilink is
 //! respelled in its own form, and the rewrites ride the operation as its

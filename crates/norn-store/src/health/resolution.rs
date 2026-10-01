@@ -54,11 +54,11 @@
 //! wikilink rewrite reads the links naming what it rewrites through this same
 //! door: every key that could name a document the overlay reaches
 //! ([`PathOverlay::reaching`]) is sought as a changed key is, and so is every
-//! key a wikilink written with an address the overlay reaches is filed under
-//! with ASCII case folded ([`PathOverlay::reaching_filed_under`]) — on a root
-//! that tells spellings apart by a seek of the link index's folded keys,
-//! each link it finds then judged under its keys in the root's own key
-//! space. A link sought more than one way is judged once.
+//! key, in the root's own key space, a wikilink written with an address the
+//! overlay reaches is filed under ([`PathOverlay::reaching_filed_under`]);
+//! each link judged says which of those addresses it is filed under exactly
+//! ([`LinkChange::filed_under`]). A link sought more than one way is judged
+//! once.
 //!
 //! # What a key names, read once
 //!
@@ -129,8 +129,7 @@ pub struct PathOverlay {
     /// Each document whose naming links the plan reaches though it changes
     /// nothing there.
     reached: Vec<DocumentPath>,
-    /// Each address whose folded keys the plan reaches the links filed
-    /// under.
+    /// Each address whose keys the plan reaches the links filed under.
     filed: Vec<String>,
 }
 
@@ -207,16 +206,17 @@ impl PathOverlay {
         self
     }
 
-    /// The same overlay, reaching every link the store holds filed under one
-    /// of the keys a wikilink written `address` is held under, with ASCII
-    /// case folded, whatever the root's own case behaviour ([`filed_under`]):
-    /// `[[Old Note]]` and `[[old note]]` alike. Each is judged and handed back
-    /// as the links under a changed key are.
+    /// The same overlay, reaching every link the store holds filed under the
+    /// keys a wikilink written `address` is held under, each in the root's
+    /// own key space — ASCII case folded where the root folds it, and kept
+    /// where it tells spellings apart, as resolution reads them. Each is
+    /// judged and handed back as the links under a changed key are, saying
+    /// whether it is filed under `address` exactly
+    /// ([`LinkChange::filed_under`]): a link sharing only some of its keys,
+    /// as `[[v1]]` shares one of `v1.2`'s, is reached and is not.
     ///
     /// A wikilink rewrite whose `old` names no document — the repair of a
     /// broken link — reads the links it repairs this way.
-    ///
-    /// [`filed_under`]: crate::filed_under
     #[must_use]
     pub fn reaching_filed_under(mut self, address: &str) -> Self {
         if !self.filed.iter().any(|filed| filed == address) {
@@ -306,6 +306,15 @@ pub struct LinkChange {
     /// among them, which is how a caller tells whether an ambiguous link
     /// could name a document the plan moves or a wikilink rewrite reaches.
     pub before_targets: Vec<DocumentPath>,
+    /// Each address the plan reaches the links filed under
+    /// ([`PathOverlay::reaching_filed_under`]) that this link is filed under
+    /// exactly: a suffix address it is read through precisely the keys of,
+    /// in the root's own key space, so that the resolver files the link and
+    /// looks the address up by one key — case folded only where the root
+    /// folds ASCII case. A link sharing some but not all of an address's
+    /// keys is not filed under it, and a link of another address kind, a
+    /// path or a rooted name, is filed under none.
+    pub filed_under: Vec<String>,
 }
 
 /// What one judgment of a plan's links cost, beside the statements its
@@ -480,18 +489,36 @@ struct Judging<'a, R> {
     /// Each key that could name a target, and the targets it could name.
     naming: BTreeMap<String, Vec<usize>>,
     /// Each key whose links are judged: one that could name a target the
-    /// plan changes or a document it reaches, and, where the root folds
-    /// case, one an address it reaches is filed under.
+    /// plan changes or a document it reaches, or one an address it reaches
+    /// is filed under.
     sought: BTreeSet<String>,
     /// Each key that could name a document the plan reaches, and the
     /// documents it could name, by their place in the overlay's list.
     reaching: BTreeMap<String, Vec<usize>>,
-    /// The folded keys the addresses the plan reaches are filed under, where
-    /// the root tells spellings apart and so seeks another key: each swept
-    /// by a seek of the folded keys after the sought ones ([`Self::run`]).
-    filed: BTreeSet<String>,
+    /// Each address the plan reaches the links filed under, and the keys it
+    /// is read through in the store's key space, each once and in order.
+    filed: Vec<(String, Vec<Key>)>,
     resolved: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
+}
+
+/// `keys` in the key space `key` selects, each once and in order: the raw
+/// keys where the root tells spellings apart, the folded ones where it folds
+/// ASCII case.
+fn in_space(keys: Vec<link::LinkKey>, key: SuffixKey) -> Vec<Key> {
+    let mut keys: Vec<Key> = keys
+        .into_iter()
+        .map(|held| {
+            let text = match key {
+                SuffixKey::Raw => held.key,
+                SuffixKey::Folded => held.folded_key,
+            };
+            (text, held.segments)
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 impl<'a, R: Runner> Judging<'a, R> {
@@ -519,14 +546,11 @@ impl<'a, R: Runner> Judging<'a, R> {
                 reaching.entry(named).or_default().push(at);
             }
         }
-        let mut filed = BTreeSet::new();
+        let mut filed = Vec::with_capacity(overlay.filed.len());
         for address in &overlay.filed {
-            for held in suffix_keys(address) {
-                match key {
-                    SuffixKey::Folded => sought.insert(held.folded_key),
-                    SuffixKey::Raw => filed.insert(held.folded_key),
-                };
-            }
+            let keys = in_space(suffix_keys(address), key);
+            sought.extend(keys.iter().map(|(text, _)| text.clone()));
+            filed.push((address.clone(), keys));
         }
         Judging {
             order,
@@ -549,8 +573,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// Judge the probed links, then the links the store holds under each
-    /// sought key, then those filed under each folded key the root does not
-    /// seek, a chunk at a time.
+    /// sought key, a chunk at a time.
     fn run(
         &mut self,
         probed: &[ProbedLink],
@@ -595,59 +618,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             }
         }
 
-        // An address the plan reaches is filed under its folded keys, which
-        // a root telling spellings apart does not seek: those are swept by
-        // the folded key itself, and each link found there judged under its
-        // keys in the root's space, once.
-        let filed: Vec<String> = self.filed.iter().cloned().collect();
-        for keys in filed.chunks(LINK_HEALTH_CHUNK) {
-            let listed: Vec<&str> = keys.iter().map(String::as_str).collect();
-            let occupied = occupied_keys(&self.runner, SuffixKey::Folded, &[], &listed)?;
-            for key in occupied.paths.into_iter().map(|at| listed[at]) {
-                let mut pages = Pages::by_key(key);
-                while let Some(links) = pages.next(&self.runner, SuffixKey::Folded)? {
-                    let mut chunk = Vec::with_capacity(links.len());
-                    for held in links {
-                        if let Some(judged) = self.filed_by(key, held)? {
-                            chunk.push(judged);
-                        }
-                    }
-                    self.judge(chunk, each)?;
-                }
-            }
-        }
         Ok(())
-    }
-
-    /// `held`, read under the folded key `key` an address the plan reaches is
-    /// filed under, as a link to judge — or `None` where its holder is a
-    /// target, a lesser such key it is held under owns it, or one of its keys
-    /// in the root's own space is sought, which judged it already.
-    fn filed_by(&self, key: &str, held: Held) -> Result<Option<Judged>, StoreError> {
-        let holder = DocumentPath::new(&held.holder)
-            .map_err(|_| unreadable("documents.path", &held.holder))?;
-        if self
-            .target_keys
-            .contains(holder.path_key_in(self.key).as_str())
-            || held
-                .keys
-                .iter()
-                .any(|(text, _)| text.as_str() < key && self.filed.contains(text))
-        {
-            return Ok(None);
-        }
-        let keys = self.keys_of(&held.link.fact, &holder);
-        if self.is_sought(&keys) {
-            return Ok(None);
-        }
-        Ok(Some(Judged {
-            holder,
-            link: held.link.fact,
-            address: held.link.address,
-            before: keys.clone(),
-            after: keys,
-            written: false,
-        }))
     }
 
     /// `held`, read under the sought key `key`, as a link to judge — or
@@ -687,19 +658,7 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// `keys` in the store's key space, each once.
     fn in_space(&self, keys: Vec<link::LinkKey>) -> Vec<Key> {
-        let mut keys: Vec<Key> = keys
-            .into_iter()
-            .map(|key| {
-                let text = match self.key {
-                    SuffixKey::Raw => key.key,
-                    SuffixKey::Folded => key.folded_key,
-                };
-                (text, key.segments)
-            })
-            .collect();
-        keys.sort();
-        keys.dedup();
-        keys
+        in_space(keys, self.key)
     }
 
     /// What the suffix address `address` names on each side of the plan,
@@ -902,6 +861,12 @@ impl<'a, R: Runner> Judging<'a, R> {
                     before_targets.push(document.clone());
                 }
             }
+            let filed_under = self
+                .filed
+                .iter()
+                .filter(|(_, keys)| *keys == judged.before)
+                .map(|(address, _)| address.clone())
+                .collect();
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
@@ -911,6 +876,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                 written: judged.written,
                 members_moved,
                 before_targets,
+                filed_under,
             });
         }
         // What the next chunk may reuse is what this one held, so what is

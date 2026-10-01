@@ -9,6 +9,8 @@ use norn_wire::{
     UnresolvedReason,
 };
 
+use norn_store::StoredPathOrder;
+
 use super::{Fixture, applied, creating, path};
 
 /// A rewrite of every wikilink naming `old` to name `new`.
@@ -94,34 +96,71 @@ fn an_old_naming_one_document_retargets_every_spelling_of_its_wikilinks() {
 }
 
 /// **An `old` naming no document repairs the broken wikilinks filed under
-/// it, in any case**: `[[Old Note]]` and `[[old note|x]]` resolve to nothing
-/// and are filed under the key `Old Note` folds to, so both name `c.md`
-/// after; another broken link, and a path-qualified one filed elsewhere, are
-/// left as they are.
+/// it exactly, as the root reads it**: `[[Old Note]]` is filed under `Old
+/// Note`, so it names `c.md` after; `[[old note|x]]` is too only where the
+/// root folds ASCII case. Another broken link, a path-qualified one, one
+/// written with the extension — read through a key `Old Note` is not — and
+/// `[[Old]]`, sharing none of its keys, are left as they are; and a rewrite
+/// of `v1.2` never repairs `[[v1]]`, whose one key is only one of `v1.2`'s.
 #[test]
 fn an_old_naming_nothing_repairs_the_broken_links_filed_under_it() {
     let mut fixture = Fixture::new(&[
         ("c.md", "C\n"),
         (
             "h.md",
-            "[[Old Note]] [[old note|x]] [[Other Gone]] [[sub/Old Note]]\n",
+            "[[Old Note]] [[old note|x]] [[Other Gone]] [[sub/Old Note]] [[Old Note.md]] [[v1]]\n",
         ),
     ]);
+    let folds = fixture.store.path_order() == StoredPathOrder::AsciiCaseInsensitive;
     let resolution = fixture.resolution(vec![retargeting("Old Note", "c")]);
-    assert_eq!(
-        resolution.plan.operations[0].cascade,
-        [
-            wikilink("h.md", "Old Note", "c"),
-            wikilink("h.md", "old note", "c"),
-        ]
-    );
+    let mut repaired = vec![wikilink("h.md", "Old Note", "c")];
+    if folds {
+        repaired.push(wikilink("h.md", "old note", "c"));
+    }
+    assert_eq!(resolution.plan.operations[0].cascade, repaired);
     assert!(resolution.forecast.links.is_empty());
+
+    let versions = fixture.planned(vec![retargeting("v1.2", "c")]);
+    let detail = unresolved_detail(&versions);
+    assert!(detail.contains("no broken wikilink"), "{detail}");
+
     applied(fixture.apply(resolution.plan));
+    let kept = if folds { "[[c|x]]" } else { "[[old note|x]]" };
     assert_eq!(
         fixture.read("h.md").as_deref(),
-        Some("[[c]] [[c|x]] [[Other Gone]] [[sub/Old Note]]\n")
+        Some(
+            format!("[[c]] {kept} [[Other Gone]] [[sub/Old Note]] [[Old Note.md]] [[v1]]\n")
+                .as_str()
+        )
     );
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **On a root telling spellings apart, a broken link is repaired only by
+/// an `old` spelled in its own case**: `old note` repairs `[[old note]]` and
+/// not `[[Old Note]]`; and `Old Note.md` repairs the link written with the
+/// extension and nothing else. On a root folding ASCII case `old note`
+/// repairs both spellings.
+#[test]
+fn a_broken_link_is_repaired_by_an_old_spelled_as_the_root_reads_it() {
+    let fixture = Fixture::new(&[
+        ("c.md", "C\n"),
+        ("h.md", "[[Old Note]] [[old note]] [[Old Note.md]]\n"),
+    ]);
+    let folds = fixture.store.path_order() == StoredPathOrder::AsciiCaseInsensitive;
+    let lower = fixture.resolution(vec![retargeting("old note", "c")]);
+    let mut repaired = Vec::new();
+    if folds {
+        repaired.push(wikilink("h.md", "Old Note", "c"));
+    }
+    repaired.push(wikilink("h.md", "old note", "c"));
+    assert_eq!(lower.plan.operations[0].cascade, repaired);
+
+    let suffixed = fixture.resolution(vec![retargeting("Old Note.md", "c")]);
+    assert_eq!(
+        suffixed.plan.operations[0].cascade,
+        [wikilink("h.md", "Old Note.md", "c.md")]
+    );
 }
 
 /// **An `old` naming several documents is left unresolved with the head of

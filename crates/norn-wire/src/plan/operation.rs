@@ -83,8 +83,8 @@
 //! lands, the forecast advising on each link it breaks. A `rewrite_wikilink`
 //! reads its `old` as the vault stands before the plan and carries the
 //! cascade retargeting every wikilink resolving to that one document, or,
-//! where `old` names none, every broken wikilink filed under `old` in any
-//! case; its `new` must name one document where the plan leaves the vault.
+//! where `old` names none, every broken wikilink filed under exactly `old`'s
+//! keys as the root reads them; its `new` must name one document where the plan leaves the vault.
 //! An authored `rewrite_link` names its document where the plan leaves it
 //! and composes in one batch with every cascade rewrite there, so no rewrite
 //! respells a link another wrote; one matching no link does not resolve.

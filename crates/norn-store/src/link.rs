@@ -204,33 +204,6 @@ fn rooted_name(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `link` is filed under one of the keys a wikilink written with
-/// the suffix address `address` is held under, ASCII case folded on both
-/// sides whatever the root's own case behaviour: a link written with a
-/// suffix address one of whose reductions folds to one of `address`'s. So
-/// `[[Old Note]]`, `[[old note]]` and `[[Old Note.md]]` are filed under `Old
-/// Note`, and `[[sub/Old Note]]`, a rooted or a Markdown link are not.
-///
-/// **What a broken link is repaired by.** A wikilink rewrite whose `old`
-/// names no document retargets the broken wikilinks filed under it, which
-/// the resolution change set's door reaches by these same keys
-/// ([`crate::PathOverlay::reaching_filed_under`]); this tells such a link from
-/// one the door reached another way.
-pub fn filed_under(link: &LinkFact, address: &str) -> bool {
-    let LinkAddress::Suffix(target) =
-        LinkAddress::of(link.family.wire(), link.protocol.as_deref(), &link.target)
-    else {
-        return false;
-    };
-    let filed: Vec<String> = suffix_keys(address)
-        .into_iter()
-        .map(|key| key.folded_key)
-        .collect();
-    suffix_keys(target)
-        .iter()
-        .any(|key| filed.contains(&key.folded_key))
-}
-
 /// The vault paths `link`, held by the document at `holder`, names by path:
 /// the one path a Markdown path or a path read from the root names, each
 /// root path a rooted wikilink's reductions spell, and the holder itself for

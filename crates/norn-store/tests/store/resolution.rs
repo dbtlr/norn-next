@@ -436,43 +436,74 @@ fn an_ambiguous_link_names_the_reached_document_it_could_name() {
     });
 }
 
-/// **The links filed under an address's folded keys are reached in either
-/// case, on either root**: `[[Old Note]]`, `[[old note]]` and `[[OLD
-/// NOTE.md]]` are filed under the key `Old Note` folds to, broken alike,
-/// while a path-qualified `[[sub/Old Note]]` and `[[Other]]` are filed
-/// elsewhere. [`norn_store::filed_under`] says which a link is.
+/// Every link `overlay` reaches, each with the addresses it is filed under
+/// ([`LinkChange::filed_under`]), sorted.
+fn filed(vault: &Vault, overlay: &PathOverlay) -> Vec<(String, Vec<String>)> {
+    let snapshot = vault.snapshot();
+    let mut filed = Vec::new();
+    snapshot
+        .resolution_changes(overlay, &[], &declared(), |change| {
+            filed.push((change.link.target.clone(), change.filed_under.clone()));
+        })
+        .unwrap_or_else(|refusal| panic!("{:?}: a judgment: {refusal}", vault.order));
+    filed.sort();
+    filed
+}
+
+/// **A link is filed under an address exactly where the resolver files and
+/// looks both up by one key, as the root reads it.** On a root folding ASCII
+/// case `[[Old Note]]` and `[[old note]]` are both filed under `old note`; on
+/// a root telling spellings apart only `[[old note]]` is. `[[Old Note.md]]`
+/// is read through a second key its extension opens, so it is filed under
+/// `Old Note.md` and not under `Old Note`, and `[[v1]]` is never filed under
+/// `v1.2`, whose keys it shares only one of. A path-qualified wikilink and a
+/// Markdown link are filed under neither.
 #[test]
-fn the_links_filed_under_an_address_are_reached_in_either_case() {
+fn a_link_is_filed_under_an_address_only_by_the_key_the_root_reads_both_by() {
     both_orders("resolution-filed-under", |mut vault| {
         vault.write(&[(
             "h.md",
-            "[[Old Note]] [[old note]] [[OLD NOTE.md]] [[sub/Old Note]] [[Other]]\n",
+            "[[Old Note]] [[old note]] [[Old Note.md]] [[sub/Old Note]] [[v1]] [[v1.2]] [t](old%20note.md)\n",
         )]);
-        let reaching = PathOverlay::new().reaching_filed_under("Old Note");
-        let (mut reached, _) = vault.judge(&reaching, &[]);
-        reached.sort();
+        let under = |addresses: &[&str]| {
+            addresses
+                .iter()
+                .fold(PathOverlay::new(), |overlay, address| {
+                    overlay.reaching_filed_under(address)
+                })
+        };
+        let filed_under = |overlay: &PathOverlay, target: &str| -> Vec<String> {
+            filed(&vault, overlay)
+                .into_iter()
+                .filter(|(reached, _)| reached == target)
+                .flat_map(|(_, filed)| filed)
+                .collect()
+        };
+
+        let note = under(&["old note"]);
+        let folds = vault.order == Folding;
         assert_eq!(
-            reached,
-            [
-                judged("h.md", "OLD NOTE.md", "none", "none"),
-                judged("h.md", "Old Note", "none", "none"),
-                judged("h.md", "old note", "none", "none"),
-            ]
+            filed_under(&note, "Old Note"),
+            if folds {
+                vec!["old note".to_string()]
+            } else {
+                Vec::new()
+            },
+            "{:?}",
+            vault.order
         );
-        for (body, filed) in [
-            ("[[Old Note]]", true),
-            ("[[old note]]", true),
-            ("[[OLD NOTE.md]]", true),
-            ("[[sub/Old Note]]", false),
-            ("[[Other]]", false),
-            ("[t](Old%20Note.md)", false),
-        ] {
-            assert_eq!(
-                norn_store::filed_under(&link(body), "Old Note"),
-                filed,
-                "{body}"
-            );
-        }
+        assert_eq!(filed_under(&note, "old note"), ["old note"]);
+        assert!(filed_under(&note, "Old Note.md").is_empty());
+        assert!(filed_under(&note, "sub/Old Note").is_empty());
+        assert!(filed_under(&note, "old%20note.md").is_empty());
+
+        let suffixed = under(&["Old Note.md", "Old Note"]);
+        assert_eq!(filed_under(&suffixed, "Old Note.md"), ["Old Note.md"]);
+        assert_eq!(filed_under(&suffixed, "Old Note"), ["Old Note"]);
+
+        let versions = under(&["v1.2"]);
+        assert!(filed_under(&versions, "v1").is_empty());
+        assert_eq!(filed_under(&versions, "v1.2"), ["v1.2"]);
     });
 }
 

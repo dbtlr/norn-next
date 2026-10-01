@@ -644,7 +644,7 @@ pub(crate) fn retarget_namings<I: LinkIndex + ?Sized>(
 /// `overlay`, reaching the wikilinks each wikilink rewrite of the plan could
 /// retarget, its ends named as `namings` says: every link naming the one
 /// document its `old` names before the plan, or, where `old` names none,
-/// every link filed under `old` in any case. An `old` naming several reaches
+/// every link filed under `old`, as the root reads it. An `old` naming several reaches
 /// nothing, as its rewrite does not resolve.
 pub(crate) fn reaching(
     overlay: PathOverlay,
@@ -671,8 +671,10 @@ pub(crate) fn reaching(
 pub(crate) enum Named<'a> {
     /// Exactly the file at this path.
     One(&'a str),
-    /// No document, the link broken as link health judges it.
-    Broken,
+    /// No document, the link broken as link health judges it; filed under
+    /// each of these addresses the plan reaches the links filed under
+    /// ([`LinkChange::filed_under`]).
+    Broken(&'a [String]),
     /// Several documents, or no document without the link breaking.
     Other,
 }
@@ -685,7 +687,7 @@ impl<'a> Named<'a> {
             Resolves::None {}
                 if LinkHealth::of_address(change.address, 0) == LinkHealth::Broken =>
             {
-                Named::Broken
+                Named::Broken(&change.filed_under)
             }
             _ => Named::Other,
         }
@@ -727,8 +729,10 @@ impl Decider<'_> {
 /// says: one whose `old` names exactly one document before the plan names a
 /// wikilink resolving to exactly that document then, whatever its spelling;
 /// one whose `old` names no document names a broken wikilink filed under
-/// `old` ([`norn_store::filed_under`]). A Markdown link, and a wikilink
-/// resolving to several documents, is named by none.
+/// `old` exactly, by the key the root's resolution files the link and looks
+/// `old` up by ([`LinkChange::filed_under`]) — never one sharing only part
+/// of `old`'s keys. A Markdown link, and a wikilink resolving to several
+/// documents, is named by none.
 pub(crate) fn selecting<'l>(
     link: &LinkFact,
     named: Named<'_>,
@@ -750,7 +754,7 @@ pub(crate) fn selecting<'l>(
                 (Resolves::One { path: old }, Named::One(path)) => {
                     identity(old.as_str()).is_some_and(|old| identity(path) == Some(old))
                 }
-                (Resolves::None {}, Named::Broken) => norn_store::filed_under(link, &retarget.old),
+                (Resolves::None {}, Named::Broken(filed)) => filed.contains(&retarget.old),
                 _ => false,
             }
         })
