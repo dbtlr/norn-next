@@ -4,9 +4,9 @@
 //! the cascade it carries.
 
 use norn_wire::{
-    Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, Operation,
-    OperationKind, PlanCondition, RefusedCheck, ResolutionTarget, Resolves, UnresolvedOperation,
-    UnresolvedReason,
+    AmbiguousEnd, Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite,
+    Operation, OperationKind, PlanCondition, RefusedCheck, ResolutionTarget, Resolves,
+    UnresolvedOperation, UnresolvedReason,
 };
 
 use norn_store::StoredPathOrder;
@@ -179,6 +179,7 @@ fn an_old_naming_several_documents_is_unresolved_with_its_candidates() {
         [UnresolvedOperation::new(
             retargeting("a", "c"),
             UnresolvedReason::ambiguous_target(
+                AmbiguousEnd::Old,
                 CandidateHead::new(
                     [
                         Candidate::new(path("x/a.md"), "x/a"),
@@ -191,6 +192,31 @@ fn an_old_naming_several_documents_is_unresolved_with_its_candidates() {
         )]
     );
     assert!(several.plan.transitions.is_empty());
+}
+
+/// **A rewrite whose two ends are both ambiguous is answered for its
+/// `old`**, the end the links it would rewrite are read by.
+#[test]
+fn a_rewrite_ambiguous_at_both_ends_is_answered_for_its_old() {
+    let fixture = Fixture::new(&[
+        ("x/a.md", "X\n"),
+        ("y/a.md", "Y\n"),
+        ("x/c.md", "X\n"),
+        ("y/c.md", "Y\n"),
+        ("h.md", "[[x/a]]\n"),
+    ]);
+    let both = fixture.planned(vec![retargeting("a", "c")]);
+    let [left] = both.unresolved.as_slice() else {
+        panic!("one operation is unresolved: {:?}", both.unresolved);
+    };
+    let UnresolvedReason::AmbiguousTarget {
+        end, candidates, ..
+    } = &left.reason
+    else {
+        panic!("an ambiguous end: {:?}", left.reason);
+    };
+    assert_eq!(*end, AmbiguousEnd::Old);
+    assert_eq!(candidates.candidates()[0].path, path("x/a.md"));
 }
 
 /// **A `new` must name one document where the plan leaves the vault.**
@@ -218,6 +244,7 @@ fn a_rewrite_with_nothing_to_rewrite_to_or_from_is_unresolved_saying_why() {
         [UnresolvedOperation::new(
             retargeting("a", "c"),
             UnresolvedReason::ambiguous_target(
+                AmbiguousEnd::Target,
                 CandidateHead::new(
                     [
                         Candidate::new(path("x/c.md"), "x/c"),

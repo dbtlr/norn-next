@@ -198,18 +198,36 @@ pub enum UnresolvedReason {
         /// How many links name it, across every holder.
         total: u64,
     },
-    /// A target it reads resolves to more than one document: a wikilink
-    /// rewrite's `old` before the plan, so which links name the document
-    /// meant is not known, or a wikilink rewrite's `new` or a delete's
-    /// `rewrite_to` where the plan leaves the vault, so which document the
-    /// links should name is not known. A wikilink rewrite whose two ends are
-    /// both ambiguous is answered for its `old`.
+    /// A target it reads resolves to more than one document, `end` saying
+    /// which: a wikilink rewrite's `old` before the plan, so which links name
+    /// the document meant is not known, or a wikilink rewrite's `new` or a
+    /// delete's `rewrite_to` where the plan leaves the vault, so which
+    /// document the links should name is not known. A wikilink rewrite whose
+    /// two ends are both ambiguous is answered for its `old`.
     #[non_exhaustive]
     AmbiguousTarget {
+        /// Which end of the operation's link rewrite the target is.
+        end: AmbiguousEnd,
         /// The documents the target resolves to, in the resolution ladder's
         /// order, and how many there were.
         candidates: CandidateHead,
     },
+}
+
+/// Which end of an operation's link rewrite an ambiguous target is: what
+/// the links it rewrites name before the plan, or what it rewrites them to
+/// name after it.
+///
+/// On the wire an end is one word: `old` or `target`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbiguousEnd {
+    /// What the rewritten links name before the plan: a wikilink rewrite's
+    /// `old`.
+    Old,
+    /// What the rewritten links are to name after the plan: a wikilink
+    /// rewrite's `new`, or a delete's `rewrite_to`.
+    Target,
 }
 
 impl UnresolvedReason {
@@ -235,9 +253,10 @@ impl UnresolvedReason {
         UnresolvedReason::HasBacklinks { holders, total }
     }
 
-    /// The operation's target resolves to the documents `candidates` heads.
-    pub const fn ambiguous_target(candidates: CandidateHead) -> Self {
-        UnresolvedReason::AmbiguousTarget { candidates }
+    /// The operation's target at `end` resolves to the documents
+    /// `candidates` heads.
+    pub const fn ambiguous_target(end: AmbiguousEnd, candidates: CandidateHead) -> Self {
+        UnresolvedReason::AmbiguousTarget { end, candidates }
     }
 }
 

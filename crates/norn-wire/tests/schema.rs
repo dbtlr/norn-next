@@ -11,31 +11,32 @@
 //! restating it.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
-    ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
-    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DeleteParams, DescribeParams,
-    DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
-    DocumentPath, DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus,
-    ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType,
-    FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily,
-    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId, OperationKind, Page,
-    PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate,
-    Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport,
-    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
-    ReloadReport, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
-    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
-    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation,
-    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap,
-    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
-    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
+    AuthoredPlan, AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead,
+    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
+    ContainerKind, ContentHash, ControlFileFailure, CountParams, CountReport, Cursor, CursorKey,
+    DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind,
+    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
+    GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId,
+    OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
+    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
+    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
+    ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart, RequestScope,
+    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
+    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
+    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
+    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
+    WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -263,6 +264,7 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<Forecast>(),
         schema_of::<RefusedCheck>(),
         schema_of::<UnresolvedReason>(),
+        schema_of::<AmbiguousEnd>(),
         schema_of::<UnresolvedOperation>(),
         schema_of::<InterruptionCause>(),
         schema_of::<PlanFault>(),
@@ -3469,6 +3471,26 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
     assert_eq!(
         property_names(branch(&reasons, "kind", "has_backlinks")),
         ["kind", "holders", "total"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "ambiguous_target")),
+        ["kind", "end", "candidates"].into_iter().collect()
+    );
+    assert_eq!(
+        branch(&reasons, "kind", "ambiguous_target")["properties"]["end"]["$ref"].as_str(),
+        Some("#/$defs/AmbiguousEnd"),
+        "an ambiguous target names its end by its own vocabulary"
+    );
+    assert_eq!(
+        sorted(
+            branches(definition(&reasons, "AmbiguousEnd"))
+                .iter()
+                .map(|branch| {
+                    string_constant(branch)
+                        .unwrap_or_else(|| panic!("an end is not a pinned string: {branch}"))
+                })
+        ),
+        sorted(["old", "target"])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<InterruptionCause>(), "kind")),

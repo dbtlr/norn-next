@@ -14,17 +14,17 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
-    ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead,
-    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
-    ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
-    CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory, DoctorRegistryParams,
-    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams,
-    ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
-    ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath, FileState,
-    FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
-    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
+    Addressing, Advisory, AmbiguousEnd, Anchor, AnswerAdvisory, AnswerReading, AnswerShape,
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
+    AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
+    CandidateHead, ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column,
+    ComparedBy, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor,
+    CursorKey, CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory,
+    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
+    EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
+    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath,
+    FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath,
+    Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
     IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
     LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
@@ -7703,6 +7703,7 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
         UnresolvedReason::requires_unresolved(operation_id("make-b")),
         UnresolvedReason::has_backlinks(vec![path("notes/c.md"), path("notes/d.md")], 3),
         UnresolvedReason::ambiguous_target(
+            AmbiguousEnd::Old,
             CandidateHead::new(
                 [
                     Candidate::new(path("notes/a.md"), "notes/a"),
@@ -7711,6 +7712,10 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
                 2,
             )
             .expect("a head"),
+        ),
+        UnresolvedReason::ambiguous_target(
+            AmbiguousEnd::Target,
+            CandidateHead::new([Candidate::new(path("notes/b.md"), "notes/b")], 3).expect("a head"),
         ),
     ]
 }
@@ -8037,9 +8042,17 @@ fn a_forecast_advises_on_links_by_their_key_and_names_files_left_behind() {
     );
     assert_eq!(
         wire(&UnresolvedReason::ambiguous_target(
+            AmbiguousEnd::Old,
             CandidateHead::new([Candidate::new(path("a.md"), "a")], 2).expect("a head")
         )),
-        r#"{"kind":"ambiguous_target","candidates":{"candidates":[{"path":"a.md","suffix":"a"}],"total":2}}"#
+        r#"{"kind":"ambiguous_target","end":"old","candidates":{"candidates":[{"path":"a.md","suffix":"a"}],"total":2}}"#
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::ambiguous_target(
+            AmbiguousEnd::Target,
+            CandidateHead::new([Candidate::new(path("a.md"), "a")], 2).expect("a head")
+        )),
+        r#"{"kind":"ambiguous_target","end":"target","candidates":{"candidates":[{"path":"a.md","suffix":"a"}],"total":2}}"#
     );
     for text in ["", "/", "/notes/a.png"] {
         assert!(FilePath::new(text).is_err(), "`{text}` was built");

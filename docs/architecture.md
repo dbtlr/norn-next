@@ -2565,7 +2565,7 @@ lands, and the forecast advises on each link it leaves broken. A delete rewritin
 its `rewrite_to` through the same door, as a wikilink written with it is held, where the plan
 leaves the vault: naming no document there — the one the delete removes among them — it is
 left unresolved in words, and naming several, with the head of them a store built at the
-after-state would report, the only read of the door past the bound a link's judgment reads.
+after-state would report and the ambiguous end named `target`, the only read of the door past the bound a link's judgment reads.
 Naming one, every backlink not already naming that document after the plan is respelled to
 it in both syntaxes, each in its own form by the spellings a move's cascade writes, its embed
 marker, title and anchor kept — an anchor the new document holds no heading for is a link
@@ -2603,7 +2603,8 @@ anchor kept, and rides the rewrite as its cascade, one operation with it, compos
 regenerated on refresh and recomposed by the applier as a move's is; a wikilink the rewrite
 retargets is its own, whatever a move or a delete of the same plan would do with it. An
 `old` naming several documents leaves the rewrite unresolved with the head of them before
-the plan, a `new` naming several with the head of them after it, and a `new` naming none,
+the plan, its ambiguous end named `old`, a `new` naming several with the head of them after
+it, its end named `target` — both ambiguous, it is answered for `old` — and a `new` naming none,
 an `old` and a `new` naming one document, and a rewrite retargeting no wikilink each leave
 it unresolved in words, so a rewrite of nothing never lands. Every wikilink the rewrite
 would retarget that its cascade leaves as written is an entry of the change set, though

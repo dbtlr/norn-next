@@ -107,8 +107,8 @@ use std::path::Path;
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkFact, ProbedLink, TargetNaming};
 use norn_wire::{
-    Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily, LinkRewrite, Resolves,
-    UnresolvedReason,
+    AmbiguousEnd, Backlinks, DOCUMENT_EXTENSION, DocumentPath, LinkAddress, LinkFamily,
+    LinkRewrite, Resolves, UnresolvedReason,
 };
 
 use super::compose::{Composition, Skipped};
@@ -450,7 +450,7 @@ fn unnamed(
 ) -> UnresolvedReason {
     let address = removal.rewrite_to().unwrap_or_default();
     if let (Resolves::Several {}, Some(candidates)) = (&named.after, &named.candidates) {
-        return UnresolvedReason::ambiguous_target(candidates.clone());
+        return UnresolvedReason::ambiguous_target(AmbiguousEnd::Target, candidates.clone());
     }
     let itself = match &named.before {
         Resolves::One { path } => removed_by(&named.before, lineage, normalizer)
@@ -480,12 +480,18 @@ fn retarget_destination<'n>(
 ) -> Result<&'n DocumentPath, UnresolvedReason> {
     let (old, new) = (&retarget.old, &retarget.new);
     if let (Resolves::Several {}, Some(candidates)) = (&named.old.before, &named.old.candidates) {
-        return Err(UnresolvedReason::ambiguous_target(candidates.clone()));
+        return Err(UnresolvedReason::ambiguous_target(
+            AmbiguousEnd::Old,
+            candidates.clone(),
+        ));
     }
     let to = match (&named.new.after, &named.new.candidates) {
         (Resolves::One { path }, _) => path,
         (Resolves::Several {}, Some(candidates)) => {
-            return Err(UnresolvedReason::ambiguous_target(candidates.clone()));
+            return Err(UnresolvedReason::ambiguous_target(
+                AmbiguousEnd::Target,
+                candidates.clone(),
+            ));
         }
         _ => {
             return Err(UnresolvedReason::no_longer_resolves(format!(
