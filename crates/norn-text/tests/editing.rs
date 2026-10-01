@@ -1404,16 +1404,75 @@ fn removing_an_anchor_definition_its_alias_still_needs_is_refused() {
     );
 }
 
+/// **A list set over a scalar field rewrites the field's whole entry**, flat
+/// or nested, and every byte outside the entry stands.
 #[test]
-fn a_sequence_offered_for_a_scalar_field_refuses_rather_than_restyling_it() {
-    assert!(matches!(
+fn a_list_set_over_a_scalar_field_rewrites_its_entry() {
+    assert_eq!(
         set(
-            "---\ntitle: hello\n---\n",
+            "---\ntitle: 'hello'\nafter: x # kept\n---\n",
             "title",
             Value::Sequence(vec!["a".into()])
         ),
-        Err(EditError::Render(_))
-    ));
+        Ok("---\ntitle:\n  - a\nafter: x # kept\n---\n".to_string())
+    );
+    assert_eq!(
+        set(
+            "---\ntitle: hello\n---\n",
+            "title",
+            Value::Sequence(vec![Value::Sequence(vec!["a".into()])])
+        ),
+        Ok("---\ntitle:\n  - - a\n---\n".to_string())
+    );
+}
+
+/// **A scalar set over a list field rewrites the field's whole entry**, flow
+/// or block.
+#[test]
+fn a_scalar_set_over_a_list_field_rewrites_its_entry() {
+    assert_eq!(
+        set(
+            "---\ntags: [a, b]\nafter: x\n---\n",
+            "tags",
+            Value::String("one".into())
+        ),
+        Ok("---\ntags: one\nafter: x\n---\n".to_string())
+    );
+    assert_eq!(
+        set("---\ntags:\n  - a\nafter: x\n---\n", "tags", Value::Int(3)),
+        Ok("---\ntags: 3\nafter: x\n---\n".to_string())
+    );
+}
+
+/// **A set changing what a field holds refuses where its entry carries a
+/// comment**: the whole entry is rewritten, so the comment would be dropped
+/// silently.
+#[test]
+fn a_type_changing_set_over_a_commented_entry_refuses() {
+    for (source, value) in [
+        (
+            "---\ntitle: hello # note\n---\n",
+            Value::Sequence(vec!["a".into()]),
+        ),
+        ("---\ntags: [a] # note\n---\n", Value::String("one".into())),
+        (
+            "---\ntags:\n  # why\n  - a\n---\n",
+            Value::String("one".into()),
+        ),
+    ] {
+        let field = if source.contains("title") {
+            "title"
+        } else {
+            "tags"
+        };
+        assert_eq!(
+            set(source, field, value),
+            Err(EditError::CommentWouldBeLost {
+                field: field.into()
+            }),
+            "for {source:?}"
+        );
+    }
 }
 
 #[test]

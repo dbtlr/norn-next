@@ -71,9 +71,6 @@ pub enum RenderError {
         text: String,
         context: ScalarContext,
     },
-    /// A sequence was offered for a field currently holding a scalar. Remove
-    /// the field and write it afresh rather than silently restyling it.
-    SequenceIntoScalar,
 }
 
 impl fmt::Display for RenderError {
@@ -82,9 +79,6 @@ impl fmt::Display for RenderError {
             RenderError::NotRoundTrippable { text, context } => write!(
                 f,
                 "no quoting style renders {text:?} so that it reads back unchanged as a {context}"
-            ),
-            RenderError::SequenceIntoScalar => f.write_str(
-                "a sequence cannot replace a scalar field; remove the field and write it afresh",
             ),
         }
     }
@@ -134,19 +128,15 @@ impl ScalarStyle {
     }
 }
 
-/// The bytes that replace a field's `value_range`, keeping the author's
-/// quoting where the new value permits it and upgrading where it does not.
+/// The bytes that replace a field's `value_range` with the scalar `value`,
+/// keeping the author's quoting where the new value permits it and upgrading
+/// where it does not. A collection is never written into a span: it replaces
+/// the field's whole entry ([`render_entry`]).
 pub(crate) fn render_scalar_in_span(
     value: &Value,
     original: ScalarStyle,
 ) -> Result<String, RenderError> {
-    match value {
-        Value::Sequence(_) => Err(RenderError::SequenceIntoScalar),
-        // A map replaces the whole entry, so the field layer never offers one
-        // a scalar's span.
-        Value::Map(_) => unreachable!("a map is written as a whole entry, never into a span"),
-        scalar => render_scalar(scalar, original.rank(), ScalarContext::Block),
-    }
+    render_scalar(value, original.rank(), ScalarContext::Block)
 }
 
 /// A sequence written inline: `[one, two]`. Each item is verified as a flow

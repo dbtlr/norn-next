@@ -793,30 +793,16 @@ fn a_block_written_from_no_fields_reads_back_as_the_empty_mapping() {
     ));
 }
 
-/// The refusal vocabulary is exactly two reasons, and each one is reachable.
-/// A third that no path constructs is a variant nobody can act on — and a
-/// dead variant is what this crate deleted rather than inherited.
+/// The refusal vocabulary is exactly one reason, and it is reachable. A
+/// second that no path constructs is a variant nobody can act on — and a dead
+/// variant is what this crate deleted rather than inherited.
 #[test]
 fn every_render_refusal_is_reachable() {
     let long_key: Mapping = [("k".repeat(2000), Value::Int(1))].into_iter().collect();
-    let seen = [
+    assert!(matches!(
         render_document(&long_key, "", LineEnding::Lf),
-        Document::parse("---\nk: scalar\n---\n")
-            .set_field("k", &Value::Sequence(vec!["a".into()]))
-            .map_err(|error| match error {
-                EditError::Render(render) => render,
-                other => panic!("unexpected {other:?}"),
-            }),
-    ];
-    let reasons: Vec<&'static str> = seen
-        .iter()
-        .map(|outcome| match outcome {
-            Err(RenderError::NotRoundTrippable { .. }) => "not-round-trippable",
-            Err(RenderError::SequenceIntoScalar) => "sequence-into-scalar",
-            Ok(_) => panic!("expected a refusal"),
-        })
-        .collect();
-    assert_eq!(reasons, ["not-round-trippable", "sequence-into-scalar"]);
+        Err(RenderError::NotRoundTrippable { .. })
+    ));
 }
 
 /// A value no span can name is refused by the field layer, before any bytes
