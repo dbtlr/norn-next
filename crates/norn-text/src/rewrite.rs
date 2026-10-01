@@ -1,41 +1,6 @@
 //! Rewriting a document's links: every link of one family whose target is one
-//! text, respelled to another.
-//!
-//! This is the pure text half of a link cascade. A move, a redirecting delete
-//! or a wikilink rewrite expands, per document holding an affected link, into
-//! *in this document, every link of this family whose target is `from` is
-//! respelled `to`*, and [`Document::rewrite_links`] is what composes that
-//! document's after-bytes — for the planner that previews them and for the
-//! applier that writes them alike, so the two cannot disagree.
-//!
-//! # The match is the index's
-//!
-//! What a link resolves to depends on the document holding it, its family and
-//! its target text, so a cascade names the links it rewrites by exactly those.
-//! `from` is compared against [`Link::target`] as this crate's one parse reads
-//! it — the text the store's `links.target` column is derived from, never
-//! decoded, unescaped or normalized on either side — so a link the index holds
-//! under `from` is a link this rewrite matches, and no other is. The two
-//! families' targets are different texts read by different grammars, so a
-//! rewrite names one family, and a Markdown link whose target happens to spell
-//! `from` is not touched by a wikilink rewrite.
-//!
-//! Three kinds of link never match. An empty `from` matches nothing, because
-//! a target-less link — `[[#Heading]]` — addresses the document holding it
-//! and is never what a cascade renames. A link written with a protocol other
-//! than `vault` addresses something outside the vault, whose stem merely
-//! spells the same text. And code is opaque: a link written inside a code span
-//! or block is not a link.
-//!
-//! # Rewritten, or skipped with a reason
-//!
-//! Only a link's stem bytes change, so everything else it was written with —
-//! an embed marker, a title, an anchor, padding, a protocol — survives byte for
-//! byte, and so does every byte outside the links rewritten. A matching link
-//! that cannot carry `to` is left exactly as written and reported in
-//! [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that says why; it is
-//! never forced. A rewrite that matched nothing returns the document's own
-//! bytes.
+//! text, respelled to another — the pure text half of a link cascade. See
+//! [`Document::rewrite_links`].
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -70,8 +35,9 @@ pub struct SkippedLink {
 
 /// Why a matching link was not rewritten.
 ///
-/// Plain rather than `#[non_exhaustive]`, like every enum here a caller
-/// reports from: a new reason should reach every place that words one.
+/// Plain rather than `#[non_exhaustive]`: a consumer that has not decided how
+/// to word a new reason should fail to compile rather than fall into a
+/// default arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RewriteSkip {
     /// `to` cannot be written where this link's target is written and read
@@ -89,12 +55,56 @@ pub enum RewriteSkip {
     LinkNotRewritable,
 }
 
-impl<'a> Document<'a> {
+impl Document<'_> {
     /// Respell every link of `family` whose target is `from` to `to`, and
     /// return the whole rewritten document.
     ///
-    /// See [the module](crate::rewrite) for what matches, what is preserved
-    /// and why a matching link is skipped rather than written.
+    /// A move, a redirecting delete or a wikilink rewrite expands, per
+    /// document holding an affected link, into *in this document, every link
+    /// of this family whose target is `from` is respelled `to`*, and this is
+    /// what composes that document's after-bytes — for the planner that
+    /// previews them and for the applier that writes them alike, so the two
+    /// cannot disagree.
+    ///
+    /// # The match is the index's
+    ///
+    /// What a link resolves to depends on the document holding it, its family
+    /// and its target text, so a cascade names the links it rewrites by
+    /// exactly those. `from` is compared against [`Link::target`] as this
+    /// crate's one parse reads it — the text the store's `links.target`
+    /// column is derived from, never decoded, unescaped or normalized on
+    /// either side — and `to` is written as that same text: a percent-encoded
+    /// Markdown destination is matched in its encoded spelling and stays
+    /// encoded only if `to` is spelled so. The links matched are the ones the
+    /// index holds: those [`Document::frontmatter_wikilinks`] and
+    /// [`Document::links`] report. The two families' targets are different
+    /// texts read by different grammars, so a rewrite names one family, and a
+    /// Markdown link whose target happens to spell `from` is not touched by a
+    /// wikilink rewrite. Frontmatter values are read for wikilinks only.
+    ///
+    /// Three kinds of link never match. An empty `from` matches nothing,
+    /// because a target-less link — `[[#Heading]]` — addresses the document
+    /// holding it and is never what a cascade renames. A link written with a
+    /// protocol other than `vault` addresses something outside the vault,
+    /// whose stem merely spells the same text. And code is opaque: a link
+    /// written inside a code span or block is not a link.
+    ///
+    /// # Rewritten, or skipped with a reason
+    ///
+    /// Only a link's stem bytes change, so everything else it was written
+    /// with — an embed marker, a title, an anchor, padding, a protocol, a
+    /// Markdown destination's angle brackets — survives byte for byte, and so
+    /// does every byte outside the links rewritten. A matching link that
+    /// cannot carry `to` is left exactly as written and reported in
+    /// [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that says why; it
+    /// is never forced. A rewrite that respells nothing returns the document's
+    /// own bytes.
+    ///
+    /// The result is proven by reading it back: the frontmatter reads as it
+    /// did with only the rewritten strings changed, and the document holds
+    /// the same links in the same order with only the rewritten ones'
+    /// targets changed. An edit that does not read back is skipped where it
+    /// stands rather than returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
         let mut edits = Vec::new();
         let mut skipped = Vec::new();
@@ -117,7 +127,7 @@ impl<'a> Document<'a> {
         }
 
         let mut text = self.spliced(&edits);
-        if !self.reads_as_rewritten(&text, &edits, to) {
+        if !edits.is_empty() && !self.reads_as_rewritten(&text, &edits, to) {
             edits = self.provable_alone(edits, to, &mut skipped);
             text = self.spliced(&edits);
         }
@@ -140,6 +150,8 @@ impl<'a> Document<'a> {
     /// came from with only that string's value changed — the same proof every
     /// frontmatter edit here makes, so what a plain scalar can carry is the
     /// YAML reader's answer rather than a list of hazards somebody maintains.
+    /// A string that would grow the block past its byte bound reads back as
+    /// nothing, and is skipped the same way.
     fn frontmatter_edits<'d>(
         &'d self,
         from: &str,
