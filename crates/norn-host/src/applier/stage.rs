@@ -649,7 +649,7 @@ fn stage_one(
             let FileState::Present { hash, .. } = &old.before else {
                 unreachable!("a respell's old spelling holds a document before");
             };
-            let content = if new.after == old.before {
+            let content = if new.after.same_content(&old.before) {
                 None
             } else {
                 content
