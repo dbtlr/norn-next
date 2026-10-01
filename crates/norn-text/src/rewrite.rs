@@ -94,7 +94,12 @@ impl Document<'_> {
     /// from the document reads as it did, where its bytes moved to, with only
     /// the rewritten targets changed — the same links in the same order, and
     /// the same headings, tags and code. A heading or a link title whose own
-    /// text holds a rewritten link reads that link's new spelling. An edit
+    /// text holds a rewritten link reads exactly as it did with that link's
+    /// old token replaced by its new one, so a target whose bytes would read
+    /// as markup there — a `*` pairing with a literal one later in the
+    /// heading — is caught. A text that does not hold the old token as written
+    /// (or, for `[[a]](b)`, where the two links share their outer brackets,
+    /// the token inside them) cannot be proven so and skips the edit. An edit
     /// that does not read back is skipped where it stands rather than
     /// returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
@@ -201,10 +206,11 @@ impl Document<'_> {
     /// compared with what this document's own [`Reading`] becomes under the
     /// edits ([`Reading::respelled`]): the links of both families, frontmatter
     /// ones included, in the same order, with only the rewritten ones' targets
-    /// changed; the headings and the tags of both sources as they were; and
-    /// the code ranges, which decide which bytes can be any of those. Each is
-    /// compared where its bytes moved to, so a fact that survives one byte
-    /// further on is a fact that moved, and the proof fails.
+    /// changed; the headings and the tags of both sources as they were, a
+    /// heading or link title holding a rewritten link with only that link's
+    /// token changed; and the code ranges, which decide which bytes can be any
+    /// of those. Each is compared where its bytes moved to, so a fact that
+    /// survives one byte further on is a fact that moved, and the proof fails.
     ///
     /// This is the proof every rewrite returns under, and it is about the whole
     /// document because what a target's bytes mean depends on what surrounds
@@ -220,11 +226,9 @@ impl Document<'_> {
         to: &Address,
     ) -> bool {
         let respelling = Respelling::of(edits, &to.target);
-        let carried = before.carrying(&respelling);
-        let expected = before.respelled(&respelling, &carried);
-        let mut actual = Reading::of(&Document::parse(text));
-        actual.forget(&carried);
-        actual == expected
+        before
+            .respelled(&respelling)
+            .is_some_and(|expected| Reading::of(&Document::parse(text)) == expected)
     }
 
     /// The edits kept greedily in document order: each is kept when it reads
@@ -378,19 +382,9 @@ struct LinkReading {
 #[derive(Debug, PartialEq)]
 struct HeadingReading {
     level: u8,
-    text: Option<String>,
+    text: String,
     at: Range<usize>,
     inside_container: bool,
-}
-
-/// The facts of a reading whose own text holds a respelled link's bytes:
-/// each is changed by the rewrite because the link is part of it, so the
-/// proof reads it without that text.
-struct Carried {
-    /// Links whose bracket text holds another respelled link — `[[a]](b)`.
-    titles: Vec<usize>,
-    /// Headings whose text holds a respelled link — `# See [[a]]`.
-    headings: Vec<usize>,
 }
 
 impl Reading {
@@ -412,7 +406,7 @@ impl Reading {
             .iter()
             .map(|heading| HeadingReading {
                 level: heading.level,
-                text: Some(heading.text.clone()),
+                text: heading.text.clone(),
                 at: body + heading.span.byte_offset..body + heading.body_offset,
                 inside_container: heading.inside_container,
             })
@@ -441,71 +435,54 @@ impl Reading {
     }
 
     /// What this reading becomes under `respelling`: every fact where its
-    /// bytes moved to, each respelled link targeting `to`, and the `carried`
-    /// facts' text forgotten.
-    fn respelled(&self, respelling: &Respelling<'_>, carried: &Carried) -> Reading {
+    /// bytes moved to, each respelled link targeting `to`, and each heading or
+    /// link title holding a respelled link with that link's token respelled
+    /// ([`Respelling::carried`]). `None` where such a text does not hold the
+    /// link's token as written, so what it should read as is unknown.
+    fn respelled(&self, respelling: &Respelling<'_>) -> Option<Reading> {
         let moved = |at: &Range<usize>| respelling.moved(at.start)..respelling.moved(at.end);
-        let mut reading = Reading {
-            links: self
-                .links
-                .iter()
-                .map(|link| LinkReading {
+        let links = self
+            .links
+            .iter()
+            .map(|link| {
+                let except = Some((link.family, link.at.start));
+                let title = match &link.title {
+                    Some(title) => Some(respelling.carried(title, &link.at, except)?),
+                    None => None,
+                };
+                Some(LinkReading {
                     target: if respelling.respells(link) {
                         respelling.to.to_string()
                     } else {
                         link.target.clone()
                     },
+                    title,
                     at: moved(&link.at),
                     ..link.clone()
                 })
-                .collect(),
-            headings: self
-                .headings
-                .iter()
-                .map(|heading| HeadingReading {
+            })
+            .collect::<Option<_>>()?;
+        let headings = self
+            .headings
+            .iter()
+            .map(|heading| {
+                Some(HeadingReading {
+                    text: respelling.carried(&heading.text, &heading.at, None)?,
                     at: moved(&heading.at),
-                    text: heading.text.clone(),
                     ..*heading
                 })
-                .collect(),
+            })
+            .collect::<Option<_>>()?;
+        Some(Reading {
+            links,
+            headings,
             tags: self
                 .tags
                 .iter()
                 .map(|(name, at)| (name.clone(), at.map(|at| respelling.moved(at))))
                 .collect(),
             code: self.code.iter().map(moved).collect(),
-        };
-        reading.forget(carried);
-        reading
-    }
-
-    /// The facts whose own text holds a link `respelling` respells.
-    fn carrying(&self, respelling: &Respelling<'_>) -> Carried {
-        Carried {
-            titles: (0..self.links.len())
-                .filter(|&index| {
-                    let link = &self.links[index];
-                    respelling.holds(&link.at, Some((link.family, link.at.start)))
-                })
-                .collect(),
-            headings: (0..self.headings.len())
-                .filter(|&index| respelling.holds(&self.headings[index].at, None))
-                .collect(),
-        }
-    }
-
-    /// This reading with the `carried` facts' text left unread.
-    fn forget(&mut self, carried: &Carried) {
-        for &index in &carried.titles {
-            if let Some(link) = self.links.get_mut(index) {
-                link.title = None;
-            }
-        }
-        for &index in &carried.headings {
-            if let Some(heading) = self.headings.get_mut(index) {
-                heading.text = None;
-            }
-        }
+        })
     }
 }
 
@@ -526,23 +503,40 @@ impl LinkReading {
     }
 }
 
-/// The links a set of edits respells, each by its family and the byte its
-/// token begins at, with the source bytes its stem stands at: exactly what
-/// the edits replace, so where every other byte moves to follows.
+/// The links a set of edits respells, in document order: exactly what the
+/// edits replace, so where every other byte moves to follows.
 struct Respelling<'t> {
-    stems: Vec<(LinkFamily, usize, Range<usize>)>,
+    stems: Vec<RespelledStem<'t>>,
     to: &'t str,
 }
 
+/// One link a respelling rewrites: its family and the byte its token begins
+/// at, which name it; the source bytes its stem stands at; and its token as
+/// written and as respelled.
+struct RespelledStem<'t> {
+    family: LinkFamily,
+    at: usize,
+    stem: Range<usize>,
+    old: &'t str,
+    new: String,
+}
+
 impl<'t> Respelling<'t> {
-    fn of(edits: &[Edit], to: &'t str) -> Self {
+    fn of(edits: &'t [Edit], to: &'t str) -> Self {
         let stems = edits
             .iter()
             .flat_map(|edit| &edit.links)
             .filter_map(|link| {
                 let at = link.span.byte_offset;
                 let stem = link.stem_range.clone()?;
-                Some((link.family, at, at + stem.start..at + stem.end))
+                let new = format!("{}{to}{}", &link.raw[..stem.start], &link.raw[stem.end..]);
+                Some(RespelledStem {
+                    family: link.family,
+                    at,
+                    stem: at + stem.start..at + stem.end,
+                    old: &link.raw,
+                    new,
+                })
             })
             .collect();
         Respelling { stems, to }
@@ -552,7 +546,7 @@ impl<'t> Respelling<'t> {
     fn respells(&self, link: &LinkReading) -> bool {
         self.stems
             .iter()
-            .any(|(family, at, _)| (*family, *at) == (link.family, link.at.start))
+            .any(|stem| (stem.family, stem.at) == (link.family, link.at.start))
     }
 
     /// Where the source byte at `at` stands once every stem ending at or
@@ -561,17 +555,55 @@ impl<'t> Respelling<'t> {
         let (grown, shrunk) = self
             .stems
             .iter()
-            .filter(|(_, _, stem)| stem.end <= at)
-            .fold((0, 0), |(grown, shrunk), (_, _, stem)| {
-                (grown + self.to.len(), shrunk + stem.len())
+            .filter(|respelled| respelled.stem.end <= at)
+            .fold((0, 0), |(grown, shrunk), respelled| {
+                (grown + self.to.len(), shrunk + respelled.stem.len())
             });
         at + grown - shrunk
     }
 
-    /// Whether a respelled link other than `except` begins inside `range`.
-    fn holds(&self, range: &Range<usize>, except: Option<(LinkFamily, usize)>) -> bool {
-        self.stems
+    /// `text`, the text of a fact whose bytes span `range`, as it reads once
+    /// every respelled link other than `except` beginning inside `range` is
+    /// rewritten: each such link's old token replaced by its new one, in
+    /// order, each found after the one before.
+    ///
+    /// A link beginning where a Markdown link does — `[[a]](b)` — shares its
+    /// brackets with it, so that link's bracket text holds the token inside
+    /// its outer brackets, `[a]`, and that is what is replaced when the whole
+    /// token is not there.
+    ///
+    /// `None` where `text` does not hold a link's old token as written — the
+    /// link's own title holding markup the text flattens, say — so the proof
+    /// cannot say what the text reads as and fails rather than guess. A
+    /// literal copy of the token earlier in the text, in a code span say, is
+    /// found first, and the proof fails then too: conservative, never wrong.
+    fn carried(
+        &self,
+        text: &str,
+        range: &Range<usize>,
+        except: Option<(LinkFamily, usize)>,
+    ) -> Option<String> {
+        let mut expected = String::with_capacity(text.len());
+        let mut rest = text;
+        for respelled in self
+            .stems
             .iter()
-            .any(|(family, at, _)| range.contains(at) && except != Some((*family, *at)))
+            .filter(|stem| range.contains(&stem.at) && except != Some((stem.family, stem.at)))
+        {
+            let (found, old, new) = match rest.find(respelled.old) {
+                Some(found) => (found, respelled.old, respelled.new.as_str()),
+                None if except.is_some() && respelled.at == range.start => {
+                    let old = respelled.old.get(1..respelled.old.len() - 1)?;
+                    let new = respelled.new.get(1..respelled.new.len() - 1)?;
+                    (rest.find(old)?, old, new)
+                }
+                None => return None,
+            };
+            expected.push_str(&rest[..found]);
+            expected.push_str(new);
+            rest = &rest[found + old.len()..];
+        }
+        expected.push_str(rest);
+        Some(expected)
     }
 }

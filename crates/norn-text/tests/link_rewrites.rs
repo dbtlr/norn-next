@@ -552,15 +552,23 @@ fn a_target_whose_bytes_read_otherwise_where_written_is_skipped_there_alone() {
 }
 
 /// Two families' links may share bytes: `[[Old]](x.md)` is a wikilink inside
-/// a Markdown link's bracket text. Rewriting the wikilink changes the other
-/// link's display text, which is that link's own bytes being what they are,
-/// and not a change in what it addresses.
+/// a Markdown link's bracket text, the two sharing the outer brackets.
+/// Rewriting the wikilink changes the other link's display text from `[Old]`
+/// to `[New]` — the token inside the shared brackets, respelled — and not
+/// what it addresses.
 #[test]
 fn a_wikilink_inside_a_markdown_links_text_is_rewritten() {
     let source = "[[Old]](x.md)\n";
     let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
     assert_eq!(out.text, "[[New]](x.md)\n");
     assert_eq!(out.rewritten, 1);
+    let titles: Vec<_> = Document::parse(&out.text)
+        .links()
+        .into_iter()
+        .filter(|link| link.family == LinkFamily::Markdown)
+        .map(|link| link.title)
+        .collect();
+    assert_eq!(titles, [Some("[New]".to_string())]);
 }
 
 // ── Everything else the document says stands ─────────────────────────────
@@ -643,6 +651,67 @@ fn a_heading_holding_a_rewritten_link_reads_its_new_spelling() {
     );
     assert_eq!(out.rewritten, 2);
     assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+    let headings = Document::parse(&out.text).headings();
+    assert_eq!(headings[0].text, "See [[Longer/Name]] #tag");
+    assert_eq!(headings[0].slug, "see-longername-tag");
+}
+
+/// A heading's text and a Markdown link's bracket text read a link inside
+/// them with exactly its new token where the old one stood, and nothing else
+/// in them changes.
+#[test]
+fn a_heading_and_a_link_title_holding_a_rewritten_link_read_its_new_token() {
+    let source = "# See [[a]] here\n\n[see [[a]] too](d)\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "a", "b");
+    assert_eq!(out.text, "# See [[b]] here\n\n[see [[b]] too](d)\n");
+    assert_eq!(out.rewritten, 2);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+    let document = Document::parse(&out.text);
+    assert_eq!(document.headings()[0].text, "See [[b]] here");
+    assert_eq!(document.headings()[0].slug, "see-b-here");
+    let titles: Vec<_> = document
+        .links()
+        .into_iter()
+        .filter(|link| link.family == LinkFamily::Markdown)
+        .map(|link| link.title)
+        .collect();
+    assert_eq!(titles, [Some("see [[b]] too".to_string())]);
+}
+
+/// A `*` opening a target pairs with a literal one later in the heading, so
+/// the heading would read as emphasis rather than its own characters.
+#[test]
+fn a_target_that_emphasises_a_heading_is_skipped() {
+    assert_skipped_as_unrepresentable("# See [[a]] and b*\n", LinkFamily::Wikilink, "*x");
+}
+
+/// A `_` opening a target pairs with a literal one later in the heading,
+/// changing the heading's text and so the slug a link addresses it by.
+#[test]
+fn a_target_that_emphasises_a_heading_by_underscore_is_skipped() {
+    assert_skipped_as_unrepresentable("# See [[a]] and b_\n", LinkFamily::Wikilink, "_x");
+}
+
+/// A `**` opening a target pairs with a literal one later in the heading and
+/// reads the text between as strong.
+#[test]
+fn a_target_that_strengthens_a_heading_is_skipped() {
+    assert_skipped_as_unrepresentable("# See [[a]] and b**\n", LinkFamily::Wikilink, "**x");
+}
+
+/// A backslash ending a target escapes the bracket after it, so the heading
+/// reads one character short of the link it holds.
+#[test]
+fn a_target_that_escapes_a_headings_bracket_is_skipped() {
+    assert_skipped_as_unrepresentable("# See [[a]]\n", LinkFamily::Wikilink, "x\\");
+}
+
+/// A Markdown link's bracket text is read like a heading's: a `*` opening a
+/// target pairs with a literal one later in it, and the title would read as
+/// emphasis.
+#[test]
+fn a_target_that_emphasises_a_link_title_is_skipped() {
+    assert_skipped_as_unrepresentable("[see [[a]] and b*](d)\n", LinkFamily::Wikilink, "*x");
 }
 
 /// A rewrite that changes nothing returns the document's own bytes — a mark,
