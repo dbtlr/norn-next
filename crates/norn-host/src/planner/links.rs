@@ -47,9 +47,7 @@
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
 //! one of a cascade's — held in its document under the syntax and the
 //! address the rewrite writes. Every such link is an entry whatever it
-//! resolves to, so a cascade's rewrite is checked where it lands. NORN-297:
-//! no planning resolves an authored `rewrite_link` yet, so the links a
-//! resolved plan writes are its cascades' until it does.
+//! resolves to, so a rewrite is checked where it lands.
 //!
 //! **What the forecast says of a link a cascade did not follow.** A link
 //! that named a document a move carries away, and does not name it where it
@@ -1158,8 +1156,8 @@ mod tests {
 
     /// **A link a `rewrite_link` writes is an entry whatever it resolves
     /// to**, even where the plan moves no document's presence: what the
-    /// rewrite wrote is checked where it lands. Planning composes no rewrite
-    /// yet, so the set is computed here from the bytes a rewrite would leave.
+    /// rewrite wrote is checked where it lands. The set is computed here from
+    /// the bytes the rewrite leaves, alone.
     #[test]
     fn a_link_a_rewrite_writes_is_an_entry_whatever_it_resolves_to() {
         let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);

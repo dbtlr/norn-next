@@ -285,3 +285,138 @@ fn resending_an_interrupted_wikilink_rewrite_finishes_its_cascade() {
     assert_eq!(fixture.read("k.md").as_deref(), Some("[[c]] too\n"));
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// A `rewrite_link` of the links of `syntax` in `holder` written `from`, to
+/// `to`.
+fn relinking(holder: &str, syntax: LinkFamily, from: &str, to: &str) -> Operation {
+    Operation::new(OperationKind::rewrite_link(path(holder), syntax, from, to))
+}
+
+/// **An authored link rewrite respells its holder in place, in one batch
+/// with a move's cascade on the same holder.** The move carries `a.md` to
+/// `b.md`, a create refills `a.md`, and the move's cascade respells `[[a]]`
+/// to `[[b]]`; the authored rewrite respells `[[c]]` to `[[a]]` over the same
+/// parse, so the link it writes is never respelled again. Its link is a
+/// written entry of the plan, naming the created `a.md`, and the plan
+/// previews as planned and lands.
+#[test]
+fn an_authored_link_rewrite_composes_in_one_batch_with_a_cascade_on_its_holder() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", "[[a]] [[c]]\n")]);
+    let resolution = fixture.resolution(vec![
+        super::moving("a.md", "b.md"),
+        creating("a.md", "new A\n"),
+        relinking("h.md", LinkFamily::Wikilink, "c", "a"),
+    ]);
+    let moved = resolution
+        .plan
+        .operations
+        .iter()
+        .find(|operation| matches!(operation.kind, OperationKind::MoveDocument { .. }))
+        .expect("the move");
+    assert_eq!(moved.cascade, [wikilink("h.md", "a", "b")]);
+    assert!(
+        resolution
+            .plan
+            .conditions
+            .contains(&PlanCondition::link_resolution(
+                key("h.md", "a"),
+                Resolves::one(path("a.md")),
+                Resolves::one(path("a.md")),
+            )),
+        "{:?}",
+        resolution.plan.conditions
+    );
+    assert!(
+        resolution.forecast.links.is_empty(),
+        "{:?}",
+        resolution.forecast.links
+    );
+    let (previewed, forecast) = fixture
+        .preview(resolution.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, resolution.plan);
+    assert_eq!(forecast.links, resolution.forecast.links);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[b]] [[a]]\n"));
+    assert_eq!(fixture.read("b.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("new A\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **An authored link rewrite matching no link is unresolved, in words,
+/// rather than landing as a change of nothing**, as an edit whose text does
+/// not occur is: no link of its syntax is written `from` in its holder —
+/// `[[zzz]]` nowhere, and `a` written as a wikilink and not as a Markdown
+/// link — or no document stands where it names one. One matching a link
+/// respelled to what it already holds lands found, as an edit rewriting what
+/// its document holds does.
+#[test]
+fn an_authored_link_rewrite_matching_no_link_is_unresolved() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    for (operation, says) in [
+        (
+            relinking("h.md", LinkFamily::Wikilink, "zzz", "a"),
+            "no wikilink in `h.md` is written `zzz`",
+        ),
+        (
+            relinking("h.md", LinkFamily::Markdown, "a", "b"),
+            "no Markdown link in `h.md` is written `a`",
+        ),
+        (
+            relinking("gone.md", LinkFamily::Wikilink, "a", "b"),
+            "no document stands at `gone.md`",
+        ),
+    ] {
+        let resolution = fixture.planned(vec![operation.clone()]);
+        let detail = unresolved_detail(&resolution);
+        assert!(detail.contains(says), "{operation:?}: {detail}");
+        assert!(resolution.plan.transitions.is_empty(), "{operation:?}");
+    }
+
+    let same = fixture.resolution(vec![relinking("h.md", LinkFamily::Wikilink, "a", "a")]);
+    assert_eq!(same.plan.transitions.len(), 1);
+    assert_eq!(
+        same.plan.transitions[0].before,
+        same.plan.transitions[0].after
+    );
+    let applied = applied(fixture.apply(same.plan));
+    assert_eq!(
+        super::results(&applied),
+        [("h.md".to_string(), norn_wire::TargetResult::Found)]
+    );
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+}
+
+/// **A link an authored rewrite matches and the text layer leaves as written
+/// is advised on**: a wikilink's address cannot hold `]]`, so `[[a]]` stays
+/// as it is, the forecast says it is unrepresentable, and the holder lands
+/// found.
+#[test]
+fn an_authored_link_rewrite_the_text_layer_refuses_is_advised() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let resolution = fixture.resolution(vec![relinking("h.md", LinkFamily::Wikilink, "a", "x]]y")]);
+    assert_eq!(
+        resolution.forecast.links,
+        [LinkAdvisory::skipped_unrepresentable(key("h.md", "a"))]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+}
+
+/// **Re-sending an authored link rewrite whose holder already landed
+/// finishes the plan**: the holder holds its after-state, so its rewrite —
+/// which matches nothing there — is not refused for it, and the other
+/// target lands.
+#[test]
+fn resending_an_authored_link_rewrite_whose_holder_landed_finishes_it() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("c.md", "C\n"), ("h.md", "[[b]]\n")]);
+    let plan = fixture.plan(vec![
+        relinking("h.md", LinkFamily::Wikilink, "b", "c"),
+        super::editing("a.md", "draft", "final"),
+    ]);
+    fixture.foreign("h.md", "[[c]]\n");
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}

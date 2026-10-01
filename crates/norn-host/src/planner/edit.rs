@@ -50,10 +50,11 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteSection { path, .. }
         | OperationKind::InsertBeforeHeading { path, .. }
         | OperationKind::InsertAfterHeading { path, .. } => return Some(Ok(path)),
-        // NORN-297: a `rewrite_link` edits one document where it stands, and
-        // a cascade's rewrites compose through `norn-text`'s link rewriter
-        // ([`rewritten`]); an authored one is not planned yet, so it is not
-        // read here as a document-local edit.
+        // A `rewrite_link` edits one document, but where the plan leaves it,
+        // with every cascade rewrite naming that document, in one batch
+        // through `norn-text`'s link rewriter ([`rewritten`]): composition
+        // places it there itself, so it is not read here as a document-local
+        // edit.
         OperationKind::CreateDocument { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
@@ -171,8 +172,8 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// `bytes` with every one of `rewrites` composed at once — each link of a
 /// rewrite's syntax whose address is its `from` respelled its `to` — through
 /// `norn-text`'s link rewriter, and each matching link the rewriter left as
-/// written, with why: everything a plan's link cascades write in one
-/// document.
+/// written, with why: everything a plan's link cascades and authored link
+/// rewrites write in one document.
 ///
 /// **One batch over one parse.** Every link is matched against `bytes` as
 /// they are, so a rewrite whose `to` is another's `from` never respells a
@@ -182,8 +183,9 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// cascades name the holder ([`super::compose::compose`]), so the order the
 /// operations compose in says nothing about what the holder reads.
 ///
-/// **A rewrite never fails.** A rewrite matching no link composes its
-/// document unchanged: the applier recomposes a cascade over the stand-in for
+/// **A rewrite never fails here.** A rewrite matching no link composes its
+/// document unchanged — composition refuses an authored one that matches
+/// none before it gets here ([`super::compose::compose`]): the applier recomposes a cascade over the stand-in for
 /// a holder already holding its change, where nothing matches, and a link a
 /// foreign edit took away since planning is the change set's to notice, not
 /// composition's. Bytes that are not UTF-8 hold no link the index derives, so

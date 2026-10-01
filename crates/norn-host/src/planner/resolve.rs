@@ -861,25 +861,6 @@ mod tests {
         }
     }
 
-    /// **An authored link rewrite is left unresolved until it is planned
-    /// (NORN-297)**, naming the limit, and writes nothing — never planned as
-    /// something it does not say.
-    #[test]
-    fn a_link_rewrite_is_left_unresolved_until_it_is_planned() {
-        let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
-        for kind in [OperationKind::rewrite_link(
-            path("notes/a.md"),
-            norn_wire::LinkFamily::Wikilink,
-            "b",
-            "c",
-        )] {
-            let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
-            let detail = unresolved_detail(&resolution);
-            assert!(detail.contains("is not planned yet"), "{kind:?}: {detail}");
-            assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
-        }
-    }
-
     /// **A folder move reaching planning unexpanded is left unresolved**,
     /// saying it is planned only as the document moves it expands into, and
     /// writes nothing: only a plan resolved without expansion meets one here.
