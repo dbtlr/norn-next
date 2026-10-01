@@ -195,13 +195,12 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
-                // Dormant carrier for NORN-298's planner: a creation by rule
-                // names no path until planning expands it, one for one, into
-                // a `create_document`, as a folder move expands into document
-                // moves before anything composes (`super::expand`). The
-                // call graph does not give this arm a path to follow yet
-                // because that expansion has not landed, and composition
-                // leaves the operation unresolved (`super::compose`).
+                // Planning expands a creation by rule, one for one, into a
+                // `create_document` before anything is ordered
+                // (`super::rule`), which this follows as any create. One
+                // left unexpanded — unresolved there, or in a plan resolved
+                // without expansion, which composition leaves unresolved
+                // (`super::compose`) — is never in an order this follows.
                 OperationKind::CreateByRule { .. } => {}
                 // Every delete is a removal, so its link choice is read
                 // though the content it removes is one the plan created; only

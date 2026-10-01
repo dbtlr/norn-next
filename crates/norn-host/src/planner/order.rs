@@ -233,11 +233,11 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::CreateDocument { path, .. } => Some(path),
         OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
         // A folder move and a creation by rule name their documents only
-        // once planning expands them, and a wikilink rewrite only edits
-        // documents where they stand. An unexpanded rule names no path, so
-        // it arrives at nothing. Ordering runs before any expansion of a rule
-        // exists; once NORN-298's planner expands a rule into a
-        // `create_document` before ordering, the create carries the path.
+        // once planning expands them, before ordering (`super::expand`,
+        // `super::rule`), so the expanded moves and create carry the paths;
+        // one met here was left unresolved unexpanded, or reached a plan
+        // resolved without expansion, and arrives at nothing. A wikilink
+        // rewrite only edits documents where they stand.
         OperationKind::MoveFolder { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::RewriteWikilink { .. } => None,
@@ -264,11 +264,9 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::DeleteDocument { path, .. } => Some(path),
         OperationKind::CreateDocument { .. } | OperationKind::StrReplace { .. } => None,
         // A folder move and a creation by rule name their documents only
-        // once planning expands them, and a wikilink rewrite only edits
-        // documents where they stand. An unexpanded rule names no path, so
-        // it vacates nothing. Ordering runs before any expansion of a rule
-        // exists; once NORN-298's planner expands a rule into a
-        // `create_document` before ordering, the create carries the path.
+        // once planning expands them, before ordering (`super::expand`,
+        // `super::rule`); one met here unexpanded vacates nothing. A
+        // wikilink rewrite only edits documents where they stand.
         OperationKind::MoveFolder { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::RewriteWikilink { .. } => None,

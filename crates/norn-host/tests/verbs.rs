@@ -9,8 +9,10 @@
 //! move carrying the link cascade it plans and a folder move naming what it
 //! leaves behind, a delete refused while links name its document unless it
 //! rewrites them or leaves them broken, a wikilink rewrite carrying the
-//! cascade that retargets every wikilink naming its `old`, and the refusals
-//! the planner and the applier answer for a write.
+//! cascade that retargets every wikilink naming its `old`, a new document by
+//! a creation rule or into the inbox planned as the one create its rule
+//! makes — two writers racing for one numbered name landing one document —
+//! and the refusals the planner and the applier answer for a write.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -402,23 +404,226 @@ fn a_new_document_at_an_occupied_name_is_refused() {
     assert_eq!(read(&vault, "taken.md"), "other\n");
 }
 
-/// **A new document by a rule, or captured into the inbox, is refused until
-/// a planner expands it**: the host passes the compiled `create_by_rule`
-/// through unchanged, so it is left unresolved, preview and apply alike, and
-/// nothing is written.
-#[test]
-fn a_new_document_by_rule_is_refused_until_it_is_planned() {
-    let (_sandbox, vault) = a_vault("host-verbs-new-by-rule", &[("a.md", "a\n")]);
+/// A vault schema declaring a numbered rule, a rule numbering nothing, and
+/// the inbox.
+const RULE_SCHEMA: &str = "version: 1
+creatable:
+  task:
+    target: \"tasks/{{var.project}}-{{seq}}.md\"
+    variables: [project, title]
+    frontmatter_defaults:
+      status: todo
+      created: \"{{now}}\"
+      day: \"{{date}}\"
+    body: \"# {{var.title}}\\n\"
+  daily:
+    target: \"daily/{{date}}.md\"
+inbox:
+  target: \"inbox/{{date}}-{{seq}}.md\"
+";
+
+/// A served vault pinning `schema`, holding `files`.
+fn a_schema_vault(
+    label: &str,
+    schema: &str,
+    files: &[(&str, &str)],
+) -> (Sandbox, attach::Vault, attach::ServingHost) {
+    let (sandbox, vault) = a_vault(label, files);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the schema");
     let host = vault.host();
-    let _lease = attach::attach_and_wait(&host, vault.name());
-    for subject in [
+    (sandbox, vault, host)
+}
+
+fn variables(entries: &[(&str, &str)]) -> Variables {
+    Variables::new(
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string())),
+    )
+    .expect("each variable once")
+}
+
+fn fields(entries: Vec<(&str, AuthoredValue)>) -> ValueMap {
+    ValueMap::new(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+    )
+    .expect("each field once")
+}
+
+/// A `new --as task` for the project `NORN`, titled `title`, sending `body`.
+fn new_task(vault: &attach::Vault, mode: ApplyMode, title: &str, body: Option<&str>) -> NewParams {
+    NewParams::for_subject(
+        address(vault),
+        mode,
         NewSubject::by_rule(
-            "meeting",
-            Variables::default(),
+            "task",
+            variables(&[("project", "NORN"), ("title", title)]),
             ValueMap::default(),
-            Some("Agenda.\n".to_string()),
+            body.map(str::to_string),
         ),
-        NewSubject::inbox(ValueMap::default(), None),
+    )
+}
+
+/// The one create a plan carries: its path and its content.
+fn the_create(plan: &ResolvedPlan) -> (String, String) {
+    match &plan.operations[..] {
+        [operation] => match &operation.kind {
+            OperationKind::CreateDocument { path, content } => {
+                (path.as_str().to_string(), content.clone())
+            }
+            other => panic!("a create is planned: {other:?}"),
+        },
+        other => panic!("one operation is planned: {other:?}"),
+    }
+}
+
+/// **A new document by rule previews the one create its rule makes, then
+/// lands it**: the resolved plan carries a `create_document` at the numbered
+/// target, holding the rule's defaults filled from one clock reading — `{{now}}`
+/// and `{{date}}` naming the same day — with the caller's field overriding
+/// in the default's place and a new one following, and the rule's body
+/// filled. The previewed plan sent back lands exactly those bytes.
+#[test]
+fn a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-by-rule", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let creating = NewParams::for_subject(
+        address(&vault),
+        ApplyMode::Preview,
+        NewSubject::by_rule(
+            "task",
+            variables(&[("project", "NORN"), ("title", "Ship it")]),
+            fields(vec![
+                ("status", AuthoredValue::string("doing")),
+                ("owner", AuthoredValue::string("drew")),
+            ]),
+            None,
+        ),
+    );
+
+    let plan = previewed(host.new_document(creating));
+    let (at, content) = the_create(&plan);
+    assert_eq!(at, "tasks/NORN-1.md");
+    let now = content
+        .lines()
+        .find_map(|line| line.strip_prefix("created: "))
+        .unwrap_or_else(|| panic!("the default `created` is filled: {content:?}"));
+    assert_eq!(now.len(), "2026-10-01T09:30:15+02:00".len(), "{now}");
+    let date = &now[..10];
+    assert_eq!(
+        content,
+        format!("---\nstatus: doing\ncreated: {now}\nday: {date}\nowner: drew\n---\n# Ship it\n")
+    );
+    assert!(!vault.path().join("tasks").exists(), "a preview wrote");
+
+    let (landed, _, targets) = applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan.clone()),
+    )));
+    assert_eq!(landed, plan);
+    assert_eq!(targets, wrote(&["tasks/NORN-1.md"]));
+    assert_eq!(read(&vault, "tasks/NORN-1.md"), content);
+}
+
+/// Wait until the wall clock reads another second than it read on entry,
+/// so a template filled now reads differently than one filled before.
+fn until_the_clock_moves() {
+    let second = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after the epoch")
+            .as_secs()
+    };
+    let entered = second();
+    while second() == entered {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// **A previewed creation sent back lands where and as it was previewed,
+/// after the clock has moved**: the resolved plan carries the filled create,
+/// so nothing is filled again, though a fresh preview now reads another
+/// time.
+#[test]
+fn a_previewed_creation_lands_as_previewed_after_the_clock_moves() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-by-rule-resend", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let plan = previewed(host.new_document(new_task(&vault, ApplyMode::Preview, "T", None)));
+    let (at, content) = the_create(&plan);
+    until_the_clock_moves();
+    let (_, later) = the_create(&previewed(host.new_document(new_task(
+        &vault,
+        ApplyMode::Preview,
+        "T",
+        None,
+    ))));
+    assert_ne!(
+        later, content,
+        "the clock did not move between the previews"
+    );
+
+    let (landed, _, _) = applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan.clone()),
+    )));
+    assert_eq!(landed, plan);
+    assert_eq!(read(&vault, &at), content);
+}
+
+/// **A capture lands in the inbox, numbered past what the inbox holds, as
+/// exactly the caller's fields and body.**
+#[test]
+fn a_capture_lands_in_the_inbox_as_exactly_its_fields_and_body() {
+    let (_sandbox, vault, host) = a_schema_vault(
+        "host-verbs-new-inbox",
+        RULE_SCHEMA,
+        &[("inbox/1999-01-01-4.md", "earlier\n")],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let capturing = NewParams::for_subject(
+        address(&vault),
+        ApplyMode::Apply,
+        NewSubject::inbox(
+            fields(vec![("source", AuthoredValue::string("phone"))]),
+            Some("Call Sam.\n".to_string()),
+        ),
+    );
+
+    let (plan, _, _) = applied(host.new_document(capturing));
+    let (at, content) = the_create(&plan);
+    assert!(
+        at.starts_with("inbox/") && at.ends_with("-1.md"),
+        "a capture lands in the inbox, numbered in its own day's slot: {at}"
+    );
+    assert_eq!(content, "---\nsource: phone\n---\nCall Sam.\n");
+    assert_eq!(read(&vault, &at), content);
+}
+
+/// **A capture where no inbox is declared, and a creation by a rule the
+/// schema does not declare, are refused naming why**, preview and apply
+/// alike, and nothing is written.
+#[test]
+fn a_creation_with_no_rule_to_make_it_is_refused_naming_why() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-no-rule", "version: 1\n", &[("a.md", "a\n")]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for (subject, words) in [
+        (
+            NewSubject::by_rule(
+                "meeting",
+                Variables::default(),
+                ValueMap::default(),
+                Some("Agenda.\n".to_string()),
+            ),
+            "no creation rule `meeting`",
+        ),
+        (
+            NewSubject::inbox(ValueMap::default(), None),
+            "no inbox is declared",
+        ),
     ] {
         for mode in [ApplyMode::Preview, ApplyMode::Apply] {
             let creating = NewParams::for_subject(address(&vault), mode, subject.clone());
@@ -427,13 +632,262 @@ fn a_new_document_by_rule_is_refused_until_it_is_planned() {
             let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
                 panic!("the refusal carries {:?}", refusal.detail());
             };
+            let [left] = unresolved.as_slice() else {
+                panic!("one operation is unresolved: {unresolved:?}");
+            };
             assert!(matches!(
-                unresolved.as_slice(),
-                [left] if matches!(left.operation.kind, OperationKind::CreateByRule { .. })
+                left.operation.kind,
+                OperationKind::CreateByRule { .. }
             ));
+            let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+                panic!("left out for {:?}", left.reason);
+            };
+            assert!(detail.contains(words), "{detail}");
         }
     }
     assert_eq!(read(&vault, "a.md"), "a\n");
+}
+
+/// **Two writers previewing one numbered name before either applies: one
+/// document lands, the other is refused** (Layer 4, exit item 10). Both
+/// previews allocate the same number; the first applied lands; the second's
+/// resolved plan meets that name taken by other content and is refused,
+/// writing nothing, its fresh plan leaving its create unresolved. The
+/// second writer plans again and is numbered past the first.
+#[test]
+fn two_previews_of_one_numbered_name_land_one_document_and_refuse_the_other() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-by-rule-race", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let first =
+        previewed(host.new_document(new_task(&vault, ApplyMode::Preview, "T", Some("First.\n"))));
+    let second =
+        previewed(host.new_document(new_task(&vault, ApplyMode::Preview, "T", Some("Second.\n"))));
+    let (at, first_content) = the_create(&first);
+    assert_eq!(at, "tasks/NORN-1.md");
+    assert_eq!(the_create(&second).0, at, "the previews allocated apart");
+
+    applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(first),
+    )));
+    let refusal = refused(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(second),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused {
+        checks, unresolved, ..
+    } = refusal.detail()
+    else {
+        panic!("the refusal carries {:?}", refusal.detail());
+    };
+    assert!(
+        matches!(&checks[..], [RefusedCheck::Drifted { .. }]),
+        "{checks:?}"
+    );
+    assert!(
+        matches!(
+            unresolved.as_slice(),
+            [left] if matches!(left.operation.kind, OperationKind::CreateDocument { .. })
+        ),
+        "{unresolved:?}"
+    );
+    assert_eq!(read(&vault, &at), first_content);
+
+    let (again, _, _) =
+        applied(host.new_document(new_task(&vault, ApplyMode::Apply, "T", Some("Second.\n"))));
+    let (next, content) = the_create(&again);
+    assert_eq!(next, "tasks/NORN-2.md");
+    assert!(content.ends_with("---\nSecond.\n"), "{content}");
+    assert_eq!(read(&vault, &at), first_content);
+}
+
+/// **A foreign writer taking the allocated name first wins it**: a
+/// previewed creation sent back after another writer published other bytes
+/// at its name is refused, and those bytes are left as written.
+#[test]
+fn a_creation_whose_name_a_foreign_writer_took_is_refused() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-by-rule-foreign", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let plan = previewed(host.new_document(new_task(&vault, ApplyMode::Preview, "T", None)));
+    let (at, _) = the_create(&plan);
+    std::fs::create_dir_all(vault.path().join("tasks")).expect("make the folder");
+    std::fs::write(vault.path().join(&at), "foreign\n").expect("another writer takes the name");
+
+    let refusal = refused(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    assert_eq!(read(&vault, &at), "foreign\n");
+}
+
+/// **A rule numbering nothing names one document**: a second writer's
+/// preview of the same name, sent back after the first landed, is refused
+/// where its content differs and found landed where it is the same.
+#[test]
+fn a_creation_numbering_nothing_lands_once_and_refuses_other_content() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-daily", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let daily = |body: &str| {
+        NewParams::for_subject(
+            address(&vault),
+            ApplyMode::Preview,
+            NewSubject::by_rule(
+                "daily",
+                Variables::default(),
+                ValueMap::default(),
+                Some(body.to_string()),
+            ),
+        )
+    };
+    let first = previewed(host.new_document(daily("Notes.\n")));
+    let same = previewed(host.new_document(daily("Notes.\n")));
+    let other = previewed(host.new_document(daily("Other.\n")));
+    let (at, _) = the_create(&first);
+    assert!(at.starts_with("daily/"), "{at}");
+
+    applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(first),
+    )));
+    let refusal = refused(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(other),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    let (_, _, targets) = applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(same),
+    )));
+    assert_eq!(
+        targets,
+        vec![AppliedTarget::new(path(&at), TargetResult::Found)]
+    );
+    assert_eq!(read(&vault, &at), "Notes.\n");
+}
+
+/// **Writers creating by rule at once each land their own document**: the
+/// applies run one at a time on the entry's claim, each planning against
+/// the files the one before it left, so each writer is numbered past the
+/// last, every allocated name holds exactly one writer's document, and no
+/// writer overwrites another. A writer the vault refused would write
+/// nothing; none is refused here, since none plans before the one ahead of
+/// it lands.
+#[test]
+fn writers_creating_by_rule_at_once_each_land_their_own_document() {
+    const WRITERS: usize = 6;
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-by-rule-concurrent", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let start = Barrier::new(WRITERS);
+    let landed: Vec<(String, String)> = std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let (host, vault, start) = (&host, &vault, &start);
+                scope.spawn(move || {
+                    let body = format!("Writer {writer}.\n");
+                    start.wait();
+                    let answered = host
+                        .new_document(new_task(vault, ApplyMode::Apply, "T", Some(&body)))
+                        .expect("an apply is admitted")
+                        .wait();
+                    match answered {
+                        Ok(answer) => {
+                            let ApplyReport::Applied { plan, .. } = answer.report else {
+                                panic!("an apply answered {:?}", answer.report);
+                            };
+                            Some(the_create(&plan))
+                        }
+                        Err(refusal) => {
+                            assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+                            None
+                        }
+                    }
+                })
+            })
+            .collect();
+        writers
+            .into_iter()
+            .filter_map(|writer| writer.join().expect("a writer"))
+            .collect()
+    });
+
+    let mut names: Vec<&str> = landed.iter().map(|(at, _)| at.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        landed.len(),
+        "two writers landed one name: {landed:?}"
+    );
+    assert_eq!(landed.len(), WRITERS, "a writer was refused: {landed:?}");
+    for (at, content) in &landed {
+        assert_eq!(&read(&vault, at), content, "{at} was overwritten");
+    }
+    let mut on_disk: Vec<String> = std::fs::read_dir(vault.path().join("tasks"))
+        .expect("the tasks folder")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    on_disk.sort_unstable();
+    let mut expected: Vec<String> = landed
+        .iter()
+        .map(|(at, _)| at.trim_start_matches("tasks/").to_string())
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(on_disk, expected);
+}
+
+/// **An authored plan requiring a creation by rule orders after the create
+/// it expands into**: the identifier rides the expanded create, so an edit of
+/// the new document requiring it composes on its bytes.
+#[test]
+fn an_authored_plan_requiring_a_creation_by_rule_orders_after_its_create() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-by-rule-requires", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let made = norn_wire::OperationId::new("make-task").expect("an identifier");
+    let plan = AuthoredPlan::new(
+        address(&vault),
+        vec![
+            Operation::new(OperationKind::set_frontmatter(
+                WriteTarget::path(path("tasks/NORN-1.md")),
+                "status",
+                AuthoredValue::string("doing"),
+            ))
+            .with_requires(vec![made.clone()]),
+            Operation::new(OperationKind::create_by_rule(
+                Some("task".to_string()),
+                variables(&[("project", "NORN"), ("title", "T")]),
+                ValueMap::default(),
+                Some("Body.\n".to_string()),
+            ))
+            .with_id(made.clone()),
+        ],
+    );
+
+    let (landed, _, targets) = applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::operations(plan),
+    )));
+    assert_eq!(targets, wrote(&["tasks/NORN-1.md"]));
+    assert_eq!(landed.operations[0].id.as_ref(), Some(&made));
+    assert!(matches!(
+        landed.operations[0].kind,
+        OperationKind::CreateDocument { .. }
+    ));
+    let written = read(&vault, "tasks/NORN-1.md");
+    assert!(
+        written.starts_with("---\nstatus: doing\ncreated: ") && written.ends_with("---\nBody.\n"),
+        "{written}"
+    );
 }
 
 /// A vault schema declaring the one tag `project` and reporting any other.

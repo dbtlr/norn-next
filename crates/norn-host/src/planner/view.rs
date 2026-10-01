@@ -715,7 +715,10 @@ mod tests {
         let (_scratch, view) = tree();
         let mut names = view.root_names().expect("a readable tree");
         names.sort();
-        assert_eq!(names, vec![OsString::from("folder"), OsString::from("link")]);
+        assert_eq!(
+            names,
+            vec![OsString::from("folder"), OsString::from("link")]
+        );
     }
 
     /// On a volume that folds case, a spelling the fold equates is the

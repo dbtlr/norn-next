@@ -29,8 +29,9 @@
 //! rule declares must be supplied, and none it does not declare may be: a
 //! variable the rule would not read is left unresolved rather than dropped.
 //! The inbox declares none. A value that would break the target's path — one
-//! a [`FillError`] names — leaves the operation unresolved naming the token
-//! and the value, or the path it filled to.
+//! a [`FillError`](norn_config::schema::FillError) names — leaves the
+//! operation unresolved naming the token and the value, or the path it
+//! filled to.
 //!
 //! **The document's text** ([`composed`]): the rule's frontmatter defaults,
 //! each string scalar filled as a template and every type and order kept,
@@ -69,8 +70,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use norn_config::schema::{
-    CreationRule, FillError, LocalTimestamp, NotALocalTimestamp, SeqSlot, Target, TemplateValues,
-    VaultSchema,
+    CreationRule, LocalTimestamp, NotALocalTimestamp, SeqSlot, Target, TemplateValues, VaultSchema,
 };
 use norn_text::{LineEnding, Mapping, render_document};
 use norn_wire::{DocumentPath, Operation, OperationKind, UnresolvedReason, ValueMap, Variables};
@@ -199,9 +199,9 @@ fn made<V: VaultView>(
         )));
     };
     let values = TemplateValues::new(supplied.iter().cloned().collect(), at);
-    let refused = |error: FillError| format!("{named} cannot make a document: {error}");
+    let cannot = |detail: String| format!("{named} cannot make a document: {detail}");
     let values = match target.seq_slot(&values) {
-        Err(error) => return Ok(Err(refused(error))),
+        Err(error) => return Ok(Err(cannot(error.to_string()))),
         Ok(None) => values,
         Ok(Some(slot)) => match allocated(&slot, arrivals, view)? {
             Ok(seq) => values.with_seq(seq),
@@ -210,22 +210,19 @@ fn made<V: VaultView>(
     };
     let path = match filled_path(target, &values) {
         Ok(path) => path,
-        Err(detail) => return Ok(Err(refused_path(&named, &detail))),
+        Err(detail) => return Ok(Err(cannot(detail))),
     };
     Ok(composed(rule, asked, &values)
         .map(|content| (path, content))
-        .map_err(|detail| format!("{named} cannot make a document: {detail}")))
+        .map_err(cannot))
 }
 
 /// The document path `target` fills to under `values`, or why it fills to
-/// none, in words.
+/// none, in words. The fill judges the path by the store's document-path
+/// rules, so the wire's own grammar never refuses what it answers.
 fn filled_path(target: &Target, values: &TemplateValues) -> Result<DocumentPath, String> {
     let filled = target.fill(values).map_err(|error| error.to_string())?;
     DocumentPath::new(filled.as_str()).map_err(|refusal| format!("{filled:?} {refusal}"))
-}
-
-fn refused_path(named: &str, detail: &str) -> String {
-    format!("{named} cannot make a document: {detail}")
 }
 
 /// The text of the document `rule` — the inbox where it is `None` — makes for
@@ -714,6 +711,268 @@ inbox:
         assert_eq!(
             kinds(&resolution),
             vec![create("2026-10-01-3.md", "Call Sam.\n")]
+        );
+    }
+
+    /// The words `operation` is left unresolved with, planned alone over an
+    /// empty vault under `SCHEMA`; nothing is written.
+    fn refused_alone(operation: Operation) -> String {
+        let resolution = planned(&MemoryVault::default(), vec![operation.clone()]);
+        assert!(resolution.plan.transitions.is_empty());
+        assert_eq!(resolution.unresolved[0].operation, operation);
+        left_in_words(&resolution)
+    }
+
+    /// **A rule the schema does not declare is unresolved, naming it.**
+    #[test]
+    fn an_unknown_rule_is_unresolved_naming_it() {
+        let detail = refused_alone(by_rule(Some("meeting"), &[], ValueMap::default(), None));
+        assert!(detail.contains("no creation rule `meeting`"), "{detail}");
+    }
+
+    /// **A creation naming no rule where the schema declares no inbox is
+    /// unresolved, saying no inbox is declared.**
+    #[test]
+    fn a_capture_with_no_inbox_declared_is_unresolved_saying_so() {
+        let no_inbox = schema(b"version: 1\n");
+        let capture = by_rule(None, &[], ValueMap::default(), Some("Call Sam.\n"));
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &no_inbox,
+            vec![capture],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        let detail = left_in_words(&resolution);
+        assert!(detail.contains("no inbox is declared"), "{detail}");
+    }
+
+    /// **A variable the rule declares and the caller does not supply leaves
+    /// the creation unresolved, naming the variable**, even one no template
+    /// of the rule reads.
+    #[test]
+    fn a_missing_variable_is_unresolved_naming_it() {
+        let detail = refused_alone(by_rule(
+            Some("task"),
+            &[("project", "NORN")],
+            ValueMap::default(),
+            Some("Body.\n"),
+        ));
+        assert!(detail.contains("`title`"), "{detail}");
+        assert!(detail.contains("no value is supplied"), "{detail}");
+    }
+
+    /// **A variable the rule does not declare is unresolved, naming it**,
+    /// rather than dropped; the inbox declares none.
+    #[test]
+    fn an_undeclared_variable_is_unresolved_naming_it() {
+        let detail = refused_alone(by_rule(
+            Some("task"),
+            &[("project", "NORN"), ("title", "T"), ("owner", "drew")],
+            ValueMap::default(),
+            None,
+        ));
+        assert!(detail.contains("declares no variable `owner`"), "{detail}");
+        let detail = refused_alone(by_rule(
+            None,
+            &[("owner", "drew")],
+            ValueMap::default(),
+            None,
+        ));
+        assert!(
+            detail.contains("the inbox declares no variable `owner`"),
+            "{detail}"
+        );
+    }
+
+    /// **A value that would break the target's path is unresolved, naming
+    /// the token and the value.**
+    #[test]
+    fn an_unsafe_value_is_unresolved_naming_the_token() {
+        let detail = refused_alone(by_rule(
+            Some("task"),
+            &[("project", "../up"), ("title", "T")],
+            ValueMap::default(),
+            None,
+        ));
+        assert!(
+            detail.contains("{{var.project}}") && detail.contains("../up"),
+            "{detail}"
+        );
+    }
+
+    /// **A document the renderer refuses is unresolved, naming the
+    /// refusal**: frontmatter past the bound the reader admits would read as
+    /// none.
+    #[test]
+    fn an_oversized_composition_is_unresolved_naming_the_bound() {
+        let huge = "x".repeat(norn_text::FRONTMATTER_MAX_BYTES);
+        let detail = refused_alone(by_rule(
+            Some("task"),
+            &[("project", "NORN"), ("title", "T")],
+            fields(vec![("notes", AuthoredValue::string(huge))]),
+            None,
+        ));
+        assert!(detail.contains("cannot be written"), "{detail}");
+        assert!(
+            detail.contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string()),
+            "{detail}"
+        );
+    }
+
+    /// **The clock is read once for a plan, and only for a plan creating by
+    /// rule**: every creation of the plan fills from that one reading.
+    #[test]
+    fn the_clock_is_read_once_per_plan_and_only_when_a_rule_creates() {
+        let reads = Cell::new(0);
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(SCHEMA),
+            vec![
+                task(),
+                task(),
+                by_rule(None, &[], ValueMap::default(), None),
+            ],
+            Ok(reading()),
+            &reads,
+        );
+        assert_eq!(kinds(&resolution).len(), 3);
+        assert_eq!(reads.get(), 1);
+
+        let reads = Cell::new(0);
+        planned_reading(
+            &MemoryVault::default(),
+            &schema(SCHEMA),
+            vec![Operation::new(create("a.md", "a\n"))],
+            Ok(reading()),
+            &reads,
+        );
+        assert_eq!(reads.get(), 0);
+    }
+
+    /// **A clock no template can write leaves every creation by rule
+    /// unresolved, naming the clock**, and the plan's other operations
+    /// resolve.
+    #[test]
+    fn a_clock_outside_the_calendar_leaves_each_creation_unresolved() {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(SCHEMA),
+            vec![task(), Operation::new(create("a.md", "a\n")), task()],
+            Err(NotALocalTimestamp),
+            &Cell::new(0),
+        );
+        assert_eq!(
+            resolution.plan.operations,
+            vec![Operation::new(create("a.md", "a\n"))]
+        );
+        assert_eq!(resolution.unresolved.len(), 2);
+        for left in &resolution.unresolved {
+            let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+                panic!("left out for {:?}", left.reason);
+            };
+            assert!(detail.contains("clock"), "{detail}");
+        }
+    }
+
+    /// **A capture is exactly the caller's fields and body**, in the inbox,
+    /// numbered; one with no field is its body alone, with no empty
+    /// frontmatter block.
+    #[test]
+    fn a_capture_is_exactly_the_callers_fields_and_body() {
+        let vault = MemoryVault::with(&[("inbox/2026-10-01-1.md", "earlier\n")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                by_rule(
+                    None,
+                    &[],
+                    fields(vec![("source", AuthoredValue::string("phone"))]),
+                    Some("Call Sam.\n"),
+                ),
+                by_rule(None, &[], ValueMap::default(), Some("Buy milk.\n")),
+            ],
+        );
+        assert_eq!(
+            kinds(&resolution),
+            vec![
+                create(
+                    "inbox/2026-10-01-2.md",
+                    "---\nsource: phone\n---\nCall Sam.\n"
+                ),
+                create("inbox/2026-10-01-3.md", "Buy milk.\n"),
+            ]
+        );
+    }
+
+    /// **A caller's body replaces the rule's body template**, and a caller's
+    /// value is written as it is, never filled as a template.
+    #[test]
+    fn a_callers_body_and_values_are_written_as_sent() {
+        let resolution = planned(
+            &MemoryVault::default(),
+            vec![by_rule(
+                Some("task"),
+                &[("project", "NORN"), ("title", "T")],
+                fields(vec![("note", AuthoredValue::string("{{now}}"))]),
+                Some("Mine.\n"),
+            )],
+        );
+        assert_eq!(
+            kinds(&resolution),
+            vec![create(
+                "tasks/NORN-1.md",
+                "---\nstatus: todo\ncreated: 2026-10-01T09:30:15+02:00\nrank: 3\nnote: '{{now}}'\n---\nMine.\n"
+            )]
+        );
+    }
+
+    /// **The expanded create keeps what the creation carries beyond its
+    /// kind**: an operation requiring it by identifier requires the create.
+    #[test]
+    fn the_expanded_create_keeps_its_identifier_and_requirements() {
+        let made = norn_wire::OperationId::new("make-task").expect("an identifier");
+        let first = norn_wire::OperationId::new("first").expect("an identifier");
+        let creating = Operation::new(create("a.md", "a\n")).with_id(first.clone());
+        let by_task = task()
+            .with_id(made.clone())
+            .with_requires(vec![first.clone()]);
+        let editing = Operation::new(OperationKind::str_replace(
+            DocumentPath::new("tasks/NORN-1.md").expect("a path"),
+            "Ship it",
+            "Shipped",
+        ))
+        .with_requires(vec![made.clone()]);
+        let resolution = planned(&MemoryVault::default(), vec![editing, by_task, creating]);
+        let operations = &resolution.plan.operations;
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(operations.len(), 3);
+        assert_eq!(operations[1].id.as_ref(), Some(&made));
+        assert_eq!(operations[1].requires, vec![first]);
+        assert!(matches!(
+            &operations[1].kind,
+            OperationKind::CreateDocument { path, .. } if path.as_str() == "tasks/NORN-1.md"
+        ));
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                norn_wire::Transition::new(
+                    DocumentPath::new("a.md").expect("a path"),
+                    norn_wire::FileState::absent(),
+                    norn_wire::FileState::present(super::super::compose::content_hash(b"a\n")),
+                ),
+                norn_wire::Transition::new(
+                    DocumentPath::new("tasks/NORN-1.md").expect("a path"),
+                    norn_wire::FileState::absent(),
+                    norn_wire::FileState::present(super::super::compose::content_hash(
+                        b"---\nstatus: todo\ncreated: 2026-10-01T09:30:15+02:00\nrank: 3\n---\n# Shipped\n"
+                    )),
+                ),
+            ]
         );
     }
 }
