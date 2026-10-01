@@ -34,7 +34,10 @@ use norn_wire::{
 };
 
 use super::observe::{TargetState, identity};
-use crate::planner::compose::{Composition, compose, content_hash, edits_in_place, touched};
+use crate::derivation::decodes;
+use crate::planner::compose::{
+    Composition, compose, content_hash, edits_in_place, holding, touched,
+};
 use crate::planner::edit;
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
@@ -68,7 +71,7 @@ pub(super) fn disagreement(paths: impl IntoIterator<Item = DocumentPath>) -> Pla
 /// stand-in does not let act is one whose target already holds its change.
 ///
 /// **A target already holding its after-state is landed, whoever wrote it**
-/// (ADR 0031's landed rule). So a plan whose after-states were edited by hand
+/// (ADR 0032's landed rule). So a plan whose after-states were edited by hand
 /// to what the vault already holds is not caught here: every target is
 /// judged landed, nothing is recomposed against those after-states, and the
 /// plan answers applied with every target found, writing nothing. A target
@@ -171,7 +174,7 @@ fn transitions_differ<V>(
             continue;
         }
         let after = match &composed.after {
-            Some(bytes) => FileState::present(content_hash(bytes)),
+            Some(bytes) => holding(bytes, content_hash(bytes)),
             None => FileState::absent(),
         };
         if after == transition.after {
@@ -232,7 +235,7 @@ fn conditions_differ<V: VaultView>(
             let held = match condition {
                 AuthorCondition::ContentHash { path, hash } => identity(normalizer, path.as_str())
                     .is_some_and(|file| match composition.before(&file) {
-                        Some(before) => *before == FileState::present(hash.clone()),
+                        Some(before) => before.hash() == Some(hash),
                         None => carries(&file, Some(hash)),
                     }),
                 AuthorCondition::ExpectedValue {
@@ -298,7 +301,11 @@ fn condition_path(condition: &AuthorCondition) -> &DocumentPath {
 /// **A target reads as its recorded before-state**: absent where the plan
 /// found nothing, and a document with the before-state's hash where it found
 /// one — holding the bytes the target still holds where it holds that
-/// before-state, and the stand-in where this apply cannot see them. A place
+/// before-state, and the stand-in where this apply cannot see them, which
+/// decodes as a document exactly where the before-state says the bytes did
+/// ([`stand_in`]). Read from the bytes a target holds, the before-state
+/// composed is compared with the recorded one, flag and all, which is where
+/// a before-state's record of whether those bytes decode is judged. A place
 /// the vault reads no documents at never reaches here: observing refuses a
 /// target named at one, and any other name an operation carries is read from
 /// the vault as it stands, which reads it as what it is.
@@ -359,17 +366,19 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
             .find(|&index| self.plan.transitions[index].before != FileState::absent())
             .unwrap_or(indices[0]);
         let transition = &self.plan.transitions[index];
-        let FileState::Present { hash } = &transition.before else {
+        let FileState::Present { hash, quarantined } = &transition.before else {
             return Ok(Entry::Absent {
                 at: transition.path.clone(),
             });
         };
         let bytes = match &self.states[index] {
             TargetState::AtBefore(Some(bytes)) => bytes.clone(),
-            TargetState::Landed(Some(bytes)) if transition.after == transition.before => {
+            TargetState::Landed(Some(bytes))
+                if transition.after.same_content(&transition.before) =>
+            {
                 bytes.clone()
             }
-            _ => stand_in(),
+            _ => stand_in(*quarantined),
         };
         Ok(Entry::Document {
             at: transition.path.clone(),
@@ -394,11 +403,22 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
     }
 }
 
-/// The bytes standing in for a before-state this apply cannot see. Nothing
-/// composed from them is published or compared; the one thing read from them
-/// is a landed holder's skip advisories, which they leave empty.
-fn stand_in() -> Arc<[u8]> {
-    Arc::from(&b""[..])
+/// The bytes standing in for a before-state this apply cannot see, which
+/// decode as a vault document by the derivation's one rule ([`decodes`])
+/// exactly where the plan records that the bytes they stand in for do
+/// (`quarantined`): the before-state composed from them is then the
+/// recorded one, flag and all, which is all an apply can know of bytes that
+/// are gone. Nothing else composed from them is published or compared; the
+/// one other thing read from them is a landed holder's skip advisories,
+/// which they leave empty, decoding or not.
+fn stand_in(quarantined: bool) -> Arc<[u8]> {
+    let bytes: Arc<[u8]> = if quarantined {
+        Arc::from(&b"\xff"[..])
+    } else {
+        Arc::from(&b""[..])
+    };
+    debug_assert_eq!(decodes(&bytes), !quarantined);
+    bytes
 }
 
 #[cfg(test)]

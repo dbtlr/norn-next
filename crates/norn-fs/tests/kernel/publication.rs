@@ -459,7 +459,7 @@ fn a_document_removed_after_staging_is_not_resurrected() {
 /// kind: not refused, and not written again.
 ///
 /// A resolved plan's after-state is what it promised, whoever put it there
-/// (ADR 0031). The forbidden shapes are a refusal — a re-sent plan would never
+/// (ADR 0032). The forbidden shapes are a refusal — a re-sent plan would never
 /// finish over a target somebody else finished for it — and a report that this
 /// call wrote it, which would prime the own-write ledger for an event this call
 /// did not cause. The shadow a found create or replace staged is discarded.

@@ -35,6 +35,7 @@ use norn_wire::{
 };
 
 use super::compose::Unresolved;
+use crate::derivation::document_source;
 
 /// The document path a document-local kind names, or why it names none yet;
 /// `None` for a kind that is not document-local.
@@ -121,7 +122,7 @@ fn nested(value: &AuthoredValue, element: bool) -> Option<Unresolved> {
 /// `bytes`, the document the operation names as it stands so far, edited as
 /// the document-local `kind` edits it; or why it cannot be.
 pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Unresolved> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return Err(
             "the document is not UTF-8 text, so its frontmatter and sections cannot be edited"
                 .to_string(),
@@ -284,7 +285,7 @@ pub(crate) fn expectation_unmet(
             "the expected value of `{field}` in `{path}` cannot be judged: {refusal}"
         ));
     }
-    let Ok(text) = std::str::from_utf8(bytes) else {
+    let Ok(text) = document_source(bytes) else {
         return Some(format!(
             "`{path}` is not UTF-8 text, so its field `{field}` cannot be observed"
         ));

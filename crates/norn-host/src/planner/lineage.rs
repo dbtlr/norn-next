@@ -1,7 +1,7 @@
 //! A plan's content lineage: which file's before-state each target's content
 //! is drawn from, and the content cycle that lineage refuses.
 //!
-//! **Why a cycle is refused.** ADR 0031 publishes no target over content a
+//! **Why a cycle is refused.** ADR 0032 publishes no target over content a
 //! later publication needs: a source is not replaced or removed until every
 //! target drawing on it has durably landed, because a re-send restages each
 //! target from the before-states, and content held only in a shadow is lost

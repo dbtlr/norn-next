@@ -12,7 +12,7 @@
 //! the second. **Every target is overlaid both ways**, whatever the store
 //! holds at its path: a re-send whose landed targets the store has already
 //! taken in reads the same two vaults as the first send, so a plan's own
-//! progress never changes what it records (ADR 0031). A target is matched by
+//! progress never changes what it records (ADR 0032). A target is matched by
 //! its path key in the store's key space, so on a root that folds case the
 //! store's spelling of a target is the target.
 //!

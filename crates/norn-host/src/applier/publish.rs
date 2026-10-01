@@ -58,7 +58,7 @@ impl Publisher<'_> {
     /// **Any landing not synced stops publication**: a later target may draw
     /// on this one's content, and a source is not replaced or removed until
     /// every target drawing on it durably landed, its folders synced (ADR
-    /// 0031). What stops is discarded, and nothing after it publishes.
+    /// 0032). What stops is discarded, and nothing after it publishes.
     pub(super) fn publish(
         &self,
         plan: &ResolvedPlan,
@@ -152,7 +152,7 @@ impl Publisher<'_> {
                 let old_path = &plan.transitions[old].path;
                 self.own_writes
                     .published(Path::new(old_path.as_str()), &interrupted.published);
-                if let FileState::Present { hash } = &plan.transitions[new].after {
+                if let FileState::Present { hash, .. } = &plan.transitions[new].after {
                     progress.effects.push(PlanEffect {
                         path: publishing.stored[old].clone(),
                         holds: Some(kernel_hash(hash)),
@@ -211,7 +211,7 @@ impl Publishing<'_> {
             progress.effects.push(PlanEffect {
                 path: self.stored[index].clone(),
                 holds: match &transition.after {
-                    FileState::Present { hash } => Some(kernel_hash(hash)),
+                    FileState::Present { hash, .. } => Some(kernel_hash(hash)),
                     FileState::Absent {} => None,
                 },
             });
