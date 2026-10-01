@@ -29,8 +29,9 @@
 //! **What is judged where.** A document the plan writes is read from the
 //! bytes the plan composed, since the store holds its before-state: each link
 //! it holds is keyed at its after-state, and read before the plan from where
-//! the document's content stood — a moved document's source — so a relative
-//! link a move breaks is seen breaking. Every other link is the store's, read
+//! the document's content stood — a moved document's source, whether or not
+//! its bytes decoded there — so a relative link a move breaks is seen
+//! breaking. Every other link is the store's, read
 //! through the [`LinkIndex`] by the keys that could name a target whose
 //! presence the plan changes (`norn_store::Snapshot::resolution_changes`). A
 //! link in a document the plan removes is no entry: its disappearance is the
@@ -134,6 +135,9 @@ fn reads_links_over<'o>(
 pub(crate) struct Target<'a> {
     /// The file, at the spelling the plan writes it.
     path: &'a DocumentPath,
+    /// Whether a file stands there before the plan, a document or not: where
+    /// content the plan carries elsewhere stood.
+    stood: bool,
     /// Whether a document stands there before the plan.
     before: bool,
     /// What the document there holds after the plan, or `None` where none
@@ -153,6 +157,7 @@ impl<'a> Target<'a> {
     ) -> Self {
         Target {
             path,
+            stood: before.hash().is_some(),
             before: before.is_document(),
             after: bytes.filter(|_| after.is_document()),
         }
@@ -191,10 +196,13 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     let rewrites = rewrites(operations, normalizer);
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
     // The spelling each file standing before the plan is written at, which
-    // a moved document's links are read from before the plan.
+    // a moved document's links are read from before the plan. Where its
+    // content stood is a fact of the file's path and lineage, so a file
+    // whose bytes did not decode there counts: one repaired and moved is
+    // read from where it stood, not from where it lands.
     let stood: BTreeMap<NormalizedPath, &DocumentPath> = targets
         .iter()
-        .filter(|target| target.before)
+        .filter(|target| target.stood)
         .filter_map(|target| Some((identity(target.path)?, target.path)))
         .collect();
     let mut overlay = PathOverlay::new();
@@ -660,13 +668,16 @@ mod tests {
         let operations = [rewrite];
         let lineage = Lineage::of(&operations, &[0], &normalizer);
         let holder = path("b.md");
+        let (before, after): (&[u8], &[u8]) =
+            (b"[[old]] and [[other]]\n", b"[[a]] and [[other]]\n");
         let links = EmptyStore::new();
         let set = change_set(
-            &[Target {
-                path: &holder,
-                before: true,
-                after: Some(b"[[a]] and [[other]]\n"),
-            }],
+            &[Target::new(
+                &holder,
+                &FileState::present(crate::planner::compose::content_hash(before)),
+                &FileState::present(crate::planner::compose::content_hash(after)),
+                Some(after),
+            )],
             &lineage,
             &normalizer,
             &operations,

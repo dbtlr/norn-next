@@ -2161,6 +2161,86 @@ fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_app
     );
 }
 
+/// **Where a holder's content stood before the plan is a fact of its path
+/// and its lineage, not of whether its bytes decoded there.** A quarantined
+/// file repaired by an edit and moved holds a document only after the plan,
+/// and its relative link is read before the plan from where its content
+/// stood, `old/q.md`: the plan records `./d.md` at `new/q.md` going from
+/// `old/d.md` to `new/d.md`, and applies. (The source's quarantine finding
+/// outlives the apply until a heal, NORN-323, so the store is not compared
+/// with a build from zero here.)
+#[test]
+fn a_repaired_then_moved_holder_reads_its_links_before_the_plan_from_its_lineage_source() {
+    let mut fixture = Fixture::new(&[("old/d.md", "old target\n"), ("new/d.md", "new target\n")]);
+    fixture.foreign("old/q.md", b"\xc2X\xa0 [d](./d.md)\n");
+    let plan = fixture.plan(vec![
+        editing("old/q.md", "X", ""),
+        moving("old/q.md", "new/q.md"),
+    ]);
+    assert_eq!(
+        plan.conditions,
+        vec![norn_wire::PlanCondition::link_resolution(
+            norn_wire::LinkKey::new(path("new/q.md"), norn_wire::LinkFamily::Markdown, "./d.md"),
+            norn_wire::Resolves::one(path("old/d.md")),
+            norn_wire::Resolves::one(path("new/d.md")),
+        )]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(
+        fixture.read("new/q.md").as_deref(),
+        Some("\u{a0} [d](./d.md)\n")
+    );
+}
+
+/// **A holder whose bytes do not decode after the plan holds no links
+/// then**, and the links naming it are judged by whether it is a document
+/// on each side. A quarantined file edited and moved, still undecodable,
+/// records no entry for the relative link in its bytes nor for the links
+/// naming it at either spelling, being no document on either side; and a
+/// document holding a link that quarantined bytes are moved over loses that
+/// link with no entry, while `[[d]]`, naming a document before and none
+/// after, is left broken. Each plan applies. (A moved quarantined file's
+/// finding outlives the apply until a heal, NORN-323, so the store is not
+/// compared with a build from zero here.)
+#[test]
+fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_document_ness() {
+    let mut fixture = Fixture::new(&[
+        ("l.md", "[[q]] [[old/q]] [[new/q]]\n"),
+        ("old/d.md", "old target\n"),
+        ("new/d.md", "new target\n"),
+    ]);
+    fixture.foreign("old/q.md", b"\xffX [d](./d.md)\n");
+    let plan = fixture.plan(vec![
+        editing("old/q.md", "X", "Y"),
+        moving("old/q.md", "new/q.md"),
+    ]);
+    assert_eq!(plan.conditions, vec![]);
+    applied(fixture.apply(plan));
+    assert!(fixture.vault.join("new/q.md").exists());
+
+    let mut fixture = Fixture::new(&[
+        ("l.md", "[[d]]\n"),
+        ("d.md", "[x](./x.md)\n"),
+        ("x.md", "x\n"),
+    ]);
+    fixture.foreign("q.md", UNDECODABLE);
+    let plan = fixture.plan(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    assert_eq!(
+        plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "d",
+            norn_wire::Resolves::one(path("d.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
 /// **A recorded flag the bytes do not bear out is a plan whose transitions
 /// disagree with its operations**, wherever the applier holds the bytes of
 /// that side: a before-state the file still holds, an after-state composed
