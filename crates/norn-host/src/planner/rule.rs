@@ -42,8 +42,14 @@
 //! is the caller's where it sends one, else the rule's body template filled,
 //! else empty. The inbox has neither defaults nor a body template, so a
 //! capture is exactly the caller's fields and body. The document is written
-//! through `norn-text`'s one renderer, with LF line endings; one holding no
-//! field is its body alone, with no empty frontmatter block. A document the
+//! through `norn-text`'s one renderer, its frontmatter block with LF line
+//! endings and its body exactly as sent — a body's own breaks, CRLF
+//! included, and an unterminated last line are kept. One holding no field is
+//! its body alone, with no empty frontmatter block, unless the reader would
+//! take the body's first line as opening a block (`norn-text`'s own fence
+//! rule, a byte-order mark and any line break included): that body is set
+//! under an empty block, so it reads back as no field and the body as sent,
+//! never as fields the caller did not send. A document the
 //! renderer refuses — a block past the bound the reader admits among them —
 //! leaves the operation unresolved naming the refusal.
 //!
@@ -72,7 +78,7 @@ use std::path::Path;
 use norn_config::schema::{
     CreationRule, LocalTimestamp, NotALocalTimestamp, SeqSlot, Target, TemplateValues, VaultSchema,
 };
-use norn_text::{LineEnding, Mapping, render_document};
+use norn_text::{LineEnding, Mapping, opens_frontmatter, render_document};
 use norn_wire::{DocumentPath, Operation, OperationKind, UnresolvedReason, ValueMap, Variables};
 
 use super::edit::text_value;
@@ -251,7 +257,10 @@ fn composed(
         (None, Some(template)) => template.fill(values).map_err(|error| error.to_string())?,
         (None, None) => String::new(),
     };
-    if frontmatter.is_empty() {
+    // A body laid down alone that the reader would take as opening a block
+    // would read back as fields nobody sent, or as a block it refuses; under
+    // an empty block it is body, as sent.
+    if frontmatter.is_empty() && !opens_frontmatter(&body) {
         return Ok(body);
     }
     render_document(&frontmatter, &body, LineEnding::Lf)
@@ -903,6 +912,92 @@ inbox:
                 create("inbox/2026-10-01-3.md", "Buy milk.\n"),
             ]
         );
+    }
+
+    /// The one create of `resolution`: its path and content.
+    fn the_create(resolution: &Resolution) -> (String, String) {
+        match &kinds(resolution)[..] {
+            [OperationKind::CreateDocument { path, content }] => {
+                (path.as_str().to_string(), content.clone())
+            }
+            other => panic!("one create is planned: {other:?}"),
+        }
+    }
+
+    /// **A body the reader would take as opening a frontmatter block is set
+    /// under an empty one where no field is sent**, so it reads back as no
+    /// field and the body exactly as sent — whichever break ends its fence,
+    /// behind a byte-order mark too — and a fence too large for the reader to
+    /// admit is body content, not a block refused; a body opening no block is
+    /// written alone.
+    #[test]
+    fn a_body_opening_a_fence_with_no_field_is_set_under_an_empty_block() {
+        let oversized = format!(
+            "---\nnotes: {}\n---\nBody.\n",
+            "x".repeat(norn_text::FRONTMATTER_MAX_BYTES)
+        );
+        for body in [
+            "---\nstatus: forged\n---\nreal\n",
+            "---\r\nstatus: forged\r\n---\r\nreal\r\n",
+            "\u{feff}---\nstatus: forged\n---\nreal\n",
+            "---\nnever closed\n",
+            &oversized,
+        ] {
+            let capture = by_rule(None, &[], ValueMap::default(), Some(body));
+            let (_, content) = the_create(&planned(&MemoryVault::default(), vec![capture]));
+            assert_eq!(content, format!("---\n---\n{body}"));
+            let read = norn_text::Document::parse(&content);
+            // An empty block reads as null: no field.
+            assert_eq!(
+                read.frontmatter(),
+                Some(&norn_text::Value::Null),
+                "{body:?}"
+            );
+            assert!(read.diagnostics().is_empty(), "{:?}", read.diagnostics());
+            assert_eq!(read.body(), body);
+        }
+        for body in ["--- not a fence\n", "Call Sam.\n---\n", ""] {
+            let capture = by_rule(None, &[], ValueMap::default(), Some(body));
+            let (_, content) = the_create(&planned(&MemoryVault::default(), vec![capture]));
+            assert_eq!(content, body);
+        }
+    }
+
+    /// **A rule's body template opening a fence is set under an empty block
+    /// too**, where the rule holds no default and the caller sends no field.
+    #[test]
+    fn a_body_template_opening_a_fence_is_set_under_an_empty_block() {
+        let fenced = schema(
+            b"version: 1\ncreatable:\n  note:\n    target: \"notes/{{seq}}.md\"\n    body: \"---\\nstatus: forged\\n---\\n\"\n",
+        );
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &fenced,
+            vec![by_rule(Some("note"), &[], ValueMap::default(), None)],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        assert_eq!(
+            kinds(&resolution),
+            vec![create("notes/1.md", "---\n---\n---\nstatus: forged\n---\n")]
+        );
+    }
+
+    /// **A caller's body is written exactly as sent, under fields too**: an
+    /// unterminated last line stays unterminated, and CRLF breaks stay CRLF
+    /// under the block's LF lines.
+    #[test]
+    fn a_callers_body_is_written_exactly_as_sent_under_fields() {
+        for body in ["Call Sam.", "Line one.\r\nLine two.\r\n"] {
+            let capture = by_rule(
+                None,
+                &[],
+                fields(vec![("source", AuthoredValue::string("phone"))]),
+                Some(body),
+            );
+            let (_, content) = the_create(&planned(&MemoryVault::default(), vec![capture]));
+            assert_eq!(content, format!("---\nsource: phone\n---\n{body}"));
+        }
     }
 
     /// **A caller's body replaces the rule's body template**, and a caller's

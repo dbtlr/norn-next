@@ -356,22 +356,23 @@ fn a_lone_cr_frontmatter_block_splits_into_its_fields() {
     assert!(edited.contains("c: 3"), "{edited:?}");
 }
 
-/// A body whose last line is terminated gets no second terminator, whichever
-/// break terminated it.
+/// A body is written exactly as given: one whose last line is terminated gets
+/// no second terminator, whichever break terminated it, and one whose last
+/// line is not stays unterminated.
 ///
-/// Under a `\n`-only test a `\r`-terminated body reads as unterminated and the
-/// render welds a terminator onto a line that already ended, adding a blank
-/// line the caller's bytes never had.
+/// Under a `\n`-only test a `\r`-terminated body reads as unterminated and a
+/// render that terminated bodies welded a terminator onto a line that already
+/// ended, adding a blank line the caller's bytes never had.
 #[test]
-fn rendering_adds_no_terminator_to_a_body_that_already_ends_a_line() {
+fn rendering_adds_no_terminator_to_a_body() {
     let fields = Mapping::default();
     let rendered = |body: &str| {
         render_document(&fields, body, LineEnding::Lf).expect("an empty mapping renders")
     };
     assert_eq!(rendered("prose\n"), "---\n---\nprose\n");
     assert_eq!(rendered("prose\r"), "---\n---\nprose\r");
-    // A body that really does not end a line still gets one.
-    assert_eq!(rendered("prose"), "---\n---\nprose\n");
+    // A body that does not end a line is written as given, unterminated.
+    assert_eq!(rendered("prose"), "---\n---\nprose");
 }
 
 // ── The CR-only write path ───────────────────────────────────────────────

@@ -36,7 +36,6 @@ use std::fmt;
 use crate::frontmatter::extract::FRONTMATTER_MAX_BYTES;
 use crate::frontmatter::fields::{ValueStyle, reparse_admitted};
 use crate::line_ending::LineEnding;
-use crate::span::trailing_break;
 use crate::value::{Mapping, Value};
 
 /// The YAML lexical context a value is emitted into, and proven in.
@@ -542,7 +541,10 @@ fn escape_double_quoted(text: &str) -> String {
 /// Write a whole document from scratch: a frontmatter block holding `fields`
 /// in the order they are given, then `body`.
 ///
-/// Every line uses `line_ending`. Fields are emitted exactly as offered — a
+/// Every line of the block uses `line_ending`, its closing delimiter's line
+/// included. The body is written exactly as given — its breaks kept, and a
+/// last line it leaves unterminated left so — because a body is the caller's
+/// bytes, not the renderer's. Fields are emitted exactly as offered — a
 /// null field emits `key: ~`, because whether an unset field belongs in a
 /// document is a question about the vault, not about its syntax. A collection
 /// emits block style, nested ones two spaces deeper per level, and an empty
@@ -570,15 +572,7 @@ pub fn render_document(
     let mut out = format!("---{terminator}{block}");
     out.push_str("---");
     out.push_str(terminator);
-    if !body.is_empty() {
-        out.push_str(body);
-        // Whether the body's last line is already terminated is the crate's
-        // break rule, so a body ending in a lone `\r` ends a line and gets no
-        // second terminator welded onto it.
-        if trailing_break(body).is_none() {
-            out.push_str(terminator);
-        }
-    }
+    out.push_str(body);
     Ok(out)
 }
 

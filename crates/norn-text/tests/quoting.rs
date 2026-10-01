@@ -759,12 +759,15 @@ fn a_null_field_is_written_rather_than_silently_dropped() {
     );
 }
 
+/// The body is the caller's bytes: one whose last line is unterminated is
+/// written unterminated, and only the frontmatter block, which the renderer
+/// writes, ends its every line.
 #[test]
-fn a_rendered_body_gains_the_terminator_it_is_missing() {
+fn a_rendered_body_is_written_exactly_as_given() {
     let fields: Mapping = [("title", "t")].into_iter().collect();
     assert_eq!(
         render_document(&fields, "no trailing break", LineEnding::Lf),
-        Ok("---\ntitle: t\n---\nno trailing break\n".to_string())
+        Ok("---\ntitle: t\n---\nno trailing break".to_string())
     );
     assert_eq!(
         render_document(&Mapping::new(), "", LineEnding::Lf),

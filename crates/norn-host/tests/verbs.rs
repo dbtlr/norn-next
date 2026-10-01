@@ -602,6 +602,68 @@ fn a_capture_lands_in_the_inbox_as_exactly_its_fields_and_body() {
     assert_eq!(read(&vault, &at), content);
 }
 
+/// A capture of `body` with `fields`, applied over `vault`: where it landed
+/// and the bytes read back from there.
+fn captured(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    fields: ValueMap,
+    body: &str,
+) -> (String, String) {
+    let capturing = NewParams::for_subject(
+        address(vault),
+        ApplyMode::Apply,
+        NewSubject::inbox(fields, Some(body.to_string())),
+    );
+    let (plan, _, _) = applied(host.new_document(capturing));
+    let (at, content) = the_create(&plan);
+    let written = read(vault, &at);
+    assert_eq!(written, content);
+    (at, written)
+}
+
+/// **A capture's body lands exactly as sent**: unterminated, or with CRLF
+/// breaks under the block's LF lines.
+#[test]
+fn a_capture_body_lands_exactly_as_sent() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-body-as-sent", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for body in ["Call Sam.", "Line one.\r\nLine two.\r\n"] {
+        let (_, written) = captured(
+            &host,
+            &vault,
+            fields(vec![("source", AuthoredValue::string("phone"))]),
+            body,
+        );
+        assert_eq!(written, format!("---\nsource: phone\n---\n{body}"));
+    }
+}
+
+/// **A capture with no field whose body opens a fence lands as that body
+/// under an empty block**: it reads back as no field and the body as sent,
+/// never as the fields the body spells — and a fence past the bound the
+/// reader admits lands as body content rather than failing the schema check.
+#[test]
+fn a_capture_body_opening_a_fence_lands_as_body_under_an_empty_block() {
+    let (_sandbox, vault, host) = a_schema_vault(
+        "host-verbs-new-fenced-body",
+        "version: 1\ninbox:\n  target: \"inbox/capture-{{seq}}.md\"\n",
+        &[],
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let oversized = format!(
+        "---\nnotes: {}\n---\nBody.\n",
+        "x".repeat(norn_text::FRONTMATTER_MAX_BYTES)
+    );
+    for body in ["---\nstatus: forged\n---\nreal\n", oversized.as_str()] {
+        let (_, written) = captured(&host, &vault, ValueMap::default(), body);
+        assert_eq!(written, format!("---\n---\n{body}"));
+        let document = norn_text::Document::parse(&written);
+        assert_eq!(document.frontmatter(), Some(&norn_text::Value::Null));
+        assert_eq!(document.body(), body);
+    }
+}
+
 /// **A capture where no inbox is declared, and a creation by a rule the
 /// schema does not declare, are refused naming why**, preview and apply
 /// alike, and nothing is written.

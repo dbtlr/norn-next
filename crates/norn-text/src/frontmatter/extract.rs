@@ -67,11 +67,6 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
     // offset below is content-absolute, so an edit splices after it and leaves
     // it untouched.
     let byte_order_mark = content.starts_with(BOM);
-    let after_bom = if byte_order_mark {
-        &content[BOM.len()..]
-    } else {
-        content
-    };
 
     let absent = |refusal: Option<BlockRefusal>| Extraction {
         value: None,
@@ -83,7 +78,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         strip: StripReport::default(),
     };
 
-    if strip_opening_fence(after_bom).is_none() {
+    if !opens_frontmatter(content) {
         return absent(None);
     }
 
@@ -128,6 +123,18 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         byte_order_mark,
         strip,
     }
+}
+
+/// Whether the reader takes `content` as opening a frontmatter block: its
+/// first line, past a byte-order mark, is an opening `---` fence.
+///
+/// This is the reader's own test, asked without reading a block, so a writer
+/// laying text down at the head of a document can tell whether that text
+/// would be read as a block it never wrote. It says nothing of whether the
+/// block closes or parses: an unclosed one is still diagnosed as a block, not
+/// read as plain body.
+pub fn opens_frontmatter(content: &str) -> bool {
+    strip_opening_fence(content.strip_prefix(BOM).unwrap_or(content)).is_some()
 }
 
 /// Where a closed leading block's YAML and the body after it sit.

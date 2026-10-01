@@ -6,7 +6,8 @@
 //! file states is which diagnostic, and what survives beside it.
 
 use norn_text::{
-    BlockRefusal, DiagnosticCode, Document, LineEnding, Value, ValueStyle, render_document,
+    BlockRefusal, DiagnosticCode, Document, LineEnding, Value, ValueStyle, opens_frontmatter,
+    render_document,
 };
 
 fn codes<'a>(document: &'a Document<'a>) -> Vec<&'a str> {
@@ -122,6 +123,42 @@ fn an_unclosed_block_is_diagnosed_and_the_whole_document_stays_body() {
     assert_eq!(document.frontmatter_range(), None);
     assert_eq!(document.body(), source);
     assert_eq!(document.body_start(), 0);
+}
+
+/// **Whether text opens a frontmatter block is the reader's own fence rule**,
+/// asked without reading a block: `---`, any spaces or tabs, then any of the
+/// crate's line breaks, past a byte-order mark. A writer laying a body down
+/// with no block above it asks this to know whether the reader would take the
+/// body's first line as a fence — closed or not, since an unclosed one is
+/// diagnosed rather than read as plain body.
+#[test]
+fn text_opens_a_block_where_the_reader_takes_its_first_line_as_a_fence() {
+    for opening in [
+        "---\n",
+        "---\r\nbody",
+        "---\rbody",
+        "--- \t\ntitle: t\n---\n",
+        "\u{feff}---\n---\n",
+        "---\nunclosed\n",
+    ] {
+        assert!(opens_frontmatter(opening), "{opening:?} opens a block");
+        assert!(
+            Document::parse(opening).frontmatter_range().is_some()
+                || codes(&Document::parse(opening)).contains(&"frontmatter-unclosed"),
+            "{opening:?} is read as a block"
+        );
+    }
+    for plain in [
+        "",
+        "---",
+        "----\n",
+        "--- x\n",
+        " ---\n",
+        "body\n---\n",
+        "\u{feff}body\n",
+    ] {
+        assert!(!opens_frontmatter(plain), "{plain:?} opens no block");
+    }
 }
 
 #[test]

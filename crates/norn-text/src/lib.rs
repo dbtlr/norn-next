@@ -134,6 +134,8 @@
 //! - [`BodyScan`] — headings, sections, links, tags and block ids, in one
 //!   pass.
 //! - [`render_document`] — write a whole document from scratch.
+//! - [`opens_frontmatter`] — whether text at a document's head would be read
+//!   as opening a frontmatter block.
 
 mod body;
 mod diagnostic;
@@ -153,7 +155,7 @@ pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use document::{Document, EditError, FieldText, TAGS_FIELD, frontmatter_reads_back};
 pub use frontmatter::{
     BlockRefusal, FRONTMATTER_MAX_BYTES, Field, RenderError, ScalarContext, SplitRefusal,
-    ValueStyle, render_document,
+    ValueStyle, opens_frontmatter, render_document,
 };
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
