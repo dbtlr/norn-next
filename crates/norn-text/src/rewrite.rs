@@ -2,7 +2,6 @@
 //! text, respelled to another — the pure text half of a link cascade. See
 //! [`Document::rewrite_links`].
 
-use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::document::{Document, frontmatter_of, splice_all};
@@ -113,11 +112,13 @@ impl Document<'_> {
     /// is never forced. A rewrite that respells nothing returns the document's
     /// own bytes.
     ///
-    /// The result is proven by reading it back: the frontmatter reads as it
-    /// did with only the rewritten strings changed, and the document holds
-    /// the same links in the same order with only the rewritten ones'
-    /// targets changed. An edit that does not read back is skipped where it
-    /// stands rather than returned.
+    /// The result is proven by reading it back: everything the index derives
+    /// from the document reads as it did, where its bytes moved to, with only
+    /// the rewritten targets changed — the frontmatter but for the rewritten
+    /// strings, the same links in the same order, and the same headings, tags,
+    /// block ids and code. A heading or a link title whose own text holds a
+    /// rewritten link reads that link's new spelling. An edit that does not
+    /// read back is skipped where it stands rather than returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
         let (from, to) = (Address::of(from), Address::of(to));
         let to = &to;
@@ -142,9 +143,12 @@ impl Document<'_> {
         }
 
         let mut text = self.spliced(&edits);
-        if !edits.is_empty() && !self.reads_as_rewritten(&text, &edits, to) {
-            edits = self.provable_alone(edits, to, &mut skipped);
-            text = self.spliced(&edits);
+        if !edits.is_empty() {
+            let before = Reading::of(self);
+            if !self.reads_as_rewritten(&before, &text, &edits, to) {
+                edits = self.provable_alone(&before, edits, to, &mut skipped);
+                text = self.spliced(&edits);
+            }
         }
         skipped.sort_by_key(|skip| skip.link.span.byte_offset);
         RewrittenLinks {
@@ -219,39 +223,37 @@ impl Document<'_> {
     }
 
     /// Whether `text` — this document with `edits` spliced in — reads as this
-    /// document with exactly those edits' links respelled: the same
-    /// frontmatter with only the rewritten strings changed, and the same links
-    /// of both families, in the same order, with only the rewritten ones'
-    /// targets changed.
+    /// document with exactly those edits' links respelled.
+    ///
+    /// Everything the index derives from a document is read back from `text`
+    /// and compared with what this document's own reading becomes under the
+    /// edits ([`Reading::respelled`]): the frontmatter with only the rewritten
+    /// strings changed; the links of both families, in the same order, with
+    /// only the rewritten ones' targets changed; the headings, the tags of
+    /// both sources and the block ids as they were; and the code ranges, which
+    /// decide which bytes can be any of those. Each is compared where its
+    /// bytes moved to, so a fact that survives one byte further on is a fact
+    /// that moved, and the proof fails.
     ///
     /// This is the proof every rewrite returns under, and it is about the whole
     /// document because what a target's bytes mean depends on what surrounds
     /// them: a backtick in a wikilink stem can pair with one later in the
     /// paragraph and turn the text between into code, a backslash can escape
-    /// the bracket closing the Markdown link around it, and a space ends a
-    /// bare destination. A link's title is not compared — it is display text,
-    /// and the bracket text of `[[a]](b)` is another link's bytes, which a
-    /// rewrite of that link rightly changes.
-    fn reads_as_rewritten(&self, text: &str, edits: &[Edit<'_>], to: &Address) -> bool {
-        let reread = Document::parse(text);
-        if reread.frontmatter().cloned() != self.frontmatter_after(edits) {
-            return false;
-        }
-        let respelled: HashSet<(LinkFamily, usize)> = edits
-            .iter()
-            .flat_map(|edit| &edit.links)
-            .map(|link| (link.family, link.span.byte_offset))
-            .collect();
-        let (before, after) = (self.all_links(), reread.all_links());
-        before.len() == after.len()
-            && before.iter().zip(&after).all(|(was, is)| {
-                let target = if respelled.contains(&(was.family, was.span.byte_offset)) {
-                    to.target.as_str()
-                } else {
-                    was.target.as_str()
-                };
-                reading(was) == reading(is) && is.target == target
-            })
+    /// the bracket closing the Markdown link around it, a space ends a bare
+    /// destination, and `<!--` opens a comment that hides every tag after it.
+    fn reads_as_rewritten(
+        &self,
+        before: &Reading,
+        text: &str,
+        edits: &[Edit<'_>],
+        to: &Address,
+    ) -> bool {
+        let respelling = Respelling::of(edits, &to.target);
+        let carried = before.carrying(&respelling);
+        let expected = before.respelled(&respelling, self.frontmatter_after(edits), &carried);
+        let mut actual = Reading::of(&Document::parse(text));
+        actual.forget(&carried);
+        actual == expected
     }
 
     /// The edits each provable alone and alongside the ones kept before it,
@@ -264,6 +266,7 @@ impl Document<'_> {
     /// corrupting its value and a body one as unrepresentable there.
     fn provable_alone<'d>(
         &'d self,
+        before: &Reading,
         edits: Vec<Edit<'d>>,
         to: &Address,
         skipped: &mut Vec<SkippedLink>,
@@ -271,7 +274,7 @@ impl Document<'_> {
         let mut kept = Vec::with_capacity(edits.len());
         for edit in edits {
             kept.push(edit);
-            if !self.reads_as_rewritten(&self.spliced(&kept), &kept, to) {
+            if !self.reads_as_rewritten(before, &self.spliced(&kept), &kept, to) {
                 let refused = kept.pop().expect("the edit just kept");
                 let reason = match refused.slot {
                     Some(_) => RewriteSkip::WouldCorruptFrontmatter,
@@ -281,14 +284,6 @@ impl Document<'_> {
             }
         }
         kept
-    }
-
-    /// Every link this document holds, frontmatter first and then the body,
-    /// in the order the index derives them in.
-    fn all_links(&self) -> Vec<Link> {
-        let mut links = self.frontmatter_wikilinks();
-        links.extend(self.links());
-        links
     }
 
     /// The frontmatter this document would read as with `edits`' strings
@@ -373,16 +368,258 @@ impl Address {
     }
 }
 
-/// What a link reads as, its target and its display text aside: the parts a
-/// rewrite must leave as they were.
-fn reading(link: &Link) -> (LinkFamily, bool, Option<&str>, Option<&str>, Option<&str>) {
-    (
-        link.family,
-        link.embed,
-        link.protocol.as_deref(),
-        link.anchor.as_deref(),
-        link.block_ref.as_deref(),
-    )
+/// Everything the index derives from one document — its frontmatter, its
+/// links of both families, its headings, its tags from both sources and its
+/// block ids — and the code ranges that decide which bytes can be any of
+/// them, each placed by the bytes it stands at in the source.
+///
+/// A position is a byte offset alone: a rewrite writes no line break and
+/// removes none, so where a fact's line and column land follows from where
+/// its byte does. A heading's slug is not read either, because it is the
+/// heading texts' own function, in order, and they are read.
+#[derive(Debug, PartialEq)]
+struct Reading {
+    frontmatter: Option<Value>,
+    links: Vec<LinkReading>,
+    headings: Vec<HeadingReading>,
+    /// Frontmatter tags first, then body ones, as the index orders them; a
+    /// frontmatter tag whose entry names no bytes has no position.
+    tags: Vec<(String, Option<usize>)>,
+    block_ids: Vec<(String, usize)>,
+    code: Vec<Range<usize>>,
+}
+
+/// A link as the index reads it, at the bytes its token spans.
+#[derive(Debug, Clone, PartialEq)]
+struct LinkReading {
+    family: LinkFamily,
+    embed: bool,
+    protocol: Option<String>,
+    target: String,
+    title: Option<String>,
+    anchor: Option<String>,
+    block_ref: Option<String>,
+    at: Range<usize>,
+}
+
+/// A heading as the index reads it: where its construct begins and ends.
+#[derive(Debug, PartialEq)]
+struct HeadingReading {
+    level: u8,
+    text: Option<String>,
+    at: Range<usize>,
+    inside_container: bool,
+}
+
+/// The facts of a reading whose own text holds a respelled link's bytes:
+/// each is changed by the rewrite because the link is part of it, so the
+/// proof reads it without that text.
+struct Carried {
+    /// Links whose bracket text holds another respelled link — `[[a]](b)`.
+    titles: Vec<usize>,
+    /// Headings whose text holds a respelled link — `# See [[a]]`.
+    headings: Vec<usize>,
+}
+
+impl Reading {
+    fn of(document: &Document<'_>) -> Self {
+        let scan = document.scan_body();
+        let body = document.body_start();
+        let links = document
+            .frontmatter_wikilinks()
+            .into_iter()
+            .map(|link| LinkReading::of(link, 0))
+            .chain(
+                scan.links()
+                    .into_iter()
+                    .map(|link| LinkReading::of(link, body)),
+            )
+            .collect();
+        let headings = scan
+            .headings()
+            .iter()
+            .map(|heading| HeadingReading {
+                level: heading.level,
+                text: Some(heading.text.clone()),
+                at: body + heading.span.byte_offset..body + heading.body_offset,
+                inside_container: heading.inside_container,
+            })
+            .collect();
+        let tags = document
+            .frontmatter_tags()
+            .into_iter()
+            .map(|tag| (tag.name, tag.span.map(|span| span.byte_offset)))
+            .chain(
+                scan.tags()
+                    .into_iter()
+                    .map(|tag| (tag.name, tag.span.map(|span| body + span.byte_offset))),
+            )
+            .collect();
+        let block_ids = scan
+            .block_ids()
+            .into_iter()
+            .map(|block| (block.id, body + block.span.byte_offset))
+            .collect();
+        let code = scan
+            .code_ranges()
+            .iter()
+            .map(|range| body + range.start..body + range.end)
+            .collect();
+        Reading {
+            frontmatter: document.frontmatter().cloned(),
+            links,
+            headings,
+            tags,
+            block_ids,
+            code,
+        }
+    }
+
+    /// What this reading becomes under `respelling`: every fact where its
+    /// bytes moved to, each respelled link targeting `to`, the frontmatter
+    /// read as `frontmatter`, and the `carried` facts' text forgotten.
+    fn respelled(
+        &self,
+        respelling: &Respelling<'_>,
+        frontmatter: Option<Value>,
+        carried: &Carried,
+    ) -> Reading {
+        let moved = |at: &Range<usize>| respelling.moved(at.start)..respelling.moved(at.end);
+        let mut reading = Reading {
+            frontmatter,
+            links: self
+                .links
+                .iter()
+                .map(|link| LinkReading {
+                    target: if respelling.respells(link) {
+                        respelling.to.to_string()
+                    } else {
+                        link.target.clone()
+                    },
+                    at: moved(&link.at),
+                    ..link.clone()
+                })
+                .collect(),
+            headings: self
+                .headings
+                .iter()
+                .map(|heading| HeadingReading {
+                    at: moved(&heading.at),
+                    text: heading.text.clone(),
+                    ..*heading
+                })
+                .collect(),
+            tags: self
+                .tags
+                .iter()
+                .map(|(name, at)| (name.clone(), at.map(|at| respelling.moved(at))))
+                .collect(),
+            block_ids: self
+                .block_ids
+                .iter()
+                .map(|(id, at)| (id.clone(), respelling.moved(*at)))
+                .collect(),
+            code: self.code.iter().map(moved).collect(),
+        };
+        reading.forget(carried);
+        reading
+    }
+
+    /// The facts whose own text holds a link `respelling` respells.
+    fn carrying(&self, respelling: &Respelling<'_>) -> Carried {
+        Carried {
+            titles: (0..self.links.len())
+                .filter(|&index| {
+                    let link = &self.links[index];
+                    respelling.holds(&link.at, Some((link.family, link.at.start)))
+                })
+                .collect(),
+            headings: (0..self.headings.len())
+                .filter(|&index| respelling.holds(&self.headings[index].at, None))
+                .collect(),
+        }
+    }
+
+    /// This reading with the `carried` facts' text left unread.
+    fn forget(&mut self, carried: &Carried) {
+        for &index in &carried.titles {
+            if let Some(link) = self.links.get_mut(index) {
+                link.title = None;
+            }
+        }
+        for &index in &carried.headings {
+            if let Some(heading) = self.headings.get_mut(index) {
+                heading.text = None;
+            }
+        }
+    }
+}
+
+impl LinkReading {
+    /// `link` as read, its token placed `base` bytes further into the source.
+    fn of(link: Link, base: usize) -> Self {
+        let at = link.range();
+        LinkReading {
+            family: link.family,
+            embed: link.embed,
+            protocol: link.protocol,
+            target: link.target,
+            title: link.title,
+            anchor: link.anchor,
+            block_ref: link.block_ref,
+            at: base + at.start..base + at.end,
+        }
+    }
+}
+
+/// The links a set of edits respells, each by its family and the byte its
+/// token begins at, with the source bytes its stem stands at: exactly what
+/// the edits replace, so where every other byte moves to follows.
+struct Respelling<'t> {
+    stems: Vec<(LinkFamily, usize, Range<usize>)>,
+    to: &'t str,
+}
+
+impl<'t> Respelling<'t> {
+    fn of(edits: &[Edit<'_>], to: &'t str) -> Self {
+        let stems = edits
+            .iter()
+            .flat_map(|edit| &edit.links)
+            .filter_map(|link| {
+                let at = link.span.byte_offset;
+                let stem = link.stem_range.clone()?;
+                Some((link.family, at, at + stem.start..at + stem.end))
+            })
+            .collect();
+        Respelling { stems, to }
+    }
+
+    /// Whether `link` is one this respelling rewrites.
+    fn respells(&self, link: &LinkReading) -> bool {
+        self.stems
+            .iter()
+            .any(|(family, at, _)| (*family, *at) == (link.family, link.at.start))
+    }
+
+    /// Where the source byte at `at` stands once every stem ending at or
+    /// before it is written as `to`.
+    fn moved(&self, at: usize) -> usize {
+        let (grown, shrunk) = self
+            .stems
+            .iter()
+            .filter(|(_, _, stem)| stem.end <= at)
+            .fold((0, 0), |(grown, shrunk), (_, _, stem)| {
+                (grown + self.to.len(), shrunk + stem.len())
+            });
+        at + grown - shrunk
+    }
+
+    /// Whether a respelled link other than `except` begins inside `range`.
+    fn holds(&self, range: &Range<usize>, except: Option<(LinkFamily, usize)>) -> bool {
+        self.stems
+            .iter()
+            .any(|(family, at, _)| range.contains(at) && except != Some((*family, *at)))
+    }
 }
 
 /// Set the string at `field` — its own value, or the `item` of its sequence —

@@ -375,6 +375,13 @@ impl<'a> BodyScan<'a> {
         links
     }
 
+    /// The byte ranges code makes opaque — fenced and indented blocks and
+    /// inline spans — in document order. No fact this scan reports stands in
+    /// one, so which bytes are code decides which bytes can be any fact.
+    pub(crate) fn code_ranges(&self) -> &[Range<usize>] {
+        &self.code_ranges
+    }
+
     /// Every `[[…]]` token in the body, code excluded.
     pub fn wikilinks(&self) -> Vec<Link> {
         parse_tokens(self.body, &self.code_ranges)

@@ -509,6 +509,79 @@ fn a_wikilink_inside_a_markdown_links_text_is_rewritten() {
     assert_eq!(out.rewritten, 1);
 }
 
+// ── Everything else the document says stands ─────────────────────────────
+
+/// A rewrite whose `to` changes anything the index reads besides the rewritten
+/// targets is skipped, and the document is returned as it was.
+fn assert_skipped_as_unrepresentable(source: &str, family: LinkFamily, to: &str) {
+    let out = rewrite(source, family, "a", to);
+    assert_eq!(out.text, source, "to {to:?}");
+    assert_eq!(out.rewritten, 0, "to {to:?}");
+    assert_eq!(reasons(&out), [RewriteSkip::Unrepresentable], "to {to:?}");
+}
+
+/// A target that opens an HTML comment turns the rest of the paragraph into
+/// the comment, so a tag after the link would stop being a tag.
+#[test]
+fn a_target_that_hides_a_tag_is_skipped() {
+    assert_skipped_as_unrepresentable(
+        "see [[a]] and #tag here -->\n",
+        LinkFamily::Wikilink,
+        "<!--",
+    );
+}
+
+/// A target that closes an HTML comment the link sits in turns the text after
+/// it into prose, so a tag the comment hid would become one.
+#[test]
+fn a_target_that_reveals_a_tag_is_skipped() {
+    assert_skipped_as_unrepresentable("x <!-- [[a]] #hidden -->\n", LinkFamily::Wikilink, "-->");
+}
+
+/// Code is a different document: a target that opens a comment swallowing a
+/// later code span changes which bytes are code, even where no link or tag
+/// stands in them yet.
+#[test]
+fn a_target_that_swallows_a_code_span_is_skipped() {
+    assert_skipped_as_unrepresentable(
+        "see [[a]] then `rm -rf` -->\n",
+        LinkFamily::Wikilink,
+        "<!--",
+    );
+}
+
+/// A target that opens an inline HTML tag reads every byte up to the quote
+/// closing its attribute as that tag, a tag and a code span among them.
+#[test]
+fn a_target_that_opens_an_html_tag_is_skipped() {
+    assert_skipped_as_unrepresentable("[[a]] #tag `code` \">\n", LinkFamily::Wikilink, "<x y=\"");
+}
+
+/// `[[a]](dest)` is two links sharing bytes. A backslash written at the end
+/// of the wikilink's stem escapes the bracket after it, so the Markdown link
+/// would still read with its own target — one byte further on. A link that
+/// moved is a link the index would place somewhere else.
+#[test]
+fn a_target_that_moves_another_link_is_skipped() {
+    assert_skipped_as_unrepresentable("[[a]](dest)\n", LinkFamily::Wikilink, "x\\");
+}
+
+/// What a rewritten link's own bytes are part of changes with them and is not
+/// a change in what the document says: a heading holding the link reads its
+/// new spelling, and every heading, tag and block id after it reads where its
+/// bytes moved to.
+#[test]
+fn a_heading_holding_a_rewritten_link_reads_its_new_spelling() {
+    let source = "# See [[a]] #tag\n\nText [[a]] ^blk\n\n## After\n";
+    let out = rewrite(source, LinkFamily::Wikilink, "a", "Longer/Name");
+    assert_eq!(
+        out.text,
+        "# See [[Longer/Name]] #tag\n\nText [[Longer/Name]] ^blk\n\n## After\n"
+    );
+    assert_eq!(out.rewritten, 2);
+    assert!(out.skipped.is_empty(), "{:?}", reasons(&out));
+}
+
 /// A rewrite that changes nothing returns the document's own bytes — a mark,
 /// CRLF breaks and all — whether nothing matched or every match was a link
 /// already spelled `to`.
