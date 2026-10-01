@@ -1018,10 +1018,6 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
     }
 }
 
-/// The store's fact for one link the text layer parsed. An empty anchor —
-/// `note#`, `note#^` — names no place, so the fact carries none; a heading
-/// anchor carries the readings the text layer's section resolver matches it
-/// by.
 /// Every link the document `bytes` spell holds, in the order its facts
 /// list them: its frontmatter's wikilinks, then its body's links, each read
 /// as a derivation reads it. Bytes that are not UTF-8 hold none, as a
@@ -1049,6 +1045,10 @@ fn links_of(document: &Document<'_>, scan: &norn_text::BodyScan<'_>) -> Vec<Link
         .collect()
 }
 
+/// The store's fact for one link the text layer parsed. An empty anchor —
+/// `note#`, `note#^` — names no place, so the fact carries none; a heading
+/// anchor carries the readings the text layer's section resolver matches it
+/// by.
 fn map_link(link: norn_text::Link) -> LinkFact {
     let anchor = match (link.anchor, link.block_ref) {
         (Some(written), _) => {

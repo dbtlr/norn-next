@@ -444,13 +444,6 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
         .collect()
 }
 
-/// The bytes `unit` publishes, where it writes any.
-///
-/// A target already holding its after-state, and a respell halfway, hold the
-/// after-state's bytes, and those are its content; every other written target
-/// takes the recomposed bytes, which [`recompose`] held to its after-state.
-/// A written target the operations leave nothing at is returned as the path
-/// its transition disagrees at.
 /// Every way the resolution change set a plan records differs from
 /// `recomputed`, the set computed again from the plan: each entry it records
 /// that the set does not hold with the same values fails, and each entry the
@@ -501,6 +494,13 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
     checks
 }
 
+/// The bytes `unit` publishes, where it writes any.
+///
+/// A target already holding its after-state, and a respell halfway, hold the
+/// after-state's bytes, and those are its content; every other written target
+/// takes the recomposed bytes, which [`recompose`] held to its after-state.
+/// A written target the operations leave nothing at is returned as the path
+/// its transition disagrees at.
 fn content(
     plan: &ResolvedPlan,
     unit: Unit,
