@@ -200,7 +200,7 @@ pub(crate) struct ChangeSet {
     pub(crate) advisories: Vec<LinkAdvisory>,
     /// The position of each delete whose link choice the set contradicts
     /// ([`Removal::kept_by`]), in order. Planning leaves every such delete
-    /// unresolved, so a plan it resolved holds none; the applier refuses a
+    /// unresolved by the same rule, so a plan it resolved holds none; the applier refuses a
     /// resolved plan holding one as one that is not what its operations do.
     pub(crate) unkept: Vec<usize>,
 }
@@ -340,6 +340,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
                 !removal.kept_by(
                     named.contains(&removal.position),
                     rewritten_to.get(&removal.position),
+                    normalizer,
                 )
             })
             .map(|removal| removal.position)
@@ -533,6 +534,22 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
     Ok(targets)
 }
 
+/// The one document a rewriting delete's target `named` names where the
+/// plan leaves the vault, as the file the vault's rule reads and the path the
+/// store's grammar reads: what its backlinks are respelled toward. `None`
+/// where it names no one document, or one at a path either refuses, which no
+/// link can be respelled toward.
+pub(crate) fn rewrite_destination(
+    named: &TargetNaming,
+    normalizer: &PathNormalizer,
+) -> Option<(NormalizedPath, norn_store::DocumentPath)> {
+    let Resolves::One { path } = &named.after else {
+        return None;
+    };
+    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
+    Some((file, stored_path(path)?))
+}
+
 /// **The one rule a delete's cascade follows**: whether a link that
 /// resolved before the plan to exactly the document `removal` removes, and
 /// resolves to `after` after it, is one the delete rewrites — the delete
@@ -552,15 +569,13 @@ pub(crate) fn rewritten_for(
     if removal.rewrite_to().is_none() {
         return false;
     }
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
     let target = targets
         .get(&removal.position)
-        .and_then(|target| match &target.after {
-            Resolves::One { path } => identity(path),
-            _ => None,
-        });
+        .and_then(|target| rewrite_destination(target, normalizer));
     match (after, target) {
-        (Resolves::One { path }, Some(target)) => identity(path).as_ref() != Some(&target),
+        (Resolves::One { path }, Some((target, _))) => {
+            normalizer.normalize(Path::new(path.as_str())).ok().as_ref() != Some(&target)
+        }
         _ => true,
     }
 }

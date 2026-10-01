@@ -2554,13 +2554,15 @@ a delete removes where it resolves before the plan to exactly that document — 
 plan's moves carried it first — so a link naming several documents is a backlink of none,
 and a link the document holds goes with it. Backlinks are read from the same door, overlay
 and probes, at the plan's after-state: a link in a holder the plan removes or edits away is
-none, and one the plan writes is. A delete saying neither flag that a backlink names is left
+none, and one the plan adds is. A link a link rewrite respells is judged by the text it had,
+never by what its new spelling named before the plan, so a link a move's cascade respells to
+the name of a document a delete removes is no backlink of it. A delete saying neither flag that a backlink names is left
 unresolved, its reason naming every holding document once, in path order, and how many
 backlinks there are, so its plan answers `vault/plan-refused`. A delete leaving them broken
 lands, and the forecast advises on each link it leaves broken. A delete rewriting them reads
 its `rewrite_to` through the same door, as a wikilink written with it is held, where the plan
-leaves the vault: naming no document there — the one the delete removes among them — it is
-left unresolved in words, and naming several, with the head of them a store built at the
+leaves the vault: naming no document there — the one the delete removes among them — or one
+at a path the vault's rule or the store's grammar refuses, it is left unresolved in words, and naming several, with the head of them a store built at the
 after-state would report, the only read of the door past the bound a link's judgment reads.
 Naming one, every backlink not already naming that document after the plan is respelled to
 it in both syntaxes, each in its own form by the spellings a move's cascade writes, its embed
@@ -2573,9 +2575,10 @@ an entry of the change set, even where the path it named is refilled, so a backl
 writer adds after planning is an entry the plan does not record: the apply is refused, and
 the fresh plan rewrites the new backlink too or, for a delete saying neither flag, is left
 unresolved naming its holder. The applier holds a resolved plan's delete to its link choice
-from the set it computes again, reading nothing more: a delete forbidding the links naming
-its document whose plan records one, or one rewriting them whose `rewrite_to` names no one
-document where the plan leaves the vault, is one planning leaves unresolved, so the plan is
+from the set it computes again, reading nothing more, by the one rule planning resolves a
+delete by: a delete forbidding the links naming its document whose plan records one, or one
+rewriting them whose `rewrite_to` names no one document a link can be respelled toward where
+the plan leaves the vault, is one planning leaves unresolved, so the plan is
 `request/plan-invalid` (`transitions_disagree`, naming the deleted document); where the
 vault moved since planning, the refusal's fresh plan answers for it instead.
 

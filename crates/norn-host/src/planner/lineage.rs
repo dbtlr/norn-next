@@ -27,9 +27,10 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
-use norn_wire::{Backlinks, Operation, OperationKind, Resolves};
+use norn_wire::{Backlinks, Operation, OperationKind};
 
 use super::compose::touches;
+use super::links::rewrite_destination;
 
 /// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,23 +104,33 @@ impl Removal {
     }
 
     /// **The one rule a delete's link choice is held to** where the plan
-    /// leaves the vault, with `named` whether a link resolving before the
-    /// plan to exactly the document it removes holds an entry of the plan's
-    /// resolution change set, and `target` what its `rewrite_to` names
-    /// there: a delete forbidding the links naming its document is kept
-    /// where no link names it; one rewriting them, where its `rewrite_to`
-    /// names exactly one document — never the removed one, which stands
-    /// nowhere after the plan, though another may stand at its path; one
-    /// leaving them broken, always.
+    /// leaves the vault, with `named` whether a backlink of the document it
+    /// removes is held there — a link that itself resolved before the plan
+    /// to exactly that document, a link a rewrite writes judged by the text
+    /// it had and never by its new spelling — and `target` what its
+    /// `rewrite_to` names there: a delete forbidding the links naming its
+    /// document is kept where no link names it; one rewriting them, where
+    /// its `rewrite_to` names exactly one document at a path a link can be
+    /// respelled toward ([`rewrite_destination`]) — never the removed one,
+    /// which stands nowhere after the plan, though another may stand at its
+    /// path; one leaving them broken, always.
     ///
-    /// Planning leaves a delete it does not keep unresolved, and the applier
-    /// refuses a resolved plan holding one; neither reads anything more than
-    /// the change set it computes.
-    pub(crate) fn kept_by(&self, named: bool, target: Option<&TargetNaming>) -> bool {
+    /// Planning resolves every delete by this rule, leaving one it does not
+    /// keep unresolved, and the applier refuses a resolved plan holding one
+    /// by it again; neither reads anything more than the links and the
+    /// target it judges. Planning reads `named` before any cascade writes a
+    /// link, and the change set after, from the links it does not write, so
+    /// the two read the same backlinks.
+    pub(crate) fn kept_by(
+        &self,
+        named: bool,
+        target: Option<&TargetNaming>,
+        normalizer: &PathNormalizer,
+    ) -> bool {
         match &self.backlinks {
             Backlinks::Forbidden => !named,
             Backlinks::RewrittenTo(_) => {
-                target.is_some_and(|target| matches!(target.after, Resolves::One { .. }))
+                target.is_some_and(|target| rewrite_destination(target, normalizer).is_some())
             }
             Backlinks::LeftBroken => true,
         }
@@ -351,7 +362,7 @@ fn carriers(cycle: &[&NormalizedPath], drawing: &BTreeMap<&NormalizedPath, &Draw
 #[cfg(test)]
 mod tests {
     use norn_fs::CaseSensitivity;
-    use norn_wire::DocumentPath;
+    use norn_wire::{DocumentPath, ResolutionTarget, Resolves};
 
     use super::*;
 
@@ -386,5 +397,31 @@ mod tests {
             "the walk followed {steps} steps over {} files",
             drawing.len()
         );
+    }
+
+    /// **A rewriting delete is kept only where its `rewrite_to` names one
+    /// document at a path a link can be respelled toward.** One document at
+    /// a path both the vault's rule and the store's grammar read keeps it; a
+    /// path either refuses — one the vault's rule does not read, or one
+    /// whose leaf the store's grammar reduces to no stem — does not, nor
+    /// does naming no document, as planning leaves each unresolved.
+    #[test]
+    fn a_rewriting_delete_is_kept_only_where_its_target_is_a_path_links_can_name() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let removal = Removal {
+            position: 0,
+            backlinks: Backlinks::RewrittenTo(ResolutionTarget::new("c").expect("a target")),
+        };
+        let naming = |after: Resolves| TargetNaming::new(Resolves::none(), after, None);
+        let one = |at: &str| Resolves::one(DocumentPath::new(at).expect("a document path"));
+        assert!(removal.kept_by(false, Some(&naming(one("x/c.md"))), &normalizer));
+        for unreadable in ["../c.md", "x/...md"] {
+            assert!(
+                !removal.kept_by(false, Some(&naming(one(unreadable))), &normalizer),
+                "{unreadable}"
+            );
+        }
+        assert!(!removal.kept_by(false, Some(&naming(Resolves::none())), &normalizer));
+        assert!(!removal.kept_by(false, None, &normalizer));
     }
 }
