@@ -164,6 +164,9 @@ struct Simulated<'view, V> {
 /// Why one operation cannot act on the state it met, in words.
 pub(crate) type Unresolved = String;
 
+/// Each rewrite of a cascade beside the spelling of the holder it names.
+type HeldRewrites<'c> = Vec<(DocumentPath, &'c LinkRewrite)>;
+
 /// Where one name an operation carries leads.
 enum Place {
     /// A file the plan composes, at the spelling it is written at.
@@ -491,7 +494,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     fn holders<'c>(
         &mut self,
         cascade: &'c [LinkRewrite],
-    ) -> Result<Result<Vec<(DocumentPath, &'c LinkRewrite)>, Unresolved>, V::Error> {
+    ) -> Result<Result<HeldRewrites<'c>, Unresolved>, V::Error> {
         let mut named = Vec::with_capacity(cascade.len());
         for rewrite in cascade {
             match self.standing(&rewrite.path)? {
