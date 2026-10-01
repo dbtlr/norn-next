@@ -1168,6 +1168,55 @@ fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
     }
 }
 
+/// **An operation that does not act refuses the plan even where it touches
+/// no file.** A wikilink rewrite names its documents only through its
+/// cascade, and is not planned yet (NORN-297), so a resolved plan carrying
+/// one — beside an edit or alone, with a cascade or without — is
+/// `request/plan-invalid` naming the files its cascade names, and never
+/// applied with the rewrite silently dropped.
+#[test]
+fn a_resolved_plan_carrying_a_wikilink_rewrite_is_invalid_rather_than_dropped() {
+    let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
+    let rewrite = || {
+        Operation::new(norn_wire::OperationKind::rewrite_wikilink(
+            target("x"),
+            target("y"),
+        ))
+    };
+    let cascade = vec![norn_wire::LinkRewrite::new(
+        path("b.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "x",
+        "y",
+    )];
+    for (label, alone, operation, named) in [
+        ("beside an edit, no cascade", false, rewrite(), vec![]),
+        (
+            "beside an edit, with its cascade",
+            false,
+            rewrite().with_cascade(cascade.clone()),
+            vec![path("b.md")],
+        ),
+        (
+            "alone, with its cascade",
+            true,
+            rewrite().with_cascade(cascade.clone()),
+            vec![path("b.md")],
+        ),
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[x]]\n")]);
+        let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+        if alone {
+            plan.operations.clear();
+            plan.transitions.clear();
+        }
+        plan.operations.push(operation);
+        assert_eq!(fixture.refuses_disagreeing(plan), named, "{label}");
+        assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"), "{label}");
+        assert_eq!(fixture.read("b.md").as_deref(), Some("[[x]]\n"), "{label}");
+    }
+}
+
 /// A removal no operation makes, added to a plan, is refused.
 #[test]
 fn an_extra_removal_no_operation_makes_is_refused() {

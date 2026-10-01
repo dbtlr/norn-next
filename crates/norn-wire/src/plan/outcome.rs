@@ -374,7 +374,8 @@ pub enum PlanFault {
         /// Every file the disagreement touches, sorted and each once as the
         /// constructor builds it: every transition's path that disagrees,
         /// and every path an operation writes or names that no transition or
-        /// checked condition matches.
+        /// checked condition matches. An operation that does not act refuses
+        /// the plan even where it names no file, so the list may be empty.
         paths: Vec<DocumentPath>,
     },
     /// A resolved plan's operations still carry what planning expands into
