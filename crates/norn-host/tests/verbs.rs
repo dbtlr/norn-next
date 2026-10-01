@@ -710,6 +710,30 @@ fn a_creation_with_no_rule_to_make_it_is_refused_naming_why() {
     assert_eq!(read(&vault, "a.md"), "a\n");
 }
 
+/// **A creation by rule is made by the pinned schema's rules, not the
+/// declaration on disk**: a declaration rewritten after attach, which no
+/// reload has re-pinned, neither moves the rule's target nor withdraws the
+/// inbox.
+#[test]
+fn a_creation_by_rule_is_made_by_the_pinned_schema_not_the_bytes_on_disk() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-pinned", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        "version: 1\ncreatable:\n  task:\n    target: \"elsewhere/{{seq}}.md\"\n",
+    )
+    .expect("rewrite the schema on disk");
+
+    let (plan, _, _) =
+        applied(host.new_document(new_task(&vault, ApplyMode::Apply, "T", Some("Body.\n"))));
+    let (at, content) = the_create(&plan);
+    assert_eq!(at, "tasks/NORN-1.md");
+    assert!(content.starts_with("---\nstatus: todo\n"), "{content}");
+    let (at, _) = captured(&host, &vault, ValueMap::default(), "Call Sam.\n");
+    assert!(at.starts_with("inbox/"), "{at}");
+    assert!(!vault.path().join("elsewhere").exists());
+}
+
 /// **Two writers previewing one numbered name before either applies: one
 /// document lands, the other is refused** (Layer 4, exit item 10). Both
 /// previews allocate the same number; the first applied lands; the second's
