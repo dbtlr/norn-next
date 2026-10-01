@@ -2624,7 +2624,9 @@ nothing it names changes, so a wikilink another writer adds after planning that 
 would retarget is an entry the plan does not record: the apply is refused, and the fresh
 plan's cascade rewrites it too. An authored `rewrite_link` names its document where the plan
 leaves it and joins that document's batch with every cascade rewrite naming it, so no
-rewrite respells a link another wrote; one matching no link of its syntax written `from`
+rewrite respells a link another wrote; the link it names is its own, ahead of any wikilink
+rewrite, move or delete of the same plan, which neither respells it nor selects the text
+it writes, and a forbidding delete's backlink it respells is none; one matching no link of its syntax written `from`
 there is left unresolved in words, as an edit whose text does not occur is, while one
 matching a link the text layer leaves as written, or respelling one to what it already
 holds, lands, its document found, and the forecast advises on what the text layer left.

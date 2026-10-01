@@ -99,7 +99,7 @@ use norn_wire::{
 };
 
 use super::compose::{Composition, Kept, Skipped};
-use super::lineage::{Drawn, Lineage, Removal, Retarget};
+use super::lineage::{Drawn, Lineage, Relink, Removal, Retarget};
 use crate::derivation::document_links;
 
 /// Where the links a plan does not write are judged: what each link the plan
@@ -309,6 +309,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         }
         let left_behind = unwritten
             && decider(
+                &change.holder,
                 &change.link,
                 Named::of(&change),
                 lineage,
@@ -355,9 +356,9 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     // text it had resolved before the plan to exactly that document, read
     // from where its holder's content stood: a backlink respelled away, or
     // respelled from where its moved holder lands, is still one, and a link
-    // respelled toward the deleted document's name is none. A backlink a
-    // wikilink rewrite decides is the rewrite's, whose author said what it
-    // names, so respelled it is none. Only a delete forbidding the links
+    // respelled toward the deleted document's name is none. A backlink an
+    // authored link rewrite or a wikilink rewrite decides is that rewrite's,
+    // whose author said what it names, so respelled it is none. Only a delete forbidding the links
     // naming its document reads whether one does ([`Removal::kept_by`]), so
     // the originals are read only where one does.
     if !originals.is_empty()
@@ -375,13 +376,14 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             };
             let authored = matches!(
                 decider(
+                    &change.holder,
                     &change.link,
                     Named::of(&change),
                     lineage,
                     &retargeted,
                     normalizer
                 ),
-                Some(Decider::Retarget(_))
+                Some(Decider::Authored(_) | Decider::Retarget(_))
             );
             if !authored {
                 named.insert(removal.position);
@@ -837,6 +839,8 @@ impl<'a> Named<'a> {
 /// ([`decider`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Decider<'l> {
+    /// An authored link rewrite naming the link.
+    Authored(&'l Relink),
     /// A wikilink rewrite whose `old` names the link.
     Retarget(&'l Retarget),
     /// A delete removing the document the link named.
@@ -856,6 +860,7 @@ impl Decider<'_> {
     /// link it decides.
     pub(crate) fn owner(&self) -> usize {
         match self {
+            Decider::Authored(relink) => relink.position,
             Decider::Retarget(retarget) => retarget.position,
             Decider::Removal(removal) => removal.position,
             Decider::Move { owner, .. } => *owner,
@@ -908,23 +913,35 @@ pub(crate) fn selecting<'l>(
 }
 
 /// **The one rule which operation of a plan decides what a link names after
-/// it**, the link written as `link` and naming `named` before the plan: a
-/// wikilink rewrite whose `old` names it ([`selecting`]) — the first in plan
-/// order — whatever a move or a delete would do with it, since its author
-/// said what it names; else a delete removing the one document it named;
-/// else the moves carrying that document away. `None` where the plan leaves
-/// what it named where it stood.
+/// it**, the link written as `link` in the document held at `holder` after
+/// the plan, and naming `named` before it: an authored link rewrite naming
+/// the link — its holder, its syntax and the address it is written with —
+/// the first in plan order; else a wikilink rewrite whose `old` names it
+/// ([`selecting`]), the first in plan order — each whatever a move or a
+/// delete would do with it, since its author said what it names; else a
+/// delete removing the one document it named; else the moves carrying that
+/// document away. `None` where the plan leaves what it named where it stood.
 ///
 /// A link cascade reads the document a link must name by this
 /// (`Cascade::final_document`), and the change set which links a cascade
-/// left as written ([`respells`]).
+/// left as written ([`respells`]) and which links a rewrite writes are a
+/// deleted document's backlinks still.
 pub(crate) fn decider<'l>(
+    holder: &norn_store::DocumentPath,
     link: &LinkFact,
     named: Named<'_>,
     lineage: &'l Lineage,
     namings: &BTreeMap<usize, RetargetNaming>,
     normalizer: &PathNormalizer,
 ) -> Option<Decider<'l>> {
+    let held = normalizer.normalize(Path::new(holder.as_str())).ok();
+    if let Some(relink) = lineage.relinks().find(|relink| {
+        held.as_ref() == Some(&relink.holder)
+            && relink.syntax == wire_family(link.family)
+            && relink.from == address(link)
+    }) {
+        return Some(Decider::Authored(relink));
+    }
     if let Some(&first) = selecting(link, named, lineage, namings, normalizer).first() {
         return Some(Decider::Retarget(first));
     }
@@ -943,8 +960,9 @@ pub(crate) fn decider<'l>(
 }
 
 /// **Whether the operation `decider` decides a link by respells it**, the
-/// link resolving to `before` before the plan and `after` after it: a
-/// wikilink rewrite, where the link does not already name the one document
+/// link resolving to `before` before the plan and `after` after it: never an
+/// authored link rewrite, which writes the link itself rather than through a
+/// cascade; a wikilink rewrite, where the link does not already name the one document
 /// its `new` names after the plan (`namings`); a delete, by its own rule
 /// ([`rewritten_for`], its target named as `rewritten_to` says); the moves,
 /// by theirs ([`left_behind`]).
@@ -966,6 +984,7 @@ pub(crate) fn respells(
         _ => None,
     };
     match decider {
+        Decider::Authored(_) => false,
         Decider::Retarget(retarget) => {
             let new = namings
                 .get(&retarget.position)

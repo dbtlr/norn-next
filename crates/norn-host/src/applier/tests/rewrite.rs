@@ -551,6 +551,64 @@ fn a_wikilink_rewrite_never_selects_the_text_an_authored_rewrite_writes() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **An authored link rewrite decides the link it names, whatever a move or
+/// a delete of the plan would do with it**: its author said what it names.
+/// With `a.md` moved to `b.md`, a respelling of `[[a]]` the text layer
+/// refuses leaves it as written for the author's reason, and the move's
+/// cascade does not also respell it — two rewrites of one link would leave
+/// it as written for their conflict. With `a.md` deleted forbidding the
+/// links naming it, `[[a]]` respelled to `[[c]]` names `c.md`, so the delete
+/// needs no flag and the plan lands, while one the text layer refuses still
+/// names `a.md` and holds the delete back.
+#[test]
+fn an_authored_link_rewrite_decides_its_link_over_a_move_or_a_delete() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("c.md", "C\n"), ("h.md", "[[a]]\n")]);
+    let moved = fixture.resolution(vec![
+        super::moving("a.md", "b.md"),
+        relinking("h.md", LinkFamily::Wikilink, "a", "x]]y"),
+    ]);
+    assert!(
+        moved
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty()),
+        "{:?}",
+        moved.plan.operations
+    );
+    assert_eq!(
+        moved.forecast.links,
+        [LinkAdvisory::skipped_unrepresentable(key("h.md", "a"))]
+    );
+
+    let refused = fixture.planned(vec![
+        deleting("a.md"),
+        relinking("h.md", LinkFamily::Wikilink, "a", "x]]y"),
+    ]);
+    assert_eq!(
+        refused
+            .unresolved
+            .iter()
+            .map(|left| left.reason.clone())
+            .collect::<Vec<_>>(),
+        [UnresolvedReason::has_backlinks(vec![path("h.md")], 1)]
+    );
+
+    let cleared = fixture.resolution(vec![
+        deleting("a.md"),
+        relinking("h.md", LinkFamily::Wikilink, "a", "c"),
+    ]);
+    let (previewed, forecast) = fixture
+        .preview(cleared.plan.clone())
+        .expect("the plan previews");
+    assert_eq!(previewed, cleared.plan);
+    assert_eq!(forecast.links, cleared.forecast.links);
+    applied(fixture.apply(cleared.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"));
+    assert_eq!(fixture.read("a.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+}
+
 /// **A link an authored rewrite matches and the text layer leaves as written
 /// is advised on**: a wikilink's address cannot hold `]]`, so `[[a]]` stays
 /// as it is, the forecast says it is unrepresentable, and the holder lands

@@ -331,30 +331,39 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         if change.written && !cascade.kept.contains(&change_key(&change)) {
             return;
         }
+        let Some(destination) =
+            cascade.final_document(&change.holder, &change.link, Named::of(&change))
+        else {
+            return;
+        };
         // A wikilink two rewrites select is the earlier one's, and the later
         // one is left out naming it.
-        if let [earlier, later @ ..] = &selecting(
-            &change.link,
-            Named::of(&change),
-            lineage,
-            &cascade.namings,
-            normalizer,
-        )[..]
-        {
-            for retarget in later {
+        if let Decider::Retarget(earlier) = destination.by {
+            let selected = selecting(
+                &change.link,
+                Named::of(&change),
+                lineage,
+                &cascade.namings,
+                normalizer,
+            );
+            for later in selected
+                .into_iter()
+                .filter(|retarget| retarget.position != earlier.position)
+            {
                 overlapping
-                    .entry(retarget.position)
+                    .entry(later.position)
                     .or_insert_with(|| overlaps(&change, earlier));
             }
         }
-        let Some(destination) = cascade.final_document(&change.link, Named::of(&change)) else {
-            return;
-        };
+        // A backlink of a document a delete forbidding them removes stays
+        // one where the delete, or an authored link rewrite leaving it as
+        // written, decides it; a wikilink rewrite's cascade may yet respell
+        // it.
         let forbidding = removed_by(&change.before, lineage, normalizer)
             .filter(|removal| removal.backlinks == Backlinks::Forbidden);
         if let Some(removal) = forbidding {
             match destination.by {
-                Decider::Removal(_) => {
+                Decider::Removal(_) | Decider::Authored(_) => {
                     forbidden
                         .entry(removal.position)
                         .or_default()
@@ -678,11 +687,13 @@ impl<'a> Cascade<'a> {
     }
 
     /// **The one rule a link's final document is read by**: where a link
-    /// written as `link` named `named` before the plan, the operation that
-    /// decides what it names after it ([`decider`]) and the document that is,
-    /// every effect of the plan counted — where a wikilink rewrite's `old`
-    /// names the link, the one document its `new` names, whatever a move or
-    /// a delete would do with it; where a delete removes the document
+    /// written as `link`, held at `holder` after the plan, named `named`
+    /// before it, the operation that decides what it names after it
+    /// ([`decider`]) and the document that is, every effect of the plan
+    /// counted — where an authored link rewrite names the link, none, since
+    /// that rewrite writes it and no cascade does; where a wikilink rewrite's
+    /// `old` names the link, the one document its `new` names, whatever a
+    /// move or a delete would do with it; where a delete removes the document
     /// rewriting the links naming it, the one document its `rewrite_to`
     /// names; where a move carries it, the file it lands at. `None` where the
     /// plan leaves what it named where it stood.
@@ -691,9 +702,22 @@ impl<'a> Cascade<'a> {
     /// are both pointed here, so a holder the plan moves names a deleted
     /// document's target from where it lands, whichever operation writes its
     /// rewrite, and a wikilink a rewrite retargets is retargeted once.
-    fn final_document(&self, link: &LinkFact, named: Named<'_>) -> Option<Destination<'a>> {
-        let by = decider(link, named, self.lineage, &self.namings, self.normalizer)?;
+    fn final_document(
+        &self,
+        holder: &norn_store::DocumentPath,
+        link: &LinkFact,
+        named: Named<'_>,
+    ) -> Option<Destination<'a>> {
+        let by = decider(
+            holder,
+            link,
+            named,
+            self.lineage,
+            &self.namings,
+            self.normalizer,
+        )?;
         let to = match by {
+            Decider::Authored(_) => None,
             Decider::Retarget(_) | Decider::Removal(_) => {
                 self.destinations.get(&by.owner()).cloned()
             }
@@ -760,8 +784,14 @@ impl<'a> Cascade<'a> {
                 let [named] = &norn_store::named_paths(&link, &source)[..] else {
                     continue;
                 };
-                let named = self
-                    .final_document(&link, Named::One(named))
+                let destination = self.final_document(&holder, &link, Named::One(named));
+                if destination
+                    .as_ref()
+                    .is_some_and(|destination| matches!(destination.by, Decider::Authored(_)))
+                {
+                    continue;
+                }
+                let named = destination
                     .and_then(|destination| destination.to)
                     .map(|(_, at)| at.as_str().to_string())
                     .unwrap_or_else(|| named.clone());

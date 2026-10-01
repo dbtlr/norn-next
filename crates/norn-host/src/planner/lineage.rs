@@ -27,7 +27,7 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
-use norn_wire::{Backlinks, Operation, OperationId, OperationKind};
+use norn_wire::{Backlinks, LinkFamily, Operation, OperationId, OperationKind};
 
 use super::compose::touches;
 use super::links::rewrite_destination;
@@ -83,6 +83,23 @@ pub(crate) struct Lineage {
     removed: BTreeMap<NormalizedPath, usize>,
     /// Each wikilink rewrite of the plan, in the order it composes.
     retargets: Vec<Retarget>,
+    /// Each authored link rewrite of the plan, in the order it composes.
+    relinks: Vec<Relink>,
+}
+
+/// An authored link rewrite of the plan: the links it respells, named by
+/// the document holding them where the plan leaves it, their syntax and the
+/// address they are written with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Relink {
+    /// The rewrite's position.
+    pub(crate) position: usize,
+    /// The document holding the links, where the plan leaves it.
+    pub(crate) holder: NormalizedPath,
+    /// The links' syntax.
+    pub(crate) syntax: LinkFamily,
+    /// The address the links are written with.
+    pub(crate) from: String,
 }
 
 /// A wikilink rewrite of the plan: what it retargets the wikilinks naming,
@@ -242,8 +259,16 @@ impl Lineage {
                 // every operation with its holder's batch, so it acts on what
                 // that document holds at the end of the plan: its source is
                 // read once the walk is done.
-                OperationKind::RewriteLink { path, .. } => {
+                OperationKind::RewriteLink {
+                    path, syntax, from, ..
+                } => {
                     if let Some(file) = identity(path.as_str()) {
+                        lineage.relinks.push(Relink {
+                            position,
+                            holder: file.clone(),
+                            syntax: *syntax,
+                            from: from.clone(),
+                        });
                         rewritten.push((position, file));
                     }
                 }
@@ -316,6 +341,11 @@ impl Lineage {
     /// Every wikilink rewrite of the plan, in the order it composes.
     pub(crate) fn retargets(&self) -> impl Iterator<Item = &Retarget> + '_ {
         self.retargets.iter()
+    }
+
+    /// Every authored link rewrite of the plan, in the order it composes.
+    pub(crate) fn relinks(&self) -> impl Iterator<Item = &Relink> + '_ {
+        self.relinks.iter()
     }
 
     /// The source of what `file` holds at the end of the plan, where its
