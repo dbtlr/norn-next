@@ -579,12 +579,18 @@ impl<'a, R: Runner> Judging<'a, R> {
         let mut filled: Vec<&Key> = Vec::new();
         for (key, bound) in &bounds {
             let rows = heads.get(*key).map(Vec::as_slice).unwrap_or_default();
+            let mut stored = Vec::with_capacity(rows.len());
+            for row in rows {
+                if !self.targets(&row.1)? {
+                    stored.push(row.clone());
+                }
+            }
             if rows.len() < *bound {
-                total += rows.iter().filter(|(_, path)| !self.targets(path)).count() as u64;
+                total += stored.len() as u64;
             } else {
                 filled.push(key);
             }
-            named.extend(rows.iter().filter(|(_, path)| !self.targets(path)).cloned());
+            named.extend(stored);
             for target in self.members(key).filter(|target| target.after) {
                 total += 1;
                 let rung = match key.1 {
@@ -657,6 +663,15 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// The first of `path`'s suffix spellings that names the document there
     /// alone after the plan, or the path itself where none does.
+    ///
+    /// **Each spelling is resolved through this judgment, not link health's
+    /// suffix statement** (`SuffixSpellings`): that statement reads the
+    /// classes as the store holds them, by stored document, so it would
+    /// count a document the plan removes or carries away and miss one it
+    /// creates or lands. Resolving each spelling here reads it over the
+    /// overlay, every target at its after-state, as the head it names is
+    /// read — so a candidate is named as a store built after the plan would
+    /// name it, at the cost of a bounded read of each spelling's keys.
     fn minimal_suffix(&mut self, path: &str) -> Result<String, StoreError> {
         let document = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
         for spelling in document.suffix_spellings() {
@@ -671,10 +686,11 @@ impl<'a, R: Runner> Judging<'a, R> {
         Ok(path.to_string())
     }
 
-    /// Whether a target of the plan stands at the stored `path`.
-    fn targets(&self, path: &str) -> bool {
-        DocumentPath::new(path)
-            .is_ok_and(|at| self.target_keys.contains(at.path_key_in(self.key).as_str()))
+    /// Whether a target of the plan stands at the stored `path`, or why the
+    /// store holds a path its own grammar does not read.
+    fn targets(&self, path: &str) -> Result<bool, StoreError> {
+        let at = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
+        Ok(self.target_keys.contains(at.path_key_in(self.key).as_str()))
     }
 
     /// Whether one of `keys` could name a target the plan changes.
@@ -790,12 +806,12 @@ impl<'a, R: Runner> Judging<'a, R> {
             .map(|key| (key, self.naming.get(&key.0).map_or(0, Vec::len) + 2))
             .collect();
         for (key, head) in self.heads(&bounds)? {
-            let stored = head
-                .into_iter()
-                .map(|(_, path)| path)
-                .filter(|path| !self.targets(path))
-                .take(2)
-                .collect();
+            let mut stored = Vec::new();
+            for (_, path) in head {
+                if !self.targets(&path)? && stored.len() < 2 {
+                    stored.push(path);
+                }
+            }
             self.work.keys_resolved += 1;
             self.resolved.insert(key, KeyHeld { stored });
         }
