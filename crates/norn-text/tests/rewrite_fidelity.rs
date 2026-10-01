@@ -8,8 +8,8 @@
 //! here rather than tested-for: those bytes are never inside the edited range.
 
 use norn_text::{
-    BodyScan, Link, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
-    wikilink_target_is_representable,
+    AddressRewrite, Document, Link, LinkFamily, RewriteSkip, RewrittenLinks,
+    parse_wikilinks_in_text,
 };
 
 fn only(text: &str) -> Link {
@@ -20,6 +20,29 @@ fn only(text: &str) -> Link {
         "expected exactly one link in {text:?}"
     );
     link
+}
+
+/// `raw`, a document holding one wikilink, with that link's stem rewritten to
+/// `stem` through the one link rewrite — under the protocol it was written
+/// with, because a rewrite keys a link by its address as written.
+fn respelled(raw: &str, stem: &str) -> RewrittenLinks {
+    let link = only(raw);
+    let address = |stem: &str| match &link.protocol {
+        Some(protocol) => format!("{protocol}://{stem}"),
+        None => stem.to_string(),
+    };
+    Document::parse(raw).rewrite_links(&[AddressRewrite::new(
+        LinkFamily::Wikilink,
+        address(&link.target),
+        address(stem),
+    )])
+}
+
+/// [`respelled`]'s text, asserting the one link was rewritten.
+fn rewritten(raw: &str, stem: &str) -> String {
+    let out = respelled(raw, stem);
+    assert_eq!(out.rewritten, 1, "rewriting {raw:?} to {stem:?}");
+    out.text
 }
 
 // ── The stem sub-span ────────────────────────────────────────────────────
@@ -48,10 +71,7 @@ fn the_stem_span_names_the_targets_bytes_inside_the_token() {
 /// edited range.
 #[test]
 fn a_rewrite_replaces_the_stem_and_leaves_the_padding_and_title_alone() {
-    assert_eq!(
-        reconstruct_wikilink(&only("[[ Old | Title ]]"), "New").as_deref(),
-        Some("[[ New | Title ]]")
-    );
+    assert_eq!(rewritten("[[ Old | Title ]]", "New"), "[[ New | Title ]]");
 }
 
 /// NRN-431: a hand-rolled rewriter that strips `[[` and re-emits loses the
@@ -59,7 +79,7 @@ fn a_rewrite_replaces_the_stem_and_leaves_the_padding_and_title_alone() {
 /// link. Every byte outside the stem is outside the edit.
 #[test]
 fn every_byte_outside_the_stem_survives_a_rewrite() {
-    for (raw, rewritten) in [
+    for (raw, expected) in [
         ("[[Old]]", "[[New]]"),
         ("![[Old]]", "![[New]]"),
         ("[[Old|Shown]]", "[[New|Shown]]"),
@@ -81,11 +101,7 @@ fn every_byte_outside_the_stem_survives_a_rewrite() {
             "[[New|Shown | With | Pipes]]",
         ),
     ] {
-        assert_eq!(
-            reconstruct_wikilink(&only(raw), "New").as_deref(),
-            Some(rewritten),
-            "rewriting {raw:?}"
-        );
+        assert_eq!(rewritten(raw, "New"), expected, "rewriting {raw:?}");
     }
 }
 
@@ -103,10 +119,9 @@ fn a_rewrite_to_the_same_target_is_the_identity() {
         "[[vault://Target#^blk|Shown]]",
         "[[Target|  odd   spacing  ]]",
     ] {
-        let link = only(raw);
         assert_eq!(
-            reconstruct_wikilink(&link, &link.target).as_deref(),
-            Some(raw),
+            rewritten(raw, &only(raw).target),
+            raw,
             "rewriting {raw:?} to itself"
         );
     }
@@ -118,46 +133,13 @@ fn a_rewrite_to_the_same_target_is_the_identity() {
 /// a rename leaves it exactly where the author put it.
 #[test]
 fn whitespace_between_the_stem_and_the_fragment_is_padding() {
-    let link = only("[[ Old #Heading]]");
-    assert_eq!(link.target, "Old");
-    assert_eq!(
-        reconstruct_wikilink(&link, "New").as_deref(),
-        Some("[[ New #Heading]]")
-    );
+    assert_eq!(only("[[ Old #Heading]]").target, "Old");
+    assert_eq!(rewritten("[[ Old #Heading]]", "New"), "[[ New #Heading]]");
 
-    let embedded = only("![[ Old #Head | Title ]]");
-    assert_eq!(embedded.target, "Old");
+    assert_eq!(only("![[ Old #Head | Title ]]").target, "Old");
     assert_eq!(
-        reconstruct_wikilink(&embedded, "NEW").as_deref(),
-        Some("![[ NEW #Head | Title ]]")
-    );
-}
-
-// ── Over a whole document ────────────────────────────────────────────────
-
-#[test]
-fn a_splice_over_a_body_preserves_every_untouched_byte() {
-    let body = "prose [[ Old | Shown ]] and ![[Old#^blk]] and [[keep]]\n\n\
-                ```\n[[Old]]\n```\n";
-    let out = BodyScan::new(body).splice_wikilinks(|link| {
-        (link.target == "Old")
-            .then(|| reconstruct_wikilink(link, "New"))
-            .flatten()
-    });
-    assert_eq!(
-        out,
-        "prose [[ New | Shown ]] and ![[New#^blk]] and [[keep]]\n\n\
-         ```\n[[Old]]\n```\n"
-    );
-}
-
-#[test]
-fn a_splice_over_raw_text_preserves_the_same_way() {
-    assert_eq!(
-        splice_wikilinks_in_text("[[ Old | Shown ]]", |link| reconstruct_wikilink(
-            link, "New"
-        )),
-        "[[ New | Shown ]]"
+        rewritten("![[ Old #Head | Title ]]", "NEW"),
+        "![[ NEW #Head | Title ]]"
     );
 }
 
@@ -172,7 +154,7 @@ fn a_splice_over_raw_text_preserves_the_same_way() {
 /// written from.
 #[test]
 fn an_unrepresentable_stem_is_refused() {
-    let link = only("[[ Old | Shown ]]");
+    let raw = "[[ Old | Shown ]]";
     for bad in [
         "a|b",
         "a#b",
@@ -194,9 +176,14 @@ fn an_unrepresentable_stem_is_refused() {
         "\tNew",
         "New\n",
     ] {
-        assert!(!wikilink_target_is_representable(bad), "{bad:?}");
-        assert!(
-            reconstruct_wikilink(&link, bad).is_none(),
+        let out = respelled(raw, bad);
+        assert_eq!(out.text, raw, "rewriting with {bad:?}");
+        assert_eq!(
+            out.skipped
+                .iter()
+                .map(|skip| skip.reason)
+                .collect::<Vec<_>>(),
+            [RewriteSkip::Unrepresentable],
             "rewriting with {bad:?}"
         );
     }
@@ -204,23 +191,32 @@ fn an_unrepresentable_stem_is_refused() {
     // The forms that only look like the refused ones round-trip. A caret is
     // an ordinary target character, and a single colon is no protocol.
     for fine in ["a^b", "note:draft", "HTTPS://x", "vault:/x", "a b"] {
-        assert!(wikilink_target_is_representable(fine), "{fine:?}");
+        assert_eq!(
+            rewritten(raw, fine),
+            format!("[[ {fine} | Shown ]]"),
+            "{fine:?}"
+        );
     }
 }
 
 /// The reason the refusal is not pedantry: a line break inside a table cell
-/// ends the row, and one inside a blockquote ends the quote. A splice that
+/// ends the row, and one inside a blockquote ends the quote. A rewrite that
 /// emitted these would rewrite the block the link sat in, so it emits nothing
 /// and leaves the token alone.
 #[test]
-fn a_splice_to_an_unrepresentable_target_leaves_the_document_alone() {
+fn a_rewrite_to_an_unrepresentable_target_leaves_the_document_alone() {
     for body in [
         "| a | b |\n| --- | --- |\n| [[old]] | x |\n",
         "> quoted [[old]] here\n> still quoted\n",
     ] {
         for bad in ["a\nb", "", " padded "] {
-            let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, bad));
-            assert_eq!(out, body, "rewriting {body:?} to {bad:?}");
+            let out = Document::parse(body).rewrite_links(&[AddressRewrite::new(
+                LinkFamily::Wikilink,
+                "old",
+                bad,
+            )]);
+            assert_eq!(out.text, body, "rewriting {body:?} to {bad:?}");
+            assert_eq!(out.rewritten, 0, "rewriting {body:?} to {bad:?}");
         }
     }
 }
@@ -237,54 +233,24 @@ fn a_token_carrying_a_line_break_refuses_every_rewrite() {
         "[[Target\r\nOther]]",
         "[[ Target\nOther | Shown ]]",
     ] {
-        let link = only(raw);
-        assert_eq!(
-            reconstruct_wikilink(&link, "New"),
-            None,
-            "rewriting {raw:?}"
-        );
-        assert_eq!(
-            reconstruct_wikilink(&link, &link.target),
-            None,
-            "reconstructing {raw:?}"
-        );
+        for stem in ["New", only(raw).target.as_str()] {
+            let out = respelled(raw, stem);
+            assert_eq!(out.text, raw, "rewriting {raw:?} to {stem:?}");
+            assert_eq!(
+                out.skipped
+                    .iter()
+                    .map(|skip| skip.reason)
+                    .collect::<Vec<_>>(),
+                [RewriteSkip::LinkNotRewritable],
+                "rewriting {raw:?} to {stem:?}"
+            );
+        }
     }
-}
-
-/// A hand-built fact whose stem span does not index its own bytes is refused
-/// rather than sliced. The fields are public, so the relationship is checked
-/// where it is used.
-#[test]
-fn a_stem_span_that_does_not_index_its_own_bytes_is_refused() {
-    let link = only("[[Old]]");
-    let past_the_end = 0..link.raw.len() + 92;
-    let backwards = link.raw.len()..2;
-    for stem_range in [None, Some(past_the_end), Some(backwards)] {
-        let broken = Link {
-            stem_range,
-            ..link.clone()
-        };
-        assert_eq!(reconstruct_wikilink(&broken, "New"), None);
-    }
-
-    // A span that lands inside a multi-byte character is refused too.
-    let unicode = only("[[日本語]]");
-    let broken = Link {
-        stem_range: Some(2..4),
-        ..unicode
-    };
-    assert_eq!(reconstruct_wikilink(&broken, "New"), None);
 }
 
 /// A multi-byte stem is replaced whole, and the bytes around it are untouched.
 #[test]
 fn a_multibyte_stem_is_replaced_whole() {
-    assert_eq!(
-        reconstruct_wikilink(&only("[[ 日本語 | 表示 ]]"), "New").as_deref(),
-        Some("[[ New | 表示 ]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&only("[[Old]]"), "日本語").as_deref(),
-        Some("[[日本語]]")
-    );
+    assert_eq!(rewritten("[[ 日本語 | 表示 ]]", "New"), "[[ New | 表示 ]]");
+    assert_eq!(rewritten("[[Old]]", "日本語"), "[[日本語]]");
 }
