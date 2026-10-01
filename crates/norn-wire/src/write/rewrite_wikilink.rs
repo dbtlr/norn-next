@@ -10,6 +10,11 @@
 //! **Both ends name documents, never places inside them.** Each rewritten
 //! link keeps the anchor it was written with, so an anchor on `old` or `new`
 //! is refused at the read.
+//!
+//! **Not planned yet (NORN-297).** Until link cascades are planned, the
+//! planner leaves a wikilink rewrite unresolved, naming that limit, and the
+//! host serves no `rewrite_wikilink` verb: the request compiles to its plan,
+//! which a caller can preview through `apply` to read the limit.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

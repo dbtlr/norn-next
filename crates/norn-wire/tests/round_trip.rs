@@ -7079,7 +7079,7 @@ fn a_link_kind_reads_its_ends_through_their_own_grammars() {
 }
 
 /// **A link rewrite names an address to respell and keeps its protocol**,
-/// as an operation and as a cascade's share alike. An empty `from` is
+/// as an operation and as a cascade's rewrite alike. An empty `from` is
 /// refused — an anchor-only link names its holder wherever it goes, so no
 /// rewrite respells one — and so is a `to` written under another protocol
 /// than `from`, which no rewrite can write into the link. An empty `to`, a
@@ -7091,7 +7091,7 @@ fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
             r#"{{"kind":"rewrite_link","fields":{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}}}"#
         )
     };
-    let share = |from: &str, to: &str| {
+    let rewrite = |from: &str, to: &str| {
         format!(r#"{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}"#)
     };
     for (from, to) in [
@@ -7105,8 +7105,8 @@ fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
             "a rewrite of `{from}` to `{to}` read as an operation"
         );
         assert!(
-            serde_json::from_str::<LinkRewrite>(&share(from, to)).is_err(),
-            "a rewrite of `{from}` to `{to}` read as a cascade's share"
+            serde_json::from_str::<LinkRewrite>(&rewrite(from, to)).is_err(),
+            "a rewrite of `{from}` to `{to}` read as a cascade's rewrite"
         );
     }
     for (from, to) in [
@@ -7130,14 +7130,14 @@ fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
             "a rewrite of `{from}` to `{to}`"
         );
         assert_eq!(
-            serde_json::from_str::<LinkRewrite>(&share(from, to)).ok(),
+            serde_json::from_str::<LinkRewrite>(&rewrite(from, to)).ok(),
             Some(LinkRewrite::new(
                 path("notes/c.md"),
                 LinkFamily::Wikilink,
                 from,
                 to
             )),
-            "a share rewriting `{from}` to `{to}`"
+            "a cascade's rewrite of `{from}` to `{to}`"
         );
     }
 }

@@ -102,7 +102,9 @@
 //! and the [`Provenance`] a repair plan cites, with the [`SkippedFinding`]s
 //! it left alone. In a resolved plan an operation that moves, removes or
 //! retargets documents carries its link cascade, one [`LinkRewrite`] per
-//! document holding a link it changes. Either plan carries whether it is
+//! document, syntax and address among the links it changes, and a delete
+//! says what becomes of the links naming its document as its [`Backlinks`].
+//! Either plan carries whether it is
 //! forced past the schema check. A frontmatter kind names its documents by a
 //! [`WriteTarget`] and writes an [`AuthoredValue`] — a [`FiniteFloat`] or a
 //! [`ValueMap`] among its shapes. The other write verbs each compile to an

@@ -17,9 +17,10 @@
 //! rewrite whose `old` names several documents carries the same bounded
 //! [`CandidateHead`] a link row and the ambiguous-target refusal carry, so a
 //! vault-wide ambiguity class never crosses whole. A delete left unresolved
-//! for its backlinks names every holding document, as its cascade would
-//! have rewritten each: the plan it stands in for carries one rewrite per
-//! holder already.
+//! for its backlinks names every holding document, each once — the documents
+//! a cascade would rewrite links in, which the cascade itself carries once
+//! per holder, syntax and address — so it is never longer than the plan it
+//! stands in for.
 //!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
@@ -189,7 +190,10 @@ pub enum UnresolvedReason {
     // Minted with the link-cascade vocabulary before the planner reads
     // backlinks (NORN-297): a later change of the same task plans a delete's
     // backlinks and a wikilink rewrite's `old`, and is what answers these
-    // two. Until then the planner leaves both kinds unresolved in words.
+    // two. Until then nothing answers either: a delete saying neither flag
+    // plans and lands with no backlink check, leaving every link naming its
+    // document broken, and a wikilink rewrite is left unresolved in words,
+    // naming the limit.
     /// It removes a document links still name, and says neither what to
     /// rewrite them to nor that they may be left broken.
     #[non_exhaustive]

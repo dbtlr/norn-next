@@ -33,14 +33,19 @@
 //! attachment, a file the vault does not read — by a file path: the same two
 //! rules again, since neither a document path nor a folder path describes it.
 //!
-//! **A link advisory points into the change set rather than repeating it.**
-//! A resolved plan records every link whose resolution it changes, before and
-//! after, as a condition. What that record cannot say is left to the
-//! forecast: a link the plan's cascade matched and left as written, and why,
-//! and a link whose new resolution a caller should look at — left broken,
-//! made ambiguous, or an ambiguous link the plan retargets. Each advisory
-//! names its link by the key the change set holds it under, never by a
-//! resolution of its own.
+//! **A link advisory names its link as the change set would, rather than
+//! repeating it.** A resolved plan records every link whose resolution it
+//! changes, before and after, as a condition. The forecast advises on what
+//! that record cannot say — a link the plan's cascade matched and left as
+//! written, and why — and on the links whose new resolution a caller should
+//! look at: left broken, made ambiguous, or an ambiguous link the plan
+//! retargets.
+//! Each advisory names its link by the key the change set holds it under, or
+//! would hold it under, never by a resolution of its own. A link left broken
+//! or made ambiguous has an entry, from which the advisory follows; a link
+//! the cascade skipped may have none, and an ambiguous link retargeted from
+//! several documents to several others has none, since `several` on both
+//! sides is no change the set records.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -157,10 +162,16 @@ vault_relative_path!(
     "Where a file that is not a vault document stands in its vault, relative to the vault root. Not empty, and never starting with a slash."
 );
 
-/// What a plan does to one link that its resolution change set does not say.
+/// What a plan does to one link that a caller should look at.
+///
+/// A skipped link, and an ambiguous link retargeted among several documents,
+/// are what the resolution change set does not say; a link left broken or
+/// made ambiguous follows from its entry, and is advised on so a caller need
+/// not derive it. Where the set holds no entry for the link, the key is the
+/// one it would hold.
 ///
 /// On the wire an advisory is an object tagged `advisory`, naming its link by
-/// the key the change set holds it under:
+/// the key the change set holds it under, or would:
 /// `{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","address":"b"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "advisory", rename_all = "snake_case")]
@@ -277,10 +288,9 @@ pub struct Forecast {
     /// through. Empty for a plan that is not forced, and for a forced plan
     /// whose every result is valid.
     pub forced: Vec<SchemaViolation>,
-    /// What the plan does to each link a caller should look at that its
-    /// resolution change set does not say: a link its cascade left as
-    /// written and why, a link it leaves broken or makes ambiguous, and an
-    /// ambiguous link it retargets.
+    /// What the plan does to each link a caller should look at: a link its
+    /// cascade left as written and why, a link it leaves broken or makes
+    /// ambiguous, and an ambiguous link it retargets.
     pub links: Vec<LinkAdvisory>,
     /// Every file that is not a document, left in a folder the plan's folder
     /// moves move from: a folder move takes only the documents it holds.

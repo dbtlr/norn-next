@@ -58,20 +58,33 @@
 //! several documents does not resolve. `move_folder` moves every document a
 //! folder holds, and planning expands it into one `move_document` per
 //! document, as it expands a `where` target, so a resolved plan never carries
-//! one. A `delete_document` leaves the links naming its document broken only
-//! where it says so out loud, with `allow_broken_links`, or rewrites them to
-//! name `rewrite_to`; saying neither, it does not resolve while any link names
-//! its document, and saying both is refused at the read.
+//! one. A `delete_document` says what becomes of the links naming its
+//! document: rewritten to name `rewrite_to`, left broken where
+//! `allow_broken_links` says so out loud, or — saying neither — forbidden, so
+//! that it does not resolve while any link names its document. Saying both is
+//! refused at the read.
 //!
 //! **A cascade travels on the operation that caused it.** In a resolved
 //! plan a `move_document`, a `delete_document` and a `rewrite_wikilink` carry
 //! the link rewrites their planning generated as their `cascade`, one per
-//! document holding a link the operation changes, each a `rewrite_link`'s
-//! four fields. The operation and its cascade are one operation: they
-//! resolve, land and are left unresolved together. A caller authors the
-//! operation and planning writes its cascade, so a cascade on an operation of
-//! an authored plan, or on a kind that does not cascade, is a fault in the
-//! plan's shape rather than a refusal at the read.
+//! document, syntax and address among the links the operation changes, each a
+//! `rewrite_link`'s four fields. The operation and its cascade are one
+//! operation: they resolve, land and are left unresolved together. A caller
+//! authors the operation and planning writes its cascade, so a cascade on an
+//! operation of an authored plan, or on a kind that does not cascade, is a
+//! fault in the plan's shape rather than a refusal at the read.
+//!
+//! **Planning does not read backlinks yet, so the cascade is vocabulary
+//! ahead of its planner (NORN-297).** Until link cascades are planned, a
+//! plain `move_document` and a `delete_document` saying neither flag plan and
+//! land as they did before this vocabulary: with no cascade and no backlink
+//! check, so a move leaves the links naming its source as written and a
+//! delete leaves the links naming its document broken, the forecast advising
+//! on neither. Every other part of the vocabulary — a folder move, both link
+//! rewrites, a delete saying either flag, and an operation carrying a cascade
+//! — is left unresolved by the planner, naming that limit, and the applier
+//! refuses a resolved plan carrying one. Both limits close when the cascade
+//! is planned.
 //!
 //! **A resolution target here names a document, never a place inside one.**
 //! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
@@ -220,7 +233,9 @@ pub enum OperationKind {
         /// operation of the same plan moves or removes what does.
         to: DocumentPath,
     },
-    /// Remove a document, saying what becomes of the links naming it.
+    /// Remove a document, saying what becomes of the links naming it. Until
+    /// link cascades are planned, a delete forbidding them plans with no
+    /// backlink check, and one rewriting or breaking them does not resolve.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
@@ -403,7 +418,9 @@ impl OperationKind {
         OperationKind::MoveDocument { from, to }
     }
 
-    /// Remove the document at `path`, which no link may name.
+    /// Remove the document at `path`, which no link may name — a limit the
+    /// planner does not yet hold: until link cascades are planned, the
+    /// delete lands whatever links name the document.
     pub const fn delete_document(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,
@@ -698,10 +715,11 @@ impl<'de> Deserialize<'de> for OperationKind {
     }
 }
 
-/// One document's share of a link cascade: in the document at `path`, every
-/// link of `syntax` whose address is `from` respelled `to`. It is a
-/// `rewrite_link` operation's four fields, carried in a cascading operation's
-/// `cascade`.
+/// One rewrite of a link cascade: in the document at `path`, every link of
+/// `syntax` whose address is `from` respelled `to`. A cascade holds one per
+/// document, syntax and address, so a document naming the moved document
+/// under two addresses carries two. It is a `rewrite_link` operation's four
+/// fields, carried in a cascading operation's `cascade`.
 ///
 /// On the wire a rewrite is one object:
 /// `{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}`.
@@ -905,8 +923,8 @@ pub struct Operation {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<AuthorCondition>,
     /// The link rewrites a cascading operation's planning generated, one per
-    /// document holding a link it changes. Only a resolved plan's move,
-    /// delete or wikilink rewrite carries one.
+    /// document, syntax and address among the links it changes. Only a
+    /// resolved plan's move, delete or wikilink rewrite carries one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cascade: Vec<LinkRewrite>,
 }
@@ -1389,7 +1407,7 @@ impl JsonSchema for Operation {
             (
                 "cascade",
                 generator.subschema_for::<Vec<LinkRewrite>>(),
-                "The link rewrites a cascading operation's planning generated, one per document holding a link it changes. Only a resolved plan's move, delete or wikilink rewrite carries one.",
+                "The link rewrites a cascading operation's planning generated, one per document, syntax and address among the links it changes. Only a resolved plan's move, delete or wikilink rewrite carries one.",
             ),
         ];
         let mut schema = OperationKind::json_schema(generator);

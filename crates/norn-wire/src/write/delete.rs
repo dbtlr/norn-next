@@ -2,11 +2,19 @@
 //!
 //! **A delete says out loud what becomes of the links naming its document.**
 //! It rewrites them to name `rewrite_to`, or leaves them broken where
-//! `allow_broken_links` says so; saying neither, a document any link names is
-//! not removed, and the operation is left unresolved naming every document
-//! holding such a link. Saying both is refused at the read. The flag is
-//! written only when `true`, as `force` is, so a request that omits it asks
-//! for the strict reading.
+//! `allow_broken_links` says so; saying neither asks for the strict reading,
+//! under which a document any link names is not removed and the operation
+//! is left unresolved naming every document holding such a link. Saying both
+//! is refused at the read. The flag is written only when `true`, as `force`
+//! is, so a request that omits it asks for the strict reading.
+//!
+//! **The strict reading is not held yet (NORN-297).** The planner does not
+//! read backlinks until link cascades are planned, so a delete saying
+//! neither plans and lands as `delete_document` always has, leaving every
+//! link naming its document broken, and a delete saying either flag is left
+//! unresolved, naming that limit. The host serves no `delete` verb yet
+//! either: the request compiles to its plan, and a caller sends that plan
+//! through `apply`.
 //!
 //! **`rewrite_to` names a document, never a place inside one.** It is read
 //! through the one resolution grammar, and an anchor on it is refused at the
@@ -54,7 +62,9 @@ pub struct DeleteParams {
 
 impl DeleteParams {
     /// A request to `mode` the removal of the document at `path` in `vault`,
-    /// which no link may name, with no condition and not forced.
+    /// asking for the strict reading of its links — which the planner does
+    /// not yet hold, so the delete lands whatever links name the document —
+    /// with no condition and not forced.
     pub const fn new(vault: VaultAddress, mode: ApplyMode, path: DocumentPath) -> Self {
         DeleteParams {
             vault,

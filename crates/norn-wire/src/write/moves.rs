@@ -11,11 +11,19 @@
 //! carries the extension is not moved by this verb; a plan's `move_folder`
 //! names one.
 //!
-//! **A move carries its link cascade, and nothing turns it off.** Planning
-//! rewrites every link naming what is moved, or leaves one as written with
-//! the forecast saying why; the request has no flag to leave links alone, to
-//! overwrite a destination, or to make parents. A destination must be
-//! vacant, and the folders above it are made as a create's are.
+//! **A move carries its link cascade, and nothing turns it off.** Once link
+//! cascades are planned, planning rewrites every link naming what is moved,
+//! or leaves one as written with the forecast saying why; the request has no
+//! flag to leave links alone, to overwrite a destination, or to make
+//! parents. A destination must be vacant, and the folders above it are made
+//! as a create's are.
+//!
+//! **No cascade is planned yet (NORN-297).** Until the planner reads
+//! backlinks, a document move plans and lands as `move_document` always has,
+//! leaving every link naming its source as written, and a folder move is
+//! left unresolved, naming that limit. The host serves no `move` verb yet
+//! either: the request compiles to its plan, and a caller sends that plan
+//! through `apply`.
 //!
 //! **The request is read by hand, because `from` and `to` are read
 //! together.** Which grammar reads them is decided by `from`, so the request

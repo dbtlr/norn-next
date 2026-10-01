@@ -213,8 +213,9 @@ pub enum Verb {
     Edit,
     /// Create one document at a path.
     New,
-    /// Move one document, or every document a folder holds, rewriting the
-    /// links naming what moves.
+    /// Move one document, or every document a folder holds. The links
+    /// naming what moves are rewritten once link cascades are planned; until
+    /// then a document move leaves them as written.
     Move,
     /// Remove one document, saying what becomes of the links naming it.
     Delete,
