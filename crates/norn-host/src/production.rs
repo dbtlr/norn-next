@@ -271,13 +271,13 @@ type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), Wat
 /// holds the entry's claim and this attachment's store is the one writer to
 /// it, so the reading taken here names exactly the state the changeset builds
 /// on, and it is the reading the answer is given under. The planner reads the
-/// files for its before-states, never the store. A `where` target is matched
-/// on a snapshot of a read handle the store mints for the job through the
-/// coverage's read seam, under the same claim, the first time one asks, which
-/// reads that same state; the handle closes when planning ends, before the
-/// applier runs, and a plan with none mints no handle. A handle that cannot
-/// be minted answers `host/reader-unavailable`, and what its mint ran is the
-/// job account's. A store that refuses that reading answers
+/// files for its before-states, never the store. A `where` target, a link
+/// resolution or the applier's check is read on a snapshot of a read handle
+/// the store mints for the job through the coverage's read seam, under the
+/// same claim, the first time one asks, which reads that same state; the one
+/// handle serves them all, and a job none of them asks of mints no handle. A
+/// handle that cannot be minted answers `host/reader-unavailable`, and what
+/// its mint ran is the job account's. A store that refuses that reading answers
 /// as a read meeting the same refusal does: `host/read-failed`, or damage the
 /// job publishes with the rebuild it owes.
 ///
@@ -314,13 +314,16 @@ fn apply_over(
     if let Err(refused) = ground.standing(name) {
         return ApplyEnd::answered(Err(refused));
     }
-    // One read handle for the job, minted the first time a `where` target or
-    // a link resolution asks, and shared by the planning and the applier's
-    // check; the applier holds it through staging and publication and gives
-    // it back just before the changeset commits.
-    let source: &ProductionAttachment = attachment;
+    // One read handle for the job, minted off the store the first time a
+    // `where` target, a link resolution, the applier's check or the fresh
+    // plan a refusal resolves asks, and shared by all of them; the applier
+    // holds it through staging and publication and gives it back just before
+    // the changeset commits. The store is lent through a cell because the
+    // applier commits to it after a mint may have read it.
+    let store = std::cell::RefCell::new(&mut attachment.store);
     let mint = || {
-        let (snapshot, statements) = crate::apply::established_for_the_job(source);
+        let (snapshot, statements) =
+            crate::apply::established_for_the_job(minted_reader(&store.borrow()));
         evidence.count_apply_mint(statements);
         snapshot
     };
@@ -347,29 +350,6 @@ fn apply_over(
         }
     };
     progress.planned(&resolved);
-    // The applier checks the plan's links on the snapshot planning took; a
-    // plan that read none and whose check reads some — a resolved plan sent
-    // back, which planned nothing here — takes it now, while nothing else
-    // holds the store.
-    let established = match planned_on.into_established() {
-        Some(snapshot) => Some(snapshot),
-        None if crate::planner::links::reads_links(&resolved.transitions, &resolved.operations) => {
-            match mint() {
-                Ok(snapshot) => Some(snapshot),
-                Err(unavailable) => {
-                    return ApplyEnd::answered(Err(crate::refusal::reader_unavailable(
-                        unavailable.detail(),
-                    )));
-                }
-            }
-        }
-        None => None,
-    };
-    let checked_on = crate::apply::PlanSnapshot::established(
-        resolved.vault.clone(),
-        established,
-        ground.declared.content_model(),
-    );
     let outcome = Applier {
         anchor: &ground.root,
         root: ground.identity,
@@ -377,10 +357,10 @@ fn apply_over(
         shadows: &attachment.shadows,
         own_writes: &attachment.own_writes,
         publishing: &|| reporter.begin_publishing(progress),
-        links: &checked_on,
+        links: &planned_on,
     }
-    .apply(resolved, &mut attachment.store);
-    drop(checked_on);
+    .apply(resolved, &store);
+    drop(planned_on);
     if let crate::applier::ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) =
         outcome
     {
@@ -504,11 +484,17 @@ impl SnapshotSource for ProductionAttachment {
     /// open is the store's act, and a number this seam declared for it would
     /// stop being true the moment that open changed.
     fn open_reader(&self) -> MintedReader<Self::Reader> {
-        let minted = self.store.open_reader();
-        MintedReader {
-            reader: minted.reader.map_err(|error| reader_unavailable(&error)),
-            statements: minted.statements,
-        }
+        minted_reader(&self.store)
+    }
+}
+
+/// The read handle `store` mints, with its refusal told as an unavailable
+/// read seam: the one mint behind an entry's reader and an apply job's.
+fn minted_reader(store: &Store) -> MintedReader<norn_store::SnapshotReader> {
+    let minted = store.open_reader();
+    MintedReader {
+        reader: minted.reader.map_err(|error| reader_unavailable(&error)),
+        statements: minted.statements,
     }
 }
 

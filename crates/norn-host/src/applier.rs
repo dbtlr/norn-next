@@ -75,6 +75,7 @@ mod schema;
 mod shape;
 mod stage;
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -141,16 +142,25 @@ pub(crate) struct Applier<'a> {
     /// is removed and nothing is published.
     pub(crate) publishing: &'a dyn Fn() -> bool,
     /// Where the plan's resolution change set is computed again: the apply
-    /// job's one snapshot, taken after its intake. Released before a
-    /// changeset commits, so no read snapshot is held over the store's write;
-    /// a refusal publication met before anything landed is answered while it
-    /// is still held, since nothing has committed since it was taken.
+    /// job's one snapshot, taken after its intake the first time a read asks
+    /// for it. Released before a changeset commits, so no read snapshot is
+    /// held over the store's write; a refusal publication met before anything
+    /// landed is answered while it is still held, or on one taken then, since
+    /// nothing has committed since the job's intake.
     pub(crate) links: Links<'a>,
 }
 
 impl Applier<'_> {
     /// Apply `plan`, committing what lands to `store`.
-    pub(crate) fn apply(&self, plan: ResolvedPlan, store: &mut Store) -> ApplyOutcome {
+    ///
+    /// **The store is lent in a cell, not held**, because the job's one read
+    /// handle may be minted off it while the applier runs: `links` mints it
+    /// the first time a read asks — the check of a plan whose planning read
+    /// no links, or the fresh plan a refusal resolves — and gives it back
+    /// before the changeset commits. The applier borrows the store only for
+    /// the statement that reads its pin and for the commit, and no link is
+    /// read across either.
+    pub(crate) fn apply(&self, plan: ResolvedPlan, store: &RefCell<&mut Store>) -> ApplyOutcome {
         let found = self.root_identity();
         if plan.root != found {
             return ApplyOutcome::RootChanged {
@@ -162,7 +172,7 @@ impl Applier<'_> {
             Ok(view) => view,
             Err(error) => return write_failed(plan, error.to_string()),
         };
-        let declared = match pinned_declaration(store) {
+        let declared = match pinned_declaration(&mut store.borrow_mut()) {
             Ok(declared) => declared,
             Err(failure) => return write_failed(plan, format!("{failure:?}")),
         };
@@ -207,7 +217,7 @@ impl Applier<'_> {
         stopped: Option<Stopped>,
         forced: Vec<SchemaViolation>,
         declared: &Declared,
-        store: &mut Store,
+        store: &RefCell<&mut Store>,
     ) -> ApplyOutcome {
         let changeset = if progress.effects.is_empty() {
             ChangesetOutcome::Committed
@@ -217,7 +227,7 @@ impl Applier<'_> {
             // commits over it.
             self.links.release();
             match commit_plan_changeset(
-                store,
+                &mut store.borrow_mut(),
                 self.anchor,
                 self.exclusions,
                 &progress.effects,
