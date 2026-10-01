@@ -121,8 +121,10 @@ pub enum FacetKind {
 }
 
 impl FacetKind {
-    /// Every kind the vocabulary holds, in declaration order. A kind joins
-    /// at the end, so no kind's code moves.
+    /// Every kind the vocabulary holds, in declaration order. A kind's code
+    /// is its name, not its place here, and the order a page reads kinds in
+    /// is the byte order of those codes, so adding a kind changes no other
+    /// kind's code.
     pub const ALL: [FacetKind; 9] = [
         FacetKind::DeclaredField,
         FacetKind::ObservedField,

@@ -255,8 +255,9 @@ impl VaultSchema {
 
     /// The creation rules, in the byte order of their names.
     ///
-    /// Read by `describe`, which reports each as a facet, and by the planner
-    /// that expands a create-by-rule operation into the document it makes.
+    /// Read by `describe`, which reports each as a facet. The planner will
+    /// read them too, to expand a create-by-rule operation into the document
+    /// it makes, once NORN-298's planning change lands.
     pub fn creation_rules(&self) -> impl Iterator<Item = &CreationRule> {
         self.creation_rules.values()
     }

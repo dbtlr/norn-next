@@ -300,8 +300,9 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// declared tags, the tag patterns, the stance on an undeclared tag, the
 /// declared folders, the path rules, the creation rules and the inbox. No
 /// read and no derivation consults a creation rule or the inbox: they are held
-/// here for `describe` alone, as the source text of their templates. A key declared without a typed order
-/// is ordered by its raw text, which is what a field declared as text is.
+/// here for `describe` alone, as the source text of their templates. A key
+/// declared without a typed order is ordered by its raw text, which is what a
+/// field declared as text is.
 ///
 /// **The ambiguity-ignore set is held once.** The one path rule a schema
 /// states is ambiguity-ignore, and its globs are held as the

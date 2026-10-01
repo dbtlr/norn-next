@@ -11,13 +11,13 @@
 //!
 //! **The declared facets are the pinned declaration's**: the declared fields
 //! with their type, whether they are required and their closed set, the
-//! declared tags, the tag patterns, the declared folders, the path rules and
-//! the stance on an undeclared tag are read off the [`ContentModel`] the
-//! host hands over, which is refused unless it was read from the schema the
-//! snapshot pins. They are a read of memory and run no statement, drawn from
-//! the page's position on, so a page builds no declared facet past the one
-//! that says a next page exists. A store with no schema pinned declares
-//! nothing, so it answers no declared facet.
+//! declared tags, the tag patterns, the declared folders, the path rules, the
+//! stance on an undeclared tag, the creation rules and the inbox are read off
+//! the [`ContentModel`] the host hands over, which is refused unless it was
+//! read from the schema the snapshot pins. They are a read of memory and run
+//! no statement, drawn from the page's position on, so a page builds no
+//! declared facet past the one that says a next page exists. A store with no
+//! schema pinned declares nothing, so it answers no declared facet.
 //!
 //! **The observed fields are the keys documents carry**, one facet per key,
 //! each listing every container some document holds it in. They are read from

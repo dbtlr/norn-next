@@ -632,8 +632,8 @@ fn a_declaration_not_pinned_and_a_bound_outside_its_range_are_refused() {
 
 /// **With no schema pinned describe answers the observed fields alone**: no
 /// schema declares anything, so there is no declared field, tag, pattern,
-/// folder, path rule, stance, creation rule or inbox, and the keys the documents carry are the
-/// whole field universe.
+/// folder, path rule, stance, creation rule or inbox, and the keys the
+/// documents carry are the whole field universe.
 #[test]
 fn with_no_schema_pinned_describe_answers_the_observed_fields_alone() {
     let describing_store = Describing::unpinned("describe-unpinned");
