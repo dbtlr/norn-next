@@ -501,7 +501,7 @@ pub(crate) fn splice_tokens(
 /// protocols come to mean anything, so nothing else may claim the name — a
 /// reservation the grammar records and nothing here enforces, because
 /// recognition is all this layer does.
-fn split_protocol(addressed: &str) -> (Option<String>, String) {
+pub(crate) fn split_protocol(addressed: &str) -> (Option<String>, String) {
     let Some((scheme, stem)) = addressed.split_once("://") else {
         return (None, addressed.to_string());
     };

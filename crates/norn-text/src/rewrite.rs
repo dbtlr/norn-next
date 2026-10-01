@@ -8,6 +8,7 @@ use std::ops::Range;
 use crate::document::{Document, frontmatter_of, splice_all};
 use crate::link::{
     Link, LinkFamily, addresses_the_vault, parse_wikilinks_in_text, respelled, splice_tokens,
+    split_protocol,
 };
 use crate::span::LineCursor;
 use crate::value::{Mapping, Value};
@@ -41,8 +42,9 @@ pub struct SkippedLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RewriteSkip {
     /// `to` cannot be written where this link's target is written and read
-    /// back as `to`: it is no target this family can spell, or the bytes it
-    /// would put there read as something else in that place.
+    /// back as `to`: it is no target this family can spell, its protocol is
+    /// not the link's, or the bytes it would put there read as something else
+    /// in that place.
     Unrepresentable,
     /// The link is written in a frontmatter value that cannot hold `to` and
     /// still read as the same YAML with only the target changed — a quote
@@ -69,32 +71,43 @@ impl Document<'_> {
     /// # The match is the index's
     ///
     /// What a link resolves to depends on the document holding it, its family
-    /// and its target text, so a cascade names the links it rewrites by
-    /// exactly those. `from` is compared against [`Link::target`] as this
-    /// crate's one parse reads it — the text the store's `links.target`
-    /// column is derived from, never decoded, unescaped or normalized on
-    /// either side — and `to` is written as that same text: a percent-encoded
-    /// Markdown destination is matched in its encoded spelling and stays
-    /// encoded only if `to` is spelled so. The links matched are the ones the
-    /// index holds: those [`Document::frontmatter_wikilinks`] and
-    /// [`Document::links`] report. The two families' targets are different
-    /// texts read by different grammars, so a rewrite names one family, and a
-    /// Markdown link whose target happens to spell `from` is not touched by a
-    /// wikilink rewrite. Frontmatter values are read for wikilinks only.
+    /// and its address, so a cascade names the links it rewrites by exactly
+    /// those. `from` and `to` are addresses as written: the target, with its
+    /// `protocol://` prefix when it has one — `vault://notes/x` or `notes/x`,
+    /// the index's protocol and target columns recombined. Each is split by
+    /// the one protocol splitter a link's own address is, and a link matches
+    /// only when both its [`Link::protocol`] and its [`Link::target`] equal
+    /// `from`'s. That makes `[[X]]` and `[[vault://X]]` two keys: a `vault://`
+    /// link is read from the vault root and a protocol-free one is not, so in
+    /// one document they can name different documents.
     ///
-    /// Three kinds of link never match. An empty `from` matches nothing,
+    /// The target is compared as this crate's one parse reads it — the text
+    /// the store's `links.target` column is derived from, never decoded,
+    /// unescaped or normalized on either side — and `to`'s is written as that
+    /// same text: a percent-encoded Markdown destination is matched in its
+    /// encoded spelling and stays encoded only if `to` is spelled so. The
+    /// links matched are the ones the index holds: those
+    /// [`Document::frontmatter_wikilinks`] and [`Document::links`] report. The
+    /// two families' targets are different texts read by different grammars,
+    /// so a rewrite names one family, and a Markdown link whose target happens
+    /// to spell `from` is not touched by a wikilink rewrite. Frontmatter values
+    /// are read for wikilinks only.
+    ///
+    /// Three kinds of link never match. An empty target matches nothing,
     /// because a target-less link — `[[#Heading]]` — addresses the document
     /// holding it and is never what a cascade renames. A link written with a
     /// protocol other than `vault` addresses something outside the vault,
-    /// whose stem merely spells the same text. And code is opaque: a link
-    /// written inside a code span or block is not a link.
+    /// whatever `from` spells. And code is opaque: a link written inside a
+    /// code span or block is not a link.
     ///
     /// # Rewritten, or skipped with a reason
     ///
     /// Only a link's stem bytes change, so everything else it was written
     /// with — an embed marker, a title, an anchor, padding, a protocol, a
     /// Markdown destination's angle brackets — survives byte for byte, and so
-    /// does every byte outside the links rewritten. A matching link that
+    /// does every byte outside the links rewritten. A rewrite never changes
+    /// how a link is addressed: a `to` whose protocol is not the matched
+    /// link's is [`RewriteSkip::Unrepresentable`] there. A matching link that
     /// cannot carry `to` is left exactly as written and reported in
     /// [`RewrittenLinks::skipped`] with the [`RewriteSkip`] that says why; it
     /// is never forced. A rewrite that respells nothing returns the document's
@@ -106,16 +119,18 @@ impl Document<'_> {
     /// targets changed. An edit that does not read back is skipped where it
     /// stands rather than returned.
     pub fn rewrite_links(&self, family: LinkFamily, from: &str, to: &str) -> RewrittenLinks {
+        let (from, to) = (Address::of(from), Address::of(to));
+        let to = &to;
         let mut edits = Vec::new();
         let mut skipped = Vec::new();
         if family == LinkFamily::Wikilink {
-            self.frontmatter_edits(from, to, &mut edits, &mut skipped);
+            self.frontmatter_edits(&from, to, &mut edits, &mut skipped);
         }
         for link in self.links() {
-            if link.family != family || !matches(&link, from) {
+            if link.family != family || !from.names(&link) {
                 continue;
             }
-            match respelled(&link, to) {
+            match to.respell(&link) {
                 Ok(token) => edits.push(Edit {
                     range: link.range(),
                     replacement: token,
@@ -154,8 +169,8 @@ impl Document<'_> {
     /// nothing, and is skipped the same way.
     fn frontmatter_edits<'d>(
         &'d self,
-        from: &str,
-        to: &str,
+        from: &Address,
+        to: &Address,
         edits: &mut Vec<Edit<'d>>,
         skipped: &mut Vec<SkippedLink>,
     ) {
@@ -170,10 +185,10 @@ impl Document<'_> {
                         span: cursor.span_at(literal.start + token.span.byte_offset),
                         ..token.clone()
                     };
-                    if !matches(&link, from) {
+                    if !from.names(&link) {
                         return None;
                     }
-                    match respelled(&link, to) {
+                    match to.respell(&link) {
                         Ok(respelled) => {
                             links.push(link);
                             Some(respelled)
@@ -217,7 +232,7 @@ impl Document<'_> {
     /// bare destination. A link's title is not compared — it is display text,
     /// and the bracket text of `[[a]](b)` is another link's bytes, which a
     /// rewrite of that link rightly changes.
-    fn reads_as_rewritten(&self, text: &str, edits: &[Edit<'_>], to: &str) -> bool {
+    fn reads_as_rewritten(&self, text: &str, edits: &[Edit<'_>], to: &Address) -> bool {
         let reread = Document::parse(text);
         if reread.frontmatter().cloned() != self.frontmatter_after(edits) {
             return false;
@@ -231,9 +246,9 @@ impl Document<'_> {
         before.len() == after.len()
             && before.iter().zip(&after).all(|(was, is)| {
                 let target = if respelled.contains(&(was.family, was.span.byte_offset)) {
-                    to
+                    to.target.as_str()
                 } else {
-                    &was.target
+                    was.target.as_str()
                 };
                 reading(was) == reading(is) && is.target == target
             })
@@ -250,7 +265,7 @@ impl Document<'_> {
     fn provable_alone<'d>(
         &'d self,
         edits: Vec<Edit<'d>>,
-        to: &str,
+        to: &Address,
         skipped: &mut Vec<SkippedLink>,
     ) -> Vec<Edit<'d>> {
         let mut kept = Vec::with_capacity(edits.len());
@@ -323,9 +338,39 @@ impl Edit<'_> {
     }
 }
 
-/// Whether `link` is one a rewrite of `from` names.
-fn matches(link: &Link, from: &str) -> bool {
-    !from.is_empty() && link.target == from && addresses_the_vault(link)
+/// A link's address as a rewrite is handed it: written whole, with any
+/// `protocol://` prefix, and read by the one splitter a link's own is.
+struct Address {
+    protocol: Option<String>,
+    target: String,
+}
+
+impl Address {
+    fn of(written: &str) -> Self {
+        let (protocol, target) = split_protocol(written);
+        Address { protocol, target }
+    }
+
+    /// Whether this address is `link`'s: the same protocol, or none on both,
+    /// and the same target — never an empty one, and never a link addressed
+    /// outside the vault.
+    fn names(&self, link: &Link) -> bool {
+        !self.target.is_empty()
+            && link.protocol == self.protocol
+            && link.target == self.target
+            && addresses_the_vault(link)
+    }
+
+    /// `link`'s bytes with this address's target over its stem, or why it
+    /// cannot carry it. A rewrite never changes how a link is addressed, so a
+    /// protocol other than the link's own is unrepresentable there.
+    fn respell(&self, link: &Link) -> Result<String, RewriteSkip> {
+        let token = respelled(link, &self.target)?;
+        if link.protocol != self.protocol {
+            return Err(RewriteSkip::Unrepresentable);
+        }
+        Ok(token)
+    }
 }
 
 /// What a link reads as, its target and its display text aside: the parts a

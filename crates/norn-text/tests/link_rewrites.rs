@@ -207,24 +207,102 @@ fn a_wikilink_spanning_a_line_break_is_skipped_whatever_the_target() {
 }
 
 /// A link written with a protocol other than `vault` addresses something
-/// outside the vault, so its stem spelling `from` is a coincidence and it
-/// never matches. The reserved `vault://` addresses the vault and is
-/// rewritten with its prefix standing.
+/// outside the vault, so it never matches, even an address spelling it whole.
 #[test]
-fn only_a_link_addressing_the_vault_matches() {
-    let source = "[[https://Old|Docs]] [[vault://Old]] [[Old]]\n";
-    let out = rewrite(source, LinkFamily::Wikilink, "Old", "New");
-    assert_eq!(out.text, "[[https://Old|Docs]] [[vault://New]] [[New]]\n");
-    assert_eq!(out.rewritten, 2);
-    assert!(out.skipped.is_empty());
+fn a_link_addressed_outside_the_vault_never_matches() {
+    let source = "[[https://Old|Docs]] [[Old]]\n";
+    for from in ["Old", "https://Old"] {
+        let out = rewrite(source, LinkFamily::Wikilink, from, "New");
+        assert_eq!(out.rewritten, usize::from(from == "Old"), "from {from:?}");
+        assert!(
+            out.text.starts_with("[[https://Old|Docs]]"),
+            "from {from:?}"
+        );
+        assert!(out.skipped.is_empty(), "from {from:?}");
+    }
+}
 
-    let source = "[a](https://x/old.md) [b](vault://x/old.md) [c](x/old.md)\n";
-    let out = rewrite(source, LinkFamily::Markdown, "x/old.md", "y/new.md");
+/// `from` is the address as written, protocol prefix and all, because a
+/// `vault://` link is read from the vault root and a protocol-free one is not:
+/// `[[X]]` and `[[vault://X]]` in one document can name different documents,
+/// so they are two keys and each rewrite reaches only its own. The prefix
+/// stands; only the stem is written.
+#[test]
+fn the_two_spellings_of_one_target_are_rewritten_independently() {
+    let source = "[[vault://Old|t]] [[Old]] [b](vault://x/old.md) [c](x/old.md)\n";
+
+    let out = rewrite(source, LinkFamily::Wikilink, "Old", "Sub/New");
     assert_eq!(
         out.text,
-        "[a](https://x/old.md) [b](vault://y/new.md) [c](y/new.md)\n"
+        "[[vault://Old|t]] [[Sub/New]] [b](vault://x/old.md) [c](x/old.md)\n"
     );
-    assert_eq!(out.rewritten, 2);
+    assert_eq!(out.rewritten, 1);
+
+    let out = rewrite(source, LinkFamily::Wikilink, "vault://Old", "vault://New");
+    assert_eq!(
+        out.text,
+        "[[vault://New|t]] [[Old]] [b](vault://x/old.md) [c](x/old.md)\n"
+    );
+    assert_eq!(out.rewritten, 1);
+
+    let out = rewrite(
+        source,
+        LinkFamily::Markdown,
+        "vault://x/old.md",
+        "vault://y/new.md",
+    );
+    assert_eq!(
+        out.text,
+        "[[vault://Old|t]] [[Old]] [b](vault://y/new.md) [c](x/old.md)\n"
+    );
+    let out = rewrite(source, LinkFamily::Markdown, "x/old.md", "../y/new.md");
+    assert_eq!(
+        out.text,
+        "[[vault://Old|t]] [[Old]] [b](vault://x/old.md) [c](../y/new.md)\n"
+    );
+}
+
+/// A rewrite respells a target and never changes how it is addressed: a `to`
+/// whose protocol is not the matched link's would have to rewrite the prefix,
+/// so each such link is skipped as unrepresentable and left as written.
+#[test]
+fn a_target_changing_the_links_protocol_is_skipped() {
+    for (family, source, from, to) in [
+        (LinkFamily::Wikilink, "[[Old]]\n", "Old", "vault://New"),
+        (
+            LinkFamily::Wikilink,
+            "[[vault://Old]]\n",
+            "vault://Old",
+            "New",
+        ),
+        (
+            LinkFamily::Markdown,
+            "[t](old.md)\n",
+            "old.md",
+            "vault://new.md",
+        ),
+        (
+            LinkFamily::Markdown,
+            "[t](vault://old.md)\n",
+            "vault://old.md",
+            "new.md",
+        ),
+        (
+            LinkFamily::Markdown,
+            "[t](old.md)\n",
+            "old.md",
+            "https://x/new.md",
+        ),
+    ] {
+        let out = rewrite(source, family, from, to);
+        assert_eq!(out.text, source, "{from:?} to {to:?}");
+        assert_eq!(out.rewritten, 0, "{from:?} to {to:?}");
+        assert_eq!(
+            reasons(&out),
+            [RewriteSkip::Unrepresentable],
+            "{from:?} to {to:?}"
+        );
+    }
 }
 
 /// A target-less link addresses the document holding it, and is never what a
