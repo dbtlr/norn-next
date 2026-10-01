@@ -445,7 +445,7 @@ fn unmatched(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
     let old = &retarget.old;
     UnresolvedReason::no_longer_resolves(match &named.old.before {
         Resolves::One { path } => format!(
-            "no wikilink resolves to `{path}`, the document `old` `{old}` names, outside what already names `new`, so the rewrite changes nothing"
+            "no wikilink resolves to `{path}`, the document `old` `{old}` names, so the rewrite changes nothing"
         ),
         _ => format!(
             "no broken wikilink is filed under `old` `{old}`, so the rewrite changes nothing"
