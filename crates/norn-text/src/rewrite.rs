@@ -6,8 +6,8 @@ use std::ops::Range;
 
 use crate::document::{Document, frontmatter_of, splice_all};
 use crate::link::{
-    Link, LinkFamily, addresses_the_vault, parse_wikilinks_in_text, respelled, splice_tokens,
-    split_protocol,
+    Link, LinkFamily, RewriteSkip, addresses_the_vault, parse_wikilinks_in_text, respelled,
+    splice_tokens, split_protocol,
 };
 use crate::span::LineCursor;
 use crate::value::{Mapping, Value};
@@ -31,29 +31,6 @@ pub struct SkippedLink {
     /// The link as the input document holds it, in source coordinates.
     pub link: Link,
     pub reason: RewriteSkip,
-}
-
-/// Why a matching link was not rewritten.
-///
-/// Plain rather than `#[non_exhaustive]`: a consumer that has not decided how
-/// to word a new reason should fail to compile rather than fall into a
-/// default arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RewriteSkip {
-    /// `to` cannot be written where this link's target is written and read
-    /// back as `to`: it is no target this family can spell, its protocol is
-    /// not the link's, or the bytes it would put there read as something else
-    /// in that place.
-    Unrepresentable,
-    /// The link is written in a frontmatter value that cannot hold `to` and
-    /// still read as the same YAML with only the target changed — a quote
-    /// character inside a quoted scalar, or text a plain scalar cannot carry.
-    WouldCorruptFrontmatter,
-    /// The link's own bytes give no place to write any target: a wikilink
-    /// token spanning a line break, or a Markdown destination written with
-    /// escapes or entity references, whose target is not the bytes it was
-    /// written as.
-    LinkNotRewritable,
 }
 
 impl Document<'_> {

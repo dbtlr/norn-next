@@ -39,7 +39,6 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::body::overlaps_any;
-use crate::rewrite::RewriteSkip;
 use crate::span::{LineCursor, SourceSpan, split_lines_inclusive};
 
 static WIKILINK_RE: LazyLock<Regex> =
@@ -627,6 +626,29 @@ pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
 /// address, and a vault rename has no business in it.
 pub(crate) fn addresses_the_vault(link: &Link) -> bool {
     !matches!(link.resolution(), Resolution::Protocol(scheme) if scheme != VAULT_PROTOCOL)
+}
+
+/// Why a matching link was not rewritten.
+///
+/// Plain rather than `#[non_exhaustive]`: a consumer that has not decided how
+/// to word a new reason should fail to compile rather than fall into a
+/// default arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RewriteSkip {
+    /// `to` cannot be written where this link's target is written and read
+    /// back as `to`: it is no target this family can spell, its protocol is
+    /// not the link's, or the bytes it would put there read as something else
+    /// in that place.
+    Unrepresentable,
+    /// The link is written in a frontmatter value that cannot hold `to` and
+    /// still read as the same YAML with only the target changed — a quote
+    /// character inside a quoted scalar, or text a plain scalar cannot carry.
+    WouldCorruptFrontmatter,
+    /// The link's own bytes give no place to write any target: a wikilink
+    /// token spanning a line break, or a Markdown destination written with
+    /// escapes or entity references, whose target is not the bytes it was
+    /// written as.
+    LinkNotRewritable,
 }
 
 /// `link`'s own bytes with `to` written over its stem, or why the link cannot
