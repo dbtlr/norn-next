@@ -659,7 +659,7 @@ pub(crate) fn map_document(
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
     let document_path = document_path(Path::new(path))?;
-    let source = std::str::from_utf8(bytes).map_err(|problem| Quarantine {
+    let source = document_source(bytes).map_err(|problem| Quarantine {
         cause: Undecodable::BodyBytes,
         problem: problem.to_string(),
     })?;
@@ -1018,16 +1018,32 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
     }
 }
 
+/// The text a file's `bytes` spell as a vault document, or why they spell
+/// none: **the one rule by which bytes decode as a document.** Bytes that do
+/// not are quarantined — no row is derived for them, so no link resolves to
+/// them — wherever the path names a document.
+pub(crate) fn document_source(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
+    std::str::from_utf8(bytes)
+}
+
+/// Whether `bytes` decode as a vault document ([`document_source`]): what a
+/// resolved plan records of each file state it carries, so that its
+/// resolution change set reads a file as a link's candidate only where the
+/// store would derive a document from it.
+pub(crate) fn decodes(bytes: &[u8]) -> bool {
+    document_source(bytes).is_ok()
+}
+
 /// Every link the document `bytes` spell holds, in the order its facts
 /// list them: its frontmatter's wikilinks, then its body's links, each read
-/// as a derivation reads it. Bytes that are not UTF-8 hold none, as a
+/// as a derivation reads it. Bytes that do not decode hold none, as a
 /// document they quarantine derives none.
 ///
 /// **One reading of a document's links.** The resolution change set reads
 /// the links a plan's composed documents hold here, so a link it records is
 /// the link the store derives once the plan lands.
 pub(crate) fn document_links(bytes: &[u8]) -> Vec<LinkFact> {
-    let Ok(source) = std::str::from_utf8(bytes) else {
+    let Ok(source) = document_source(bytes) else {
         return Vec::new();
     };
     let document = Document::parse(source);

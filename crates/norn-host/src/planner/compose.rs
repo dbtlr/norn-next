@@ -10,6 +10,7 @@ use norn_wire::{Backlinks, ContentHash, DocumentPath, FileState, Operation, Oper
 
 use super::edit;
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
+use crate::derivation::decodes;
 
 /// What composing a plan's operations came to.
 pub(crate) struct Composition {
@@ -153,7 +154,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             return Ok(Place::File(identity, spelling.clone()));
         }
         let (spelling, before, after) = match self.view.entry(&identity)? {
-            Entry::Document { at, bytes, hash } => (at, FileState::present(hash), Some(bytes)),
+            Entry::Document { at, bytes, hash } => (at, holding(&bytes, hash), Some(bytes)),
             Entry::Absent { at } => (at, FileState::absent(), None),
             Entry::Folder => {
                 return Ok(Place::NoFile(format!(
@@ -518,6 +519,18 @@ fn replace_once(bytes: &[u8], old: &str, new: &str) -> Result<Arc<[u8]>, Unresol
 /// The wire's content hash of `bytes`.
 pub(crate) fn content_hash(bytes: &[u8]) -> ContentHash {
     wire_hash(norn_fs::ContentHash::of(bytes))
+}
+
+/// The state of a file holding `bytes`, whose hash is `hash`: quarantined
+/// where the bytes do not decode as a vault document, by the derivation's
+/// own rule ([`decodes`]). **Every file state planning or the applier reads
+/// from bytes is built here**, so the two record and compare one flag.
+pub(crate) fn holding(bytes: &[u8], hash: ContentHash) -> FileState {
+    if decodes(bytes) {
+        FileState::present(hash)
+    } else {
+        FileState::quarantined(hash)
+    }
 }
 
 #[cfg(test)]

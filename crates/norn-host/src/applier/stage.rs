@@ -207,14 +207,14 @@ pub(super) struct Checked {
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
-/// the vault gives it, at a place the vault reads documents at; no target
-/// drifted and every content condition holds; the operations, run again from
-/// the before-states, are exactly the plan's transitions ([`recompose`]); the
-/// plan's resolution change set, computed again from those results through
-/// `links` ([`link_checks`]), is exactly the one it records; and every result
-/// passes the vault schema, or, for a forced plan, has each violation it
-/// introduces listed rather than refused. A plan whose store paths, shape,
-/// target places or recomposition fail is not what its operations do: its own
+/// the vault gives it, at a place the vault reads documents at; no target drifted and every content condition holds; the
+/// operations, run again from the before-states, are exactly the plan's
+/// transitions ([`recompose`]); the plan's resolution change set, computed
+/// again from those results through `links` ([`link_checks`]), is exactly the
+/// one it records; and every result passes the vault schema, or, for a forced
+/// plan, has each violation it introduces listed rather than refused. A plan
+/// whose store paths, shape, target places or
+/// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
 /// schema violation, a taken name, a replaced root and an I/O failure each
@@ -292,10 +292,13 @@ pub(super) fn check(
         .transitions
         .iter()
         .zip(after)
-        .map(|(transition, after)| Target {
-            path: &transition.path,
-            before: matches!(transition.before, FileState::Present { .. }),
-            after,
+        .map(|(transition, after)| {
+            Target::new(
+                &transition.path,
+                &transition.before,
+                &transition.after,
+                after,
+            )
         })
         .collect();
     let recomputed = change_set(&targets, &lineage, normalizer, &plan.operations, links)

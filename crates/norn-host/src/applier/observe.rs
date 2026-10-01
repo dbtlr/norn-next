@@ -8,6 +8,7 @@ use std::sync::Arc;
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
 use norn_wire::{FileState, PlanCondition, ResolvedPlan, Transition};
 
+use crate::planner::compose::holding;
 use crate::planner::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
 
@@ -72,7 +73,7 @@ impl TargetState {
     pub(super) fn before_unseen(&self, transition: &Transition) -> bool {
         matches!(transition.before, FileState::Present { .. })
             && match self {
-                TargetState::Landed(_) => transition.before != transition.after,
+                TargetState::Landed(_) => !transition.before.same_content(&transition.after),
                 TargetState::Halfway(_) => true,
                 TargetState::AtBefore(_) | TargetState::Drifted(_) | TargetState::Unplaced => false,
             }
@@ -180,7 +181,7 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
     };
     let (holds, bytes) = match view.entry(&identity)? {
         Entry::Document { at, bytes, hash } if at == transition.path => {
-            (FileState::present(hash), Some(bytes))
+            (holding(&bytes, hash), Some(bytes))
         }
         Entry::Document { .. } | Entry::Absent { .. } => (FileState::absent(), None),
         Entry::Blocked {
@@ -206,12 +207,13 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
     Ok(judged(transition, holds, bytes))
 }
 
-/// `holds` judged against `transition`'s two states. The after-state is asked
-/// first, so a transition whose two states agree is landed.
+/// `holds` judged against `transition`'s two states by the bytes each holds
+/// ([`FileState::same_content`]). The after-state is asked first, so a
+/// transition whose two states agree is landed.
 fn judged(transition: &Transition, holds: FileState, bytes: Option<Arc<[u8]>>) -> TargetState {
-    if holds == transition.after {
+    if holds.same_content(&transition.after) {
         TargetState::Landed(bytes)
-    } else if holds == transition.before {
+    } else if holds.same_content(&transition.before) {
         TargetState::AtBefore(bytes)
     } else {
         TargetState::Drifted(holds)
@@ -237,10 +239,10 @@ fn respell<V: VaultView>(
             ..
         } => (TargetState::Unplaced, TargetState::Unplaced),
         Entry::Document { at, bytes, hash } if at == old.path => {
-            let holds = FileState::present(hash);
-            if holds == old.before {
+            let holds = holding(&bytes, hash);
+            if holds.same_content(&old.before) {
                 (TargetState::AtBefore(Some(bytes)), untouched)
-            } else if holds == new.after {
+            } else if holds.same_content(&new.after) {
                 (
                     TargetState::Halfway(bytes.clone()),
                     TargetState::Halfway(bytes),
@@ -250,8 +252,8 @@ fn respell<V: VaultView>(
             }
         }
         Entry::Document { at, bytes, hash } if at == new.path => {
-            let holds = FileState::present(hash);
-            if holds == new.after {
+            let holds = holding(&bytes, hash);
+            if holds.same_content(&new.after) {
                 (TargetState::Landed(None), TargetState::Landed(Some(bytes)))
             } else {
                 (TargetState::Landed(None), TargetState::Drifted(holds))

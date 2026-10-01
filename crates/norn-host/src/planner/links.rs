@@ -14,6 +14,18 @@
 //! operations — so the two can only differ where the vault outside the plan
 //! moved.
 //!
+//! **A document stands where a file's bytes decode as one.** A file whose
+//! bytes do not is quarantined: the store derives no document from it, so no
+//! link resolves to it, and the set reads it as no document — deleting or
+//! moving one changes no link's resolution, and bytes that start or stop
+//! decoding put a document where none stood, or take one away, though a file
+//! stands there throughout. Whether a target is a document on each side is
+//! read from the plan's file states ([`Target::new`]), which record it for
+//! every present side by the derivation's own rule, never from bytes here: a
+//! target that already holds its change has no before-bytes left to decode,
+//! so planning and the applier read the recorded flag alike, and the applier
+//! holds the flag to every side whose bytes it does hold.
+//!
 //! **What is judged where.** A document the plan writes is read from the
 //! bytes the plan composed, since the store holds its before-state: each link
 //! it holds is keyed at its after-state, and read before the plan from where
@@ -78,14 +90,15 @@ pub(crate) trait LinkIndex {
 
 /// Whether the resolution change set of a plan with `transitions` and
 /// `operations` reads the link index at all, which is whether an apply job
-/// needs a read handle for it: [`reads_links_over`] each transition's
-/// presence on its two sides.
+/// needs a read handle for it: [`reads_links_over`] whether a document
+/// stands at each transition's file on its two sides
+/// ([`FileState::is_document`]).
 pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) -> bool {
     reads_links_over(
         transitions.iter().map(|transition| {
             (
-                matches!(transition.before, FileState::Present { .. }),
-                matches!(transition.after, FileState::Present { .. }),
+                transition.before.is_document(),
+                transition.after.is_document(),
             )
         }),
         operations,
@@ -96,9 +109,11 @@ pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) 
 /// as `presence` — whether a document stands there before the plan, and
 /// after it — and whose operations are `operations` reads the link index:
 /// some target holds a document on one side and not the other, or some
-/// operation rewrites a link. A plan of which neither holds records no entry
-/// and reads nothing, so [`change_set`] answers it without asking and an
-/// apply job mints no handle for it ([`reads_links`]).
+/// operation rewrites a link. A file whose bytes start or stop decoding
+/// holds a document on one side only, though a file stands there on both. A
+/// plan of which neither holds records no entry and reads nothing, so
+/// [`change_set`] answers it without asking and an apply job mints no handle
+/// for it ([`reads_links`]).
 fn reads_links_over<'o>(
     presence: impl IntoIterator<Item = (bool, bool)>,
     operations: impl IntoIterator<Item = &'o Operation>,
@@ -110,14 +125,38 @@ fn reads_links_over<'o>(
 }
 
 /// One file a plan writes, as the change set reads it.
+///
+/// **A document stands where a file's bytes decode as one**, which is what
+/// makes it a link's candidate: a quarantined file is none, so the change
+/// set reads one as no document, before the plan and after it. Built only by
+/// [`Target::new`], from the plan's file states, so planning and the applier
+/// read a side alike whether or not its bytes are still there to decode.
 pub(crate) struct Target<'a> {
     /// The file, at the spelling the plan writes it.
-    pub(crate) path: &'a DocumentPath,
+    path: &'a DocumentPath,
     /// Whether a document stands there before the plan.
-    pub(crate) before: bool,
+    before: bool,
     /// What the document there holds after the plan, or `None` where none
     /// stands.
-    pub(crate) after: Option<&'a [u8]>,
+    after: Option<&'a [u8]>,
+}
+
+impl<'a> Target<'a> {
+    /// The file at `path`, going from `before` to `after`, holding `bytes`
+    /// after the plan where a file stands there then: a document on each
+    /// side only where that side's state says its bytes decode.
+    pub(crate) fn new(
+        path: &'a DocumentPath,
+        before: &FileState,
+        after: &FileState,
+        bytes: Option<&'a [u8]>,
+    ) -> Self {
+        Target {
+            path,
+            before: before.is_document(),
+            after: bytes.filter(|_| after.is_document()),
+        }
+    }
 }
 
 /// A plan's resolution change set, and the advisories its forecast carries
@@ -500,12 +539,13 @@ mod tests {
 
     use norn_fs::{CaseSensitivity, PathNormalizer};
     use norn_wire::{
-        AuthoredPlan, DocumentPath, LinkAddressKind, LinkAdvisory, LinkFamily, LinkKey, Operation,
-        OperationKind, PlanCondition, Resolves, RootIdentity,
+        AuthoredPlan, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkKey,
+        Operation, OperationKind, PlanCondition, Resolves, RootIdentity,
     };
 
     use super::testing::{EmptyStore, Untouched, vault};
     use super::{ChangeSet, Judged, Target, change_set};
+    use crate::planner::compose::content_hash;
     use crate::planner::lineage::Lineage;
     use crate::planner::resolve::resolve;
     use crate::planner::view::memory::MemoryVault;
@@ -644,6 +684,169 @@ mod tests {
                 advisories: Vec::new(),
             }
         );
+    }
+
+    /// Bytes that do not decode as a vault document: a quarantined file.
+    const UNDECODABLE: &[u8] = b"\xff\xfe not utf-8\n";
+
+    /// The plan `operations` makes over `files` with the linker `l.md` —
+    /// holding `[[q]]` and `[[d]]` — edited, so its links are read from the
+    /// bytes planning composed: an empty store holds no link of its own.
+    fn planned_with_the_linker(
+        files: &[(&str, &[u8])],
+        mut operations: Vec<Operation>,
+    ) -> crate::planner::resolve::Resolution {
+        let mut held = vec![("l.md", &b"See [[q]] and [[d]].\n"[..])];
+        held.extend_from_slice(files);
+        operations.push(Operation::new(OperationKind::str_replace(
+            path("l.md"),
+            "See",
+            "Read",
+        )));
+        let resolution = planned(
+            &MemoryVault::with_bytes(&held),
+            operations,
+            &EmptyStore::new(),
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        resolution
+    }
+
+    /// The transition the plan carries at `at`.
+    fn transition_at<'p>(
+        resolution: &'p crate::planner::resolve::Resolution,
+        at: &str,
+    ) -> &'p norn_wire::Transition {
+        resolution
+            .plan
+            .transitions
+            .iter()
+            .find(|transition| transition.path.as_str() == at)
+            .unwrap_or_else(|| panic!("the plan writes {at}"))
+    }
+
+    /// **A quarantined file is no link's candidate, so deleting one changes
+    /// no link's resolution.** `[[q]]` names nothing before the plan, since
+    /// the bytes at `q.md` do not decode, and nothing after it: the plan
+    /// records the file it removes as quarantined, and no entry and no
+    /// advisory.
+    #[test]
+    fn deleting_a_quarantined_document_records_no_link_change() {
+        let resolution = planned_with_the_linker(
+            &[("q.md", UNDECODABLE)],
+            vec![Operation::new(OperationKind::delete_document(path("q.md")))],
+        );
+        assert_eq!(
+            transition_at(&resolution, "q.md").before,
+            FileState::quarantined(content_hash(UNDECODABLE))
+        );
+        assert_eq!(entries(&resolution.plan.conditions), []);
+        assert!(resolution.forecast.links.is_empty());
+    }
+
+    /// **Moving a quarantined file retargets no link**: it is a document on
+    /// neither side, at its source or at its destination, which the plan
+    /// records as quarantined too.
+    #[test]
+    fn moving_a_quarantined_document_records_no_link_change() {
+        let resolution = planned_with_the_linker(
+            &[("q.md", UNDECODABLE)],
+            vec![Operation::new(OperationKind::move_document(
+                path("q.md"),
+                path("elsewhere/q.md"),
+            ))],
+        );
+        assert_eq!(
+            transition_at(&resolution, "elsewhere/q.md").after,
+            FileState::quarantined(content_hash(UNDECODABLE))
+        );
+        assert_eq!(entries(&resolution.plan.conditions), []);
+        assert!(resolution.forecast.links.is_empty());
+    }
+
+    /// **Bytes that come to decode put a document where none stood**, though
+    /// a file stood there throughout: replacing the quarantined `q.md` with a
+    /// document mends `[[q]]`, from none to `q.md`.
+    #[test]
+    fn a_quarantined_file_replaced_by_a_document_mends_the_links_naming_it() {
+        let resolution = planned_with_the_linker(
+            &[("q.md", UNDECODABLE), ("n.md", b"now a document\n")],
+            vec![
+                Operation::new(OperationKind::delete_document(path("q.md"))),
+                Operation::new(OperationKind::move_document(path("n.md"), path("q.md"))),
+            ],
+        );
+        let replaced = transition_at(&resolution, "q.md");
+        assert!(!replaced.before.is_document() && replaced.after.is_document());
+        assert_eq!(
+            entries(&resolution.plan.conditions),
+            [PlanCondition::link_resolution(
+                key("l.md", "q"),
+                Resolves::none(),
+                Resolves::one(path("q.md")),
+            )]
+        );
+        assert!(resolution.forecast.links.is_empty());
+    }
+
+    /// **Bytes that stop decoding take a document away**, though a file
+    /// stands there throughout: replacing the document `d.md` with
+    /// quarantined bytes leaves `[[d]]` broken.
+    #[test]
+    fn a_document_replaced_by_quarantined_bytes_leaves_the_links_naming_it_broken() {
+        let resolution = planned_with_the_linker(
+            &[("d.md", b"a document\n"), ("q.md", UNDECODABLE)],
+            vec![
+                Operation::new(OperationKind::delete_document(path("d.md"))),
+                Operation::new(OperationKind::move_document(path("q.md"), path("d.md"))),
+            ],
+        );
+        let replaced = transition_at(&resolution, "d.md");
+        assert!(replaced.before.is_document() && !replaced.after.is_document());
+        assert_eq!(
+            entries(&resolution.plan.conditions),
+            [PlanCondition::link_resolution(
+                key("l.md", "d"),
+                Resolves::one(path("d.md")),
+                Resolves::none(),
+            )]
+        );
+        assert_eq!(
+            resolution.forecast.links,
+            [LinkAdvisory::left_broken(key("l.md", "d"))]
+        );
+    }
+
+    /// **The fast path reads a change of whether a document stands, not of
+    /// whether a file does**: a transition between quarantined bytes and a
+    /// document reads the index, and one between two quarantined states, or
+    /// from quarantined bytes to nothing, does not.
+    #[test]
+    fn the_fast_path_reads_whether_a_document_stands() {
+        let quarantined = FileState::quarantined(content_hash(UNDECODABLE));
+        let document = FileState::present(content_hash(b"text\n"));
+        let reads = |before: &FileState, after: &FileState| {
+            super::reads_links(
+                &[norn_wire::Transition::new(
+                    path("q.md"),
+                    before.clone(),
+                    after.clone(),
+                )],
+                &[],
+            )
+        };
+        assert!(reads(&quarantined, &document));
+        assert!(reads(&document, &quarantined));
+        assert!(!reads(&quarantined, &FileState::absent()));
+        assert!(!reads(&FileState::absent(), &quarantined));
+        assert!(!reads(
+            &quarantined,
+            &FileState::quarantined(content_hash(b"\xff"))
+        ));
     }
 
     /// **A link to an attachment is advised on as link health judges it**:

@@ -138,13 +138,13 @@ impl Fixture {
         }
     }
 
-    pub(super) fn write(&self, at: &str, content: &str) {
+    pub(super) fn write(&self, at: &str, content: impl AsRef<[u8]>) {
         write_at(&self.vault, at, content);
     }
 
     /// Another writer writes `content` at `at`, and the store takes it in as
     /// the watcher would deliver it before an apply's intake.
-    pub(super) fn foreign(&mut self, at: &str, content: &str) {
+    pub(super) fn foreign(&mut self, at: &str, content: impl AsRef<[u8]>) {
         self.write(at, content);
         heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
     }
@@ -310,7 +310,7 @@ fn order_of(vault: &Path) -> StoredPathOrder {
     crate::stored_path_order(view.normalizer().case_sensitivity())
 }
 
-fn write_at(vault: &Path, at: &str, content: &str) {
+fn write_at(vault: &Path, at: &str, content: impl AsRef<[u8]>) {
     let full = vault.join(at);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).expect("a folder");
@@ -2043,6 +2043,145 @@ fn a_part_landed_resend_computes_the_set_it_recorded_and_finishes() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// Bytes that do not decode as a vault document: a quarantined file.
+pub(super) const UNDECODABLE: &[u8] = b"\xff\xfe not utf-8\n";
+
+/// A fixture holding the linker `l.md`, whose `[[q]]` and `[[d]]` name the
+/// quarantined `q.md` and the document `d.md`, with the store holding no row
+/// for `q.md` and a quarantine finding naming it.
+pub(super) fn quarantined_fixture() -> Fixture {
+    let mut fixture = Fixture::new(&[("l.md", "See [[q]] and [[d]].\n"), ("d.md", "d\n")]);
+    fixture.foreign("q.md", UNDECODABLE);
+    fixture
+}
+
+fn quarantined(content: &[u8]) -> norn_wire::FileState {
+    norn_wire::FileState::quarantined(crate::planner::compose::content_hash(content))
+}
+
+/// **A delete of a quarantined file records no link change, and applies.**
+/// `[[q]]` names no document before the plan, since the store derives none
+/// from bytes that do not decode, and none after it: the plan records the
+/// file it removes as quarantined, no entry and no advisory, and the applier
+/// computes the same empty set.
+#[test]
+fn a_delete_of_a_quarantined_document_records_no_link_change_and_applies() {
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![deleting("q.md")]);
+    assert_eq!(
+        resolution.plan.transitions,
+        vec![norn_wire::Transition::new(
+            path("q.md"),
+            quarantined(UNDECODABLE),
+            norn_wire::FileState::absent(),
+        )]
+    );
+    assert_eq!(resolution.plan.conditions, vec![]);
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    assert!(!fixture.vault.join("q.md").exists());
+}
+
+/// **A move of a quarantined file records no link change, and applies**: it
+/// is a document on neither side, at its source or its destination.
+#[test]
+fn a_move_of_a_quarantined_document_records_no_link_change_and_applies() {
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![moving("q.md", "elsewhere/q.md")]);
+    assert_eq!(
+        resolution.plan.transitions,
+        vec![
+            norn_wire::Transition::new(
+                path("elsewhere/q.md"),
+                norn_wire::FileState::absent(),
+                quarantined(UNDECODABLE),
+            ),
+            norn_wire::Transition::new(
+                path("q.md"),
+                quarantined(UNDECODABLE),
+                norn_wire::FileState::absent(),
+            ),
+        ]
+    );
+    assert_eq!(resolution.plan.conditions, vec![]);
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("elsewhere/q.md"))
+            .ok()
+            .as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
+/// **Bytes that come to decode at a file put a document there, and bytes
+/// that stop decoding take one away**, though a file stands there
+/// throughout: a document moved over the quarantined `q.md` mends `[[q]]`,
+/// and the quarantined bytes moved over `d.md` leave `[[d]]` broken. Each
+/// plan applies, the applier computing the set it recorded.
+#[test]
+fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_applies() {
+    let mut fixture = quarantined_fixture();
+    fixture.foreign("n.md", "now a document\n");
+    let resolution = fixture.resolution(vec![deleting("q.md"), moving("n.md", "q.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "q",
+            norn_wire::Resolves::none(),
+            norn_wire::Resolves::one(path("q.md")),
+        )]
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = quarantined_fixture();
+    let resolution = fixture.resolution(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "l.md",
+            "d",
+            norn_wire::Resolves::one(path("d.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        vec![norn_wire::LinkAdvisory::left_broken(
+            norn_wire::LinkKey::new(path("l.md"), norn_wire::LinkFamily::Wikilink, "d")
+        )]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(
+        std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
+        Some(UNDECODABLE)
+    );
+}
+
+/// **A landed target's recorded flag stands for the bytes it no longer
+/// holds.** With a quarantined file's delete landed by hand, the applier
+/// cannot decode its before-bytes, so it reads the before-state the plan
+/// records — quarantined — computes the empty set the plan recorded, and
+/// finishes.
+#[test]
+fn a_landed_quarantined_targets_recorded_flag_stands_for_its_bytes() {
+    let mut fixture = quarantined_fixture();
+    let plan = fixture.plan(vec![deleting("q.md"), editing("d.md", "d", "dd")]);
+    assert_eq!(plan.conditions, vec![]);
+    std::fs::remove_file(fixture.vault.join("q.md")).expect("the delete lands by hand");
+    assert_eq!(
+        fixture
+            .preview(plan.clone())
+            .map(|(previewed, _)| previewed),
+        Ok(plan.clone())
+    );
+    applied(fixture.apply(plan));
+    assert_eq!(fixture.read("d.md").as_deref(), Some("dd\n"));
+}
+
 /// A plan that drops a condition its operations carry is refused: the
 /// condition is what its author's operation depends on.
 #[test]
@@ -2157,7 +2296,7 @@ fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
 impl Fixture {
     /// Preview `plan` as the apply seam previews a resolved plan: the same
     /// plan and its forecast, or the envelope the preview answers with.
-    fn preview(
+    pub(super) fn preview(
         &mut self,
         plan: ResolvedPlan,
     ) -> Result<(ResolvedPlan, norn_wire::Forecast), norn_wire::ErrorEnvelope> {

@@ -2384,8 +2384,9 @@ snapshot. A request states whether it previews or applies; the wire has no defau
 
 A plan is a self-contained value naming its vault by address and carrying the vault's root
 identity: the host holds no plan between requests. A resolved plan carries its operations,
-each target's before- and after-state, and the conditions its planning read, never the
-bytes of a file it did not author. Every template value resolves at planning, so the
+each target's before- and after-state — absent, or the hash of the bytes present and
+whether those bytes decode as a document, by the derivation's own rule — and the conditions
+its planning read, never the bytes of a file it did not author. Every template value resolves at planning, so the
 applier recomposes each target as a pure function of the before-states and the operations:
 before staging anything it runs the plan's operations again, through the planner's own
 ordering and composition, over the vault with every target at its recorded before-state and
@@ -2491,8 +2492,12 @@ set: every link whose resolution the plan changes, and every link a `rewrite_lin
 plan writes, each with what its key resolves to from its holder's lineage source before the
 plan and from its holder after it. Both sides are read on the request's one snapshot, the
 store's documents with every target of the plan overlaid both ways — present before where
-it stands before, present after where it stands after — so a store that has already taken
-in a target the plan landed reads the same two vaults. A document the plan writes is read
+a document stands there before, present after where one stands after — so a store that has
+already taken in a target the plan landed reads the same two vaults. A document stands
+where a file's bytes decode as one, read from the plan's recorded states on both sides,
+landed or not: a quarantined file is no link's candidate, so deleting or moving one records
+no entry, and bytes that start or stop decoding change whether a document stands though a
+file stands there throughout. A document the plan writes is read
 from the bytes planning composed, and a moved document's links from where it stood before
 the plan, so a relative link a move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target
@@ -2502,7 +2507,7 @@ name: the work is the links the plan reaches plus the candidates they resolve ag
 with one limit link health's head statement carries too: a head is read past every member
 of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
 plan that changes no document's presence and writes no link records nothing and reads no
-snapshot. The forecast advises on the links the set leaves broken, makes ambiguous or
+snapshot; a file whose bytes start or stop decoding changes its document's presence. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment
 that comes to resolve to no document is recorded and not advised broken. The applier computes the set again, from the resolved plan alone and the job's
 snapshot after its intake, and refuses on any difference: an entry the plan records that

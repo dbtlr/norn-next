@@ -11,7 +11,7 @@ use norn_wire::{
     Transition, UnresolvedOperation, UnresolvedReason,
 };
 
-use super::compose::{Composition, compose, content_hash, touches};
+use super::compose::{Composition, compose, content_hash, holding, touches};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
@@ -120,15 +120,30 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     }
     let mut conditions =
         plan_conditions(&operations, &order, &composition, view).map_err(PlanningFailure::View)?;
-    // The resolution change set is recorded as the vault stands with every
-    // target at its after-state, judged from the bytes composition wrote.
-    let targets: Vec<Target<'_>> = composition
+    let transitions = composition
         .targets
         .iter()
-        .map(|(path, target)| Target {
-            path,
-            before: matches!(target.before, FileState::Present { .. }),
-            after: target.after.as_deref(),
+        .map(|(path, target)| {
+            let after = match &target.after {
+                Some(bytes) => holding(bytes, content_hash(bytes)),
+                None => FileState::absent(),
+            };
+            Transition::new(path.clone(), target.before.clone(), after)
+        })
+        .collect::<Vec<_>>();
+    // The resolution change set is recorded as the vault stands with every
+    // target at its after-state, judged from the bytes composition wrote and
+    // from whether the plan's file states say a document stands.
+    let targets: Vec<Target<'_>> = transitions
+        .iter()
+        .zip(composition.targets.values())
+        .map(|(transition, target)| {
+            Target::new(
+                &transition.path,
+                &transition.before,
+                &transition.after,
+                target.after.as_deref(),
+            )
         })
         .collect();
     let changed = change_set(
@@ -140,18 +155,8 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     )
     .map_err(PlanningFailure::Links)?;
     drop(targets);
+    drop(composition);
     conditions.extend(changed.entries);
-    let transitions = composition
-        .targets
-        .into_iter()
-        .map(|(path, target)| {
-            let after = match &target.after {
-                Some(bytes) => FileState::present(content_hash(bytes)),
-                None => FileState::absent(),
-            };
-            Transition::new(path, target.before, after)
-        })
-        .collect::<Vec<_>>();
     let carried: BTreeSet<&OperationId> = operations
         .iter()
         .filter_map(|operation| operation.id.as_ref())
@@ -283,7 +288,7 @@ fn unmet_condition<V: VaultView>(
         return Ok(Some(detail));
     }
     let holds = match composition.before(&identity) {
-        Some(before) => *before == FileState::present(hash.clone()),
+        Some(before) => before.hash() == Some(hash),
         None => match view.entry(&identity)? {
             // The plan records the condition at the spelling the tree lists,
             // so that spelling is the one the index must be able to hold.
@@ -341,7 +346,7 @@ fn unmet_expectation<V: VaultView>(
         }
         view::Entry::Document { bytes, hash, .. } => {
             debug_assert!(
-                before.is_none_or(|before| *before == FileState::present(hash)),
+                before.is_none_or(|before| before.hash() == Some(&hash)),
                 "the view remembers the bytes a written document's before-state hashes"
             );
             edit::expectation_unmet(path, &bytes, field, expect)
