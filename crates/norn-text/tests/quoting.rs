@@ -793,42 +793,14 @@ fn a_block_written_from_no_fields_reads_back_as_the_empty_mapping() {
     ));
 }
 
-#[test]
-fn a_rendered_document_refuses_a_nested_mapping() {
-    let nested: Mapping = [("inner", "x")].into_iter().collect();
-    let fields: Mapping = [("outer", Value::Map(nested))].into_iter().collect();
-    assert_eq!(
-        render_document(&fields, "", LineEnding::Lf),
-        Err(RenderError::NonScalarValue { kind: "map" })
-    );
-}
-
-#[test]
-fn a_rendered_document_refuses_a_sequence_inside_a_sequence() {
-    let fields: Mapping = [(
-        "outer",
-        Value::Sequence(vec![Value::Sequence(vec!["inner".into()])]),
-    )]
-    .into_iter()
-    .collect();
-    assert_eq!(
-        render_document(&fields, "", LineEnding::Lf),
-        Err(RenderError::NonScalarValue { kind: "sequence" })
-    );
-}
-
-/// The refusal vocabulary is exactly three reasons, and each one is reachable.
-/// A fourth that no path constructs is a variant nobody can act on — and a
+/// The refusal vocabulary is exactly two reasons, and each one is reachable.
+/// A third that no path constructs is a variant nobody can act on — and a
 /// dead variant is what this crate deleted rather than inherited.
 #[test]
 fn every_render_refusal_is_reachable() {
     let long_key: Mapping = [("k".repeat(2000), Value::Int(1))].into_iter().collect();
-    let nested: Mapping = [("outer", Value::Map(Mapping::new()))]
-        .into_iter()
-        .collect();
     let seen = [
         render_document(&long_key, "", LineEnding::Lf),
-        render_document(&nested, "", LineEnding::Lf),
         Document::parse("---\nk: scalar\n---\n")
             .set_field("k", &Value::Sequence(vec!["a".into()]))
             .map_err(|error| match error {
@@ -840,15 +812,11 @@ fn every_render_refusal_is_reachable() {
         .iter()
         .map(|outcome| match outcome {
             Err(RenderError::NotRoundTrippable { .. }) => "not-round-trippable",
-            Err(RenderError::NonScalarValue { .. }) => "non-scalar",
             Err(RenderError::SequenceIntoScalar) => "sequence-into-scalar",
             Ok(_) => panic!("expected a refusal"),
         })
         .collect();
-    assert_eq!(
-        reasons,
-        ["not-round-trippable", "non-scalar", "sequence-into-scalar"]
-    );
+    assert_eq!(reasons, ["not-round-trippable", "sequence-into-scalar"]);
 }
 
 /// A value no span can name is refused by the field layer, before any bytes

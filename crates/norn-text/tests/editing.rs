@@ -723,7 +723,6 @@ fn a_value_no_span_can_name_refuses_an_in_place_edit_and_stays_removable() {
     for source in [
         "---\nk: |\n  literal\nother: x\n---\n",
         "---\nk: >\n  folded\nother: x\n---\n",
-        "---\nk: {a: 1}\nother: x\n---\n",
         "---\nk: &anchor value\nother: x\n---\n",
         "---\nk: !tagged value\nother: x\n---\n",
     ] {
@@ -1062,11 +1061,20 @@ fn a_key_re_exposed_below_an_interior_quote_is_answered_for_downstream() {
             }),
             "removing {field:?}"
         );
+        // `base` holds a map, so its set rewrites the whole entry, and the
+        // re-read refuses that too: the anchor the merge names goes with it.
+        let refusal = if field == "base" {
+            EditError::PostImageMismatch {
+                field: field.to_string(),
+            }
+        } else {
+            EditError::FieldNotEditable {
+                field: field.to_string(),
+            }
+        };
         assert_eq!(
             split.set_field(field, &Value::Int(1)),
-            Err(EditError::FieldNotEditable {
-                field: field.to_string()
-            }),
+            Err(refusal),
             "setting {field:?}"
         );
     }
@@ -1404,15 +1412,6 @@ fn a_sequence_offered_for_a_scalar_field_refuses_rather_than_restyling_it() {
             "title",
             Value::Sequence(vec!["a".into()])
         ),
-        Err(EditError::Render(_))
-    ));
-}
-
-#[test]
-fn a_map_value_refuses() {
-    let nested: Mapping = [("inner", "x")].into_iter().collect();
-    assert!(matches!(
-        set("---\ntitle: hello\n---\n", "title", Value::Map(nested)),
         Err(EditError::Render(_))
     ));
 }

@@ -15,8 +15,8 @@ use crate::frontmatter::list::{
     BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
 };
 use crate::frontmatter::render::{
-    RenderError, ScalarStyle, render_block_item, render_flow_sequence, render_key,
-    render_scalar_entry, render_scalar_in_span, render_sequence_entry,
+    RenderError, ScalarStyle, is_nested, render_block_item, render_entry, render_flow_sequence,
+    render_key, render_scalar_in_span,
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
@@ -85,9 +85,11 @@ pub enum EditError {
         field: String,
         kind: &'static str,
     },
-    /// A list edit would have to rewrite the field whole, and the field's
-    /// entry carries a comment that rewrite would drop. Nothing is written: a
-    /// comment is the author's, and no edit loses one silently.
+    /// An edit would have to rewrite the field whole — a list edit that cannot
+    /// splice an item, or a set writing or replacing a nested value or a
+    /// stubbed field — and the field's entry carries a comment that rewrite
+    /// would drop. Nothing is written: a comment is the author's, and no edit
+    /// loses one silently.
     CommentWouldBeLost {
         field: String,
     },
@@ -159,7 +161,7 @@ impl fmt::Display for EditError {
             }
             EditError::CommentWouldBeLost { field } => write!(
                 f,
-                "the list {field:?} carries a comment this edit would drop, so it was refused"
+                "the field {field:?} carries a comment this edit would drop, so it was refused"
             ),
             EditError::ListValueAbsent { field, value } => {
                 write!(f, "the list {field:?} holds no element equal to {value:?}")
@@ -631,6 +633,15 @@ impl<'a> Document<'a> {
     /// closing delimiter; a document with no block at all gets one, placed
     /// after any byte-order mark. The result is re-read before it is returned,
     /// and an edit that does not read back as intended refuses.
+    ///
+    /// `value` may be any shape the model holds. A scalar over a scalar
+    /// replaces the value's bytes; a sequence over a sequence, and every set
+    /// that writes or replaces a nested value — a map, or a sequence holding a
+    /// collection — replaces the field's whole entry, a nested value written
+    /// in block style. A whole-entry write over a nested value, or of one,
+    /// refuses with [`EditError::CommentWouldBeLost`] where the entry carries
+    /// a comment it would drop. A sequence over a scalar refuses as a restyle
+    /// ([`RenderError::SequenceIntoScalar`]).
     ///
     /// Growing the block past [`FRONTMATTER_MAX_BYTES`] refuses too, and with
     /// its own error: past the bound no read turns the block back into fields,
@@ -1200,7 +1211,7 @@ impl<'a> Document<'a> {
             return self.splice_existing(located, value);
         }
 
-        let entry = self.render_entry(field, value)?;
+        let entry = render_entry(field, value, self.line_ending)?;
         let terminator = self.line_ending.as_str();
         match &self.frontmatter_range {
             // Append before the closing delimiter. A null block — `---\n---\n`
@@ -1217,38 +1228,37 @@ impl<'a> Document<'a> {
         }
     }
 
-    fn render_entry(&self, field: &str, value: &Value) -> Result<String, EditError> {
-        Ok(match value {
-            Value::Sequence(items) => render_sequence_entry(field, items, self.line_ending)?,
-            Value::Map(_) => {
-                return Err(EditError::Render(RenderError::NonScalarValue {
-                    kind: "map",
-                }));
-            }
-            scalar => render_scalar_entry(field, scalar, self.line_ending)?,
-        })
-    }
-
     fn splice_existing(&self, located: &Field, value: &Value) -> Result<String, EditError> {
         // A sequence replaces the whole entry, keeping the author's flow or
         // block spelling. A stubbed field — `tags:` with nothing after it, or
         // null however it is spelled (`null`, `~`, `Null`) — becomes a block
         // sequence: a null holds no scalar a sequence would restyle.
-        let stubbed = located.style == ValueStyle::EmptyValue
-            || matches!(&self.frontmatter, Some(Value::Map(map))
-                if map.get(&located.name) == Some(&Value::Null));
+        let held = match &self.frontmatter {
+            Some(Value::Map(map)) => map.get(&located.name),
+            _ => None,
+        };
+        let stubbed = located.style == ValueStyle::EmptyValue || held == Some(&Value::Null);
+        // A nested value, written or replaced, is a whole entry: a map, or a
+        // sequence holding a collection, has no one span a scalar could be
+        // spliced into.
+        let held_nested = held.is_some_and(is_nested);
         if let Value::Sequence(items) = value
             && (located.style.is_sequence() || stubbed)
         {
             // Replacing a stub's whole entry takes its key line with it, so a
             // comment there — `tags: # c`, `tags: null # c` — would be dropped
-            // silently. It refuses instead.
-            if stubbed && entry_carries_comment(self.source, located) {
+            // silently, and so would one inside a nested entry, written or
+            // replaced. Each refuses instead.
+            if (stubbed || held_nested || is_nested(value))
+                && entry_carries_comment(self.source, located)
+            {
                 return Err(EditError::CommentWouldBeLost {
                     field: located.name.clone(),
                 });
             }
-            let entry = if located.style == ValueStyle::FlowSequence {
+            // Only a flat sequence is written inline; one holding a
+            // collection is written in block style whatever it replaces.
+            let entry = if located.style == ValueStyle::FlowSequence && !is_nested(value) {
                 format!(
                     "{}: {}{}",
                     render_key(&located.name)?,
@@ -1256,8 +1266,22 @@ impl<'a> Document<'a> {
                     self.line_ending.as_str()
                 )
             } else {
-                render_sequence_entry(&located.name, items, self.line_ending)?
+                render_entry(&located.name, value, self.line_ending)?
             };
+            return Ok(splice(self.source, located.line_range.clone(), &entry));
+        }
+
+        // A map written over anything, and anything written over a nested
+        // value, replaces the whole entry, refusing where a comment in it
+        // would be dropped. A sequence over a scalar is not among them: that
+        // refuses below as a restyle.
+        if matches!(value, Value::Map(_)) || held_nested {
+            if entry_carries_comment(self.source, located) {
+                return Err(EditError::CommentWouldBeLost {
+                    field: located.name.clone(),
+                });
+            }
+            let entry = render_entry(&located.name, value, self.line_ending)?;
             return Ok(splice(self.source, located.line_range.clone(), &entry));
         }
 

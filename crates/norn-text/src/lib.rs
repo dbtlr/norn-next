@@ -41,8 +41,11 @@
 //! guesswork — so a comment written *inside* that entry, **including one
 //! trailing it on the same line**, is replaced with it: the comment sits
 //! inside the entry's bytes, and the entry's bytes are what a whole-entry
-//! replacement writes over. A comment on its own line between two entries
-//! belongs to neither and always survives.
+//! replacement writes over. A nested value — a map, or a sequence holding a
+//! collection — is written or replaced as a whole entry too, and there a
+//! comment inside the entry refuses the set instead of going with it. A
+//! comment on its own line between two entries belongs to neither and always
+//! survives.
 //!
 //! **What cannot be proven is refused.** Every emitted scalar is re-parsed in
 //! the lexical context it will live in and compared against the value it came
