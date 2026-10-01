@@ -203,8 +203,8 @@ pub(super) struct Checked {
 /// **The checks run in this order**: no operation carries a `where` target
 /// or a folder move planning did not expand, which stops as
 /// [`PlanFault::UnexpandedTarget`], nor a creation by rule it did not
-/// expand, which stops as [`PlanFault::UnexpandedRule`], nor a cascade on a kind that does not
-/// cascade, which stops as [`PlanFault::MisplacedCascade`];
+/// expand, which stops as [`PlanFault::UnexpandedRule`], nor a cascade on a
+/// kind that does not cascade, which stops as [`PlanFault::MisplacedCascade`];
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling

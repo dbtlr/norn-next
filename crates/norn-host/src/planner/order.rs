@@ -234,7 +234,11 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
         // A folder move and a creation by rule name their documents only
         // once planning expands them, and a wikilink rewrite only edits
-        // documents where they stand.
+        // documents where they stand. A creation by rule is a dormant
+        // carrier for NORN-298's planner, which expands it into a
+        // `create_document` before ordering runs, as a folder move expands
+        // (`super::expand`); the call graph does not reach this arm until
+        // that lands.
         OperationKind::MoveFolder { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::RewriteWikilink { .. } => None,
@@ -262,7 +266,11 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::CreateDocument { .. } | OperationKind::StrReplace { .. } => None,
         // A folder move and a creation by rule name their documents only
         // once planning expands them, and a wikilink rewrite only edits
-        // documents where they stand.
+        // documents where they stand. A creation by rule is a dormant
+        // carrier for NORN-298's planner, which expands it into a
+        // `create_document` before ordering runs, as a folder move expands
+        // (`super::expand`); the call graph does not reach this arm until
+        // that lands.
         OperationKind::MoveFolder { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::RewriteWikilink { .. } => None,

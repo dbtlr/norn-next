@@ -230,6 +230,7 @@ pub enum OperationKind {
         /// The creation rule that places and shapes the document. Absent
         /// names the vault's inbox.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(length(min = 1))]
         rule: Option<String>,
         /// The values the rule's path and template take, by variable name.
         #[serde(default, skip_serializing_if = "Variables::is_empty")]
@@ -733,7 +734,7 @@ impl OperationKind {
 
 /// The derived schema of every kind, with a frontmatter kind's fields — its
 /// target flattened among them — written the way every other kind's fields
-/// are.
+/// are, and a part the reader takes only as written not admitting `null`.
 fn flattened_targets(schema: &mut Schema) {
     transform_subschemas(
         &mut |branch: &mut Schema| {
@@ -743,6 +744,7 @@ fn flattened_targets(schema: &mut Schema) {
                 .and_then(|fields| fields.try_into().ok());
             if let Some(fields) = fields {
                 settle_flattened_target(fields);
+                settle_written_properties(fields);
             }
         },
         schema,
@@ -1171,6 +1173,53 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+/// A derived optional property's schema, rewritten as the reader takes it: a
+/// part left out is absent, and `null` is refused rather than read as absent
+/// ([`written`]), so the property names its type alone, with no `null` branch
+/// and no `default` of `null`.
+pub(crate) fn settle_written_property(property: &mut Schema) {
+    let Some(object) = property.as_object_mut() else {
+        return;
+    };
+    if object
+        .get("default")
+        .is_some_and(|default| default.is_null())
+    {
+        object.remove("default");
+    }
+    if let Some(serde_json::Value::Array(names)) = object.get_mut("type") {
+        names.retain(|name| name.as_str() != Some("null"));
+        if names.len() == 1 {
+            let only = names.remove(0);
+            object.insert("type".to_string(), only);
+        }
+    }
+    let Some(serde_json::Value::Array(branches)) = object.get_mut("anyOf") else {
+        return;
+    };
+    branches.retain(|branch| branch.get("type").and_then(|name| name.as_str()) != Some("null"));
+    if branches.len() == 1 {
+        let serde_json::Value::Object(only) = branches.remove(0) else {
+            return;
+        };
+        object.remove("anyOf");
+        object.extend(only);
+    }
+}
+
+/// Every property of an object schema, settled as [`settle_written_property`]
+/// settles one.
+pub(crate) fn settle_written_properties(object: &mut Schema) {
+    let properties = object
+        .get_mut("properties")
+        .and_then(|properties| properties.as_object_mut());
+    for property in properties.into_iter().flat_map(|map| map.values_mut()) {
+        if let Ok(property) = <&mut Schema>::try_from(property) {
+            settle_written_property(property);
+        }
+    }
+}
+
 /// The field `name` of a `kind` operation, which the kind requires.
 fn required<T, E: serde::de::Error>(kind: KindName, name: &str, value: Option<T>) -> Result<T, E> {
     value.ok_or_else(|| {
@@ -1211,6 +1260,18 @@ fn whole_document<E: serde::de::Error>(
             kind.as_str()
         ))
     })
+}
+
+/// The creation rule name `name`, which names a rule rather than nothing:
+/// leaving the key out names the inbox.
+fn rule_name<E: serde::de::Error>(kind: KindName, key: &str, name: String) -> Result<String, E> {
+    if name.is_empty() {
+        return Err(E::custom(format_args!(
+            "a `{}` operation's `{key}` is refused: an empty name names no rule, and leaving it out names the inbox",
+            kind.as_str()
+        )));
+    }
+    Ok(name)
 }
 
 /// The target of a `kind` operation, from its two keys: exactly one of them
@@ -1294,7 +1355,7 @@ impl KindFields {
             // Every part of a creation by rule is optional: absent, the rule
             // is the inbox and the rest are empty.
             KindName::CreateByRule => OperationKind::CreateByRule {
-                rule,
+                rule: rule.map(|name| rule_name(kind, "rule", name)).transpose()?,
                 variables: variables.unwrap_or_default(),
                 fields: fields.unwrap_or_default(),
                 body,

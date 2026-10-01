@@ -9862,6 +9862,8 @@ fn a_new_request_mixing_its_forms_is_refused() {
         r#""path":"a.md","content":"","fields":{"status":"draft"}"#,
         r#""path":"a.md","content":"","body":"text""#,
         r#""path":"a.md","content":"","variables":{"project":"norn"}"#,
+        r#""as":"meeting","content":"text""#,
+        r#""path":"a.md","as":"meeting""#,
     ] {
         let refused = new_request(rest);
         let error = serde_json::from_str::<NewParams>(&refused)
@@ -9886,6 +9888,7 @@ fn a_new_request_by_rule_refuses_unknown_and_repeated_keys() {
         r#""as":"meeting","fields":{"status":"a","status":"b"}"#,
         r#""as":"meeting","as":"other""#,
         r#""as":null"#,
+        r#""as":"""#,
     ] {
         let refused = new_request(rest);
         assert!(
@@ -9929,6 +9932,7 @@ fn a_create_by_rule_reads_with_and_without_a_rule() {
         r#"{"kind":"create_by_rule","fields":{"rule":"a","variables":{"k":1}}}"#,
         r#"{"kind":"create_by_rule","fields":{"rule":"a","fields":{"k":1,"k":2}}}"#,
         r#"{"kind":"create_by_rule","fields":{"rule":null}}"#,
+        r#"{"kind":"create_by_rule","fields":{"rule":""}}"#,
         r#"{"kind":"create_document","fields":{"path":"a.md","content":"","rule":"a"}}"#,
         r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"f","value":1,"body":"a"}}"#,
     ] {
@@ -9937,6 +9941,28 @@ fn a_create_by_rule_reads_with_and_without_a_rule() {
             "reading {refused} produced an operation"
         );
     }
+}
+
+/// **A `create_by_rule` takes the generic envelope.** It expands one for one
+/// into a `create_document`, so an identifier it carries and the operations it
+/// requires are the expanded create's, and it reads and writes them as any
+/// kind does.
+#[test]
+fn a_create_by_rule_takes_an_identifier_and_requirements() {
+    let json = r#"{"kind":"create_by_rule","fields":{"rule":"meeting"},"id":"make-meeting","requires":["make-folder"]}"#;
+    let read: Operation = serde_json::from_str(json).expect("a create_by_rule with an envelope");
+    assert_eq!(
+        read,
+        Operation::new(OperationKind::create_by_rule(
+            Some("meeting".to_string()),
+            Variables::default(),
+            ValueMap::default(),
+            None,
+        ))
+        .with_id(operation_id("make-meeting"))
+        .with_requires(vec![operation_id("make-folder")])
+    );
+    assert_eq!(wire(&read), json);
 }
 
 /// **A resolved plan carries no creation by rule.** Planning expands one into

@@ -2516,7 +2516,8 @@ becomes of the links naming its document: rewritten to `rewrite_to`, left broken
 `allow_broken_links` says so, or — saying neither — forbidden, so that a delete any link
 names does not resolve. The `move`, `delete` and `rewrite_wikilink` requests compile to
 one such operation each. A cascade on an authored operation or on a kind that does not
-cascade, and a folder move left in a resolved plan, are `request/plan-invalid`.
+cascade, a folder move left in a resolved plan and a `create_by_rule` left in one
+(`unexpanded_rule`) are `request/plan-invalid`.
 
 **A document move plans its cascade.** Planning composes the plan without any cascade
 first, and once every operation acts asks the store's resolution door, through the overlay

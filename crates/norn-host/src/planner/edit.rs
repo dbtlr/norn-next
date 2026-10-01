@@ -56,6 +56,11 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         // through `norn-text`'s link rewriter ([`rewritten`]): composition
         // places it there itself, so it is not read here as a document-local
         // edit.
+        //
+        // A creation by rule is a dormant carrier for NORN-298's planner,
+        // which expands it into a `create_document` before composition, as a
+        // folder move expands (`super::expand`); no call reaches it here
+        // until that lands.
         OperationKind::CreateDocument { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::StrReplace { .. }
@@ -156,6 +161,8 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         OperationKind::InsertAfterHeading {
             heading, content, ..
         } => document.insert_after_heading(heading.as_str(), content),
+        // Never edited here; a creation by rule awaits NORN-298's planner,
+        // which expands it into a `create_document` first.
         OperationKind::CreateDocument { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::StrReplace { .. }

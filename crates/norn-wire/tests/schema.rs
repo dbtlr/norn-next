@@ -3839,3 +3839,30 @@ fn a_change_and_an_edit_advertise_their_tags() {
         Some("#/$defs/AuthoredValue")
     );
 }
+
+/// **No key of a `new` or a `create_by_rule` advertises `null`.** The reader
+/// refuses `null` for every part, so a part is left out to be absent, and
+/// the schema says so rather than inviting a value the reader refuses.
+#[test]
+fn a_creation_by_rule_and_a_new_admit_no_null() {
+    let new = schema_of::<NewParams>();
+    let operation = schema_of::<Operation>();
+    let by_rule = &branch(&operation, "kind", "create_by_rule")["properties"]["fields"];
+    for (what, schema) in [("a new request", &new), ("a create_by_rule", by_rule)] {
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{what} describes no properties: {schema}"));
+        for (key, property) in properties {
+            assert!(
+                !admits_null(property) && property.get("default") != Some(&Value::Null),
+                "{what} advertises `null` for `{key}`: {property}"
+            );
+        }
+    }
+    let rule = &new["properties"]["as"];
+    assert_eq!(rule["type"].as_str(), Some("string"), "{rule}");
+    assert_eq!(rule["minLength"].as_u64(), Some(1), "{rule}");
+    let rule = &by_rule["properties"]["rule"];
+    assert_eq!(rule["type"].as_str(), Some("string"), "{rule}");
+    assert_eq!(rule["minLength"].as_u64(), Some(1), "{rule}");
+}

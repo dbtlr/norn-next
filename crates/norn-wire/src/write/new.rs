@@ -30,7 +30,9 @@ use crate::apply::ApplyMode;
 use crate::document::DocumentPath;
 use crate::plan::document::AuthoredPlan;
 use crate::plan::document::is_false;
-use crate::plan::operation::{AuthorCondition, Operation, OperationKind, written};
+use crate::plan::operation::{
+    AuthorCondition, Operation, OperationKind, settle_written_properties, written,
+};
 use crate::plan::value::{ValueMap, Variables};
 
 /// What a `new` creates: the document at a path, the document a creation
@@ -137,6 +139,12 @@ impl NewSubject {
             fields,
             body,
         } = keys;
+        if rule.as_deref() == Some("") {
+            return Err(
+                "`as` is empty, and an empty name names no rule: leave it out for the inbox"
+                    .to_string(),
+            );
+        }
         match (path, content, rule) {
             (Some(path), Some(content), None) => {
                 let extras: Vec<&str> = [
@@ -268,7 +276,7 @@ struct NewForm {
 /// written.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(rename = "NewParams")]
+#[schemars(rename = "NewParams", transform = settle_written_properties)]
 struct NewKeys {
     /// The vault written.
     vault: VaultAddress,
@@ -285,7 +293,7 @@ struct NewKeys {
     /// neither `path` nor `content`. A request naming neither `path` nor `as`
     /// is a capture into the vault's inbox.
     #[serde(default, rename = "as", deserialize_with = "written")]
-    #[schemars(rename = "as")]
+    #[schemars(rename = "as", length(min = 1))]
     rule: Option<String>,
     /// The values the rule's path and template take, by variable name. Only
     /// with `as`.
