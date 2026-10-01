@@ -10,7 +10,11 @@ use norn_store::{
     ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionStatement,
     ResolutionWork, Snapshot, Store, StoredPathOrder,
 };
-use norn_wire::{Pattern, Resolves};
+use std::collections::{BTreeMap, BTreeSet};
+
+use norn_wire::{
+    Column, FindParams, LinkHealth, Pattern, Predicate, Resolves, VaultAddress, VaultName,
+};
 
 use crate::common::{Scratch, path};
 use crate::health::derived;
@@ -452,5 +456,238 @@ fn a_declaration_the_snapshot_does_not_pin_is_refused() {
             Err(norn_store::PageRefusal::DeclarationNotPinned { .. })
         ),
         "{refused:?}"
+    );
+}
+
+// ---- the store's own reads as the oracle ----
+
+/// A deterministic draw, so every run judges the same vaults and plans.
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn pick<'a, T>(&mut self, from: &'a [T]) -> &'a T {
+        &from[(self.next() as usize) % from.len()]
+    }
+}
+
+/// Where drawn documents stand: nested, ignored by the declaration, and
+/// spelled in another case.
+const FOLDERS: &[&str] = &["", "x/", "y/", "x/z/", "archive/", "X/"];
+/// The stems drawn documents are named by, a dotted one among them.
+const STEMS: &[&str] = &["a", "b", "v1", "v1.2", "A", "c"];
+/// The links a drawn document holds: suffix, rooted, relative, attachment
+/// and empty addresses, in both syntaxes.
+const LINKS: &[&str] = &[
+    "[[a]]",
+    "[[x/a]]",
+    "[[z/a]]",
+    "[[vault://x/a]]",
+    "[t](a.md)",
+    "[t](../a.md)",
+    "[t](z/b.md)",
+    "[[#h]]",
+    "[t](#h)",
+    "[[v1.2]]",
+    "[[v1]]",
+    "[[archive/a]]",
+    "[[A]]",
+    "[[b.md]]",
+    "[[c]]",
+];
+
+/// Every link the document at `at` holds, keyed by syntax, address and
+/// offset, with what the store's own find reads it as resolving to.
+fn found_links(vault: &Vault, at: &str) -> BTreeMap<(String, String, u64), String> {
+    let found = vault
+        .snapshot()
+        .find(
+            &FindParams::new(VaultAddress::name(VaultName::new("notes").expect("a name")))
+                .with_predicates([Predicate::path(at)])
+                .with_columns([Column::links()]),
+            &declared(),
+        )
+        .expect("a find");
+    let [row] = &found.rows[..] else {
+        panic!("`{at}` is not one row: {:?}", found.rows);
+    };
+    let links = row.links.clone().expect("the links column");
+    assert_eq!(
+        links.total,
+        links.items.len() as u64,
+        "every link of `{at}`"
+    );
+    links
+        .items
+        .iter()
+        .map(|link| {
+            let protocol = link
+                .protocol
+                .as_deref()
+                .map(|protocol| format!("{protocol}://"))
+                .unwrap_or_default();
+            let resolves = match link.health() {
+                LinkHealth::Healthy => {
+                    format!("one:{}", link.targets.candidates()[0].path.as_str())
+                }
+                LinkHealth::Ambiguous => "several".to_string(),
+                _ => "none".to_string(),
+            };
+            (
+                (
+                    format!("{:?}", link.family),
+                    format!("{protocol}{}", link.target),
+                    link.span.byte_offset,
+                ),
+                resolves,
+            )
+        })
+        .collect()
+}
+
+/// One drawn trial: a vault, a plan of deletes, moves and creates over it,
+/// and every link the door says the plan moves compared with the store's
+/// own reads of a store holding the vault before the plan and of one built
+/// at the vault after it. Answers how many moved links were compared.
+fn trial(order: StoredPathOrder, seed: u64) -> Result<usize, String> {
+    let mut draw = Draw(seed);
+    let identity = |at: &str| match order {
+        Sensitive => at.to_string(),
+        Folding => at.to_ascii_lowercase(),
+    };
+    let mut before: BTreeMap<String, String> = BTreeMap::new();
+    for _ in 0..4 + draw.next() % 7 {
+        let at = format!("{}{}.md", draw.pick(FOLDERS), draw.pick(STEMS));
+        if before.keys().all(|held| identity(held) != identity(&at)) {
+            let body: String = (0..draw.next() % 4)
+                .map(|_| format!("{}\n\n", draw.pick(LINKS)))
+                .collect();
+            before.insert(at, format!("# h\n\n{body}"));
+        }
+    }
+    let mut after = before.clone();
+    let mut targets: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    let mut sources: BTreeMap<String, String> = BTreeMap::new();
+    let taken = |after: &BTreeMap<String, String>, targets: &BTreeMap<String, _>, at: &str| {
+        after
+            .keys()
+            .chain(targets.keys())
+            .any(|held| identity(held) == identity(at))
+    };
+    for at in before.keys() {
+        match draw.next() % 5 {
+            0 => {
+                after.remove(at);
+                targets.insert(at.clone(), (true, false));
+            }
+            1 => {
+                let to = format!("{}{}.md", draw.pick(FOLDERS), draw.pick(STEMS));
+                if !taken(&after, &targets, &to) {
+                    let body = after.remove(at).expect("a document the vault holds");
+                    after.insert(to.clone(), body);
+                    targets.insert(at.clone(), (true, false));
+                    targets.insert(to.clone(), (false, true));
+                    sources.insert(to, at.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let to = format!("{}{}.md", draw.pick(FOLDERS), draw.pick(STEMS));
+    if !taken(&after, &targets, &to) {
+        after.insert(to.clone(), "# h\n".to_string());
+        targets.insert(to, (false, true));
+    }
+
+    let built = |side: &str, documents: &BTreeMap<String, String>| {
+        let mut vault = Vault::new(&format!("resolution-oracle-{order:?}-{seed}-{side}"), order);
+        let documents: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|(at, body)| (at.as_str(), body.as_str()))
+            .collect();
+        vault.write(&documents);
+        vault
+    };
+    let was = built("before", &before);
+    let is = built("after", &after);
+
+    let mut expected = BTreeSet::new();
+    for holder in after.keys() {
+        let source = sources.get(holder).unwrap_or(holder);
+        if !before.contains_key(source) {
+            continue;
+        }
+        let then = found_links(&was, source);
+        for (link, now) in found_links(&is, holder) {
+            let resolved = &then[&link];
+            if *resolved != now {
+                expected.insert((holder.clone(), link.1, link.2, resolved.clone(), now));
+            }
+        }
+    }
+
+    let overlay = targets
+        .iter()
+        .fold(PathOverlay::new(), |overlay, (at, (was, is))| {
+            overlay.with(path(at), *was, *is)
+        });
+    let probed: Vec<ProbedLink> = sources
+        .iter()
+        .flat_map(|(to, from)| {
+            derived(to, &after[to])
+                .links
+                .into_iter()
+                .map(|link| ProbedLink {
+                    before_holder: path(from),
+                    after_holder: path(to),
+                    link,
+                    written: false,
+                })
+        })
+        .collect();
+    let mut moved = BTreeSet::new();
+    was.snapshot()
+        .resolution_changes(&overlay, &probed, &declared(), |change| {
+            let (holder, address, before, after) = read(&change);
+            if before != after {
+                moved.insert((holder, address, change.link.span.byte_offset, before, after));
+            }
+        })
+        .map_err(|refusal| format!("the door refused: {refusal}"))?;
+    if moved != expected {
+        return Err(format!(
+            "{order:?} seed {seed}\nbefore {before:#?}\nplan {targets:?}\nmoved from {sources:?}\n\
+             missing {:#?}\nspurious {:#?}",
+            expected.difference(&moved).collect::<Vec<_>>(),
+            moved.difference(&expected).collect::<Vec<_>>(),
+        ));
+    }
+    Ok(expected.len())
+}
+
+/// **The door agrees with the store rebuilt at the plan's after-state.** Over
+/// drawn vaults and plans of deletes, moves and creates, on both roots, every
+/// link the door says a plan moves — and nothing else — is a link the store's
+/// own find reads as resolving one way in a store holding the vault before
+/// the plan and another in a store built at the vault after it, read from the
+/// holder's source before the plan.
+#[test]
+fn the_door_agrees_with_the_store_rebuilt_at_the_after_state() {
+    let mut compared = 0;
+    for order in [Sensitive, Folding] {
+        for seed in 0..16 {
+            compared += trial(order, seed).unwrap_or_else(|failure| panic!("{failure}"));
+        }
+    }
+    assert!(
+        compared > 0,
+        "the draws moved no link, so nothing was compared"
     );
 }
