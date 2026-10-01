@@ -77,16 +77,36 @@ pub(crate) trait LinkIndex {
 }
 
 /// Whether the resolution change set of a plan with `transitions` and
-/// `operations` reads the link index at all: whether some target holds a
-/// document on one side and not the other, or some operation rewrites a
-/// link. A plan of which neither holds records no entry and reads nothing.
+/// `operations` reads the link index at all, which is whether an apply job
+/// needs a read handle for it: [`reads_links_over`] each transition's
+/// presence on its two sides.
 pub(crate) fn reads_links(transitions: &[Transition], operations: &[Operation]) -> bool {
-    transitions.iter().any(|transition| {
-        matches!(transition.before, FileState::Present { .. })
-            != matches!(transition.after, FileState::Present { .. })
-    }) || operations
-        .iter()
-        .any(|operation| matches!(operation.kind, OperationKind::RewriteLink { .. }))
+    reads_links_over(
+        transitions.iter().map(|transition| {
+            (
+                matches!(transition.before, FileState::Present { .. }),
+                matches!(transition.after, FileState::Present { .. }),
+            )
+        }),
+        operations,
+    )
+}
+
+/// **The one fast-path predicate**: whether a plan whose targets each stand
+/// as `presence` — whether a document stands there before the plan, and
+/// after it — and whose operations are `operations` reads the link index:
+/// some target holds a document on one side and not the other, or some
+/// operation rewrites a link. A plan of which neither holds records no entry
+/// and reads nothing, so [`change_set`] answers it without asking and an
+/// apply job mints no handle for it ([`reads_links`]).
+fn reads_links_over<'o>(
+    presence: impl IntoIterator<Item = (bool, bool)>,
+    operations: impl IntoIterator<Item = &'o Operation>,
+) -> bool {
+    presence.into_iter().any(|(before, after)| before != after)
+        || operations
+            .into_iter()
+            .any(|operation| matches!(operation.kind, OperationKind::RewriteLink { .. }))
 }
 
 /// One file a plan writes, as the change set reads it.
@@ -120,16 +140,16 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
     targets: &[Target<'_>],
     lineage: &Lineage,
     normalizer: &PathNormalizer,
-    operations: impl IntoIterator<Item = &'o Operation>,
+    operations: impl IntoIterator<Item = &'o Operation> + Clone,
     index: &I,
 ) -> Result<ChangeSet, I::Error> {
-    let rewrites = rewrites(operations, normalizer);
-    let moves_presence = targets
+    let presence = targets
         .iter()
-        .any(|target| target.before != target.after.is_some());
-    if !moves_presence && rewrites.is_empty() {
+        .map(|target| (target.before, target.after.is_some()));
+    if !reads_links_over(presence, operations.clone()) {
         return Ok(ChangeSet::default());
     }
+    let rewrites = rewrites(operations, normalizer);
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
     // The spelling each file standing before the plan is written at, which
     // a moved document's links are read from before the plan.

@@ -2554,9 +2554,13 @@ bound by the applier's lifecycle tests.
   reconcile turn does, exactly the facts delivered by then, and it takes in none after that
   until its changeset commits. It then takes the request's one snapshot and plans its operations,
   or checks its resolved plan's states and conditions, against it and the files. That
-  snapshot is the job's one read handle, minted the first time a `where` target or a
-  resolution change set asks: planning matches and records the set on it, the applier
-  computes the set again on it, and it is given back before the changeset commits. No commit
+  snapshot is the job's one read handle. Planning mints it the first time a `where` target
+  is matched or the plan's resolution change set reads the link index, and hands it to the
+  applier; a resolved plan sent back plans nothing, so the job mints it just before the
+  applier's check where the plan changes some document's presence or rewrites a link — the
+  one predicate the change set's own answer-without-reading path reads — and a plan doing
+  neither mints none. Planning matches and records the set on it, the applier computes the
+  set again on it, and it is given back before the changeset commits. No commit
   lands in the registration's store between that snapshot and the apply's changeset, so the
   changeset builds on exactly the state the apply read. From planning to its changeset the
   entry stays `Ready`, since it has derived every fact it has taken in and an in-flight write
