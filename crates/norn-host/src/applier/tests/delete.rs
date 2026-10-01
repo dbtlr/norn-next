@@ -613,6 +613,112 @@ fn a_document_moved_then_deleted_has_its_backlinks_read_by_the_deletes_choice() 
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **A link a cascade respells is judged by the text it had, never by what
+/// its new spelling named before the plan.** In each plan a plain delete
+/// removes `v/a.md` while a move carries `v/b.md` to a path that `v/h.md`'s
+/// links to it are respelled to name as `a`: into the deleted document's
+/// path directly, through a stand-in name, or into another folder. Those
+/// links resolved to `v/b.md` before the plan, so none is a backlink of the
+/// deleted document: each plan previews as planned, the applier's check of
+/// it agrees, and it lands with the links naming the moved document.
+#[test]
+fn a_link_a_move_respells_toward_a_deleted_documents_name_is_no_backlink_of_it() {
+    let plans = [
+        (
+            "[x](b.md) [[b]]\n",
+            vec![deleting("v/a.md"), moving("v/b.md", "v/a.md")],
+            "v/a.md",
+            "[x](a.md) [[a]]\n",
+        ),
+        (
+            "[x](b.md) [[b]]\n",
+            vec![
+                moving("v/b.md", "v/z.md"),
+                deleting("v/a.md"),
+                moving("v/z.md", "v/a.md"),
+            ],
+            "v/a.md",
+            "[x](a.md) [[a]]\n",
+        ),
+        (
+            "[[b]]\n",
+            vec![deleting("v/a.md"), moving("v/b.md", "v/x/a.md")],
+            "v/x/a.md",
+            "[[a]]\n",
+        ),
+    ];
+    for (held, operations, landed, respelled) in plans {
+        let mut fixture = Fixture::new(&[("v/a.md", "A\n"), ("v/b.md", "B\n"), ("v/h.md", held)]);
+        let resolution = fixture.resolution(operations.clone());
+        let (previewed, forecast) = fixture
+            .preview(resolution.plan.clone())
+            .unwrap_or_else(|refusal| panic!("{operations:?} previews: {refusal:?}"));
+        assert_eq!(previewed, resolution.plan, "{operations:?}");
+        assert_eq!(forecast.links, resolution.forecast.links, "{operations:?}");
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(
+            fixture.read(landed).as_deref(),
+            Some("B\n"),
+            "{operations:?}"
+        );
+        assert_eq!(fixture.read("v/b.md"), None, "{operations:?}");
+        assert_eq!(
+            fixture.read("v/h.md").as_deref(),
+            Some(respelled),
+            "{operations:?}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+    }
+}
+
+/// **A link that itself named the deleted document stays its backlink where
+/// a cascade respells another link to the same address beside it.** `[[a]]`
+/// in `v/h.md` named `v/a.md` before the plan, and the move's cascade
+/// respells `[[b]]` to `[[a]]` next to it: a plain delete of `v/a.md` is
+/// left unresolved for that one link. A plan leaving it broken, sent back
+/// with its delete forbidding it, is refused by the applier as invalid for
+/// the same link.
+#[test]
+fn a_backlink_beside_a_link_respelled_to_its_address_still_refuses_a_plain_delete() {
+    let files = [
+        ("v/a.md", "A\n"),
+        ("v/b.md", "B\n"),
+        ("v/h.md", "[x](b.md) [[b]] [[a]]\n"),
+    ];
+    let refused =
+        Fixture::new(&files).planned(vec![deleting("v/a.md"), moving("v/b.md", "v/a.md")]);
+    assert!(
+        refused.unresolved.contains(&UnresolvedOperation::new(
+            deleting("v/a.md"),
+            UnresolvedReason::has_backlinks(vec![path("v/h.md")], 1),
+        )),
+        "{:?}",
+        refused.unresolved
+    );
+
+    let mut fixture = Fixture::new(&files);
+    let mut plan = fixture.plan(vec![breaking("v/a.md"), moving("v/b.md", "v/a.md")]);
+    assert_eq!(
+        plan.operations[1].cascade,
+        [
+            markdown("v/h.md", "b.md", "a.md"),
+            wikilink("v/h.md", "b", "a")
+        ]
+    );
+    let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[0].kind else {
+        panic!(
+            "the plan's first operation is the delete: {:?}",
+            plan.operations
+        );
+    };
+    *backlinks = norn_wire::Backlinks::Forbidden;
+    assert_eq!(fixture.refuses_disagreeing(plan), [path("v/a.md")]);
+    assert_eq!(
+        fixture.read("v/h.md").as_deref(),
+        Some("[x](b.md) [[b]] [[a]]\n")
+    );
+}
+
 /// **A resolved plan whose delete says another link choice than its plan
 /// does is invalid**, judged from the set the applier computes again and
 /// nothing more. A plan previewed leaving `a.md`'s links broken, sent back

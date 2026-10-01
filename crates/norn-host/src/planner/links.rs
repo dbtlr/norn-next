@@ -275,13 +275,19 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // under a key a rewrite writes reads as written, so one a cascade
         // left as written there is known by its key alone.
         let unwritten = !change.written || kept.contains(&entry);
-        // A link left behind by a cascade — a move's, or a delete's
-        // rewriting the links naming its document — and an ambiguous link
-        // that could name a document either follows, which is left as
-        // written since which it names is not known — each read from a link
-        // the plan does not write, since one it respells to a path it refills
+        // A backlink of a document a delete removes, a link left behind by
+        // a cascade — a move's, or a delete's rewriting the links naming its
+        // document — and an ambiguous link that could name a document either
+        // follows, which is left as written since which it names is not
+        // known — each read from a link the plan does not write. A link a
+        // rewrite writes is judged by the text it had, which the rewrite
+        // matched, never by what its new text names before the plan: one a
+        // move's cascade respells to the path of a document a delete removes
+        // is no backlink of it, and one respelled to a path the plan refills
         // reads as left behind from its new address.
-        let removal = removed_by(&change.before, lineage, normalizer);
+        let removal = unwritten
+            .then(|| removed_by(&change.before, lineage, normalizer))
+            .flatten();
         if let Some(removal) = removal {
             named.insert(removal.position);
         }
