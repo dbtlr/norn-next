@@ -132,6 +132,7 @@ mod frontmatter;
 mod heading;
 mod line_ending;
 mod link;
+mod rewrite;
 mod section;
 mod span;
 mod tag;
@@ -150,6 +151,7 @@ pub use link::{
     BlockId, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
     splice_wikilinks_in_text, wikilink_target_is_representable,
 };
+pub use rewrite::{RewriteSkip, RewrittenLinks, SkippedLink};
 pub use section::{
     AnchorReadings, Duplicates, SectionAddress, SectionError, SectionSpan, anchor_readings,
     heading_reading, resolve_section,

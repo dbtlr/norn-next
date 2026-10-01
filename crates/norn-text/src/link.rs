@@ -39,6 +39,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::body::overlaps_any;
+use crate::rewrite::RewriteSkip;
 use crate::span::{LineCursor, SourceSpan, split_lines_inclusive};
 
 static WIKILINK_RE: LazyLock<Regex> =
@@ -628,28 +629,63 @@ pub fn wikilink_target_is_representable(target: &str) -> bool {
 /// - The target-side mirror of that rule, which
 ///   [`wikilink_target_is_representable`] already applies.
 pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
-    if link.family != LinkFamily::Wikilink || !wikilink_target_is_representable(new_target) {
+    if link.family != LinkFamily::Wikilink || !addresses_the_vault(link) {
         return None;
     }
-    if link.raw.contains(['\n', '\r']) {
-        return None;
+    respelled(link, new_target).ok()
+}
+
+/// Whether `link` addresses the vault: written with no protocol, or with the
+/// reserved `vault` one. Any other protocol's stem is part of somebody else's
+/// address, and a vault rename has no business in it.
+pub(crate) fn addresses_the_vault(link: &Link) -> bool {
+    !matches!(link.resolution(), Resolution::Protocol(scheme) if scheme != VAULT_PROTOCOL)
+}
+
+/// `link`'s own bytes with `to` written over its stem, or why the link cannot
+/// carry it — the one stem splice both families' rewrites go through.
+///
+/// What may be written depends on the family. A wikilink takes only a target
+/// [`wikilink_target_is_representable`] accepts, and a wikilink token carrying
+/// a line break takes nothing ([`reconstruct_wikilink`] says why). A Markdown
+/// destination takes any `to` that is non-empty and on one line, because
+/// CommonMark forbids a line ending inside a destination and an empty one
+/// would turn a link to a document into a link to the document holding it;
+/// whether the bytes then read back as `to` in the place they were written —
+/// a space in a bare destination, a `)` that closes it early — is a question
+/// about the whole document, answered by re-reading it.
+///
+/// A link whose stem has no span inside its own bytes cannot be written over
+/// at all: a Markdown destination written with escapes or entity references,
+/// or a hand-built fact whose span does not index it.
+pub(crate) fn respelled(link: &Link, to: &str) -> Result<String, RewriteSkip> {
+    let fits = match link.family {
+        LinkFamily::Wikilink => {
+            if link.raw.contains(['\n', '\r']) {
+                return Err(RewriteSkip::LinkNotRewritable);
+            }
+            wikilink_target_is_representable(to)
+        }
+        LinkFamily::Markdown => !to.is_empty() && !to.contains(['\n', '\r']),
+    };
+    let stem = link
+        .stem_range
+        .clone()
+        .filter(|stem| {
+            stem.start <= stem.end
+                && stem.end <= link.raw.len()
+                && link.raw.is_char_boundary(stem.start)
+                && link.raw.is_char_boundary(stem.end)
+        })
+        .ok_or(RewriteSkip::LinkNotRewritable)?;
+    if !fits {
+        return Err(RewriteSkip::Unrepresentable);
     }
-    if matches!(link.resolution(), Resolution::Protocol(scheme) if scheme != VAULT_PROTOCOL) {
-        return None;
-    }
-    let stem = link.stem_range.clone()?;
-    if stem.start > stem.end
-        || stem.end > link.raw.len()
-        || !link.raw.is_char_boundary(stem.start)
-        || !link.raw.is_char_boundary(stem.end)
-    {
-        return None;
-    }
-    let mut out = String::with_capacity(link.raw.len() - stem.len() + new_target.len());
+    let mut out = String::with_capacity(link.raw.len() - stem.len() + to.len());
     out.push_str(&link.raw[..stem.start]);
-    out.push_str(new_target);
+    out.push_str(to);
     out.push_str(&link.raw[stem.end..]);
-    Some(out)
+    Ok(out)
 }
 
 /// One trailing block-id definition (`… ^block-id`) — the target side of a

@@ -290,6 +290,11 @@ impl<'a> Document<'a> {
         self.body_start
     }
 
+    /// The whole text this document was read from.
+    pub(crate) fn source(&self) -> &'a str {
+        self.source
+    }
+
     /// The line terminator the document is written with. Every line an edit
     /// synthesizes uses it.
     pub fn line_ending(&self) -> LineEnding {
