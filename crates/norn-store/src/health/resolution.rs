@@ -53,12 +53,10 @@
 //! **A plan may also reach links whose resolution it does not change**, so a
 //! wikilink rewrite reads the links naming what it rewrites through this same
 //! door: every key that could name a document the overlay reaches
-//! ([`PathOverlay::reaching`]) is sought as a changed key is, and so is every
-//! key, in the root's own key space, a wikilink written with an address the
-//! overlay reaches is filed under ([`PathOverlay::reaching_filed_under`]);
-//! each link judged says which of those addresses it is filed under exactly
-//! ([`LinkChange::filed_under`]). A link sought more than one way is judged
-//! once.
+//! ([`PathOverlay::reaching`]) is sought as a changed key is, whether or not
+//! a document stands there, and each link judged says which of the reached
+//! places it could name ([`LinkChange::before_targets`]). A link sought more
+//! than one way is judged once.
 //!
 //! # What a key names, read once
 //!
@@ -129,8 +127,6 @@ pub struct PathOverlay {
     /// Each document whose naming links the plan reaches though it changes
     /// nothing there.
     reached: Vec<DocumentPath>,
-    /// Each address whose keys the plan reaches the links filed under.
-    filed: Vec<String>,
 }
 
 /// One file a plan writes, and whether a document stands there on each side.
@@ -190,37 +186,22 @@ impl PathOverlay {
     }
 
     /// The same overlay, reaching every link the store holds under a key that
-    /// could name the document at `path`, though the plan changes nothing
+    /// could name a document at `path`, though the plan changes nothing
     /// there: each is judged and handed back as the links under a changed
-    /// key are, and an ambiguous one names the document among those it could
-    /// name before the plan ([`LinkChange::before_targets`]). What the
-    /// document's presence is on either side is read as it is without this.
+    /// key are, and one whose keys could name the place, the
+    /// ambiguity-ignore set letting it in, names it among those it could
+    /// name before the plan ([`LinkChange::before_targets`]) — whether or not
+    /// a document stands there. What stands there on either side is read as
+    /// it is without this.
     ///
-    /// A wikilink rewrite whose `old` names one document reads the links
-    /// naming it this way, whatever each is spelled.
+    /// A wikilink rewrite reads the links its `old` names this way: those
+    /// naming the one document it names, whatever each is spelled, or,
+    /// where it names none, the broken links that would name a document
+    /// standing at the place it spells.
     #[must_use]
     pub fn reaching(mut self, path: DocumentPath) -> Self {
         if !self.reached.contains(&path) {
             self.reached.push(path);
-        }
-        self
-    }
-
-    /// The same overlay, reaching every link the store holds filed under the
-    /// keys a wikilink written `address` is held under, each in the root's
-    /// own key space — ASCII case folded where the root folds it, and kept
-    /// where it tells spellings apart, as resolution reads them. Each is
-    /// judged and handed back as the links under a changed key are, saying
-    /// whether it is filed under `address` exactly
-    /// ([`LinkChange::filed_under`]): a link sharing only some of its keys,
-    /// as `[[v1]]` shares one of `v1.2`'s, is reached and is not.
-    ///
-    /// A wikilink rewrite whose `old` names no document — the repair of a
-    /// broken link — reads the links it repairs this way.
-    #[must_use]
-    pub fn reaching_filed_under(mut self, address: &str) -> Self {
-        if !self.filed.iter().any(|filed| filed == address) {
-            self.filed.push(address.to_string());
         }
         self
     }
@@ -298,23 +279,16 @@ pub struct LinkChange {
     /// holds.
     pub members_moved: bool,
     /// Each of the plan's targets standing before it that the link's keys
-    /// name from its before-holder, then each document the plan reaches
-    /// ([`PathOverlay::reaching`]) they name, the ambiguity-ignore set
-    /// letting each in, once each in key order: which of the documents the
-    /// plan writes or reaches the link could name before the plan. A link
-    /// resolving to several documents names one of these only where it is
-    /// among them, which is how a caller tells whether an ambiguous link
-    /// could name a document the plan moves or a wikilink rewrite reaches.
+    /// name from its before-holder, then each place the plan reaches
+    /// ([`PathOverlay::reaching`]) they could name, whether or not a document
+    /// stands there, the ambiguity-ignore set letting each in, once each in
+    /// key order: which of the documents the plan writes or reaches the link
+    /// could name before the plan. A link resolving to several documents
+    /// names one of these only where it is among them, which is how a caller
+    /// tells whether an ambiguous link could name a document the plan moves
+    /// or a wikilink rewrite reaches; and a link resolving to none names a
+    /// reached place where it would resolve to a document standing there.
     pub before_targets: Vec<DocumentPath>,
-    /// Each address the plan reaches the links filed under
-    /// ([`PathOverlay::reaching_filed_under`]) that this link is filed under
-    /// exactly: a suffix address it is read through precisely the keys of,
-    /// in the root's own key space, so that the resolver files the link and
-    /// looks the address up by one key — case folded only where the root
-    /// folds ASCII case. A link sharing some but not all of an address's
-    /// keys is not filed under it, and a link of another address kind, a
-    /// path or a rooted name, is filed under none.
-    pub filed_under: Vec<String>,
 }
 
 /// What one judgment of a plan's links cost, beside the statements its
@@ -489,36 +463,13 @@ struct Judging<'a, R> {
     /// Each key that could name a target, and the targets it could name.
     naming: BTreeMap<String, Vec<usize>>,
     /// Each key whose links are judged: one that could name a target the
-    /// plan changes or a document it reaches, or one an address it reaches
-    /// is filed under.
+    /// plan changes or a document it reaches.
     sought: BTreeSet<String>,
     /// Each key that could name a document the plan reaches, and the
     /// documents it could name, by their place in the overlay's list.
     reaching: BTreeMap<String, Vec<usize>>,
-    /// Each address the plan reaches the links filed under, and the keys it
-    /// is read through in the store's key space, each once and in order.
-    filed: Vec<(String, Vec<Key>)>,
     resolved: BTreeMap<Key, KeyHeld>,
     work: ResolutionWork,
-}
-
-/// `keys` in the key space `key` selects, each once and in order: the raw
-/// keys where the root tells spellings apart, the folded ones where it folds
-/// ASCII case.
-fn in_space(keys: Vec<link::LinkKey>, key: SuffixKey) -> Vec<Key> {
-    let mut keys: Vec<Key> = keys
-        .into_iter()
-        .map(|held| {
-            let text = match key {
-                SuffixKey::Raw => held.key,
-                SuffixKey::Folded => held.folded_key,
-            };
-            (text, held.segments)
-        })
-        .collect();
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 impl<'a, R: Runner> Judging<'a, R> {
@@ -546,12 +497,6 @@ impl<'a, R: Runner> Judging<'a, R> {
                 reaching.entry(named).or_default().push(at);
             }
         }
-        let mut filed = Vec::with_capacity(overlay.filed.len());
-        for address in &overlay.filed {
-            let keys = in_space(suffix_keys(address), key);
-            sought.extend(keys.iter().map(|(text, _)| text.clone()));
-            filed.push((address.clone(), keys));
-        }
         Judging {
             order,
             key,
@@ -566,7 +511,6 @@ impl<'a, R: Runner> Judging<'a, R> {
             naming,
             sought,
             reaching,
-            filed,
             resolved: BTreeMap::new(),
             work: ResolutionWork::default(),
         }
@@ -658,7 +602,19 @@ impl<'a, R: Runner> Judging<'a, R> {
 
     /// `keys` in the store's key space, each once.
     fn in_space(&self, keys: Vec<link::LinkKey>) -> Vec<Key> {
-        in_space(keys, self.key)
+        let mut keys: Vec<Key> = keys
+            .into_iter()
+            .map(|key| {
+                let text = match self.key {
+                    SuffixKey::Raw => key.key,
+                    SuffixKey::Folded => key.folded_key,
+                };
+                (text, key.segments)
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// What the suffix address `address` names on each side of the plan,
@@ -818,8 +774,7 @@ impl<'a, R: Runner> Judging<'a, R> {
     }
 
     /// Whether one of `keys` is sought: it could name a target the plan
-    /// changes or a document it reaches, or an address it reaches is filed
-    /// under it.
+    /// changes or a document it reaches.
     fn is_sought(&self, keys: &[Key]) -> bool {
         keys.iter().any(|(text, _)| self.sought.contains(text))
     }
@@ -861,12 +816,6 @@ impl<'a, R: Runner> Judging<'a, R> {
                     before_targets.push(document.clone());
                 }
             }
-            let filed_under = self
-                .filed
-                .iter()
-                .filter(|(_, keys)| *keys == judged.before)
-                .map(|(address, _)| address.clone())
-                .collect();
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
@@ -876,7 +825,6 @@ impl<'a, R: Runner> Judging<'a, R> {
                 written: judged.written,
                 members_moved,
                 before_targets,
-                filed_under,
             });
         }
         // What the next chunk may reuse is what this one held, so what is

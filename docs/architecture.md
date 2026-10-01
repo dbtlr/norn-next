@@ -2388,7 +2388,7 @@ target), `Host::edit` (section, body and text edits to one document),
 `Host::move_path` (`move`: a document or every document a folder holds, with the link
 cascade that follows), `Host::delete` (one document, the links naming it forbidden,
 rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming one
-document, or every broken one filed under a name, retargeted to another) each compile
+document, or every broken one naming one place, retargeted to another) each compile
 their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
@@ -2600,12 +2600,15 @@ plan carries it — and its `new` where the plan leaves the vault, as a delete's
 is. Where `old` names one document, the door reaches every link naming that document though
 the plan changes nothing there, and every wikilink resolving before the plan to exactly it,
 whatever its spelling and in body or frontmatter, is retargeted; where `old` names none,
-every wikilink resolving to nothing, broken as link health judges it, and filed under
-exactly the keys `old` is read through, in the root's own key space, is — the one key the
-resolver files the link and looks `old` up by, so a link sharing only some of `old`'s keys,
-`[[v1]]` beside `v1.2`, or `[[Old Note.md]]` beside `Old Note`, is never repaired. Case is
-the root's: `[[Old Note]]` and `[[old note]]` are both repaired by `old note` on a root
-folding ASCII case, and only the second on a root telling spellings apart. A wikilink already naming `new`'s
+the door reaches the place `old` spells — `old` with the document extension appended unless
+it carries it, its leaf read by the store's own grammar — though no document stands there,
+and every wikilink resolving to nothing, broken as link health judges it, that would resolve
+to a document standing at that place, its keys read in the root's own key space and the
+ambiguity-ignore set letting it in, is: `Old Note` repairs `[[Old Note]]`,
+`[[Old Note.md]]`, `[[vault://Old Note]]` and a path-qualified spelling naming that place,
+and `v1.2`, spelling `v1.2.md`, never repairs `[[v1]]`. Case is the root's: `[[Old Note]]`
+and `[[old note]]` are both repaired by `old note` on a root folding ASCII case, and only
+the second on a root telling spellings apart. A wikilink already naming `new`'s
 document after the plan needs nothing, a Markdown link is no wikilink, and a wikilink
 naming several documents is never rewritten and the forecast says so. Each is respelled to
 `new`'s document by the spellings a move's cascade writes, its embed marker, title and
@@ -2643,7 +2646,7 @@ from the bytes planning composed, and a moved document's links from where it sto
 the plan, so a relative link a move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target
 whose presence the plan changes or whose document it replaces, or the document a wikilink
-rewrite's `old` names, or that `old` is read through in the root's key space, and each distinct key
+rewrite's `old` names or the place it spells, and each distinct key
 a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,

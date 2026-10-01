@@ -436,85 +436,80 @@ fn an_ambiguous_link_names_the_reached_document_it_could_name() {
     });
 }
 
-/// Every link `overlay` reaches, each with the addresses it is filed under
-/// ([`LinkChange::filed_under`]), sorted.
-fn filed(vault: &Vault, overlay: &PathOverlay) -> Vec<(String, Vec<String>)> {
+/// Every link `overlay` reaches, each with the places among those the plan
+/// reaches that it could name before the plan
+/// ([`LinkChange::before_targets`]), sorted.
+fn could_name(vault: &Vault, overlay: &PathOverlay) -> Vec<(String, Vec<String>)> {
     let snapshot = vault.snapshot();
-    let mut filed = Vec::new();
+    let mut named = Vec::new();
     snapshot
         .resolution_changes(overlay, &[], &declared(), |change| {
-            filed.push((change.link.target.clone(), change.filed_under.clone()));
+            named.push((
+                address_of(&change),
+                change
+                    .before_targets
+                    .iter()
+                    .map(|target| target.as_str().to_string())
+                    .collect(),
+            ));
         })
         .unwrap_or_else(|refusal| panic!("{:?}: a judgment: {refusal}", vault.order));
-    filed.sort();
-    filed
+    named.sort();
+    named
 }
 
-/// **A link is filed under an address exactly where the resolver files and
-/// looks both up by one key, as the root reads it.** On a root folding ASCII
-/// case `[[Old Note]]` and `[[old note]]` are both filed under `old note`; on
-/// a root telling spellings apart only `[[old note]]` is. `[[Old Note.md]]`
-/// is read through a second key its extension opens, so it is filed under
-/// `Old Note.md` and not under `Old Note`, and `[[v1]]` is never filed under
-/// `v1.2`, whose keys it shares only one of. A path-qualified wikilink and a
-/// Markdown link are filed under neither.
+/// `change`'s link's address as written, its protocol prefix included.
+fn address_of(change: &LinkChange) -> String {
+    match &change.link.protocol {
+        Some(protocol) => format!("{protocol}://{}", change.link.target),
+        None => change.link.target.clone(),
+    }
+}
+
+/// **A place no document stands at names every link that would resolve to
+/// a document standing there**, as the root reads it. With nothing at `Old
+/// Note.md`, `[[Old Note]]`, `[[Old Note.md]]`, `[[vault://Old Note]]` and
+/// the Markdown link to that path could each name a document there, and
+/// `[[old note]]` too only where the root folds ASCII case; `[[sub/Old
+/// Note]]` names a deeper place and is never reached. `[[v1]]` could never
+/// name a document at `v1.2.md`, which `[[v1.2]]` could.
 #[test]
-fn a_link_is_filed_under_an_address_only_by_the_key_the_root_reads_both_by() {
-    both_orders("resolution-filed-under", |mut vault| {
+fn a_place_no_document_stands_at_names_the_links_that_would_resolve_there() {
+    both_orders("resolution-reached-place", |mut vault| {
         vault.write(&[(
             "h.md",
-            "[[Old Note]] [[old note]] [[Old Note.md]] [[sub/Old Note]] [[v1]] [[v1.2]] [t](old%20note.md)\n",
+            "[[Old Note]] [[old note]] [[Old Note.md]] [[sub/Old Note]] [[vault://Old Note]] [t](Old%20Note.md) [[v1]] [[v1.2]]\n",
         )]);
-        let under = |addresses: &[&str]| {
-            addresses
-                .iter()
-                .fold(PathOverlay::new(), |overlay, address| {
-                    overlay.reaching_filed_under(address)
-                })
-        };
-        let filed_under = |overlay: &PathOverlay, target: &str| -> Vec<String> {
-            filed(&vault, overlay)
+        let place = |at: &str| {
+            could_name(&vault, &PathOverlay::new().reaching(path(at)))
                 .into_iter()
-                .filter(|(reached, _)| reached == target)
-                .flat_map(|(_, filed)| filed)
-                .collect()
+                .filter(|(_, places)| places.iter().any(|named| named == at))
+                .map(|(address, _)| address)
+                .collect::<Vec<_>>()
         };
-
-        let note = under(&["old note"]);
-        let folds = vault.order == Folding;
-        assert_eq!(
-            filed_under(&note, "Old Note"),
-            if folds {
-                vec!["old note".to_string()]
-            } else {
-                Vec::new()
-            },
-            "{:?}",
-            vault.order
-        );
-        assert_eq!(filed_under(&note, "old note"), ["old note"]);
-        assert!(filed_under(&note, "Old Note.md").is_empty());
-        assert!(filed_under(&note, "sub/Old Note").is_empty());
-        assert!(filed_under(&note, "old%20note.md").is_empty());
-
-        let suffixed = under(&["Old Note.md", "Old Note"]);
-        assert_eq!(filed_under(&suffixed, "Old Note.md"), ["Old Note.md"]);
-        assert_eq!(filed_under(&suffixed, "Old Note"), ["Old Note"]);
-
-        let versions = under(&["v1.2"]);
-        assert!(filed_under(&versions, "v1").is_empty());
-        assert_eq!(filed_under(&versions, "v1.2"), ["v1.2"]);
+        let mut note = vec![
+            "Old Note",
+            "Old Note.md",
+            "Old%20Note.md",
+            "vault://Old Note",
+        ];
+        if vault.order == Folding {
+            note.push("old note");
+        }
+        note.sort_unstable();
+        assert_eq!(place("Old Note.md"), note, "{:?}", vault.order);
+        assert_eq!(place("v1.2.md"), ["v1.2"], "{:?}", vault.order);
     });
 }
 
 /// **A link reached two ways is handed back once**: `[[a]]` is held under a
-/// key the plan's create changes and filed under the address the plan
-/// reaches.
+/// key the plan's create changes and under one that could name the place
+/// the plan reaches.
 #[test]
-fn a_link_reached_by_a_change_and_by_its_address_is_judged_once() {
+fn a_link_reached_by_a_change_and_by_a_place_is_judged_once() {
     both_orders("resolution-reached-twice", |mut vault| {
         vault.write(&[("h.md", "[[a]]\n")]);
-        let plan = overlay(&["a.md"], &[]).reaching_filed_under("A");
+        let plan = overlay(&["a.md"], &[]).reaching(path("x/a.md"));
         let (reached, _) = vault.judge(&plan, &[]);
         assert_eq!(reached, [judged("h.md", "a", "none", "one:a.md")]);
     });

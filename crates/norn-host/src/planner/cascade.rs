@@ -47,8 +47,9 @@
 //! one document, the door reaches every link naming that document though the
 //! plan changes nothing there, and every wikilink resolving to exactly it
 //! before the plan, whatever its spelling, is retargeted; where `old` names
-//! none, every broken wikilink filed under exactly `old`'s keys as the root
-//! reads them is
+//! none, the door reaches the place `old` spells though no document stands
+//! there, and every broken wikilink that would resolve to a document
+//! standing there, its keys read as the root reads them, is
 //! ([`selecting`]). A wikilink already naming `new`'s document after the
 //! plan is left alone, one resolving to several documents is never rewritten
 //! and the forecast says so, and a Markdown link is no wikilink. An `old`
@@ -604,9 +605,15 @@ fn unmatched(retarget: &Retarget, named: &RetargetNaming) -> UnresolvedReason {
         Resolves::One { path } => format!(
             "no wikilink resolves to `{path}`, the document `old` `{old}` names, so the rewrite changes nothing"
         ),
-        _ => format!(
-            "no broken wikilink is filed under `old` `{old}`, so the rewrite changes nothing"
-        ),
+        _ => match norn_store::spelled_place(old) {
+            Some(place) => format!(
+                "no broken wikilink would name a document at `{}`, the place `old` `{old}` spells, so the rewrite changes nothing",
+                place.as_str()
+            ),
+            None => format!(
+                "`old` `{old}` spells no place a document could stand at, so no broken wikilink names it and the rewrite changes nothing"
+            ),
+        },
     })
 }
 

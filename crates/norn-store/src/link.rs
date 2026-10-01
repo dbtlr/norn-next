@@ -204,6 +204,32 @@ fn rooted_name(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// The place the suffix address `address` spells, as a request's target
+/// naming no document is read: the document path a document must stand at
+/// for a wikilink written with the address to name it by every segment it
+/// spells — `address` itself where its leaf carries the document extension,
+/// in any ASCII case, and `address` with the extension appended otherwise,
+/// the leaf's extension read by the one rule a suffix address's reductions
+/// strip by. `None` where the wikilink grammar refuses the address, or the
+/// document path grammar the place.
+///
+/// **What a repair of broken links names.** A wikilink rewrite whose `old`
+/// names no document repairs the broken wikilinks that would name a
+/// document standing here, so `Old Note` repairs `[[Old Note]]` and
+/// `[[Old Note.md]]` alike, and `v1.2` spells `v1.2.md`, never `v1.md`.
+pub fn spelled_place(address: &str) -> Option<DocumentPath> {
+    suffix_probe(address).ok()?;
+    let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
+    let stem = leaf_stem(leaf);
+    let written = stem != leaf && leaf[stem.len() + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION);
+    let place = if written {
+        address.to_string()
+    } else {
+        format!("{address}.{DOCUMENT_EXTENSION}")
+    };
+    DocumentPath::new(&place).ok()
+}
+
 /// The vault paths `link`, held by the document at `holder`, names by path:
 /// the one path a Markdown path or a path read from the root names, each
 /// root path a rooted wikilink's reductions spell, and the holder itself for
@@ -482,6 +508,30 @@ mod tests {
             (Markdown, "../Notes.md", &[]),
         ] {
             assert_eq!(rooted_keys(family, target), keys, "{family:?} `{target}`");
+        }
+    }
+
+    /// **The place a suffix address spells is itself where its leaf carries
+    /// the document extension, and itself with the extension appended
+    /// otherwise**: a dotted leaf is never stripped to a shorter stem, and an
+    /// address the wikilink grammar refuses spells none.
+    #[test]
+    fn a_suffix_address_spells_the_place_its_whole_name_names() {
+        for (address, place) in [
+            ("Old Note", Some("Old Note.md")),
+            ("Old Note.md", Some("Old Note.md")),
+            ("Old Note.MD", Some("Old Note.MD")),
+            ("notes/Old Note", Some("notes/Old Note.md")),
+            ("v1.2", Some("v1.2.md")),
+            ("a.b/c", Some("a.b/c.md")),
+            ("notes/", None),
+            ("a/../b", None),
+        ] {
+            assert_eq!(
+                spelled_place(address).as_ref().map(DocumentPath::as_str),
+                place,
+                "`{address}`"
+            );
         }
     }
 

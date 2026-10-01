@@ -220,7 +220,8 @@ pub enum Verb {
     /// Remove one document, saying what becomes of the links naming it.
     Delete,
     /// Respell every wikilink naming one document — or every broken one
-    /// filed under one name — to name another, each in its own form, and
+    /// naming one place no document stands at — to name another, each in
+    /// its own form, and
     /// saying of each wikilink left as written why.
     RewriteWikilink,
     /// Register a vault under a name.

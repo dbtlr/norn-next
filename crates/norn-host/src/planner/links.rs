@@ -785,8 +785,9 @@ pub(crate) fn retarget_namings<I: LinkIndex + ?Sized>(
 /// `overlay`, reaching the wikilinks each wikilink rewrite of the plan could
 /// retarget, its ends named as `namings` says: every link naming the one
 /// document its `old` names before the plan, or, where `old` names none,
-/// every link filed under `old`, as the root reads it. An `old` naming several reaches
-/// nothing, as its rewrite does not resolve.
+/// every link that could name a document standing at the place `old` spells
+/// ([`norn_store::spelled_place`]), though none stands there. An `old`
+/// naming several reaches nothing, as its rewrite does not resolve.
 pub(crate) fn reaching(
     overlay: PathOverlay,
     lineage: &Lineage,
@@ -801,7 +802,10 @@ pub(crate) fn reaching(
                 Some(stored) => overlay.reaching(stored),
                 None => overlay,
             },
-            Some(Resolves::None {}) => overlay.reaching_filed_under(&retarget.old),
+            Some(Resolves::None {}) => match norn_store::spelled_place(&retarget.old) {
+                Some(place) => overlay.reaching(place),
+                None => overlay,
+            },
             _ => overlay,
         }
     })
@@ -812,10 +816,10 @@ pub(crate) fn reaching(
 pub(crate) enum Named<'a> {
     /// Exactly the file at this path.
     One(&'a str),
-    /// No document, the link broken as link health judges it; filed under
-    /// each of these addresses the plan reaches the links filed under
-    /// ([`LinkChange::filed_under`]).
-    Broken(&'a [String]),
+    /// No document, the link broken as link health judges it; it could name
+    /// a document standing at each of these places the plan reaches
+    /// ([`LinkChange::before_targets`]).
+    Broken(&'a [norn_store::DocumentPath]),
     /// Several documents, or no document without the link breaking.
     Other,
 }
@@ -828,7 +832,7 @@ impl<'a> Named<'a> {
             Resolves::None {}
                 if LinkHealth::of_address(change.address, 0) == LinkHealth::Broken =>
             {
-                Named::Broken(&change.filed_under)
+                Named::Broken(&change.before_targets)
             }
             _ => Named::Other,
         }
@@ -872,10 +876,12 @@ impl Decider<'_> {
 /// `named` before the plan, in plan order, its ends named as `namings`
 /// says: one whose `old` names exactly one document before the plan names a
 /// wikilink resolving to exactly that document then, whatever its spelling;
-/// one whose `old` names no document names a broken wikilink filed under
-/// `old` exactly, by the key the root's resolution files the link and looks
-/// `old` up by ([`LinkChange::filed_under`]) — never one sharing only part
-/// of `old`'s keys. A Markdown link, and a wikilink resolving to several
+/// one whose `old` names no document names a broken wikilink that would
+/// resolve to a document standing at the place `old` spells
+/// ([`norn_store::spelled_place`]), its keys read as the root reads them —
+/// so `Old Note` names `[[Old Note]]`, `[[Old Note.md]]` and
+/// `[[vault://Old Note]]`, `[[old note]]` too where the root folds ASCII
+/// case, and `v1.2` never names `[[v1]]`. A Markdown link, and a wikilink resolving to several
 /// documents, is named by none; and a rewrite with no document to retarget
 /// to ([`RetargetNaming::destination`]), which planning leaves unresolved,
 /// names none, so it never takes a wikilink from a rewrite that has one.
@@ -903,7 +909,15 @@ pub(crate) fn selecting<'l>(
                 (Resolves::One { path: old }, Named::One(path)) => {
                     identity(old.as_str()).is_some_and(|old| identity(path) == Some(old))
                 }
-                (Resolves::None {}, Named::Broken(filed)) => filed.contains(&retarget.old),
+                (Resolves::None {}, Named::Broken(could)) => {
+                    norn_store::spelled_place(&retarget.old)
+                        .and_then(|place| identity(place.as_str()))
+                        .is_some_and(|place| {
+                            could
+                                .iter()
+                                .any(|named| identity(named.as_str()).as_ref() == Some(&place))
+                        })
+                }
                 _ => false,
             }
         })

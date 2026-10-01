@@ -621,8 +621,9 @@ where
     /// **The rewrite carries its link cascade.** Where `old` names one
     /// document before the plan, every wikilink resolving to it, whatever
     /// its spelling, is respelled in its own form to name `new`'s document;
-    /// where it names none, every broken wikilink filed under `old` in any
-    /// case is. An ambiguous wikilink is left as written, the forecast saying
+    /// where it names none, every broken wikilink that would name a
+    /// document standing at the place `old` spells, its case read as the
+    /// root reads it, is. An ambiguous wikilink is left as written, the forecast saying
     /// so, and a Markdown link is no wikilink. An `old` naming several
     /// documents, a `new` naming none or several, and a rewrite retargeting
     /// nothing are refused, the operation unresolved saying why.

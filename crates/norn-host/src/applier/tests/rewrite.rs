@@ -95,28 +95,33 @@ fn an_old_naming_one_document_retargets_every_spelling_of_its_wikilinks() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **An `old` naming no document repairs the broken wikilinks filed under
-/// it exactly, as the root reads it**: `[[Old Note]]` is filed under `Old
-/// Note`, so it names `c.md` after; `[[old note|x]]` is too only where the
-/// root folds ASCII case. Another broken link, a path-qualified one, one
-/// written with the extension — read through a key `Old Note` is not — and
-/// `[[Old]]`, sharing none of its keys, are left as they are; and a rewrite
-/// of `v1.2` never repairs `[[v1]]`, whose one key is only one of `v1.2`'s.
+/// **An `old` naming no document repairs the broken wikilinks that would
+/// name a document standing at the place it spells**, as the root reads
+/// them: with nothing at `Old Note.md`, `[[Old Note]]`, `[[Old Note.md]]`
+/// and `[[vault://Old Note]]` each name `c.md` after, in their own forms,
+/// and `[[old note|x]]` too only where the root folds ASCII case. Another
+/// broken link, `[[sub/Old Note]]` — which names a deeper place — and
+/// `[[v1]]` are left as they are; and a rewrite of `v1.2`, spelling
+/// `v1.2.md`, never repairs `[[v1]]`.
 #[test]
-fn an_old_naming_nothing_repairs_the_broken_links_filed_under_it() {
+fn an_old_naming_nothing_repairs_the_broken_links_that_would_name_its_place() {
     let mut fixture = Fixture::new(&[
         ("c.md", "C\n"),
         (
             "h.md",
-            "[[Old Note]] [[old note|x]] [[Other Gone]] [[sub/Old Note]] [[Old Note.md]] [[v1]]\n",
+            "[[Old Note]] [[old note|x]] [[Other Gone]] [[sub/Old Note]] [[Old Note.md]] [[vault://Old Note]] [[v1]]\n",
         ),
     ]);
     let folds = fixture.store.path_order() == StoredPathOrder::AsciiCaseInsensitive;
     let resolution = fixture.resolution(vec![retargeting("Old Note", "c")]);
-    let mut repaired = vec![wikilink("h.md", "Old Note", "c")];
+    let mut repaired = vec![
+        wikilink("h.md", "Old Note", "c"),
+        wikilink("h.md", "Old Note.md", "c.md"),
+    ];
     if folds {
         repaired.push(wikilink("h.md", "old note", "c"));
     }
+    repaired.push(wikilink("h.md", "vault://Old Note", "vault://c"));
     assert_eq!(resolution.plan.operations[0].cascade, repaired);
     assert!(resolution.forecast.links.is_empty());
 
@@ -129,18 +134,18 @@ fn an_old_naming_nothing_repairs_the_broken_links_filed_under_it() {
     assert_eq!(
         fixture.read("h.md").as_deref(),
         Some(
-            format!("[[c]] {kept} [[Other Gone]] [[sub/Old Note]] [[Old Note.md]] [[v1]]\n")
+            format!("[[c]] {kept} [[Other Gone]] [[sub/Old Note]] [[c.md]] [[vault://c]] [[v1]]\n")
                 .as_str()
         )
     );
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **On a root telling spellings apart, a broken link is repaired only by
-/// an `old` spelled in its own case**: `old note` repairs `[[old note]]` and
-/// not `[[Old Note]]`; and `Old Note.md` repairs the link written with the
-/// extension and nothing else. On a root folding ASCII case `old note`
-/// repairs both spellings.
+/// **A broken link is repaired by an `old` spelling its place as the root
+/// reads it**: on a root telling spellings apart, `old note` repairs
+/// `[[old note]]` alone, and `Old Note.md`, spelling the same place as `Old
+/// Note`, repairs `[[Old Note]]` and `[[Old Note.md]]`; on a root folding
+/// ASCII case either repairs all three.
 #[test]
 fn a_broken_link_is_repaired_by_an_old_spelled_as_the_root_reads_it() {
     let fixture = Fixture::new(&[
@@ -148,19 +153,27 @@ fn a_broken_link_is_repaired_by_an_old_spelled_as_the_root_reads_it() {
         ("h.md", "[[Old Note]] [[old note]] [[Old Note.md]]\n"),
     ]);
     let folds = fixture.store.path_order() == StoredPathOrder::AsciiCaseInsensitive;
+    let every = [
+        wikilink("h.md", "Old Note", "c"),
+        wikilink("h.md", "Old Note.md", "c.md"),
+        wikilink("h.md", "old note", "c"),
+    ];
     let lower = fixture.resolution(vec![retargeting("old note", "c")]);
-    let mut repaired = Vec::new();
     if folds {
-        repaired.push(wikilink("h.md", "Old Note", "c"));
+        assert_eq!(lower.plan.operations[0].cascade, every);
+    } else {
+        assert_eq!(
+            lower.plan.operations[0].cascade,
+            [wikilink("h.md", "old note", "c")]
+        );
     }
-    repaired.push(wikilink("h.md", "old note", "c"));
-    assert_eq!(lower.plan.operations[0].cascade, repaired);
 
     let suffixed = fixture.resolution(vec![retargeting("Old Note.md", "c")]);
-    assert_eq!(
-        suffixed.plan.operations[0].cascade,
-        [wikilink("h.md", "Old Note.md", "c.md")]
-    );
+    if folds {
+        assert_eq!(suffixed.plan.operations[0].cascade, every);
+    } else {
+        assert_eq!(suffixed.plan.operations[0].cascade, every[..2]);
+    }
 }
 
 /// **An `old` naming several documents is left unresolved with the head of

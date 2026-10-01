@@ -83,8 +83,10 @@
 //! lands, the forecast advising on each link it breaks. A `rewrite_wikilink`
 //! reads its `old` as the vault stands before the plan and carries the
 //! cascade retargeting every wikilink resolving to that one document, or,
-//! where `old` names none, every broken wikilink filed under exactly `old`'s
-//! keys as the root reads them; its `new` must name one document where the plan leaves the vault.
+//! where `old` names none, every broken wikilink that would name a document
+//! standing at the place `old` spells — `old` with the document extension
+//! appended unless it carries it — as the root reads it; its `new` must name
+//! one document where the plan leaves the vault.
 //! An authored `rewrite_link` names its document where the plan leaves it
 //! and composes in one batch with every cascade rewrite there, so no rewrite
 //! respells a link another wrote; one matching no link does not resolve.
@@ -276,8 +278,9 @@ pub enum OperationKind {
     /// another.
     RewriteWikilink {
         /// What the links name now, read before the plan. It need not name a
-        /// document that stands — naming none, the broken wikilinks filed
-        /// under it are rewritten — and naming several does not resolve.
+        /// document that stands — naming none, the broken wikilinks that
+        /// would name a document at the place it spells are rewritten — and
+        /// naming several does not resolve.
         #[schemars(schema_with = "whole_document_schema")]
         old: ResolutionTarget,
         /// What they name after, one document where the plan leaves the
