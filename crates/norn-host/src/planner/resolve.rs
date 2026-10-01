@@ -890,6 +890,26 @@ mod tests {
         assert!(unexpanded.plan.transitions.is_empty());
     }
 
+    /// **A creation by rule is left unresolved until a planner expands it**,
+    /// saying it is not planned yet, and writes nothing: no rule names a path
+    /// or composes content here.
+    #[test]
+    fn a_creation_by_rule_is_left_unresolved_until_it_is_planned() {
+        let vault = MemoryVault::with(&[("notes/a.md", "a\n")]);
+        let by_rule = planned(
+            &vault,
+            vec![Operation::new(OperationKind::create_by_rule(
+                Some("meeting".to_string()),
+                norn_wire::Variables::default(),
+                norn_wire::ValueMap::default(),
+                None,
+            ))],
+        );
+        let detail = unresolved_detail(&by_rule);
+        assert!(detail.contains("NORN-298"), "{detail}");
+        assert!(by_rule.plan.transitions.is_empty());
+    }
+
     /// **An expected value of absent on a document the plan writes is judged
     /// against its before-state and becomes that before-state**: a set of a
     /// field the document does not carry resolves, carrying no plan

@@ -57,6 +57,7 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         // places it there itself, so it is not read here as a document-local
         // edit.
         OperationKind::CreateDocument { .. }
+        | OperationKind::CreateByRule { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
         | OperationKind::DeleteDocument { .. }
@@ -156,6 +157,7 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
             heading, content, ..
         } => document.insert_after_heading(heading.as_str(), content),
         OperationKind::CreateDocument { .. }
+        | OperationKind::CreateByRule { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
         | OperationKind::DeleteDocument { .. }

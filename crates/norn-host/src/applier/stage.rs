@@ -202,7 +202,8 @@ pub(super) struct Checked {
 ///
 /// **The checks run in this order**: no operation carries a `where` target
 /// or a folder move planning did not expand, which stops as
-/// [`PlanFault::UnexpandedTarget`], nor a cascade on a kind that does not
+/// [`PlanFault::UnexpandedTarget`], nor a creation by rule it did not
+/// expand, which stops as [`PlanFault::UnexpandedRule`], nor a cascade on a kind that does not
 /// cascade, which stops as [`PlanFault::MisplacedCascade`];
 /// the store can name every target; before
 /// any vault read, the transitions name exactly the files the operations
@@ -234,10 +235,12 @@ pub(super) fn check(
 ) -> Result<Checked, Unfit> {
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
-    // before it could pass unread; so is a cascade on a kind that does not
+    // before it could pass unread; so is a creation by rule, which names no
+    // path until planning expands it, and a cascade on a kind that does not
     // cascade, which no planning wrote.
     if let Some(fault) = plan
         .unexpanded_targets()
+        .or_else(|| plan.unexpanded_rules())
         .or_else(|| plan.misplaced_cascades())
     {
         return Err(Unfit::Invalid(fault));

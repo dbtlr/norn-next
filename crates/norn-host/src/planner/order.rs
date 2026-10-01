@@ -232,9 +232,12 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { to, .. } => Some(to),
         OperationKind::CreateDocument { path, .. } => Some(path),
         OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
-        // A folder move names its documents only once planning expands it,
-        // and a wikilink rewrite only edits documents where they stand.
-        OperationKind::MoveFolder { .. } | OperationKind::RewriteWikilink { .. } => None,
+        // A folder move and a creation by rule name their documents only
+        // once planning expands them, and a wikilink rewrite only edits
+        // documents where they stand.
+        OperationKind::MoveFolder { .. }
+        | OperationKind::CreateByRule { .. }
+        | OperationKind::RewriteWikilink { .. } => None,
         // A document-local kind edits a document where it stands, putting
         // none at a name.
         OperationKind::RewriteLink { .. }
@@ -257,9 +260,12 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { from, .. } => Some(from),
         OperationKind::DeleteDocument { path, .. } => Some(path),
         OperationKind::CreateDocument { .. } | OperationKind::StrReplace { .. } => None,
-        // A folder move names its documents only once planning expands it,
-        // and a wikilink rewrite only edits documents where they stand.
-        OperationKind::MoveFolder { .. } | OperationKind::RewriteWikilink { .. } => None,
+        // A folder move and a creation by rule name their documents only
+        // once planning expands them, and a wikilink rewrite only edits
+        // documents where they stand.
+        OperationKind::MoveFolder { .. }
+        | OperationKind::CreateByRule { .. }
+        | OperationKind::RewriteWikilink { .. } => None,
         // A document-local kind edits a document where it stands, leaving no
         // name empty.
         OperationKind::RewriteLink { .. }

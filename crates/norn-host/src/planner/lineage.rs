@@ -195,6 +195,10 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
+                // A creation by rule names no path until planning expands
+                // it into a `create_document`, so it draws on and puts
+                // nothing yet.
+                OperationKind::CreateByRule { .. } => {}
                 // Every delete is a removal, so its link choice is read
                 // though the content it removes is one the plan created; only
                 // one removing a before-state can have links naming it.
