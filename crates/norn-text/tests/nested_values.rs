@@ -557,3 +557,26 @@ fn setting_a_flat_list_to_its_own_value_changes_no_byte() {
         );
     }
 }
+
+/// **A field set to the value it already holds changes no byte even where
+/// the block's fields cannot be split apart**: an explicit `? key` or a `<<`
+/// merge keeps any other set from locating its entry, but a set that writes
+/// nothing needs no entry.
+#[test]
+fn setting_a_field_to_its_own_value_in_an_unsplittable_block_changes_no_byte() {
+    for (source, field, value) in [
+        (
+            "---\n? meta\n: {k: v}\n---\n",
+            "meta",
+            map([("k", "v".into())]),
+        ),
+        ("---\n? x\n: 1\nb: 2\n---\n", "b", Value::Int(2)),
+        ("---\n<<: {a: 1}\nb: 2\n---\n", "b", Value::Int(2)),
+    ] {
+        assert_eq!(
+            set(source, field, &value),
+            Ok(source.to_string()),
+            "for {source:?}"
+        );
+    }
+}

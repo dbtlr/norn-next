@@ -643,7 +643,8 @@ impl<'a> Document<'a> {
     /// with [`EditError::CommentWouldBeLost`] where the entry carries a
     /// comment it would drop. A field already holding `value` — equal under
     /// the value model's equality, at every depth — is left as it is written,
-    /// and the document comes back unchanged.
+    /// and the document comes back unchanged, even from a block whose entries
+    /// no other set could locate.
     ///
     /// Growing the block past [`FRONTMATTER_MAX_BYTES`] refuses too, and with
     /// its own error: past the bound no read turns the block back into fields,
@@ -1215,6 +1216,16 @@ impl<'a> Document<'a> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
         }
+        // A field already holding `value` already says what the set asks for,
+        // so nothing is written: a re-spelling would be a change of nothing.
+        // Nothing in the way of a rewrite is in the way of no write — not a
+        // comment the rewrite would drop, nor a block whose entries cannot be
+        // located — so this answers before either refuses.
+        if let Some(Value::Map(map)) = &self.frontmatter
+            && map.get(field) == Some(value)
+        {
+            return Ok(self.source.to_string());
+        }
         if let Some(cause) = &self.split_refusal {
             return Err(EditError::FrontmatterNotEditable {
                 cause: cause.clone(),
@@ -1251,12 +1262,6 @@ impl<'a> Document<'a> {
             Some(Value::Map(map)) => map.get(&located.name),
             _ => None,
         };
-        // A field already holding `value` already says what the set asks for,
-        // so nothing is written: a re-spelling would be a change of nothing,
-        // and a comment a rewrite would drop is not in the way of one.
-        if held == Some(value) {
-            return Ok(self.source.to_string());
-        }
 
         // A scalar over a scalar replaces the value's bytes, keeping the
         // author's quoting where the new value permits it. A scalar no span
