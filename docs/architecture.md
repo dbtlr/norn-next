@@ -2441,11 +2441,17 @@ document-local kinds: a frontmatter field set, removed, pushed to or popped from
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,
 which proves every splice by reading it back, and addresses a section through the one
-shared heading resolver a read and a wikilink anchor use. An edit that cannot be made
-leaves its operation unresolved: a push onto a scalar or a map, a pop or a removal of what
-the document does not hold, a heading that is ambiguous, missing or inside a container,
-empty content to append or insert, a refusal `norn-text` makes, and a nested value, which
-is not written until nested frontmatter values land. An edit that rewrites what the
+shared heading resolver a read and a wikilink anchor use. A frontmatter value may be any
+shape the value model holds: a map, a list of maps or a list of lists is written in block
+style, two spaces deeper per level, an empty collection as `[]` or `{}`, and a set over or
+of a nested value rewrites the field's whole entry. A push or a pop on a block list
+splices or deletes only the lines of the items it adds or removes, an item spanning several
+lines included, and every byte it does not change stays; a flow list, or a block list whose
+items do not each re-read alone as themselves, is rewritten whole. An edit that cannot be
+made leaves its operation unresolved: a push onto a scalar or a map, a pop or a removal of
+what the document does not hold, a heading that is ambiguous, missing or inside a container,
+empty content to append or insert, and a refusal `norn-text` makes — among them a
+whole-entry rewrite that would drop a comment. An edit that rewrites what the
 document already holds — a field set to its value, a body or a section replaced by
 itself — resolves to a transition whose after-state is its before-state, and lands found.
 A resolved plan carries only path targets. Planning expands a

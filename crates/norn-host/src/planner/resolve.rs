@@ -990,6 +990,54 @@ mod tests {
         assert!(!judged("tags", E::present(list(&["b", "a"]))));
     }
 
+    /// **A nested expected value holds only where the field reads as exactly
+    /// that value**, judged by the same equality as a flat one: a map's
+    /// entries in order, a list of lists element by element.
+    #[test]
+    fn a_nested_expected_value_is_judged_by_equality() {
+        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        let vault = MemoryVault::with(&[(
+            "a.md",
+            "---\nowner:\n  name: ana\n  roles: [a, b]\ngrid:\n  - [a]\n  - k: 1\n---\n",
+        )]);
+        let judged = |field: &str, expect: E| {
+            let resolution = planned(
+                &vault,
+                vec![
+                    Operation::new(OperationKind::replace_body(path("a.md"), "x\n"))
+                        .with_conditions(vec![expecting("a.md", field, expect)]),
+                ],
+            );
+            resolution.unresolved.is_empty()
+        };
+        let map = |entries: Vec<(&str, V)>| {
+            V::map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value)),
+            )
+            .expect("a map")
+        };
+        let roles = |items: [&str; 2]| V::list(items.map(V::string));
+        let owner = map(vec![
+            ("name", V::string("ana")),
+            ("roles", roles(["a", "b"])),
+        ]);
+        assert!(judged("owner", E::present(owner)));
+        let reordered = map(vec![
+            ("roles", roles(["a", "b"])),
+            ("name", V::string("ana")),
+        ]);
+        assert!(!judged("owner", E::present(reordered)));
+        let other_roles = map(vec![
+            ("name", V::string("ana")),
+            ("roles", roles(["b", "a"])),
+        ]);
+        assert!(!judged("owner", E::present(other_roles)));
+        let grid = V::list([V::list([V::string("a")]), map(vec![("k", V::Integer(1))])]);
+        assert!(judged("grid", E::present(grid)));
+    }
+
     /// **An expected value on a document the plan does not write is judged
     /// as it stands and travels as a condition on its content**, so the
     /// document the author observed is the document the apply finds.
@@ -1024,21 +1072,18 @@ mod tests {
     }
 
     /// **An expected value cannot hold where it cannot be observed**: on no
-    /// document, on a block that cannot be read, or holding a nested value,
-    /// which names the limit and NORN-317. Each leaves its operation
+    /// document, or on a block that cannot be read. Each leaves its operation
     /// unresolved.
     #[test]
     fn an_expected_value_that_cannot_be_observed_leaves_its_operation_unresolved() {
-        use norn_wire::{AuthoredValue as V, ExpectedField as E};
+        use norn_wire::ExpectedField as E;
         let vault = MemoryVault::with(&[
             ("a.md", "body"),
             ("broken.md", "---\ntitle: [unclosed\n---\n"),
         ]);
-        let nested = V::map([("k".to_string(), V::Integer(1))]).expect("a map");
         for (at, expect, named) in [
             ("gone.md", E::absent(), "no document"),
             ("broken.md", E::absent(), "cannot be read"),
-            ("a.md", E::present(nested), "NORN-317"),
         ] {
             let resolution = planned(
                 &vault,

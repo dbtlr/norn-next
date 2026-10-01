@@ -471,7 +471,9 @@ fn escape_double_quoted(text: &str) -> String {
 /// null field emits `key: ~`, because whether an unset field belongs in a
 /// document is a question about the vault, not about its syntax. A collection
 /// emits block style, nested ones two spaces deeper per level, and an empty
-/// one emits `key: []` or `key: {}` ([`render_entry`]).
+/// one emits `key: []` or `key: {}`. Each collection is re-read before it is
+/// returned, and one that does not read back refuses with
+/// [`RenderError::NotRoundTrippable`].
 pub fn render_document(
     fields: &Mapping,
     body: &str,
