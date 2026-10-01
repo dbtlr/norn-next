@@ -22,8 +22,9 @@
 
 use std::borrow::Cow;
 
-use schemars::{JsonSchema, Schema, SchemaGenerator};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde_json::json;
 
 use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
@@ -276,7 +277,7 @@ struct NewForm {
 /// written.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(rename = "NewParams", transform = settle_written_properties)]
+#[schemars(rename = "NewParams", transform = state_three_forms)]
 struct NewKeys {
     /// The vault written.
     vault: VaultAddress,
@@ -311,6 +312,28 @@ struct NewKeys {
     /// Whether the write applies past the schema check. Absent is `false`.
     #[serde(default)]
     force: bool,
+}
+
+/// The derived schema of the request, with its keys written as the reader
+/// takes them ([`settle_written_properties`]) and the three forms stated as
+/// the one-of they are: `path` with `content` and none of the rest; `as`
+/// beside neither `path` nor `content`; or none of `path`, `content`, `as`
+/// and `variables`.
+fn state_three_forms(schema: &mut Schema) {
+    settle_written_properties(schema);
+    let lacking = |keys: &[&str]| {
+        json_schema!({
+            "not": {
+                "anyOf": keys.iter().map(|key| json!({ "required": [key] })).collect::<Vec<_>>()
+            }
+        })
+    };
+    let mut path = lacking(&["as", "variables", "fields", "body"]);
+    path.insert("required".to_string(), json!(["path", "content"]));
+    let mut rule = lacking(&["path", "content"]);
+    rule.insert("required".to_string(), json!(["as"]));
+    let inbox = lacking(&["path", "content", "as", "variables"]);
+    schema.insert("oneOf".to_string(), json!([path, rule, inbox]));
 }
 
 impl<'de> Deserialize<'de> for NewParams {

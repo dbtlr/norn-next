@@ -3866,3 +3866,90 @@ fn a_creation_by_rule_and_a_new_admit_no_null() {
     assert_eq!(rule["type"].as_str(), Some("string"), "{rule}");
     assert_eq!(rule["minLength"].as_u64(), Some(1), "{rule}");
 }
+
+/// Whether an object holding exactly the keys `present` satisfies the
+/// structure of `schema` the three-form rule is stated with: `required`,
+/// `not`, `anyOf` and `oneOf`. The crate holds no schema validator, so the
+/// subset its exclusivity is written in is evaluated here.
+fn admits_keys(schema: &Value, present: &BTreeSet<&str>) -> bool {
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_none_or(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .all(|name| present.contains(name))
+        });
+    let count = |keyword: &str| {
+        schema
+            .get(keyword)
+            .and_then(Value::as_array)
+            .map(|branches| branches.iter().filter(|b| admits_keys(b, present)).count())
+    };
+    required
+        && schema
+            .get("not")
+            .is_none_or(|forbidden| !admits_keys(forbidden, present))
+        && count("anyOf").is_none_or(|admitted| admitted >= 1)
+        && count("oneOf").is_none_or(|admitted| admitted == 1)
+}
+
+/// **A `new` schema admits exactly the three forms its reader reads**, and
+/// the seven mixes it refuses are refused by the schema too: `path` with
+/// `content` alone; `as` with optional `variables`, `fields` and `body`; and
+/// neither, with optional `fields` and `body`.
+#[test]
+fn a_new_request_schema_admits_exactly_its_three_forms() {
+    let schema = schema_of::<NewParams>();
+    // The reader and the schema must agree on every request here.
+    let admitted = |keys: &[&str]| {
+        let mut present: BTreeSet<&str> = keys.iter().copied().collect();
+        present.extend(["vault", "mode"]);
+        let mut request =
+            serde_json::json!({"vault": {"by": "name", "name": "notes"}, "mode": "preview"});
+        for key in keys {
+            request[*key] = match *key {
+                "variables" | "fields" => serde_json::json!({}),
+                "path" => serde_json::json!("a.md"),
+                _ => serde_json::json!("text"),
+            };
+        }
+        let read = serde_json::from_value::<NewParams>(request).is_ok();
+        let schema_admits = admits_keys(&schema, &present);
+        assert_eq!(
+            read, schema_admits,
+            "the reader and the schema disagree on {keys:?}"
+        );
+        schema_admits
+    };
+    for keys in [
+        vec!["path", "content"],
+        vec!["as"],
+        vec!["as", "variables"],
+        vec!["as", "variables", "fields", "body"],
+        vec![],
+        vec!["fields"],
+        vec!["body"],
+        vec!["fields", "body"],
+    ] {
+        assert!(admitted(&keys), "the schema refuses the form {keys:?}");
+    }
+    for keys in [
+        vec!["path"],
+        vec!["content"],
+        vec!["path", "as"],
+        vec!["path", "as", "content"],
+        vec!["as", "content"],
+        vec!["variables"],
+        vec!["path", "content", "body"],
+        vec!["path", "content", "fields"],
+        vec!["path", "content", "variables"],
+    ] {
+        assert!(!admitted(&keys), "the schema admits the mix {keys:?}");
+    }
+    assert_eq!(
+        required_names(&schema),
+        ["vault", "mode"].into_iter().collect()
+    );
+}
