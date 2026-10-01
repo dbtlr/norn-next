@@ -288,6 +288,18 @@ pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal>
     if yaml.len() > FRONTMATTER_MAX_BYTES {
         return Err(BlockRefusal::TooLarge { bytes: yaml.len() });
     }
+    parse_admitted(yaml)
+}
+
+/// [`parse_block`] past its size gate: the same parse and the same merge
+/// expansion, for YAML already admitted.
+///
+/// The bound admits a document; it is no part of what the YAML means. A
+/// caller that reads bytes to ask what they mean — an admitted block re-read
+/// with a few bytes changed, or a rendering proven by reading it back — asks
+/// this rather than the gate, which would answer text past the bound with a
+/// refusal instead of a value. The bound is judged once, on the document.
+pub(crate) fn parse_admitted(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal> {
     let mut parsed: serde_yaml::Value =
         serde_yaml::from_str(yaml).map_err(|error| BlockRefusal::Unreadable {
             problem: error.to_string(),

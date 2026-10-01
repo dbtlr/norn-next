@@ -723,7 +723,6 @@ fn a_value_no_span_can_name_refuses_an_in_place_edit_and_stays_removable() {
     for source in [
         "---\nk: |\n  literal\nother: x\n---\n",
         "---\nk: >\n  folded\nother: x\n---\n",
-        "---\nk: {a: 1}\nother: x\n---\n",
         "---\nk: &anchor value\nother: x\n---\n",
         "---\nk: !tagged value\nother: x\n---\n",
     ] {
@@ -1062,11 +1061,20 @@ fn a_key_re_exposed_below_an_interior_quote_is_answered_for_downstream() {
             }),
             "removing {field:?}"
         );
+        // `base` holds a map, so its set rewrites the whole entry, and the
+        // re-read refuses that too: the anchor the merge names goes with it.
+        let refusal = if field == "base" {
+            EditError::PostImageMismatch {
+                field: field.to_string(),
+            }
+        } else {
+            EditError::FieldNotEditable {
+                field: field.to_string(),
+            }
+        };
         assert_eq!(
             split.set_field(field, &Value::Int(1)),
-            Err(EditError::FieldNotEditable {
-                field: field.to_string()
-            }),
+            Err(refusal),
             "setting {field:?}"
         );
     }
@@ -1396,25 +1404,75 @@ fn removing_an_anchor_definition_its_alias_still_needs_is_refused() {
     );
 }
 
+/// **A list set over a scalar field rewrites the field's whole entry**, flat
+/// or nested, and every byte outside the entry stands.
 #[test]
-fn a_sequence_offered_for_a_scalar_field_refuses_rather_than_restyling_it() {
-    assert!(matches!(
+fn a_list_set_over_a_scalar_field_rewrites_its_entry() {
+    assert_eq!(
         set(
-            "---\ntitle: hello\n---\n",
+            "---\ntitle: 'hello'\nafter: x # kept\n---\n",
             "title",
             Value::Sequence(vec!["a".into()])
         ),
-        Err(EditError::Render(_))
-    ));
+        Ok("---\ntitle:\n  - a\nafter: x # kept\n---\n".to_string())
+    );
+    assert_eq!(
+        set(
+            "---\ntitle: hello\n---\n",
+            "title",
+            Value::Sequence(vec![Value::Sequence(vec!["a".into()])])
+        ),
+        Ok("---\ntitle:\n  - - a\n---\n".to_string())
+    );
 }
 
+/// **A scalar set over a list field rewrites the field's whole entry**, flow
+/// or block.
 #[test]
-fn a_map_value_refuses() {
-    let nested: Mapping = [("inner", "x")].into_iter().collect();
-    assert!(matches!(
-        set("---\ntitle: hello\n---\n", "title", Value::Map(nested)),
-        Err(EditError::Render(_))
-    ));
+fn a_scalar_set_over_a_list_field_rewrites_its_entry() {
+    assert_eq!(
+        set(
+            "---\ntags: [a, b]\nafter: x\n---\n",
+            "tags",
+            Value::String("one".into())
+        ),
+        Ok("---\ntags: one\nafter: x\n---\n".to_string())
+    );
+    assert_eq!(
+        set("---\ntags:\n  - a\nafter: x\n---\n", "tags", Value::Int(3)),
+        Ok("---\ntags: 3\nafter: x\n---\n".to_string())
+    );
+}
+
+/// **A set changing what a field holds refuses where its entry carries a
+/// comment**: the whole entry is rewritten, so the comment would be dropped
+/// silently.
+#[test]
+fn a_type_changing_set_over_a_commented_entry_refuses() {
+    for (source, value) in [
+        (
+            "---\ntitle: hello # note\n---\n",
+            Value::Sequence(vec!["a".into()]),
+        ),
+        ("---\ntags: [a] # note\n---\n", Value::String("one".into())),
+        (
+            "---\ntags:\n  # why\n  - a\n---\n",
+            Value::String("one".into()),
+        ),
+    ] {
+        let field = if source.contains("title") {
+            "title"
+        } else {
+            "tags"
+        };
+        assert_eq!(
+            set(source, field, value),
+            Err(EditError::CommentWouldBeLost {
+                field: field.into()
+            }),
+            "for {source:?}"
+        );
+    }
 }
 
 #[test]
@@ -1728,19 +1786,30 @@ fn a_push_that_would_drop_a_comment_refuses() {
     );
 }
 
-/// **A block list whose items are not one per line is rewritten whole only
-/// where it carries no comment**: a multi-line item cannot be spliced around,
-/// so the list is written as a set writes it, or refused where that would
-/// drop a comment.
+/// **A block list whose items span several lines takes a splice too**: the
+/// pushed item goes below the last line of the last item, and that item's
+/// lines — and the comment above them — stand.
 #[test]
-fn a_block_list_with_a_multi_line_item_is_rewritten_only_without_comments() {
+fn a_block_list_with_a_multi_line_item_takes_a_push_as_a_splice() {
     assert_eq!(
-        Document::parse("---\ntags:\n  - a\n  - \"two\n    lines\"\n---\n")
+        Document::parse("---\ntags:\n  # why\n  - a\n  - \"two\n    lines\"\n---\n")
             .push_to_list("tags", &string("c")),
-        Ok("---\ntags:\n  - a\n  - two lines\n  - c\n---\n".to_string())
+        Ok("---\ntags:\n  # why\n  - a\n  - \"two\n    lines\"\n  - c\n---\n".to_string())
+    );
+}
+
+/// **A block list whose items cannot be proven line by line is rewritten
+/// whole, and only where it carries no comment**: an item naming an anchor
+/// another item writes does not re-read alone, so the list is written as a
+/// set writes it, or refused where that would drop a comment.
+#[test]
+fn a_block_list_whose_items_do_not_re_read_alone_is_rewritten_only_without_comments() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - &x a\n  - *x\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a\n  - a\n  - c\n---\n".to_string())
     );
     assert_eq!(
-        Document::parse("---\ntags:\n  # why\n  - \"two\n    lines\"\n---\n")
+        Document::parse("---\ntags:\n  # why\n  - &x a\n  - *x\n---\n")
             .push_to_list("tags", &string("c")),
         Err(EditError::CommentWouldBeLost {
             field: "tags".into()

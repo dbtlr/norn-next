@@ -531,6 +531,75 @@ fn a_set_guarded_by_an_absent_field_writes_only_where_it_is_absent() {
     assert_eq!(read(&vault, "owned.md"), owned);
 }
 
+/// **A set of a nested value lands and reads back as that value**: a map
+/// holding a list of maps is written in block style below the fields already
+/// there, and a set guarded by expecting exactly that value finds it, where
+/// one expecting another nested value is refused.
+#[test]
+fn a_set_of_a_nested_value_lands_and_reads_back_as_that_value() {
+    let subject = "---\nstatus: draft # kept\n---\n# Subject\n";
+    let (_sandbox, vault) = a_vault("host-verbs-set-nested", &[("subject.md", subject)]);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let map = |entries: Vec<(&str, AuthoredValue)>| {
+        AuthoredValue::map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value)),
+        )
+        .expect("a map")
+    };
+    let owner = |role: &str| {
+        map(vec![
+            ("name", AuthoredValue::string("ana")),
+            (
+                "roles",
+                AuthoredValue::list([map(vec![("k", AuthoredValue::string(role))])]),
+            ),
+        ])
+    };
+    let setting = |field: &str, value: AuthoredValue, expect: Option<AuthoredValue>| {
+        let params = SetParams::new(
+            address(&vault),
+            ApplyMode::Apply,
+            WriteTarget::path(path("subject.md")),
+            vec![FieldChange::set(field, value)],
+        );
+        match expect {
+            Some(expected) => params.with_conditions(vec![AuthorCondition::expected_value(
+                path("subject.md"),
+                "owner",
+                ExpectedField::present(expected),
+            )]),
+            None => params,
+        }
+    };
+
+    let (_, changeset, targets) = applied(host.set(setting("owner", owner("a: b"), None)));
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(targets, wrote(&["subject.md"]));
+    let written = "---\nstatus: draft # kept\nowner:\n  name: ana\n  roles:\n    - k: 'a: b'\n---\n# Subject\n";
+    assert_eq!(read(&vault, "subject.md"), written);
+
+    let refusal = refused(host.set(setting(
+        "status",
+        AuthoredValue::string("final"),
+        Some(owner("other")),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    assert_eq!(read(&vault, "subject.md"), written);
+    let (_, _, targets) = applied(host.set(setting(
+        "status",
+        AuthoredValue::string("final"),
+        Some(owner("a: b")),
+    )));
+    assert_eq!(targets, wrote(&["subject.md"]));
+    assert_eq!(
+        read(&vault, "subject.md"),
+        written.replace("status: draft", "status: final")
+    );
+}
+
 /// `count` documents under `folder`, each carrying `wave: flip`, named so
 /// their path order is their number's.
 fn flips(folder: &str, count: usize) -> Vec<(String, String)> {
