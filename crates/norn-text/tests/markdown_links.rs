@@ -585,16 +585,21 @@ fn a_definition_line_and_an_undefined_reference_are_invisible() {
 /// backslash escape is resolved. What the parse does *not* answer is which
 /// hash the author wrote, so a destination whose bytes it changed carries no
 /// stem sub-span — a span that is not certainly right is absent rather than
-/// guessed.
+/// guessed. The angle brackets are delimiters rather than bytes the parse
+/// changed, so a bracketed destination with no escape in it keeps its span.
 #[test]
 fn a_destination_is_the_parsers_and_a_rewritten_one_carries_no_stem_span() {
     let angled = only("[t](<my file.md>)\n");
     assert_eq!(angled.target, "my file.md");
     assert_eq!(angled.raw, "[t](<my file.md>)");
-    assert_eq!(angled.stem_range, None);
+    assert_eq!(angled.stem_range, Some(5..15));
 
     let escaped = only("[t](note\\#draft.md)\n");
     assert_eq!(escaped.stem_range, None);
+
+    let escaped_in_brackets = only("[t](<my\\_file.md>)\n");
+    assert_eq!(escaped_in_brackets.target, "my_file.md");
+    assert_eq!(escaped_in_brackets.stem_range, None);
 }
 
 /// The fragment split runs over the destination's *source* bytes. An escaped

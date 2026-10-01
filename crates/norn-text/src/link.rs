@@ -139,10 +139,10 @@ pub struct Link {
     ///
     /// A wikilink always has one. A Markdown link has one when its destination
     /// stands in the token exactly as the parse read it, which is the ordinary
-    /// case; `None` when it does not, because a destination written with
-    /// backslash escapes or inside `<…>` is not made of the bytes that produced
-    /// it, and a span that is not certainly right is absent rather than
-    /// guessed.
+    /// case, inside `<…>` or not; `None` when it does not, because a
+    /// destination written with backslash escapes or entity references is not
+    /// made of the bytes that produced it, and a span that is not certainly
+    /// right is absent rather than guessed.
     ///
     /// A span being present is not a licence to splice one family's grammar
     /// over the other's: [`reconstruct_wikilink`] still refuses a Markdown
@@ -306,16 +306,19 @@ pub(crate) fn markdown_link(
     let written = destination_span(raw, text_end);
     let (hash, stem_origin) = match &written {
         // The source carries the destination byte for byte, so the split and
-        // the stem's own bytes are both nameable inside the token.
-        Some(found) if !found.angled && &raw[found.range.clone()] == destination => {
-            (destination.find('#'), Some(found.range.start))
+        // the stem's own bytes are both nameable inside the token. Angle
+        // brackets are not the destination's bytes but delimiters around
+        // them, like the parentheses, so a bracketed destination written
+        // without escapes is carried byte for byte too.
+        Some(found) if &raw[found.clone()] == destination => {
+            (destination.find('#'), Some(found.start))
         }
         // The parse resolved something. The split still belongs to the source,
         // so it is located there and mapped onto the resolved destination —
         // and the stem's bytes are no longer nameable, because the bytes that
         // produced them are not the bytes it is made of.
         Some(found) => (
-            unescaped_hash(&raw[found.range.clone()], destination).unwrap_or(destination.find('#')),
+            unescaped_hash(&raw[found.clone()], destination).unwrap_or(destination.find('#')),
             None,
         ),
         // The destination could not be located in the token at all, so there
@@ -375,14 +378,8 @@ fn decoded(fragment: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| fragment.to_string())
 }
 
-/// A Markdown destination as it was written, inside the link token's bytes.
-struct WrittenDestination {
-    range: Range<usize>,
-    /// Whether it was written inside `<…>`, whose bytes the parse strips.
-    angled: bool,
-}
-
-/// Locate the destination inside an inline Markdown link token.
+/// Locate the destination inside an inline Markdown link token: the bytes it
+/// was written as, inside the `<…>` when it was written in one.
 ///
 /// `text_end` is where the parse said the bracket text ended, so the closing
 /// `]` is the next one after it however many brackets the text itself carried.
@@ -392,7 +389,7 @@ struct WrittenDestination {
 ///
 /// `None` when the token does not have that shape, which is the answer that
 /// leaves the fragment split to the parse's own destination.
-fn destination_span(raw: &str, text_end: usize) -> Option<WrittenDestination> {
+fn destination_span(raw: &str, text_end: usize) -> Option<Range<usize>> {
     let close = text_end + raw.get(text_end..)?.find(']')?;
     let after = raw.get(close + 1..)?.strip_prefix('(')?;
     let lead = after.len() - after.trim_start().len();
@@ -401,10 +398,7 @@ fn destination_span(raw: &str, text_end: usize) -> Option<WrittenDestination> {
 
     if let Some(inside) = rest.strip_prefix('<') {
         let end = unescaped_index(inside, '>')?;
-        return Some(WrittenDestination {
-            range: start + 1..start + 1 + end,
-            angled: true,
-        });
+        return Some(start + 1..start + 1 + end);
     }
 
     let mut depth = 0usize;
@@ -428,10 +422,7 @@ fn destination_span(raw: &str, text_end: usize) -> Option<WrittenDestination> {
             _ => {}
         }
     }
-    Some(WrittenDestination {
-        range: start..start + end,
-        angled: false,
-    })
+    Some(start..start + end)
 }
 
 /// Where the fragment opens in `destination`, given the `source` bytes it was

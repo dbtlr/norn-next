@@ -37,6 +37,7 @@
 //! never forced. A rewrite that matched nothing returns the document's own
 //! bytes.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::document::{Document, frontmatter_of, splice_all};
@@ -109,13 +110,20 @@ impl<'a> Document<'a> {
                     range: link.range(),
                     replacement: token,
                     links: vec![link],
+                    slot: None,
                 }),
                 Err(reason) => skipped.push(SkippedLink { link, reason }),
             }
         }
+
+        let mut text = self.spliced(&edits);
+        if !self.reads_as_rewritten(&text, &edits, to) {
+            edits = self.provable_alone(edits, to, &mut skipped);
+            text = self.spliced(&edits);
+        }
         skipped.sort_by_key(|skip| skip.link.span.byte_offset);
         RewrittenLinks {
-            text: self.spliced(&edits),
+            text,
             rewritten: edits.iter().map(|edit| edit.links.len()).sum(),
             skipped,
         }
@@ -132,16 +140,13 @@ impl<'a> Document<'a> {
     /// came from with only that string's value changed — the same proof every
     /// frontmatter edit here makes, so what a plain scalar can carry is the
     /// YAML reader's answer rather than a list of hazards somebody maintains.
-    fn frontmatter_edits(
-        &self,
+    fn frontmatter_edits<'d>(
+        &'d self,
         from: &str,
         to: &str,
-        edits: &mut Vec<Edit>,
+        edits: &mut Vec<Edit<'d>>,
         skipped: &mut Vec<SkippedLink>,
     ) {
-        let Some(Value::Map(map)) = self.frontmatter() else {
-            return;
-        };
         let mut cursor = LineCursor::new(self.source());
         for literal in self.literal_texts() {
             let mut links = Vec::new();
@@ -171,29 +176,111 @@ impl<'a> Document<'a> {
             if links.is_empty() {
                 continue;
             }
-            let mut expected = map.clone();
-            with_text(&mut expected, literal.field, literal.item, &text);
             let edit = Edit {
                 range: literal.start..literal.start + literal.text.len(),
                 replacement: text,
                 links,
+                slot: Some((literal.field, literal.item)),
             };
-            if frontmatter_of(&self.spliced(std::slice::from_ref(&edit)))
-                == Some(Value::Map(expected))
-            {
+            let alone = std::slice::from_ref(&edit);
+            if frontmatter_of(&self.spliced(alone)) == self.frontmatter_after(alone) {
                 edits.push(edit);
             } else {
-                skipped.extend(edit.links.into_iter().map(|link| SkippedLink {
-                    link,
-                    reason: RewriteSkip::WouldCorruptFrontmatter,
-                }));
+                skipped.extend(edit.skipped(RewriteSkip::WouldCorruptFrontmatter));
             }
         }
     }
 
+    /// Whether `text` — this document with `edits` spliced in — reads as this
+    /// document with exactly those edits' links respelled: the same
+    /// frontmatter with only the rewritten strings changed, and the same links
+    /// of both families, in the same order, with only the rewritten ones'
+    /// targets changed.
+    ///
+    /// This is the proof every rewrite returns under, and it is about the whole
+    /// document because what a target's bytes mean depends on what surrounds
+    /// them: a backtick in a wikilink stem can pair with one later in the
+    /// paragraph and turn the text between into code, a backslash can escape
+    /// the bracket closing the Markdown link around it, and a space ends a
+    /// bare destination. A link's title is not compared — it is display text,
+    /// and the bracket text of `[[a]](b)` is another link's bytes, which a
+    /// rewrite of that link rightly changes.
+    fn reads_as_rewritten(&self, text: &str, edits: &[Edit<'_>], to: &str) -> bool {
+        let reread = Document::parse(text);
+        if reread.frontmatter().cloned() != self.frontmatter_after(edits) {
+            return false;
+        }
+        let respelled: HashSet<(LinkFamily, usize)> = edits
+            .iter()
+            .flat_map(|edit| &edit.links)
+            .map(|link| (link.family, link.span.byte_offset))
+            .collect();
+        let (before, after) = (self.all_links(), reread.all_links());
+        before.len() == after.len()
+            && before.iter().zip(&after).all(|(was, is)| {
+                let target = if respelled.contains(&(was.family, was.span.byte_offset)) {
+                    to
+                } else {
+                    &was.target
+                };
+                reading(was) == reading(is) && is.target == target
+            })
+    }
+
+    /// The edits each provable alone and alongside the ones kept before it,
+    /// in document order; every other edit's links are skipped.
+    ///
+    /// This is the path a rewrite takes only when the edits together did not
+    /// read back, which is rare and is what the extra reads are spent on. An
+    /// edit that cannot be proven is one whose target bytes read as something
+    /// else where they were written, so a frontmatter one is skipped as
+    /// corrupting its value and a body one as unrepresentable there.
+    fn provable_alone<'d>(
+        &'d self,
+        edits: Vec<Edit<'d>>,
+        to: &str,
+        skipped: &mut Vec<SkippedLink>,
+    ) -> Vec<Edit<'d>> {
+        let mut kept = Vec::with_capacity(edits.len());
+        for edit in edits {
+            kept.push(edit);
+            if !self.reads_as_rewritten(&self.spliced(&kept), &kept, to) {
+                let refused = kept.pop().expect("the edit just kept");
+                let reason = match refused.slot {
+                    Some(_) => RewriteSkip::WouldCorruptFrontmatter,
+                    None => RewriteSkip::Unrepresentable,
+                };
+                skipped.extend(refused.skipped(reason));
+            }
+        }
+        kept
+    }
+
+    /// Every link this document holds, frontmatter first and then the body,
+    /// in the order the index derives them in.
+    fn all_links(&self) -> Vec<Link> {
+        let mut links = self.frontmatter_wikilinks();
+        links.extend(self.links());
+        links
+    }
+
+    /// The frontmatter this document would read as with `edits`' strings
+    /// written into it.
+    fn frontmatter_after(&self, edits: &[Edit<'_>]) -> Option<Value> {
+        let mut value = self.frontmatter().cloned();
+        if let Some(Value::Map(map)) = value.as_mut() {
+            for edit in edits {
+                if let Some((field, item)) = edit.slot {
+                    with_text(map, field, item, &edit.replacement);
+                }
+            }
+        }
+        value
+    }
+
     /// This document's source with each edit's range replaced. The edits are
     /// in document order and do not overlap.
-    fn spliced(&self, edits: &[Edit]) -> String {
+    fn spliced(&self, edits: &[Edit<'_>]) -> String {
         let runs: Vec<(Range<usize>, &str)> = edits
             .iter()
             .map(|edit| (edit.range.clone(), edit.replacement.as_str()))
@@ -204,15 +291,41 @@ impl<'a> Document<'a> {
 
 /// One run of source bytes a rewrite replaces, and the links it respells
 /// there: one body token, or one frontmatter string holding one or more.
-struct Edit {
+struct Edit<'d> {
     range: Range<usize>,
     replacement: String,
     links: Vec<Link>,
+    /// For a frontmatter string, the field holding it and the item of that
+    /// field's sequence it is, `None` for the field's own value. A
+    /// frontmatter edit's range is exactly the string's text, so its
+    /// replacement is the string's new value.
+    slot: Option<(&'d str, Option<usize>)>,
+}
+
+impl Edit<'_> {
+    /// This edit's links, each skipped for `reason`.
+    fn skipped(self, reason: RewriteSkip) -> impl Iterator<Item = SkippedLink> {
+        self.links
+            .into_iter()
+            .map(move |link| SkippedLink { link, reason })
+    }
 }
 
 /// Whether `link` is one a rewrite of `from` names.
 fn matches(link: &Link, from: &str) -> bool {
     !from.is_empty() && link.target == from && addresses_the_vault(link)
+}
+
+/// What a link reads as, its target and its display text aside: the parts a
+/// rewrite must leave as they were.
+fn reading(link: &Link) -> (LinkFamily, bool, Option<&str>, Option<&str>, Option<&str>) {
+    (
+        link.family,
+        link.embed,
+        link.protocol.as_deref(),
+        link.anchor.as_deref(),
+        link.block_ref.as_deref(),
+    )
 }
 
 /// Set the string at `field` — its own value, or the `item` of its sequence —
