@@ -19,7 +19,7 @@
 //! b→a]` cannot be ordered at all and is refused there, before anything
 //! composes. An exchange routed through a name nothing stands at, such as
 //! `[a→t, b→a, t→b]`, orders and composes; its net transitions still draw
-//! on each other, and [`content_cycle`] refuses it here. The two cannot be
+//! on each other, and [`Lineage::content_cycle`] refuses it here. The two cannot be
 //! one check, since composition needs the order the first one settles.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -182,17 +182,6 @@ impl Lineage {
     fn drawing_map(&self) -> BTreeMap<&NormalizedPath, &Drawn> {
         self.drawing().collect()
     }
-}
-
-/// The positions of the moves closing a content cycle among `operations`,
-/// taken in `order`, or `None` where their targets draw on no cycle: the
-/// rule [`Lineage::content_cycle`] states, over [`Lineage::of`].
-pub(crate) fn content_cycle(
-    operations: &[Operation],
-    order: &[usize],
-    normalizer: &PathNormalizer,
-) -> Option<Vec<usize>> {
-    Lineage::of(operations, order, normalizer).content_cycle()
 }
 
 /// The cycle among `drawing` whose moves hold the lowest position, counting

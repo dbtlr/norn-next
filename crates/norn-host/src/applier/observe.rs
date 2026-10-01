@@ -321,16 +321,15 @@ pub(super) fn transition_index(
     index
 }
 
-/// Every condition the plan carries that the vault no longer meets.
+/// Every content condition the plan carries that the vault no longer meets.
 ///
 /// A content-hash condition is on a file the plan does not write, so it reads
 /// the same whatever of the plan has landed: it is judged against the file as
 /// it stands.
 ///
-/// **A link-resolution entry is not checked yet, so it fails (NORN-297).**
-/// Checking one means computing the plan's resolution change set again, which
-/// lands with link cascades; until then no planning records one, and a plan
-/// carrying one is refused rather than applied with a condition nobody read.
+/// **A link-resolution entry is not judged here.** The entries are one
+/// resolution change set, judged whole against the set computed again from
+/// the plan's composed results, once those are known (`stage::check`).
 pub(super) fn failed_conditions<V: VaultView>(
     plan: &ResolvedPlan,
     view: &V,
@@ -347,7 +346,7 @@ pub(super) fn failed_conditions<V: VaultView>(
                     None => false,
                 }
             }
-            PlanCondition::LinkResolution { .. } => false,
+            PlanCondition::LinkResolution { .. } => true,
         };
         if !holds {
             failed.push(condition.clone());

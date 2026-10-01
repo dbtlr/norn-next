@@ -92,6 +92,7 @@ use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
 use crate::production::{commit_plan_changeset, pinned_declaration};
 use publish::{Progress, Publisher, Stopped};
+pub(crate) use stage::Links;
 use stage::{Stop, Unfit};
 
 /// Where a publication is recorded so the watcher's echo of it is known as
@@ -139,6 +140,12 @@ pub(crate) struct Applier<'a> {
     /// does. An answer of no is a teardown the apply stops at: every shadow
     /// is removed and nothing is published.
     pub(crate) publishing: &'a dyn Fn() -> bool,
+    /// Where the plan's resolution change set is computed again: the apply
+    /// job's one snapshot, taken after its intake. Released before a
+    /// changeset commits, so no read snapshot is held over the store's write;
+    /// a refusal publication met before anything landed is answered while it
+    /// is still held, since nothing has committed since it was taken.
+    pub(crate) links: Links<'a>,
 }
 
 impl Applier<'_> {
@@ -166,12 +173,14 @@ impl Applier<'_> {
             &plan,
             &view,
             &declared,
+            self.links,
         ) {
             Ok(staged) => staged,
             Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail),
+            Err(Stop::Unread(refused)) => return ApplyOutcome::Unread(refused),
         };
         drop(view);
         let forced = std::mem::take(&mut staged.forced);
@@ -203,6 +212,10 @@ impl Applier<'_> {
         let changeset = if progress.effects.is_empty() {
             ChangesetOutcome::Committed
         } else {
+            // Nothing reads the plan's links once a target landed, so the
+            // snapshot they were read on is given back before the changeset
+            // commits over it.
+            self.links.release();
             match commit_plan_changeset(
                 store,
                 self.anchor,
@@ -289,7 +302,7 @@ impl Applier<'_> {
         checks: Vec<RefusedCheck>,
     ) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions) {
-            Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks),
+            Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks, self.links),
             Err(error) => write_failed(plan, error.to_string()),
         }
     }
@@ -319,7 +332,9 @@ impl Applier<'_> {
 /// [`stage::check`] runs — each target at its before- or after-state, every
 /// condition, the operations recomposed from the before-states, the schema.
 /// Where an apply would go on to stage, the answer is the same plan with its
-/// forecast from what the vault holds; where it would not, the answer is the
+/// forecast from what the vault holds, the advisories on its links read off
+/// its resolution change set computed again through `links`; where it would
+/// not, the answer is the
 /// outcome an apply of the plan over the same files ends in — a refusal with
 /// its fresh plan, a fault in the plan's shape, or a vault that could not be
 /// read, which an apply answers as a write that failed before anything
@@ -331,6 +346,7 @@ pub(crate) fn preview(
     root: norn_fs::Identity,
     exclusions: &[PathBuf],
     declared: &Declared,
+    links: Links<'_>,
 ) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
     let found = RootIdentity::from_device_and_inode(root.dev, root.ino);
     if plan.root != found {
@@ -343,14 +359,24 @@ pub(crate) fn preview(
         Ok(view) => view,
         Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
     };
-    let outcome = match stage::check(&plan, &view, declared) {
+    let outcome = match stage::check(&plan, &view, declared, links) {
         Ok(checked) => match forecast(&plan.transitions, &view) {
-            Ok(forecast) => return Ok((plan, forecast.with_forced(checked.forced))),
+            Ok(forecast) => {
+                return Ok((
+                    plan,
+                    forecast
+                        .with_forced(checked.forced)
+                        .with_links(checked.links),
+                ));
+            }
             Err(error) => write_failed(plan, error.to_string()),
         },
-        Err(Unfit::Refused(checks)) => refresh::refuse_and_refresh(plan, &view, declared, checks),
+        Err(Unfit::Refused(checks)) => {
+            refresh::refuse_and_refresh(plan, &view, declared, checks, links)
+        }
         Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
         Err(Unfit::Failed(detail)) => write_failed(plan, detail),
+        Err(Unfit::Unread(refused)) => ApplyOutcome::Unread(refused),
     };
     Err(Box::new(outcome))
 }

@@ -14,7 +14,9 @@ use norn_wire::{
 };
 
 use super::{Applier, ApplyOutcome, OwnWriteLedger};
-use crate::planner::resolve::resolve;
+use crate::apply::PlanSnapshot;
+use crate::planner::links::testing::{resolve_over_files as resolve, snapshot_of, vault};
+use crate::planner::resolve::Resolution;
 use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
@@ -67,6 +69,22 @@ pub(super) struct Fixture {
     pub(super) exclusions: Vec<PathBuf>,
     pub(super) store: Store,
     pub(super) recorded: Recorded,
+    /// The content model the store pins, which its links are judged under.
+    pub(super) declared: norn_store::ContentModel,
+}
+
+/// A snapshot of a fixture's store as it stands, and the declaration it
+/// pins: where a fixture's plans judge their links, as an apply job's
+/// snapshot after its intake.
+pub(super) struct Links {
+    snapshot: norn_store::Snapshot,
+    declared: norn_store::ContentModel,
+}
+
+impl Links {
+    pub(super) fn index(&self) -> PlanSnapshot<'_> {
+        PlanSnapshot::held(vault(), &self.snapshot, &self.declared)
+    }
 }
 
 impl Fixture {
@@ -116,6 +134,7 @@ impl Fixture {
             root,
             exclusions,
             store,
+            declared: norn_store::ContentModel::none(),
         }
     }
 
@@ -138,22 +157,44 @@ impl Fixture {
         RootIdentity::from_device_and_inode(self.root.dev, self.root.ino)
     }
 
-    /// `operations` resolved against the vault, every one of them resolving.
-    pub(super) fn plan(&self, operations: Vec<Operation>) -> ResolvedPlan {
+    /// The store as it stands, as a link index.
+    pub(super) fn links(&self) -> Links {
+        Links {
+            snapshot: snapshot_of(&self.store),
+            declared: self.declared.clone(),
+        }
+    }
+
+    /// `operations` resolved against the vault, its links judged on the
+    /// store as it stands, every one of them resolving.
+    pub(super) fn resolution(&self, operations: Vec<Operation>) -> Resolution {
         let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
         let name = VaultName::new("notes").expect("a legal vault name");
         let authored = AuthoredPlan::new(VaultAddress::name(name), operations);
-        let resolution = resolve(authored, self.root_identity(), &BTreeSet::new(), &view)
-            .unwrap_or_else(|failure| panic!("the plan resolves: {failure:?}"));
+        let links = self.links();
+        let resolution = crate::planner::resolve::resolve(
+            authored,
+            self.root_identity(),
+            &BTreeSet::new(),
+            &view,
+            &links.index(),
+        )
+        .unwrap_or_else(|failure| panic!("the plan resolves: {failure:?}"));
         assert!(
             resolution.unresolved.is_empty(),
             "every operation resolves: {:?}",
             resolution.unresolved
         );
-        resolution.plan
+        resolution
+    }
+
+    /// `operations` resolved against the vault, every one of them resolving.
+    pub(super) fn plan(&self, operations: Vec<Operation>) -> ResolvedPlan {
+        self.resolution(operations).plan
     }
 
     pub(super) fn apply(&mut self, plan: ResolvedPlan) -> ApplyOutcome {
+        let links = self.links();
         let applier = Applier {
             anchor: &self.vault,
             root: self.root,
@@ -161,6 +202,7 @@ impl Fixture {
             shadows: &self.shadows,
             own_writes: &self.recorded,
             publishing: &|| true,
+            links: &links.index(),
         };
         applier.apply(plan, &mut self.store)
     }
@@ -565,6 +607,10 @@ impl Fixture {
             .pin_vault_schema(schema.as_bytes(), "applier-test-schema")
             .expect("the schema pins");
         heal_from_zero(&mut self.store, &self.vault, &self.exclusions).expect("a heal");
+        self.declared = crate::production::pinned_declaration(&mut self.store)
+            .expect("a pin")
+            .content_model()
+            .clone();
     }
 }
 
@@ -858,6 +904,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
     ]);
     let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
     let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
+    let links = fixture.links();
     let before = norn_testkit::process::open_fd_count().expect("a count");
     let staged = super::stage::check_and_stage(
         &fixture.vault,
@@ -866,6 +913,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
         &plan,
         &view,
         &declared,
+        &links.index(),
     )
     .expect("the plan stages");
     let between = norn_testkit::process::open_fd_count().expect("a count");
@@ -1616,6 +1664,7 @@ impl Fixture {
             at: PathBuf::from(at),
             leaves,
         };
+        let links = self.links();
         let applier = Applier {
             anchor: &self.vault,
             root: self.root,
@@ -1623,6 +1672,7 @@ impl Fixture {
             shadows: &self.shadows,
             own_writes: &meddling,
             publishing: &|| true,
+            links: &links.index(),
         };
         applier.apply(plan, &mut self.store)
     }
@@ -1790,6 +1840,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         deleting("c.md"),
     ]);
     let before = fixture.tree();
+    let links = fixture.links();
     let applier = Applier {
         anchor: &fixture.vault,
         root: fixture.root,
@@ -1797,6 +1848,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         shadows: &fixture.shadows,
         own_writes: &fixture.recorded,
         publishing: &|| false,
+        links: &links.index(),
     };
     let outcome = applier.apply(plan.clone(), &mut fixture.store);
     match outcome {
@@ -1856,14 +1908,21 @@ impl Fixture {
         plan: ResolvedPlan,
     ) -> Result<(ResolvedPlan, norn_wire::Forecast), norn_wire::ErrorEnvelope> {
         let declared = crate::production::pinned_declaration(&mut self.store).expect("a pin");
-        super::preview(plan, &self.vault, self.root, &self.exclusions, &declared).map_err(
-            |outcome| {
-                outcome
-                    .into_wire()
-                    .expect("a preview never stands down")
-                    .expect_err("a preview's refusal is no report")
-            },
+        let links = self.links();
+        super::preview(
+            plan,
+            &self.vault,
+            self.root,
+            &self.exclusions,
+            &declared,
+            &links.index(),
         )
+        .map_err(|outcome| {
+            outcome
+                .into_wire()
+                .expect("a preview never stands down")
+                .expect_err("a preview's refusal is no report")
+        })
     }
 }
 

@@ -12,7 +12,7 @@ use norn_wire::{
 
 use super::observe::{TargetState, identity, observe, units};
 use super::outcome::{ApplyOutcome, Refused};
-use super::stage::{check, drifted_checks};
+use super::stage::{Links, check, drifted_checks};
 use crate::derivation::Declared;
 use crate::planner::compose::touches;
 use crate::planner::resolve::{PlanningFailure, resolve};
@@ -46,13 +46,16 @@ enum Fate {
 /// its force, an empty one whose operations no longer plan included, and a
 /// forced fresh plan's forecast lists the schema violations its force lets
 /// through, judged under `declared` by the applier's one judgment, so it is
-/// what a preview of the fresh plan lists. Nothing is rebased: applying the
-/// fresh plan is the caller's decision.
+/// what a preview of the fresh plan lists. The fresh plan records its own
+/// resolution change set, judged through `links`, and its forecast advises on
+/// the links that set reaches. Nothing is rebased: applying the fresh plan is
+/// the caller's decision.
 pub(super) fn refuse_and_refresh(
     plan: ResolvedPlan,
     view: &TreeView,
     declared: &Declared,
     mut checks: Vec<RefusedCheck>,
+    links: Links<'_>,
 ) -> ApplyOutcome {
     let normalizer = view.normalizer();
     let units = units(&plan, normalizer);
@@ -114,7 +117,7 @@ pub(super) fn refuse_and_refresh(
             ));
         }
     }
-    let (fresh, forecast) = match resolve(authored, plan.root.clone(), &met, view) {
+    let (fresh, forecast) = match resolve(authored, plan.root.clone(), &met, view, links) {
         Ok(resolution) => {
             for left in resolution.unresolved {
                 let position = again
@@ -158,13 +161,15 @@ pub(super) fn refuse_and_refresh(
                 detail: error.to_string(),
             };
         }
+        Err(PlanningFailure::Links(refused)) => return ApplyOutcome::Unread(refused),
     };
     unresolved.sort_by_key(|(position, _)| *position);
-    let forced = forced_through(&fresh, view, declared);
+    let forced = forced_through(&fresh, view, declared, links);
     ApplyOutcome::Refused(Box::new(Refused {
         plan: fresh,
         forecast: Forecast::new(drifted, forecast.folders_made, forecast.folders_removed)
-            .with_forced(forced),
+            .with_forced(forced)
+            .with_links(forecast.links),
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
     }))
@@ -179,11 +184,12 @@ fn forced_through(
     fresh: &ResolvedPlan,
     view: &TreeView,
     declared: &Declared,
+    links: Links<'_>,
 ) -> Vec<norn_wire::SchemaViolation> {
     if !fresh.force {
         return Vec::new();
     }
-    check(fresh, view, declared).map_or_else(|_| Vec::new(), |checked| checked.forced)
+    check(fresh, view, declared, links).map_or_else(|_| Vec::new(), |checked| checked.forced)
 }
 
 /// The target a drifted or a taken-name check names.

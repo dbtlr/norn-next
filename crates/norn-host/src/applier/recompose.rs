@@ -408,7 +408,7 @@ mod tests {
     use super::super::observe::{observe, recorded_lineage, units};
     use super::{Recomposed, recompose};
     use crate::planner::compose::content_hash;
-    use crate::planner::resolve::resolve;
+    use crate::planner::links::testing::resolve_over_files as resolve;
     use crate::planner::view::VaultView;
     use crate::planner::view::memory::MemoryVault;
 

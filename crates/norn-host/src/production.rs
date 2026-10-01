@@ -314,21 +314,24 @@ fn apply_over(
     if let Err(refused) = ground.standing(name) {
         return ApplyEnd::answered(Err(refused));
     }
+    // One read handle for the job, minted the first time a `where` target or
+    // a link resolution asks, and shared by the planning and the applier's
+    // check; the applier gives it back before it publishes.
+    let source: &ProductionAttachment = attachment;
+    let mint = || {
+        let (snapshot, statements) = crate::apply::established_for_matching(source);
+        evidence.count_apply_mint(statements);
+        snapshot
+    };
+    let planned_on = crate::apply::PlanSnapshot::on_demand(
+        plan.vault().clone(),
+        &mint,
+        ground.declared.content_model(),
+    );
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
-            let source: &ProductionAttachment = attachment;
-            let mint = || {
-                let (snapshot, statements) = crate::apply::established_for_matching(source);
-                evidence.count_apply_mint(statements);
-                snapshot
-            };
-            let matcher = crate::apply::SnapshotMatcher::on_demand(
-                authored.vault.clone(),
-                &mint,
-                ground.declared.content_model(),
-            );
-            match crate::apply::resolve_on(authored, &ground, name, &matcher) {
+            match crate::apply::resolve_on(authored, &ground, name, &planned_on) {
                 Ok(resolution) => match crate::apply::fully_resolved(resolution) {
                     Ok(resolution) => resolution.plan,
                     Err(refused) => return ApplyEnd::answered(Err(refused)),
@@ -343,6 +346,29 @@ fn apply_over(
         }
     };
     progress.planned(&resolved);
+    // The applier checks the plan's links on the snapshot planning took; a
+    // plan that read none and whose check reads some — a resolved plan sent
+    // back, which planned nothing here — takes it now, while nothing else
+    // holds the store.
+    let established = match planned_on.into_established() {
+        Some(snapshot) => Some(snapshot),
+        None if crate::planner::links::reads_links(&resolved.transitions, &resolved.operations) => {
+            match mint() {
+                Ok(snapshot) => Some(snapshot),
+                Err(unavailable) => {
+                    return ApplyEnd::answered(Err(crate::refusal::reader_unavailable(
+                        unavailable.detail(),
+                    )));
+                }
+            }
+        }
+        None => None,
+    };
+    let checked_on = crate::apply::PlanSnapshot::established(
+        resolved.vault.clone(),
+        established,
+        ground.declared.content_model(),
+    );
     let outcome = Applier {
         anchor: &ground.root,
         root: ground.identity,
@@ -350,8 +376,15 @@ fn apply_over(
         shadows: &attachment.shadows,
         own_writes: &attachment.own_writes,
         publishing: &|| reporter.begin_publishing(progress),
+        links: &checked_on,
     }
     .apply(resolved, &mut attachment.store);
+    drop(checked_on);
+    if let crate::applier::ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) =
+        outcome
+    {
+        return ApplyEnd::damaged(detail);
+    }
     // The heal's paths are spelled as the vault's walk spells them, under
     // the case behaviour the root proved. A root that cannot be walked any
     // more is healed whole.
