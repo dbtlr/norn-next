@@ -15,27 +15,27 @@ use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
     AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
     Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
+    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DeleteParams, DescribeParams,
     DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
     DocumentPath, DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus,
     ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType,
     FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
     Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady, Operation,
-    OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, RollUp,
-    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
-    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
-    WriteTarget,
+    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily,
+    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId, OperationKind, Page,
+    PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate,
+    Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport,
+    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
+    ReloadReport, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
+    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation,
+    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap,
+    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
+    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -283,6 +283,14 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<DocumentEdit>(),
         schema_of::<EditParams>(),
         schema_of::<NewParams>(),
+        schema_of::<MoveParams>(),
+        schema_of::<DeleteParams>(),
+        schema_of::<RewriteWikilinkParams>(),
+        schema_of::<LinkRewrite>(),
+        schema_of::<LinkKey>(),
+        schema_of::<Resolves>(),
+        schema_of::<LinkAdvisory>(),
+        schema_of::<FilePath>(),
     ]
 }
 
@@ -3573,6 +3581,29 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             vec!["vault", "mode", "path", "content", "conditions", "force"],
             vec!["vault", "mode", "path", "content"],
         ),
+        (
+            schema_of::<MoveParams>(),
+            vec!["vault", "mode", "from", "to", "conditions", "force"],
+            vec!["vault", "mode", "from", "to"],
+        ),
+        (
+            schema_of::<DeleteParams>(),
+            vec![
+                "vault",
+                "mode",
+                "path",
+                "rewrite_to",
+                "allow_broken_links",
+                "conditions",
+                "force",
+            ],
+            vec!["vault", "mode", "path"],
+        ),
+        (
+            schema_of::<RewriteWikilinkParams>(),
+            vec!["vault", "mode", "old", "new", "conditions", "force"],
+            vec!["vault", "mode", "old", "new"],
+        ),
     ] {
         assert_eq!(property_names(&schema), fields.into_iter().collect());
         assert_eq!(required_names(&schema), required.into_iter().collect());
@@ -3580,6 +3611,30 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
         assert_eq!(
             schema["properties"]["mode"]["$ref"].as_str(),
             Some("#/$defs/ApplyMode")
+        );
+    }
+    let move_schema = schema_of::<MoveParams>();
+    for end in ["from", "to"] {
+        assert_eq!(
+            move_schema["properties"][end]["type"].as_str(),
+            Some("string")
+        );
+        assert_eq!(
+            move_schema["properties"][end]["minLength"].as_u64(),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        schema_of::<DeleteParams>()["properties"]["rewrite_to"]["$ref"].as_str(),
+        Some("#/$defs/ResolutionTarget"),
+        "a delete's `rewrite_to` admits what its reader refuses"
+    );
+    let rewrite = schema_of::<RewriteWikilinkParams>();
+    for end in ["old", "new"] {
+        assert_eq!(
+            rewrite["properties"][end]["$ref"].as_str(),
+            Some("#/$defs/ResolutionTarget"),
+            "a wikilink rewrite's `{end}`"
         );
     }
     let set = schema_of::<SetParams>();

@@ -19,30 +19,30 @@ use norn_wire::{
     AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
     Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
     ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
-    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindingKind, FindingRow,
-    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
-    HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite,
-    LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, Moved,
-    NameSet, NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
-    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    ResolvedPlan, ResolvedTag, Resolves, RollUp, RootIdentity, Rung, RungReport, RungSelection,
-    RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport,
-    SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
-    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead,
-    Transition, TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend,
-    UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
-    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
-    WriteTarget,
+    DeleteParams, DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport,
+    DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments,
+    EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet,
+    FacetKind, FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindingKind,
+    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
+    GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause,
+    KindTally, LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
+    LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder,
+    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NoProblems, NoRetrievalRung,
+    NonFiniteScore, NotReady, Operation, OperationId, OperationKind, OperationsTag, Page,
+    PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate,
+    Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport,
+    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
+    ReloadReport, ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget,
+    ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams,
+    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer,
+    VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus,
+    Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -2472,8 +2472,8 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds fifteen verbs, and every one of them is the flat string
-/// it renders as, read back as the verb it renders.
+/// The registry holds twenty-one verbs, and every one of them is the flat
+/// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
     let strings = [
@@ -2487,6 +2487,9 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "set",
         "edit",
         "new",
+        "move",
+        "delete",
+        "rewrite_wikilink",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2496,7 +2499,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 18);
+    assert_eq!(Verb::ALL.len(), 21);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2584,17 +2587,20 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 18);
+    assert_eq!(Verb::ALL.len(), 21);
     assert_eq!(
         addressed(Addressing::Required),
         [
             "apply",
             "count",
+            "delete",
             "describe",
             "edit",
             "find",
             "get",
+            "move",
             "new",
+            "rewrite_wikilink",
             "search",
             "set",
             "validate",
@@ -9529,6 +9535,205 @@ fn a_new_request_compiles_to_one_create() {
         assert!(
             serde_json::from_str::<NewParams>(refused).is_err(),
             "{refused} read as a new request"
+        );
+    }
+}
+
+/// **A `move` reads what it moves from its source.** A `from` carrying the
+/// document extension, in any case, compiles to one `move_document`, and any
+/// other `from` to one `move_folder`; each carries the request's conditions,
+/// forced as the request is, and the ends cross as the paths they are.
+#[test]
+fn a_move_request_compiles_to_the_move_its_source_names() {
+    let condition = AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab));
+    let document = MoveParams::new(
+        notes(),
+        ApplyMode::Preview,
+        MoveSubject::new("notes/a.md", "archive/A.MD").expect("a document move"),
+    )
+    .with_conditions(vec![condition.clone()])
+    .with_force(true);
+    round_trip(&document);
+    assert_eq!(
+        document.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![
+                Operation::new(OperationKind::move_document(
+                    path("notes/a.md"),
+                    path("archive/A.MD")
+                ))
+                .with_conditions(vec![condition])
+            ],
+        )
+        .with_force(true)
+    );
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","from":"notes","to":"archive/notes"}"#;
+    let folder_move: MoveParams = serde_json::from_str(json).expect("a folder move");
+    assert_eq!(wire(&folder_move), json);
+    assert_eq!(
+        folder_move.subject,
+        MoveSubject::folder(folder("notes"), folder("archive/notes"))
+    );
+    assert_eq!(
+        folder_move.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::move_folder(
+                folder("notes"),
+                folder("archive/notes")
+            ))],
+        )
+    );
+    for (from, to) in [
+        ("notes/a.md", "archive"),
+        ("notes", "archive/a.md"),
+        ("", "archive"),
+        ("notes/a.md", "/archive/a.md"),
+        ("notes/.md", "archive/a.md"),
+    ] {
+        assert!(
+            MoveSubject::new(from, to).is_err(),
+            "moving `{from}` to `{to}` read as a move"
+        );
+    }
+    assert_eq!(
+        MoveSubject::new(".md", "x").ok(),
+        Some(MoveSubject::folder(folder(".md"), folder("x"))),
+        "a leaf that is only an extension names no document"
+    );
+    for refused in [
+        json.replace(r#""mode":"apply","#, ""),
+        json.replace(r#""to":"archive/notes""#, r#""to":"archive/notes.md""#),
+        json.replace(
+            r#""to":"archive/notes""#,
+            r#""to":"archive/notes","parents":true"#,
+        ),
+        json.replace(
+            r#""to":"archive/notes""#,
+            r#""to":"archive/notes","force":null"#,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<MoveParams>(&refused).is_err(),
+            "{refused} read as a move request"
+        );
+    }
+}
+
+/// **A `delete` compiles to one `delete_document` saying what its request
+/// says of the links naming its document**: rewritten to `rewrite_to`, left
+/// broken, or — saying neither — neither, and saying both is refused.
+#[test]
+fn a_delete_request_compiles_to_one_delete_saying_what_becomes_of_its_links() {
+    let plain = DeleteParams::new(notes(), ApplyMode::Apply, path("notes/b.md"));
+    assert_eq!(
+        wire(&plain),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md"}"#
+    );
+    assert_eq!(
+        plain.clone().plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::delete_document(path(
+                "notes/b.md"
+            )))]
+        )
+    );
+    let rewriting = plain.clone().rewriting_to(target("notes/c"));
+    let breaking = plain.clone().breaking_links().with_force(true);
+    for (request, json, kind) in [
+        (
+            &rewriting,
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md","rewrite_to":"notes/c"}"#,
+            OperationKind::delete_document_rewriting(path("notes/b.md"), target("notes/c")),
+        ),
+        (
+            &breaking,
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md","allow_broken_links":true,"force":true}"#,
+            OperationKind::delete_document_breaking_links(path("notes/b.md")),
+        ),
+    ] {
+        assert_eq!(wire(request), json);
+        round_trip(request);
+        assert_eq!(
+            request.clone().plan().operations,
+            vec![Operation::new(kind)]
+        );
+    }
+    assert_eq!(rewriting.breaking_links(), plain.clone().breaking_links());
+    let json = wire(&plain);
+    for refused in [
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","rewrite_to":"c","allow_broken_links":true"#,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r##""path":"notes/b.md","rewrite_to":"c#Notes""##,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","rewrite_to":null"#,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","recursive":true"#,
+        ),
+        json.replace(r#""mode":"apply","#, ""),
+    ] {
+        assert!(
+            serde_json::from_str::<DeleteParams>(&refused).is_err(),
+            "{refused} read as a delete request"
+        );
+    }
+}
+
+/// **A `rewrite_wikilink` compiles to one `rewrite_wikilink`**, its `old`
+/// free to name a document no vault holds, and neither end carrying an
+/// anchor.
+#[test]
+fn a_rewrite_wikilink_request_compiles_to_one_rewrite() {
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","old":"gone/never-was","new":"plans/2026"}"#;
+    let request: RewriteWikilinkParams = serde_json::from_str(json).expect("a rewrite request");
+    assert_eq!(wire(&request), json);
+    assert_eq!(
+        request,
+        RewriteWikilinkParams::new(
+            notes(),
+            ApplyMode::Preview,
+            target("gone/never-was"),
+            target("plans/2026")
+        )
+    );
+    let condition = AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab));
+    let conditioned = request.with_conditions(vec![condition.clone()]);
+    round_trip(&conditioned);
+    assert_eq!(
+        conditioned.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![
+                Operation::new(OperationKind::rewrite_wikilink(
+                    target("gone/never-was"),
+                    target("plans/2026")
+                ))
+                .with_conditions(vec![condition])
+            ],
+        )
+    );
+    for refused in [
+        json.replace(r#""old":"gone/never-was""#, r##""old":"gone#Heading""##),
+        json.replace(r#""new":"plans/2026""#, r##""new":"plans/2026#^a1""##),
+        json.replace(r#""old":"gone/never-was","#, ""),
+        json.replace(
+            r#""new":"plans/2026""#,
+            r#""new":"plans/2026","path":"a.md""#,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<RewriteWikilinkParams>(&refused).is_err(),
+            "{refused} read as a rewrite request"
         );
     }
 }
