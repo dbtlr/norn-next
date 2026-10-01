@@ -101,69 +101,86 @@ pub(crate) fn key_line_value_point(content: &str, line_start: usize) -> Option<R
 /// inside a multi-line value, or between a block list's items. `block` is
 /// the range of the frontmatter's YAML in `content`.
 ///
-/// **A `#` is a comment exactly when deleting it leaves the block reading as
-/// the same value.** Each `#` in the entry that opens a line or follows a
-/// space or tab is a candidate; the block is re-read with that `#`, the
-/// spaces before it and the rest of its line deleted — the whole line where
-/// nothing else is on it — and compared with the block as written. A
-/// deletion that reads back unchanged removed only a comment; one that
-/// changes the value or does not parse removed content: a `#` inside a
-/// quoted scalar or on a block scalar's content line. No lexer decides it,
-/// so a quote that opens nothing — one inside a plain or a block scalar —
-/// cannot hide a comment from it. A block that does not re-read at all
-/// answers yes, because nothing it holds can be proven not a comment.
+/// **A `#` is a comment exactly when truncating the text after it leaves the
+/// block reading as the same value.** Each `#` in the entry that opens a line
+/// or follows a space or tab is a candidate; the block is re-read with the
+/// rest of that `#`'s line deleted — the `#` and the line's terminator stay
+/// — and compared with the block as written. A comment truncated is still a
+/// comment, so the layout around it, blank lines a keep-chomping scalar owns
+/// included, reads as it did; content truncated loses text, so the value
+/// changes or the block stops parsing: a `#` inside a quoted scalar or on a
+/// block scalar's content line. No lexer decides it, so a quote that opens
+/// nothing — one inside a plain or a block scalar — cannot hide a comment
+/// from it.
 ///
 /// The answer decides whether a whole-entry rewrite may run, and a comment
-/// it misses is one that rewrite drops silently. Its cost is a re-read per
-/// candidate, bounded by [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES),
-/// and an entry with no candidate is not re-read at all.
+/// it misses is one that rewrite drops silently, so every case it cannot
+/// judge answers yes and the rewrite refuses instead:
+///
+/// - a bare `#`, with nothing after it to truncate;
+/// - more candidates than [`MAX_JUDGED_CANDIDATES`], which bounds what the
+///   answer costs to that many re-reads of a block itself bounded by
+///   [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES);
+/// - a block that does not re-read as written at all.
+///
+/// Every candidate is truncated at once first, and a block that still reads
+/// the same holds a comment; only otherwise is each judged alone, stopping at
+/// the first comment. An entry with no candidate is not re-read.
 pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &Field) -> bool {
     let yaml = &content[block.clone()];
     let entry = field.line_range.start - block.start..field.line_range.end - block.start;
-    let mut candidates = comment_candidates(yaml, entry).peekable();
-    if candidates.peek().is_none() {
+    let candidates: Vec<Range<usize>> = comment_candidates(yaml, entry).collect();
+    if candidates.is_empty() {
         return false;
+    }
+    if candidates.len() > MAX_JUDGED_CANDIDATES || candidates.iter().any(Range::is_empty) {
+        return true;
     }
     let Some(written) = reparse(yaml) else {
         return true;
     };
-    candidates.any(|span| {
-        let mut without = String::with_capacity(yaml.len() - span.len());
-        without.push_str(&yaml[..span.start]);
-        without.push_str(&yaml[span.end..]);
-        reparse(&without).as_ref() == Some(&written)
-    })
+    let reads_as_written = |cuts: &[Range<usize>]| {
+        let mut truncated = String::with_capacity(yaml.len());
+        let mut kept_from = 0;
+        // A later `#` on a line an earlier one truncates is inside that cut.
+        for cut in cuts {
+            if cut.start < kept_from {
+                continue;
+            }
+            truncated.push_str(&yaml[kept_from..cut.start]);
+            kept_from = cut.end;
+        }
+        truncated.push_str(&yaml[kept_from..]);
+        reparse(&truncated).as_ref() == Some(&written)
+    };
+    reads_as_written(&candidates)
+        || candidates
+            .iter()
+            .any(|candidate| reads_as_written(std::slice::from_ref(candidate)))
 }
 
-/// The span each comment candidate in `yaml[entry]` would delete: a `#` that
-/// opens a line or follows a space or tab, from the spaces and tabs before it
-/// through the end of its line, and through the line's terminator too where
-/// nothing precedes it on the line.
+/// The most comment candidates [`entry_carries_comment`] judges one by one.
+/// An entry holding more is taken to carry a comment, because each judgment
+/// is a re-read of the whole block: past this many the cost would grow with
+/// the block rather than stay bounded, and a refused rewrite costs less than
+/// a dropped comment.
+pub(crate) const MAX_JUDGED_CANDIDATES: usize = 32;
+
+/// The text each comment candidate in `yaml[entry]` would truncate: for a `#`
+/// that opens a line or follows a space or tab, the rest of its line, the
+/// terminator excluded. A bare `#` truncates an empty range.
 fn comment_candidates(yaml: &str, entry: Range<usize>) -> impl Iterator<Item = Range<usize>> {
     let bytes = yaml.as_bytes();
-    let is_break = |byte: u8| matches!(byte, b'\n' | b'\r');
-    entry.filter(|&at| bytes[at] == b'#').filter_map(move |at| {
-        let mut start = at;
-        while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
-            start -= 1;
-        }
-        let opens_line = start == 0 || is_break(bytes[start - 1]);
-        if start == at && !opens_line {
-            return None;
-        }
-        let mut end = bytes[at..]
-            .iter()
-            .position(|&byte| is_break(byte))
-            .map_or(bytes.len(), |offset| at + offset);
-        if opens_line {
-            end += match &bytes[end..] {
-                [b'\r', b'\n', ..] => 2,
-                [b'\n' | b'\r', ..] => 1,
-                _ => 0,
-            };
-        }
-        Some(start..end)
-    })
+    entry
+        .filter(|&at| bytes[at] == b'#')
+        .filter(move |&at| at == 0 || matches!(bytes[at - 1], b' ' | b'\t' | b'\n' | b'\r'))
+        .map(move |at| {
+            let end = bytes[at..]
+                .iter()
+                .position(|&byte| matches!(byte, b'\n' | b'\r'))
+                .map_or(bytes.len(), |offset| at + offset);
+            at + 1..end
+        })
 }
 
 /// The key line starting at `line_start`, without its terminator, and the
@@ -180,7 +197,7 @@ fn key_line(content: &str, line_start: usize) -> Option<(&str, usize)> {
 mod tests {
     use crate::Document;
 
-    use super::entry_carries_comment;
+    use super::{MAX_JUDGED_CANDIDATES, entry_carries_comment};
 
     /// Whether `field`'s entry in `source` carries a comment.
     fn carries(source: &str, field: &str) -> bool {
@@ -190,13 +207,15 @@ mod tests {
         entry_carries_comment(source, block, located)
     }
 
-    /// **A `#` is a comment exactly when deleting it leaves the block reading
-    /// as the same value.** A quote inside a plain or a block scalar opens
-    /// nothing, so a comment after it is still found; a `#` inside a quoted
-    /// scalar, on a block scalar's content line or with no space before it is
-    /// content.
+    /// **A `#` is a comment exactly when truncating the text after it leaves
+    /// the block reading as the same value.** A quote inside a plain or a
+    /// block scalar opens nothing, so a comment after it is still found, and
+    /// so is one among the blank lines a keep-chomping scalar owns; a `#`
+    /// inside a quoted scalar, on a block scalar's content line or with no
+    /// space before it is content. A bare `#` cannot be truncated, so it is
+    /// taken for a comment.
     #[test]
-    fn a_comment_is_a_hash_whose_deletion_changes_no_value() {
+    fn a_comment_is_a_hash_whose_truncation_changes_no_value() {
         for (source, field, carries_one) in [
             ("---\nk: [a, b]\n---\n", "k", false),
             ("---\nk: [a] # keep\n---\n", "k", true),
@@ -210,6 +229,14 @@ mod tests {
             ("---\nk: |\n  a\n  # content\nn: 1\n---\n", "k", false),
             ("---\nk: |+\n    a\n  # comment\nn: 1\n---\n", "k", true),
             ("---\nk: v\r\n  # crlf\r\nn: 1\r\n---\r\n", "k", true),
+            ("---\nk: |+\n    a\n  # c\n\nn: 1\n---\n", "k", true),
+            (
+                "---\nk:\n  m: |+\n    a\n  # c\n\n  o: 1\nn: 1\n---\n",
+                "k",
+                true,
+            ),
+            ("---\nk: |+\n    a\n\n  # c\n\nn: 1\n---\n", "k", true),
+            ("---\nk: v #\nn: 1\n---\n", "k", true),
             (
                 "---\nname: Lovelace, 'Ada # don't rename\nn: 1\n---\n",
                 "name",
@@ -237,5 +264,23 @@ mod tests {
         ] {
             assert_eq!(carries(source, field), carries_one, "for {source:?}");
         }
+    }
+
+    /// **Past the cap on re-reads, an entry is taken to carry a comment.**
+    /// Judging more candidates one by one would cost a re-read each, so an
+    /// entry holding more than the cap refuses its rewrite even where none of
+    /// them is a comment: a refusal the author can act on, never a comment
+    /// lost.
+    #[test]
+    fn an_entry_with_more_candidates_than_the_cap_carries_a_comment() {
+        let content: String = (0..=MAX_JUDGED_CANDIDATES)
+            .map(|index| format!("\n  x #{index}"))
+            .collect();
+        let source = format!("---\nk: '{content}'\nn: 1\n---\n");
+        assert!(carries(&source, "k"));
+        let within: String = (0..MAX_JUDGED_CANDIDATES)
+            .map(|index| format!("\n  x #{index}"))
+            .collect();
+        assert!(!carries(&format!("---\nk: '{within}'\nn: 1\n---\n"), "k"));
     }
 }

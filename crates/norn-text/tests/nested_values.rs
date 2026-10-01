@@ -284,6 +284,33 @@ fn a_block_list_rewrite_refuses_for_a_comment_below_a_block_scalar() {
     );
 }
 
+/// **A comment under keep chomping is a comment, whatever blank lines follow
+/// it.** A `|+` scalar keeps its trailing blank lines, so the layout around a
+/// comment below it is part of the value; the comment itself is not, and a
+/// whole-entry rewrite that would drop it refuses.
+#[test]
+fn a_comment_below_a_keep_chomping_scalar_refuses_a_whole_entry_rewrite() {
+    let kept = "---\nk: |+\n    a\n  # c\n\nn: 1\n---\n";
+    for (source, value) in [
+        (kept, map([("z", Value::Int(9))])),
+        (kept, list(["x".into(), list([])])),
+        (
+            "---\nk:\n  m: |+\n    a\n  # c\n\n  o: 1\nn: 1\n---\n",
+            map([("z", Value::Int(9))]),
+        ),
+        (
+            "---\nk: |+\n    a\n\n  # c\n\nn: 1\n---\n",
+            map([("z", Value::Int(9))]),
+        ),
+    ] {
+        assert_eq!(
+            set(source, "k", &value),
+            comment_lost("k"),
+            "for {source:?}"
+        );
+    }
+}
+
 /// **A `#` that is content is not a comment**: inside a quoted scalar, on a
 /// block scalar's content line, or with no space before it. A whole-entry
 /// rewrite over it lands.
