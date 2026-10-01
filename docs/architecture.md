@@ -2495,23 +2495,33 @@ cascade, and a folder move left in a resolved plan, are `request/plan-invalid`.
 **A document move plans its cascade.** Planning composes the plan without any cascade
 first, and once every operation acts asks the store's resolution door, through the overlay
 and probes the change set itself reads, which links resolve before the plan to exactly a
-document a move carries away and after it not to exactly the file the move lands it at.
+document a move carries away and after it not to exactly the file the move lands it at —
+the one rule the change set records and advises by too. What is compared is the document,
+not the path: a path the plan vacates and refills — a move's source another move or a
+create fills again — is overlaid as holding another document, so a link naming the one
+that left is found there and follows it, though its path still resolves.
 Each is respelled in its own style to the shortest spelling of that file its syntax and
 protocol write — for a bare wikilink the shortest suffix naming it alone, at least two
-segments where the link was path-qualified, its extension kept only where it was written
-with one; for a `vault://` wikilink its root path; for a Markdown link its path from the
+segments where the link was path-qualified; for a `vault://` wikilink its root path; each
+written with the document extension exactly where the link was, never in the other style;
+for a Markdown link its path from the
 holder's folder, or from the root where the link was written from the root, in the link's
 own escaping — each candidate probed through the same door from the holder where it stands
 after the plan, and the first that reads back as that file written. A moved document's
-own relative links are read from where it stood and respelled toward the same files, or
-where the plan carries them, attachments included. A link ambiguous before the plan is
+own relative links are read from where it stood and, where a spelling no longer reaches
+the same file from where the document lands, respelled toward it, or where the plan
+carries it, attachments included. A link ambiguous before the plan is
 never rewritten, and a move keeping its document's stem, or a relative link between two
 documents one folder move carries together, needs no rewrite. Each rewrite rides the move
-landing the document it names, at its holder's after-state path, and composes after every
+landing the document it names — a moved document's own relative links ride that
+document's own move — at its holder's after-state path, and composes after every
 operation on the holder's final bytes through `norn-text`'s link rewriter — the bytes
-planning read it from — so a cascade's holder is a file its move touches: the two stand or
-fall together, and a holder an operation that does not resolve touches takes the move down
-with it. The forecast says of a link a move's cascade did not follow why it stayed — the
+planning read it from — every rewrite naming one holder in one batch over one parse, so no
+rewrite respells a link another wrote, whichever move carries which. A cascade's holder is
+a file its move touches: the two stand or fall together, and a holder an operation that
+does not resolve touches takes the move down with it, while a move that falls takes down
+only what shares a file its own kind names, since its cascade falls with it. The forecast
+says of a link a move's cascade did not follow why it stayed — the
 text layer's reason, unrepresentable where no spelling read back, or ambiguous — in place of
 what its resolution alone would say; the link keeps its entry. The applier recomposes a
 plan's cascades and never generates one: a backlink another writer adds after planning is
@@ -2530,13 +2540,16 @@ in a target the plan landed reads the same two vaults. A document the plan write
 from the bytes planning composed, and a moved document's links from where it stood before
 the plan, so a relative link a move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target
-whose presence the plan changes, and each distinct key a chunk of links holds is resolved
+whose presence the plan changes or whose document it replaces, and each distinct key a
+chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
 with one limit link health's head statement carries too: a head is read past every member
 of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
 plan that changes no document's presence and writes no link records nothing and reads no
-snapshot. The forecast advises on the links the set leaves broken, makes ambiguous or
+snapshot. A link a move's cascade leaves naming a path the plan vacates and refills is an
+entry too, naming that path on both sides, since the document there is not the one it
+named. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment
 that comes to resolve to no document is recorded and not advised broken. The applier computes the set again, from the resolved plan alone and the job's
 snapshot after its intake, and refuses on any difference: an entry the plan records that
