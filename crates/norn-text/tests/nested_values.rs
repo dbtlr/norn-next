@@ -365,6 +365,35 @@ fn a_comment_ended_by_a_unicode_line_break_refuses_a_whole_entry_rewrite() {
     }
 }
 
+/// **A `#` with nothing after it is judged too**: one ending a value's text
+/// is content, and a whole-entry rewrite over it lands; one alone is a
+/// comment, and a rewrite that would drop it refuses.
+#[test]
+fn a_bare_hash_is_a_comment_only_where_the_reader_reads_one() {
+    let value = map([("x", Value::Int(1))]);
+    for source in [
+        "---\nk: C#\nn: 1\n---\n",
+        "---\nk:\n  - C#\nn: 1\n---\n",
+        "---\nk: \"a #\n  b\"\nn: 1\n---\n",
+    ] {
+        assert_eq!(
+            set(source, "k", &value),
+            Ok("---\nk:\n  x: 1\nn: 1\n---\n".to_string()),
+            "for {source:?}"
+        );
+    }
+    for source in [
+        "---\nk: [a] #\nn: 1\n---\n",
+        "---\nk:\n  a: 1\n  #\n  b: 2\nn: 1\n---\n",
+    ] {
+        assert_eq!(
+            set(source, "k", &value),
+            comment_lost("k"),
+            "for {source:?}"
+        );
+    }
+}
+
 /// **A `#` that is content is not a comment**: inside a quoted scalar, on a
 /// block scalar's content line, or with no space before it. A whole-entry
 /// rewrite over it lands.
