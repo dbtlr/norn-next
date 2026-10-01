@@ -7,8 +7,8 @@
 //! text layer, as the host derives them.
 
 use norn_store::{
-    ContentModel, LinkChange, LinkFact, PathOverlay, ProbedLink, Provenance, ResolutionStatement,
-    ResolutionWork, Snapshot, Store, StoredPathOrder, TargetNaming,
+    ContentModel, LinkChange, LinkFact, PathOverlay, PlanSide, ProbedLink, Provenance,
+    ResolutionStatement, ResolutionWork, Snapshot, Store, StoredPathOrder, TargetNaming,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -362,6 +362,133 @@ fn a_document_replaced_at_its_path_reaches_the_links_naming_it() {
     });
 }
 
+// ---- links a plan reaches without changing what they name ----
+
+/// **A document a plan reaches hands back every link naming it, however
+/// spelled**, though nothing changes there: a bare, a path-qualified, an
+/// extended and a `vault://` wikilink, and a Markdown link, each naming
+/// `notes/a.md` alike on both sides. A link naming another document is not
+/// reached.
+#[test]
+fn a_document_a_plan_reaches_hands_back_every_link_naming_it() {
+    both_orders("resolution-reached-document", |mut vault| {
+        vault.write(&[
+            ("notes/a.md", "alpha\n"),
+            ("b.md", "beta\n"),
+            (
+                "h.md",
+                "[[a]] [[notes/a]] [[a.md]] [[vault://notes/a]] [t](notes/a.md) [[b]]\n",
+            ),
+        ]);
+        let reaching = PathOverlay::new().reaching(path("notes/a.md"));
+        let (mut reached, _) = vault.judge(&reaching, &[]);
+        reached.sort();
+        let named = "one:notes/a.md";
+        assert_eq!(
+            reached,
+            [
+                judged("h.md", "a", named, named),
+                judged("h.md", "a.md", named, named),
+                judged("h.md", "notes/a", named, named),
+                judged("h.md", "notes/a.md", named, named),
+                judged("h.md", "vault://notes/a", named, named),
+            ]
+        );
+    });
+}
+
+/// **An ambiguous link a reached document could answer names it among the
+/// documents it could name before the plan**, as it names a target the plan
+/// moves, so a caller can tell it could name the reached document; nothing
+/// moved under it.
+#[test]
+fn an_ambiguous_link_names_the_reached_document_it_could_name() {
+    both_orders("resolution-reached-ambiguous", |mut vault| {
+        vault.write(&[
+            ("x/a.md", "alpha\n"),
+            ("y/a.md", "alpha\n"),
+            ("h.md", "[[a]]\n"),
+        ]);
+        let reaching = PathOverlay::new().reaching(path("x/a.md"));
+        let snapshot = vault.snapshot();
+        let mut named = Vec::new();
+        snapshot
+            .resolution_changes(&reaching, &[], &declared(), |change| {
+                named.push((
+                    read(&change),
+                    change.members_moved,
+                    change
+                        .before_targets
+                        .iter()
+                        .map(|target| target.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                ));
+            })
+            .expect("a judgment");
+        assert_eq!(
+            named,
+            [(
+                judged("h.md", "a", "several", "several"),
+                false,
+                vec!["x/a.md".to_string()]
+            )]
+        );
+    });
+}
+
+/// **The links filed under an address's folded keys are reached in either
+/// case, on either root**: `[[Old Note]]`, `[[old note]]` and `[[OLD
+/// NOTE.md]]` are filed under the key `Old Note` folds to, broken alike,
+/// while a path-qualified `[[sub/Old Note]]` and `[[Other]]` are filed
+/// elsewhere. [`norn_store::filed_under`] says which a link is.
+#[test]
+fn the_links_filed_under_an_address_are_reached_in_either_case() {
+    both_orders("resolution-filed-under", |mut vault| {
+        vault.write(&[(
+            "h.md",
+            "[[Old Note]] [[old note]] [[OLD NOTE.md]] [[sub/Old Note]] [[Other]]\n",
+        )]);
+        let reaching = PathOverlay::new().reaching_filed_under("Old Note");
+        let (mut reached, _) = vault.judge(&reaching, &[]);
+        reached.sort();
+        assert_eq!(
+            reached,
+            [
+                judged("h.md", "OLD NOTE.md", "none", "none"),
+                judged("h.md", "Old Note", "none", "none"),
+                judged("h.md", "old note", "none", "none"),
+            ]
+        );
+        for (body, filed) in [
+            ("[[Old Note]]", true),
+            ("[[old note]]", true),
+            ("[[OLD NOTE.md]]", true),
+            ("[[sub/Old Note]]", false),
+            ("[[Other]]", false),
+            ("[t](Old%20Note.md)", false),
+        ] {
+            assert_eq!(
+                norn_store::filed_under(&link(body), "Old Note"),
+                filed,
+                "{body}"
+            );
+        }
+    });
+}
+
+/// **A link reached two ways is handed back once**: `[[a]]` is held under a
+/// key the plan's create changes and filed under the address the plan
+/// reaches.
+#[test]
+fn a_link_reached_by_a_change_and_by_its_address_is_judged_once() {
+    both_orders("resolution-reached-twice", |mut vault| {
+        vault.write(&[("h.md", "[[a]]\n")]);
+        let plan = overlay(&["a.md"], &[]).reaching_filed_under("A");
+        let (reached, _) = vault.judge(&plan, &[]);
+        assert_eq!(reached, [judged("h.md", "a", "none", "one:a.md")]);
+    });
+}
+
 // ---- robustness ----
 
 /// **A plan's own progress never changes what it records.** Once the store
@@ -532,11 +659,22 @@ fn a_declaration_the_snapshot_does_not_pin_is_refused() {
 // ---- a target named over a plan ----
 
 /// What `address` names over the plan `overlay` on `vault`, as the door reads
-/// it.
+/// it, headed where it names several after the plan.
 fn named(vault: &Vault, overlay: &PathOverlay, address: &str) -> TargetNaming {
+    named_headed(vault, overlay, address, PlanSide::After)
+}
+
+/// What `address` names over the plan `overlay` on `vault`, headed where it
+/// names several on the side `headed`.
+fn named_headed(
+    vault: &Vault,
+    overlay: &PathOverlay,
+    address: &str,
+    headed: PlanSide,
+) -> TargetNaming {
     vault
         .snapshot()
-        .target_naming(overlay, address, &declared())
+        .target_naming(overlay, address, headed, &declared())
         .unwrap_or_else(|refusal| panic!("{:?}: naming `{address}`: {refusal}", vault.order))
         .0
 }
@@ -670,6 +808,28 @@ fn a_target_naming_several_after_a_plan_is_headed_as_the_store_built_there_reads
             }
         }
     }
+}
+
+/// **A target naming several documents before a plan is headed there when
+/// asked**, as the store standing before the plan reads it: the plan
+/// removing `y/a.md` leaves `a` naming one document after it, so a head of
+/// the after-state is never read, while the head before it is the stored
+/// one's.
+#[test]
+fn a_target_naming_several_before_a_plan_is_headed_as_the_store_reads_it_then() {
+    both_orders("target-naming-head-before", |mut vault| {
+        vault.write(&[("x/a.md", "a\n"), ("y/a.md", "a\n"), ("b.md", "b\n")]);
+        let plan = overlay(&[], &["y/a.md"]);
+        let (before, candidates) = read_naming(&vault, "a");
+        assert_eq!(
+            named_headed(&vault, &plan, "a", PlanSide::Before),
+            TargetNaming::new(before, Resolves::one(wire("x/a.md")), candidates)
+        );
+        assert_eq!(
+            named(&vault, &plan, "a"),
+            TargetNaming::new(Resolves::several(), Resolves::one(wire("x/a.md")), None)
+        );
+    });
 }
 
 // ---- the store's own reads as the oracle ----
@@ -890,7 +1050,7 @@ fn trial(order: StoredPathOrder, seed: u64) -> Result<usize, String> {
     for address in TARGETS {
         let (naming, _) = was
             .snapshot()
-            .target_naming(&overlay, address, &declared())
+            .target_naming(&overlay, address, PlanSide::After, &declared())
             .map_err(|refusal| format!("the door refused to name `{address}`: {refusal}"))?;
         let read = (read_naming(&was, address).0, read_naming(&is, address));
         if (&naming.before, (&naming.after, &naming.candidates))

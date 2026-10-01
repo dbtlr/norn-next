@@ -57,7 +57,8 @@ use std::sync::Arc;
 
 use norn_fs::WatchError;
 use norn_store::{
-    ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot, TargetNaming,
+    ContentModel, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink, Snapshot,
+    TargetNaming,
 };
 use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, EditParams, ErrorDetail,
@@ -413,12 +414,17 @@ impl LinkIndex for PlanSnapshot<'_> {
         Ok(())
     }
 
-    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, PageRefused> {
+    fn target(
+        &self,
+        overlay: &PathOverlay,
+        address: &str,
+        headed: PlanSide,
+    ) -> Result<TargetNaming, PageRefused> {
         let (naming, work) = self
             .reading(|snapshot| {
                 let before = snapshot.counters();
                 snapshot
-                    .target_naming(overlay, address, self.declared)
+                    .target_naming(overlay, address, headed, self.declared)
                     .map(|(naming, work)| {
                         (
                             naming,

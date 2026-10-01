@@ -77,7 +77,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{LinkChange, PathOverlay, ProbedLink, TargetNaming};
+use norn_store::{LinkChange, PathOverlay, PlanSide, ProbedLink, TargetNaming};
 use norn_text::RewriteSkip;
 use norn_wire::{
     DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
@@ -108,8 +108,13 @@ pub(crate) trait LinkIndex {
 
     /// What the suffix address `address` names on each side of the plan
     /// `overlay` describes, read as a wikilink written with it is, with the
-    /// head of what it names after where that is several.
-    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, Self::Error>;
+    /// head of what it names on the side `headed` where that is several.
+    fn target(
+        &self,
+        overlay: &PathOverlay,
+        address: &str,
+        headed: PlanSide,
+    ) -> Result<TargetNaming, Self::Error>;
 
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
@@ -491,7 +496,10 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
     let mut targets = BTreeMap::new();
     for removal in lineage.removals() {
         if let Some(address) = &removal.rewrite_to {
-            targets.insert(removal.position, index.target(overlay, address)?);
+            targets.insert(
+                removal.position,
+                index.target(overlay, address, PlanSide::After)?,
+            );
         }
     }
     Ok(targets)
@@ -785,6 +793,7 @@ pub(crate) mod testing {
             &self,
             _: &norn_store::PathOverlay,
             address: &str,
+            _: norn_store::PlanSide,
         ) -> Result<norn_store::TargetNaming, E> {
             panic!("a plan that rewrites no link to a target named `{address}`")
         }
@@ -865,10 +874,11 @@ pub(crate) mod testing {
             &self,
             overlay: &norn_store::PathOverlay,
             address: &str,
+            headed: norn_store::PlanSide,
         ) -> Result<norn_store::TargetNaming, E> {
             self.0
                 .index()
-                .target(overlay, address)
+                .target(overlay, address, headed)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
         }
     }
