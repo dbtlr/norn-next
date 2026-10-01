@@ -2493,7 +2493,8 @@ once through link health's own head statement, cut at two rows past the targets 
 name: the work is the links the plan reaches plus the candidates they resolve against. A
 plan that changes no document's presence and writes no link records nothing and reads no
 snapshot. The forecast advises on the links the set leaves broken, makes ambiguous or
-retargets. The applier computes the set again, from the resolved plan alone and the job's
+retargets, each side judged by link health's own verdict rule, so a link to an attachment
+that comes to resolve to no document is recorded and not advised broken. The applier computes the set again, from the resolved plan alone and the job's
 snapshot after its intake, and refuses on any difference: an entry the plan records that
 the set does not hold as recorded is a failed condition, and an entry the set holds that
 the plan does not record is an unrecorded one; the fresh plan records the set as it stands.

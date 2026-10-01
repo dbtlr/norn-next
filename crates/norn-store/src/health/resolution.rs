@@ -64,14 +64,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::Resolves;
+use norn_wire::{LinkAddressKind, Resolves};
 
 use super::run::{OnSnapshot, ResolutionStatement, Runner};
 use super::{Held, Key, LINK_HEALTH_CHUNK, Pages, occupied_keys, statement};
 use crate::error::StoreError;
 use crate::facts::{LinkFact, StoredPathOrder};
 use crate::fields::ContentModel;
-use crate::link::{keys_naming, link_keys};
+use crate::link::{address_kind, keys_naming, link_keys};
 use crate::path::{DocumentPath, SuffixKey};
 use crate::read::{Lookups, PageRefusal, wire_path};
 use crate::request::unreadable;
@@ -147,6 +147,10 @@ pub struct LinkChange {
     pub holder: DocumentPath,
     /// The link as the after-state holds it.
     pub link: LinkFact,
+    /// How the link's address stands to judging it, as the store holds
+    /// beside every link: what a resolution to no document means for its
+    /// health ([`norn_wire::LinkHealth::of_address`]).
+    pub address: LinkAddressKind,
     /// What it resolves to from its before-holder, with every target at its
     /// before-state, in the vocabulary a plan records it in.
     pub before: Resolves,
@@ -217,6 +221,7 @@ impl Snapshot {
 struct Judged {
     holder: DocumentPath,
     link: LinkFact,
+    address: LinkAddressKind,
     before: Vec<Key>,
     after: Vec<Key>,
     written: bool,
@@ -301,6 +306,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             chunk.push(Judged {
                 holder: probe.after_holder.clone(),
                 link: probe.link.clone(),
+                address: address_kind(&probe.link),
                 before,
                 after,
                 written: probe.written,
@@ -353,6 +359,7 @@ impl<'a, R: Runner> Judging<'a, R> {
         Ok(Some(Judged {
             holder,
             link: held.link.fact,
+            address: held.link.address,
             before: held.keys.clone(),
             after: held.keys,
             written: false,
@@ -410,6 +417,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             each(LinkChange {
                 holder: judged.holder,
                 link: judged.link,
+                address: judged.address,
                 before,
                 after,
                 written: judged.written,

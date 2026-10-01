@@ -1871,6 +1871,27 @@ fn a_move_records_the_links_it_breaks_and_applies() {
     assert_eq!(fixture.read("archive/a.md").as_deref(), Some("[y](c.md)\n"));
 }
 
+/// **The forecast advises as link health judges.** `[[v1.2]]` names an
+/// attachment by its extension, and link health judges such a link only
+/// where it resolves to a document, so a delete that leaves it resolving to
+/// none records the entry and advises nothing.
+#[test]
+fn a_delete_leaving_an_attachment_address_unresolved_records_it_and_advises_nothing() {
+    let mut fixture = Fixture::new(&[("v1.2.md", "version\n"), ("b.md", "[[v1.2]]\n")]);
+    let resolution = fixture.resolution(vec![deleting("v1.2.md")]);
+    assert_eq!(
+        resolution.plan.conditions,
+        vec![link_entry(
+            "b.md",
+            "v1.2",
+            norn_wire::Resolves::one(path("v1.2.md")),
+            norn_wire::Resolves::none(),
+        )]
+    );
+    assert_eq!(resolution.forecast.links, vec![]);
+    applied(fixture.apply(resolution.plan));
+}
+
 /// **A create records the broken links it mends, and applies.**
 #[test]
 fn a_create_records_the_links_it_mends_and_applies() {

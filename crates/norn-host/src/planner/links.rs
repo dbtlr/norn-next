@@ -45,8 +45,8 @@ use std::path::Path;
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkChange, PathOverlay, ProbedLink};
 use norn_wire::{
-    DocumentPath, FileState, LinkAdvisory, LinkFamily, LinkKey, Operation, OperationKind,
-    PlanCondition, Resolves, Transition,
+    DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
+    Operation, OperationKind, PlanCondition, Resolves, Transition,
 };
 
 use super::lineage::Lineage;
@@ -183,6 +183,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             ))
             .or_insert_with(|| Judged {
                 key,
+                address: change.address,
                 before: change.before,
                 after: change.after,
                 written: false,
@@ -211,6 +212,7 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 /// One link the change set judged, keyed as the plan leaves it.
 struct Judged {
     key: LinkKey,
+    address: LinkAddressKind,
     before: Resolves,
     after: Resolves,
     written: bool,
@@ -218,26 +220,39 @@ struct Judged {
 }
 
 impl Judged {
-    /// What the forecast says about the link, where it says anything: a link
-    /// that resolved and resolves to none after is left broken; one that did
-    /// not resolve to several and does after is made ambiguous; and an
-    /// ambiguous link the plan does not write is retargeted where it resolves
-    /// to one document after, or to several whose members the plan moved —
-    /// the last having no entry, since several on both sides is no change the
-    /// set records.
+    /// What the forecast says about the link, where it says anything, each
+    /// side read as link health judges it ([`LinkHealth::of_address`]): a
+    /// link healthy or ambiguous before and broken after is left broken; one
+    /// ambiguous after and not before is made ambiguous; and an ambiguous
+    /// link the plan does not write is retargeted where it is healthy after,
+    /// or ambiguous after with members the plan moved — the last having no
+    /// entry, since several on both sides is no change the set records. A
+    /// side link health does not judge — an attachment's address resolving
+    /// to no document — is never broken, so a link going there is recorded
+    /// and not advised on.
     fn advisory(&self) -> Option<LinkAdvisory> {
+        let health = |resolves: &Resolves| {
+            let targets = match resolves {
+                Resolves::None {} => 0,
+                Resolves::One { .. } => 1,
+                Resolves::Several {} => 2,
+            };
+            LinkHealth::of_address(self.address, targets)
+        };
         let key = self.key.clone();
-        match (&self.before, &self.after) {
-            (Resolves::One { .. } | Resolves::Several {}, Resolves::None {}) => {
+        match (health(&self.before), health(&self.after)) {
+            (LinkHealth::Healthy | LinkHealth::Ambiguous, LinkHealth::Broken) => {
                 Some(LinkAdvisory::left_broken(key))
             }
-            (Resolves::None {} | Resolves::One { .. }, Resolves::Several {}) => {
+            (before, LinkHealth::Ambiguous) if !matches!(before, LinkHealth::Ambiguous) => {
                 Some(LinkAdvisory::made_ambiguous(key))
             }
-            (Resolves::Several {}, Resolves::One { .. }) if !self.written => {
+            (LinkHealth::Ambiguous, LinkHealth::Healthy) if !self.written => {
                 Some(LinkAdvisory::retargeted(key))
             }
-            (Resolves::Several {}, Resolves::Several {}) if !self.written && self.members_moved => {
+            (LinkHealth::Ambiguous, LinkHealth::Ambiguous)
+                if !self.written && self.members_moved =>
+            {
                 Some(LinkAdvisory::retargeted(key))
             }
             _ => None,
@@ -456,8 +471,8 @@ mod tests {
 
     use norn_fs::{CaseSensitivity, PathNormalizer};
     use norn_wire::{
-        AuthoredPlan, DocumentPath, LinkAdvisory, LinkFamily, LinkKey, Operation, OperationKind,
-        PlanCondition, Resolves, RootIdentity,
+        AuthoredPlan, DocumentPath, LinkAddressKind, LinkAdvisory, LinkFamily, LinkKey, Operation,
+        OperationKind, PlanCondition, Resolves, RootIdentity,
     };
 
     use super::testing::{EmptyStore, Untouched, vault};
@@ -602,6 +617,34 @@ mod tests {
         );
     }
 
+    /// **A link to an attachment is advised on as link health judges it**:
+    /// resolving to no document it is not judged at all, so going there from
+    /// one document leaves nothing broken, while going from none to several
+    /// makes it ambiguous.
+    #[test]
+    fn an_attachment_address_resolving_to_nothing_is_never_left_broken() {
+        let judged = |before: Resolves, after: Resolves| {
+            Judged {
+                key: key("b.md", "v1.2"),
+                address: LinkAddressKind::Attachment,
+                before,
+                after,
+                written: false,
+                members_moved: true,
+            }
+            .advisory()
+        };
+        assert_eq!(
+            judged(Resolves::one(path("v1.2.md")), Resolves::none()),
+            None
+        );
+        assert_eq!(judged(Resolves::several(), Resolves::none()), None);
+        assert_eq!(
+            judged(Resolves::none(), Resolves::several()),
+            Some(LinkAdvisory::made_ambiguous(key("b.md", "v1.2")))
+        );
+    }
+
     /// **The forecast advises on what a caller should look at.** A link that
     /// resolved and resolves to none is left broken; one that did not resolve
     /// to several and does is made ambiguous; an ambiguous link the plan does
@@ -613,6 +656,7 @@ mod tests {
         let judged = |before: Resolves, after: Resolves, written: bool, members_moved: bool| {
             Judged {
                 key: key("b.md", "a"),
+                address: LinkAddressKind::Document,
                 before,
                 after,
                 written,
