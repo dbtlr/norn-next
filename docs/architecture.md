@@ -1780,9 +1780,10 @@ checkpoint mode would trade that guarantee away), and may trail in-flight deriva
 Concurrent reads serialize against each other on the one reader per entry. The one exception
 is an apply job that matches a `where` target or reads its plan's links: it reads on a read
 handle the store mints for the job alone — its own connection, never the entry's reader — so
-no read waits behind it and it waits behind no read. The job holds that handle inside the
-entry's claim through planning, the applier's check, staging and publication, and gives it back
-just before the apply's changeset commits. No store write lands while it is held: the job
+no read waits behind it and it waits behind no read. The job mints that handle inside the
+entry's claim the first time it reads the store, holds it from there through planning, the
+applier's check, staging and publication, and gives it back just before the apply's changeset
+commits. No store write lands while it is held: the job
 holds the claim, its store is the one writer, and the changeset is the job's first write after
 its intake. So the snapshot pins the write-ahead log across the apply's own file work and never
 across a commit, a pin inside the price
@@ -2565,13 +2566,15 @@ bound by the applier's lifecycle tests.
   reconcile turn does, exactly the facts delivered by then, and it takes in none after that
   until its changeset commits. It then takes the request's one snapshot and plans its operations,
   or checks its resolved plan's states and conditions, against it and the files. That
-  snapshot is the job's one read handle. Planning mints it the first time a `where` target
-  is matched or the plan's resolution change set reads the link index, and hands it to the
-  applier; a resolved plan sent back plans nothing, so the job mints it just before the
-  applier's check where the plan changes some document's presence or rewrites a link — the
-  one predicate the change set's own answer-without-reading path reads — and a plan doing
-  neither mints none. Planning matches and records the set on it, the applier computes the
-  set again on it, and it is given back before the changeset commits. No commit
+  snapshot is the job's one read handle, minted the first time anything the job does asks
+  for it: planning matching a `where` target or reading the link index for the plan's
+  resolution change set, the applier's check reading it again — a resolved plan sent back
+  plans nothing, so its check is the first to ask — or the fresh plan a refusal resolves,
+  which reads the links the vault as it stands now makes it reach. A change set reads the
+  index only where the plan changes some document's presence or rewrites a link, so a job
+  none of whose plans does either, and which matches no `where` target, mints none. Planning
+  matches and records the set on it, the applier computes the set again on it, and it is
+  given back before the changeset commits. No commit
   lands in the registration's store between that snapshot and the apply's changeset, so the
   changeset builds on exactly the state the apply read. From planning to its changeset the
   entry stays `Ready`, since it has derived every fact it has taken in and an in-flight write

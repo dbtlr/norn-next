@@ -164,10 +164,11 @@ pub struct EvidenceReading {
     /// Statements the apply jobs' reader mints ran against a database, inside
     /// the entry's claim and outside its gate.
     ///
-    /// An apply whose plan carries a `where` target mints a read handle of
-    /// its own to match it on, and that mint reads the database as a leg's
-    /// does. **A mint that refused counts what it ran before it refused**; an
-    /// apply with no `where` target mints nothing and adds nothing.
+    /// An apply that matches a `where` target or reads the links its plan
+    /// reaches mints a read handle of its own to read them on, and that mint
+    /// reads the database as a leg's does. **A mint that refused counts what
+    /// it ran before it refused**; an apply that reads neither mints nothing
+    /// and adds nothing.
     pub apply_mint_statements: u64,
 }
 

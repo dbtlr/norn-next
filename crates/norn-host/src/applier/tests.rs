@@ -204,7 +204,7 @@ impl Fixture {
             publishing: &|| true,
             links: &links.index(),
         };
-        applier.apply(plan, &mut self.store)
+        applier.apply(plan, &std::cell::RefCell::new(&mut self.store))
     }
 
     /// Every document row and finding the store holds, with the generations
@@ -1674,7 +1674,7 @@ impl Fixture {
             publishing: &|| true,
             links: &links.index(),
         };
-        applier.apply(plan, &mut self.store)
+        applier.apply(plan, &std::cell::RefCell::new(&mut self.store))
     }
 
     /// The content hash the store holds for `at`, where it holds a row.
@@ -2407,7 +2407,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         publishing: &|| false,
         links: &links.index(),
     };
-    let outcome = applier.apply(plan.clone(), &mut fixture.store);
+    let outcome = applier.apply(plan.clone(), &std::cell::RefCell::new(&mut fixture.store));
     match outcome {
         ApplyOutcome::StoodDown => {}
         other => panic!("the apply answered {other:?}"),
