@@ -13,6 +13,16 @@
 //! sent back writes exactly the path and the bytes it was previewed with,
 //! however the clock or the vault has moved since.
 //!
+//! **Re-planning never renumbers.** A resolved plan the applier refuses
+//! answers a fresh plan of its operations, and those are the concrete
+//! creates, never the rule, so the fresh plan cannot allocate again: a
+//! caller that wants a new number re-sends its operations, which plan anew.
+//! A resolved plan re-sent writes the path it was previewed with, which may
+//! be a number freed after the preview — the resolved plan takes precedence
+//! over what allocating now would give. Two writers landing identical bytes
+//! at one name land one document: the second finds its create already
+//! landed and is reported found, not wrote.
+//!
 //! **The rules are the schema the plan is judged under**: the entry's pinned
 //! schema, the one its plan ground carries and the applier's schema check
 //! judges a composed result by ([`Rules`]). A rule name the schema does not
@@ -44,7 +54,8 @@
 //! capture is exactly the caller's fields and body. The document is written
 //! through `norn-text`'s one renderer, its frontmatter block with LF line
 //! endings and its body exactly as sent — a body's own breaks, CRLF
-//! included, and an unterminated last line are kept. One holding no field is
+//! included, and an unterminated last line are kept, so a CRLF body sits
+//! under an LF block as sent. One holding no field is
 //! its body alone, with no empty frontmatter block, unless the reader would
 //! take the body's first line as opening a block (`norn-text`'s own fence
 //! rule, a byte-order mark and any line break included): that body is set
@@ -68,9 +79,20 @@
 //! folds case, `TASK-8.md` counts for `task-`. A number past what the
 //! allocator can count leaves the operation unresolved naming the file
 //! rather than numbering below it. A folder that does not stand yet numbers
-//! from 1. Allocation is a reading, not a reservation: a name another writer
-//! takes before the plan lands is a taken name the applier refuses, as any
-//! create's is, and the caller plans again.
+//! from 1. A directory at a matching name counts as a file does: it
+//! occupies the name. The folder is listed once per slot for a plan, and its
+//! listing is folded into a running highest number as it streams, never
+//! collected. Allocation is a reading, not a reservation: a name another
+//! writer takes before the plan lands is a taken name the applier refuses,
+//! as any create's is, and the caller plans again.
+//!
+//! **Known limits.** On a root that folds case, a rule whose target folder is
+//! spelled in another case than the vault lists it never creates: its names
+//! are counted, but the create is put at the target's spelling, which the
+//! planner does not respell, and is left unresolved naming the spelling the
+//! vault lists. A name in another Unicode normalization than the target's is
+//! not counted — the one normalization point folds ASCII case only — so a
+//! number it holds may be allocated again.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -804,6 +826,29 @@ inbox:
         assert_eq!(
             landed_at(&planned(&telling, vec![task()])),
             "tasks/NORN-1.md"
+        );
+    }
+
+    /// **A known limit: on a root that folds case, a target folder spelled
+    /// in another case than the vault lists never creates.** Its names are
+    /// counted, but the create is put at the target's spelling, which the
+    /// planner does not respell, so it is left unresolved naming the spelling
+    /// the vault lists.
+    #[test]
+    fn a_target_folder_in_another_case_never_creates_on_a_folding_root() {
+        let cased = schema(b"version: 1\ninbox:\n  target: \"Tasks/{{seq}}.md\"\n");
+        let vault = MemoryVault::with(&[("tasks/1.md", "1\n")]).folding_case();
+        let resolution = planned_reading(
+            &vault,
+            &cased,
+            vec![by_rule(None, &[], ValueMap::default(), Some("x\n"))],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        let detail = left_in_words(&resolution);
+        assert!(
+            detail.contains("`Tasks/2.md` is spelled `tasks/2.md` in the vault"),
+            "{detail}"
         );
     }
 

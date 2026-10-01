@@ -2444,7 +2444,13 @@ none) with the variables, frontmatter fields and body it takes. Planning expands
 ordering and at its place in the plan, as a folder move expands, into one `create_document`
 keeping its identifier, requirements and conditions, so a resolved plan carries only the
 concrete create and every template value is fixed at planning: a resolved plan sent again
-writes the path and bytes it was previewed with, however the clock has moved. The rules are
+writes the path and bytes it was previewed with, however the clock has moved. **Re-planning
+never renumbers**: a refused resolved plan's fresh plan carries the concrete create, never the
+rule, so it cannot allocate again — a caller that wants a new number re-sends its operations —
+and a re-sent resolved plan writes the previewed path even where that number was freed after
+the preview, the resolved plan taking precedence over what allocating now would give. Two
+writers landing identical bytes at one name land one document, the second reported found, not
+wrote. The rules are
 the pinned schema's, the declaration the plan ground carries and the applier's schema check
 judges the result under. The host's clock is read once per plan, only for a plan that creates
 by rule, and every template of the plan fills from that reading. The text is the rule's
@@ -2452,13 +2458,23 @@ frontmatter defaults, each string scalar filled and every type and order kept, w
 caller's typed fields laid over them — an overriding field keeping the default's place, a new
 one following in the caller's order, none filled as a template — then the caller's body, else
 the rule's body template filled, else nothing; the inbox has no defaults and no body template.
-It is written through `norn-text`'s one renderer with LF line endings, and a document with no
-field is its body alone. `{{seq}}` is one past the highest number already used in its slot —
+It is written through `norn-text`'s one renderer, the frontmatter block with LF line endings
+and the body exactly as sent — its own breaks, CRLF included, and an unterminated last line
+kept. A document with no field is its body alone, unless the reader would take the body's
+first line as opening a frontmatter block (`norn-text`'s own fence rule): that body is set
+under an empty block, so it reads back as no field and the body as sent. `{{seq}}` is one past
+the highest number already used in its slot —
 the folder and the file-name text around the number, every other token filled — read from the
 names that folder lists, the same files vacancy reads and never the index, and from every name
 the plan itself puts a document at, so two creations on one slot in one plan take consecutive
 numbers and a name the plan removes still holds its number; names are compared under the
-root's case rule, and a gap is never filled. Allocation is a reading, not a reservation: a
+root's case rule, a directory at a matching name counts because it occupies the name, and a
+gap is never filled. Each slot's folder is listed once for a plan and folded into a running
+highest number as the listing streams, never collected (invariant 1). Two limits stand: on a
+root that folds case, a rule whose target folder is spelled in another case than the vault
+lists never creates, left unresolved naming the listed spelling; and a name in another Unicode
+normalization than the target's is not counted, so a number it holds may be allocated again.
+Allocation is a reading, not a reservation: a
 name another writer took before the plan lands is drift or a taken name, refused as any
 create's is, and the caller plans again. An unknown rule, a capture where no inbox is
 declared, a declared variable missing or an undeclared one supplied, a value that would break
