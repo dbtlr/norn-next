@@ -48,10 +48,16 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         | OperationKind::DeleteSection { path, .. }
         | OperationKind::InsertBeforeHeading { path, .. }
         | OperationKind::InsertAfterHeading { path, .. } => return Some(Ok(path)),
+        // NORN-297: a `rewrite_link` edits one document where it stands, but
+        // its composition through `norn-text`'s link rewriter is not wired
+        // yet, so it is not read here as a document-local edit.
         OperationKind::CreateDocument { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
-        | OperationKind::DeleteDocument { .. } => return None,
+        | OperationKind::DeleteDocument { .. }
+        | OperationKind::MoveFolder { .. }
+        | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteWikilink { .. } => return None,
     };
     Some(match target {
         WriteTarget::Path(path) => Ok(path),
@@ -147,7 +153,10 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         OperationKind::CreateDocument { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
-        | OperationKind::DeleteDocument { .. } => {
+        | OperationKind::DeleteDocument { .. }
+        | OperationKind::MoveFolder { .. }
+        | OperationKind::RewriteLink { .. }
+        | OperationKind::RewriteWikilink { .. } => {
             unreachable!("only a document-local kind is edited here")
         }
     };

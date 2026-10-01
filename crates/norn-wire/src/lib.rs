@@ -88,7 +88,7 @@
 //! raises, and the [`VaultStatus`] that holds all of them — with the [`RollUp`]
 //! those statuses add up to and the [`Attention`] it names them for.
 //!
-//! The four write verbs are spelled the same way, and all four answer
+//! The seven write verbs are spelled the same way, and all seven answer
 //! [`ApplyReport`]. `apply` carries [`ApplyParams`] — an [`ApplyMode`] and a
 //! [`PlanDocument`]. A plan
 //! document is an [`AuthoredPlan`] of [`Operation`]s, each an
@@ -97,17 +97,28 @@
 //! [`ExpectedField`] a frontmatter field held — or a [`ResolvedPlan`]: the
 //! [`RootIdentity`] it was resolved against, one [`Transition`] per file
 //! between two [`FileState`]s, each absent or a [`ContentHash`], the
-//! [`PlanCondition`]s its planning read, and the [`Provenance`] a repair plan
-//! cites, with the [`SkippedFinding`]s it left alone. Either plan carries
-//! whether it is forced past the schema check. A frontmatter kind names its
-//! documents by a [`WriteTarget`] and writes an [`AuthoredValue`] — a
-//! [`FiniteFloat`] or a [`ValueMap`] among its shapes. The document-local
-//! verbs each compile to an authored plan: `set` from [`SetParams`] of
-//! [`FieldChange`]s, `edit` from [`EditParams`] of [`DocumentEdit`]s, and
-//! `new` from [`NewParams`]. A preview answers with
+//! [`PlanCondition`]s its planning read — a file's content, or what one link,
+//! named by its [`LinkKey`], [`Resolves`] to before the plan and after it —
+//! and the [`Provenance`] a repair plan cites, with the [`SkippedFinding`]s
+//! it left alone. In a resolved plan an operation that moves, removes or
+//! retargets documents carries its link cascade, one [`LinkRewrite`] per
+//! document, syntax and address among the links it changes, and a delete
+//! says what becomes of the links naming its document as its [`Backlinks`].
+//! Either plan carries whether it is
+//! forced past the schema check. A frontmatter kind names its documents by a
+//! [`WriteTarget`] and writes an [`AuthoredValue`] — a [`FiniteFloat`] or a
+//! [`ValueMap`] among its shapes. The other write verbs each compile to an
+//! authored plan: `set` from [`SetParams`] of [`FieldChange`]s, `edit` from
+//! [`EditParams`] of [`DocumentEdit`]s, `new` from [`NewParams`], `move` from
+//! [`MoveParams`] of a [`MoveSubject`] — a document or a folder, read from
+//! the source, or the [`IllegalMove`] two ends name — `delete` from
+//! [`DeleteParams`], and `rewrite_wikilink` from [`RewriteWikilinkParams`].
+//! A preview answers with
 //! the resolved plan and a [`Forecast`] of what the plan does not carry — the
-//! targets that drifted, the [`FolderPath`]s a plan makes and removes, and
-//! each [`SchemaViolation`] a force lets through; an
+//! targets that drifted, the [`FolderPath`]s a plan makes and removes, each
+//! [`SchemaViolation`] a force lets through, a [`LinkAdvisory`] for each link
+//! a caller should look at, and the [`FilePath`] of each file a folder move
+//! leaves behind; an
 //! applied plan with its [`ChangesetOutcome`], the
 //! [`TargetResult`] of each [`AppliedTarget`] and what it forced. An apply
 //! that ends any other
@@ -167,6 +178,13 @@
 //!   keys among those fields, exactly one of them written, so the target is
 //!   written by hand on both sides too, and [`SetParams`], which holds a
 //!   target among its own keys, is read the way an operation is.
+//!   A delete's [`Backlinks`] is likewise at most one of two keys among the
+//!   fields that name the delete, so it is written by hand, and
+//!   [`DeleteParams`] reads its two keys the way an operation does.
+//!   [`MoveParams`] reads its two ends together, as text, before deciding
+//!   which grammar reads them, and a cascade's [`LinkRewrite`] holds its two
+//!   addresses to the rule a `rewrite_link` operation's are held to, so each
+//!   is read by the derive into a private shape first.
 //!   [`Cursor`] and [`PlanDocument`] are written by
 //!   hand on both sides: a cursor's wire shape is one opaque string rather
 //!   than the fields a derive would emit, and a document is written as the
@@ -185,13 +203,19 @@
 //!   written by hand where a derive would advertise a shape the reader does
 //!   not accept. These types do: the grammars [`VaultName`], [`VaultRoot`],
 //!   [`SchemaSource`], [`Directory`], [`DocumentPath`], [`FolderPath`],
-//!   [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
+//!   [`FilePath`], [`ResolutionTarget`], [`ContentHash`], [`RootIdentity`] and
 //!   [`OperationId`] advertise the pattern or floor their constructors
 //!   hold; [`Operation`] advertises its kind's own branches with its optional
 //!   parts added inside each, since each branch refuses a key it does not
 //!   name; [`WriteTarget`] advertises its two keys with exactly one required,
 //!   and [`OperationKind`] and [`SetParams`] keep the derive but settle
 //!   the target flattened into them as an object whose keys are all its own;
+//!   [`Backlinks`] advertises its two keys and states as a `not` the pair its
+//!   reader refuses, and [`OperationKind`] and [`DeleteParams`] settle it the
+//!   same way; a wikilink rewrite's ends and a delete's `rewrite_to` advertise
+//!   a target with no `#`, since each names a whole document;
+//!   [`MoveParams`] advertises the private shape it is read through, its two
+//!   ends the paths they are written as;
 //!   [`AuthoredValue`] and [`ValueMap`] are a tree of plain values, stating in
 //!   words the finiteness and single keys JSON Schema cannot;
 //!   [`FiniteFloat`] is a number;
@@ -337,21 +361,25 @@
 //! params types, on [`DoctorRegistryParams`], and on each of their reports;
 //! [`ContentHash::from_sha256`], [`ContentHash::new`],
 //! [`RootIdentity::from_device_and_inode`], [`OperationId::new`],
-//! [`FolderPath::new`], the constructor on each [`RefusedCheck`],
-//! [`UnresolvedReason`], [`InterruptionCause`], [`PlanFault`] and
-//! [`ApplyReport`] variant, [`ApplyReport::with_forced`], [`Forecast::new`],
-//! [`Forecast::with_forced`], [`SchemaViolation::new`],
-//! [`UnresolvedOperation::new`], [`AppliedTarget::new`],
-//! [`ApplyParams::new`], the `new` on [`SetParams`], [`EditParams`]
-//! and [`NewParams`], and the constructor on each [`FieldChange`] and
-//! [`DocumentEdit`] variant. The plan types the applier destructures, below,
-//! can be written as literals and keep their constructors all the same:
-//! [`Operation::new`], the constructor on each [`OperationKind`],
-//! [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`], [`FileState`],
-//! [`WriteTarget`] and [`PlanDocument`] variant, [`AuthoredValue::string`],
+//! [`FolderPath::new`], [`FilePath::new`], the constructor on each
+//! [`RefusedCheck`], [`UnresolvedReason`], [`InterruptionCause`],
+//! [`PlanFault`], [`LinkAdvisory`] and [`ApplyReport`] variant,
+//! [`ApplyReport::with_forced`], [`Forecast::new`], [`Forecast::with_forced`],
+//! [`Forecast::with_links`], [`Forecast::with_left_behind`],
+//! [`SchemaViolation::new`], [`UnresolvedOperation::new`],
+//! [`AppliedTarget::new`], [`ApplyParams::new`], the `new` on [`SetParams`],
+//! [`EditParams`], [`NewParams`], [`MoveParams`], [`DeleteParams`] and
+//! [`RewriteWikilinkParams`], [`MoveSubject::new`], and the constructor on
+//! each [`FieldChange`], [`DocumentEdit`] and [`MoveSubject`] variant. The
+//! plan types the applier destructures, below, can be written as literals and
+//! keep their constructors all the same: [`Operation::new`], the constructor
+//! on each [`OperationKind`], [`AuthorCondition`], [`ExpectedField`],
+//! [`PlanCondition`], [`Resolves`], [`FileState`], [`WriteTarget`] and
+//! [`PlanDocument`] variant, [`AuthoredValue::string`],
 //! [`AuthoredValue::float`], [`AuthoredValue::list`], [`AuthoredValue::map`],
-//! [`Transition::new`], [`SkippedFinding::new`], [`Provenance::new`],
-//! [`AuthoredPlan::new`] and [`ResolvedPlan::new`].
+//! [`LinkRewrite::new`], [`LinkKey::new`], [`Transition::new`],
+//! [`SkippedFinding::new`], [`Provenance::new`], [`AuthoredPlan::new`] and
+//! [`ResolvedPlan::new`].
 //!
 //! **A closed vocabulary whose every reader must decide what a new member
 //! means is plain rather than `#[non_exhaustive]`.** The two rules answer two
@@ -360,14 +388,14 @@
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
 //! [`FindingScope`], [`RungSelection`], [`ApplyMode`], [`PlanDocument`],
-//! [`OperationKind`], [`WriteTarget`], [`AuthoredValue`], [`FileState`],
-//! [`AuthorCondition`], [`ExpectedField`] and [`PlanCondition`]
-//! are the twelve members of that class: a section composes with an engine's
+//! [`OperationKind`], [`WriteTarget`], [`Backlinks`], [`AuthoredValue`],
+//! [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
+//! and [`Resolves`] are the fourteen members of that class: a section composes with an engine's
 //! own refusal to say what a client should do, a scope decides whether a
 //! finding is withheld from a document row, a selection is resolved to the
 //! ladder a search runs, and the one applier must decide what every mode,
-//! plan document, operation kind, target, written value, file state and
-//! condition means — whether a
+//! plan document, operation kind, target, delete's links, written value,
+//! file state, condition and link resolution means — whether a
 //! request writes, how a document is planned, how a kind resolves into
 //! transitions, which documents it writes and what it writes there, how a
 //! state is verified, how a condition is checked — since a
@@ -382,10 +410,11 @@
 //! composer.
 //!
 //! **What the one applier interprets is exhaustively destructurable.** The
-//! payload variants of [`OperationKind`], [`WriteTarget`], [`AuthoredValue`],
-//! [`FileState`], [`AuthorCondition`], [`ExpectedField`]
-//! and [`PlanCondition`], and the structs [`Operation`], [`Transition`],
-//! [`ResolvedPlan`], [`AuthoredPlan`], [`Provenance`] and [`SkippedFinding`],
+//! payload variants of [`OperationKind`], [`WriteTarget`], [`Backlinks`],
+//! [`AuthoredValue`], [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
+//! and [`Resolves`], and the structs [`Operation`], [`LinkRewrite`],
+//! [`LinkKey`], [`Transition`], [`ResolvedPlan`], [`AuthoredPlan`],
+//! [`Provenance`] and [`SkippedFinding`],
 //! carry no `#[non_exhaustive]` and hold only public fields; a plan's `plan`
 //! tag is a public zero-sized marker, [`OperationsTag`] or [`ResolvedTag`]. The
 //! one applier decides what every field of a plan means, so a field added to
@@ -415,7 +444,8 @@
 //! set and subtracts from one as a request that does only one of them.
 //!
 //! **A plan refuses a field it does not know, at every depth.** The plan
-//! documents, their operations, each kind's fields, their conditions, their
+//! documents, their operations, each kind's fields, their cascades, their
+//! conditions and the link keys and resolutions inside them, their
 //! transitions and file states, and a plan's provenance all refuse an unknown
 //! key, where every answer drops one. The divergence follows the direction a
 //! plan flows: an answer flows out to a caller, where a dropped field loses a
@@ -426,9 +456,12 @@
 //! previews again under the build it is talking to. An answer that carries a
 //! plan — a report, or a refusal's fresh plan — still drops a field it does
 //! not know at its own level, and the plan inside it still refuses one. The
-//! document-local write requests — [`SetParams`], [`EditParams`] and
-//! [`NewParams`], with their changes and edits — refuse one too, since each
-//! becomes a plan and a field dropped from it would be dropped from the plan.
+//! write requests — [`SetParams`], [`EditParams`], [`NewParams`],
+//! [`MoveParams`], [`DeleteParams`] and [`RewriteWikilinkParams`], with their
+//! changes and edits — refuse one too, since each becomes a plan and a field
+//! dropped from it would be dropped from the plan. A [`LinkKey`] inside a
+//! forecast's [`LinkAdvisory`] refuses one as well: it is the key a plan's
+//! condition holds a link under, read as the plan reads it.
 //!
 //! # The code grammar, and what is not a code
 //!
@@ -558,14 +591,16 @@ pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, Unkno
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::backlinks::Backlinks;
 pub use plan::document::{
-    AuthoredPlan, FileState, OperationsTag, PlanCondition, PlanDocument, Provenance, ResolvedPlan,
-    ResolvedTag, SkippedFinding, Transition,
+    AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
+    ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,
 };
-pub use plan::forecast::{FolderPath, Forecast};
+pub use plan::forecast::{FilePath, FolderPath, Forecast, LinkAdvisory};
 pub use plan::hash::{ContentHash, IllegalContentHash};
 pub use plan::operation::{
-    AuthorCondition, ExpectedField, IllegalOperationId, Operation, OperationId, OperationKind,
+    AuthorCondition, ExpectedField, IllegalOperationId, LinkRewrite, Operation, OperationId,
+    OperationKind,
 };
 pub use plan::outcome::{
     InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
@@ -609,6 +644,9 @@ pub use vault::unregister::{UnregisterParams, UnregisterReport};
 pub use verb::{
     Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
 };
+pub use write::delete::DeleteParams;
 pub use write::edit::{DocumentEdit, EditParams};
+pub use write::moves::{IllegalMove, MoveParams, MoveSubject};
 pub use write::new::NewParams;
+pub use write::rewrite_wikilink::RewriteWikilinkParams;
 pub use write::set::{FieldChange, SetParams};

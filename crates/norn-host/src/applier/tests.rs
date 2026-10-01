@@ -1120,6 +1120,103 @@ fn a_resolved_plan_carrying_a_where_target_is_invalid() {
     );
 }
 
+/// **A resolved plan carrying a folder move, or a cascade on a kind that
+/// does not cascade, is invalid.** Planning expands a folder move into
+/// document moves and writes a cascade only on a move, a delete or a
+/// wikilink rewrite, so either plan was not made by planning: it answers
+/// `request/plan-invalid` naming the operation, and nothing is published.
+#[test]
+fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
+    let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+    let cascade = vec![norn_wire::LinkRewrite::new(
+        path("b.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "a",
+        "c",
+    )];
+    for (extra, fault) in [
+        (
+            Operation::new(norn_wire::OperationKind::move_folder(
+                folder("notes"),
+                folder("archive"),
+            )),
+            norn_wire::PlanFault::unexpanded_target(vec![1]),
+        ),
+        (
+            editing("a.md", "final", "done").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
+        let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+        plan.operations.push(extra);
+        let envelope = fixture
+            .apply(plan)
+            .into_wire()
+            .expect("a refusal is answered")
+            .expect_err("the plan is refused");
+        assert_eq!(envelope.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
+        assert_eq!(
+            envelope.detail(),
+            &norn_wire::ErrorDetail::plan_invalid(fault)
+        );
+        assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+        assert!(
+            fixture.recorded.calls.borrow().is_empty(),
+            "no write recorded"
+        );
+    }
+}
+
+/// **An operation that does not act refuses the plan even where it touches
+/// no file.** A wikilink rewrite names its documents only through its
+/// cascade, and is not planned yet (NORN-297), so a resolved plan carrying
+/// one — beside an edit or alone, with a cascade or without — is
+/// `request/plan-invalid` naming the files its cascade names, and never
+/// applied with the rewrite silently dropped.
+#[test]
+fn a_resolved_plan_carrying_a_wikilink_rewrite_is_invalid_rather_than_dropped() {
+    let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
+    let rewrite = || {
+        Operation::new(norn_wire::OperationKind::rewrite_wikilink(
+            target("x"),
+            target("y"),
+        ))
+    };
+    let cascade = vec![norn_wire::LinkRewrite::new(
+        path("b.md"),
+        norn_wire::LinkFamily::Wikilink,
+        "x",
+        "y",
+    )];
+    for (label, alone, operation, named) in [
+        ("beside an edit, no cascade", false, rewrite(), vec![]),
+        (
+            "beside an edit, with its cascade",
+            false,
+            rewrite().with_cascade(cascade.clone()),
+            vec![path("b.md")],
+        ),
+        (
+            "alone, with its cascade",
+            true,
+            rewrite().with_cascade(cascade.clone()),
+            vec![path("b.md")],
+        ),
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[x]]\n")]);
+        let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+        if alone {
+            plan.operations.clear();
+            plan.transitions.clear();
+        }
+        plan.operations.push(operation);
+        assert_eq!(fixture.refuses_disagreeing(plan), named, "{label}");
+        assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"), "{label}");
+        assert_eq!(fixture.read("b.md").as_deref(), Some("[[x]]\n"), "{label}");
+    }
+}
+
 /// A removal no operation makes, added to a plan, is refused.
 #[test]
 fn an_extra_removal_no_operation_makes_is_refused() {
@@ -1614,6 +1711,29 @@ fn a_plan_condition_another_writer_broke_refuses() {
         vec![norn_wire::RefusedCheck::condition_failed(
             norn_wire::PlanCondition::content_hash(path("b.md"), seen)
         )]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+}
+
+/// **A link-resolution entry the applier cannot yet check refuses the plan
+/// (NORN-297).** Until the resolution change set is computed again at apply,
+/// an entry is never read as holding: the plan is refused naming it, and
+/// nothing is published.
+#[test]
+fn a_link_resolution_entry_refuses_until_it_is_checked() {
+    let mut fixture = Fixture::new(&[("a.md", "draft\n"), ("b.md", "[[a]]\n")]);
+    let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+    let entry = norn_wire::PlanCondition::link_resolution(
+        norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a"),
+        norn_wire::Resolves::one(path("a.md")),
+        norn_wire::Resolves::one(path("a.md")),
+    );
+    plan.conditions.push(entry.clone());
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![norn_wire::RefusedCheck::condition_failed(entry)]
     );
     assert_eq!(fixture.read("a.md").as_deref(), Some("draft\n"));
     assert!(fixture.recorded.calls.borrow().is_empty());

@@ -9,7 +9,8 @@
 //! a plan this build cannot read is refused rather than migrated.
 //!
 //! **Three kinds of fact, three places.** An author's condition sits on an
-//! operation; the conditions a resolved plan carries are [`PlanCondition`]s,
+//! operation; the conditions a resolved plan carries are [`PlanCondition`]s —
+//! a file's content, or one entry of the plan's resolution change set —
 //! checked when it is applied; and [`Provenance`] records what a plan was
 //! planned from and is never checked. Keeping them three types means a
 //! condition cannot be mistaken for provenance, and an author's condition
@@ -26,10 +27,18 @@
 //!
 //! **A resolved plan names its documents by path.** Planning expands a
 //! frontmatter kind's `where` target into one operation per matched document,
-//! so a resolved plan still carrying one is a fault in its shape, named by
+//! and a folder move into one document move per document the folder holds, so
+//! a resolved plan still carrying either is a fault in its shape, named by
 //! [`ResolvedPlan::unexpanded_targets`] and answered `request/plan-invalid`.
 //! It is judged rather than refused at the read, so it answers with that code
 //! and the operations it names.
+//!
+//! **Planning writes a cascade; an author does not.** A resolved plan's
+//! document move, document removal and wikilink rewrite carry the link
+//! rewrites their planning generated, so a cascade on an authored operation,
+//! or on any other kind, is a fault in the plan's shape — judged, as an
+//! unexpanded target is, by [`AuthoredPlan::misplaced_cascades`] and
+//! [`ResolvedPlan::misplaced_cascades`].
 //!
 //! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
 //! the finding generation they read and the findings they skipped. No Layer 4
@@ -69,9 +78,9 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 use crate::address::VaultAddress;
-use crate::document::DocumentPath;
+use crate::document::{DocumentPath, LinkFamily};
 use crate::plan::hash::ContentHash;
-use crate::plan::operation::{Operation, written};
+use crate::plan::operation::{Operation, OperationKind, written};
 use crate::plan::outcome::PlanFault;
 use crate::plan::root::RootIdentity;
 use crate::plan::write_target::WriteTarget;
@@ -130,11 +139,107 @@ impl Transition {
     }
 }
 
-/// A fact about a file the plan does not write, which must still hold when the
-/// plan is applied.
+/// One link, as a plan names it: the document holding it, its syntax and its
+/// address — what decides which documents it resolves to.
+///
+/// **A key names a link as it stands at the plan's after-state.** A link a
+/// cascade rewrites is keyed by its new address, not the one it is written
+/// with before the plan. A link the after-state no longer holds — an old
+/// address a rewrite replaced, a link in a removed document — has no key: its
+/// disappearance is the plan's own transition, guarded by that file's hashes.
+///
+/// On the wire a key is one object:
+/// `{"holder":"notes/c.md","syntax":"wikilink","address":"vault://notes/a"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkKey {
+    /// The document holding the link.
+    pub holder: DocumentPath,
+    /// The syntax the link is written in.
+    pub syntax: LinkFamily,
+    /// The link's address, exactly as written, its protocol prefix included:
+    /// `vault://notes/a` for a link written with the `vault` protocol, and
+    /// `notes/a` for one written with none. An anchor-only link, `[[#h]]`,
+    /// has the empty address, and resolves to its holder wherever that
+    /// stands.
+    pub address: String,
+}
+
+impl LinkKey {
+    /// The link of `syntax` in the document at `holder`, written with
+    /// `address`.
+    pub fn new(holder: DocumentPath, syntax: LinkFamily, address: impl Into<String>) -> Self {
+        LinkKey {
+            holder,
+            syntax,
+            address: address.into(),
+        }
+    }
+}
+
+/// What one link resolves to: exactly one document, none, or several.
+///
+/// On the wire a resolution is an object tagged `resolves`:
+/// `{"resolves":"one","path":"notes/a.md"}`, `{"resolves":"none"}`,
+/// `{"resolves":"several"}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "resolves", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Resolves {
+    /// The link resolves to exactly this document.
+    One {
+        /// The document it resolves to.
+        path: DocumentPath,
+    },
+    /// The link resolves to no document: it is broken.
+    None {},
+    /// The link resolves to more than one document: it is ambiguous.
+    Several {},
+}
+
+impl Resolves {
+    /// The link resolves to the document at `path`.
+    pub const fn one(path: DocumentPath) -> Self {
+        Resolves::One { path }
+    }
+
+    /// The link resolves to no document.
+    pub const fn none() -> Self {
+        Resolves::None {}
+    }
+
+    /// The link resolves to more than one document.
+    pub const fn several() -> Self {
+        Resolves::Several {}
+    }
+}
+
+/// A fact a resolved plan depends on, which must still hold when it is
+/// applied.
+///
+/// **Two kinds of fact.** A content hash is a fact about a file the plan does
+/// not write. A link resolution is one entry of the plan's resolution change
+/// set: how one link resolves with every target of the plan at its
+/// before-state, and with every target at its after-state, so a plan's own
+/// progress never changes it. Its link may sit in a file the plan writes — a
+/// link a cascade rewrites has an entry — so it is not a fact about a file
+/// the plan leaves alone.
+///
+/// **An entry is keyed at the after-state.** Its key names the link
+/// as the plan leaves it: a rewritten link by its new address, its `before`
+/// being what that key resolved to from its holder before the plan. A link
+/// the after-state does not hold — an old address a rewrite replaced, a link
+/// in a removed document — is no entry: its disappearance is the plan's own
+/// transition, which that file's hashes guard.
+///
+/// **The change set is exact.** It holds one entry for every link whose
+/// resolution the plan changes, and no other, so the applier computes it
+/// again and refuses on any difference: an entry the plan records that the
+/// set computed again does not hold, and an entry the set computed again
+/// holds that the plan does not record.
 ///
 /// On the wire a condition is an object tagged `condition`:
-/// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`.
+/// `{"condition":"content_hash","path":"notes/c.md","hash":"sha256:…"}`,
+/// `{"condition":"link_resolution","link":{…},"before":{"resolves":"one","path":"a.md"},"after":{"resolves":"none"}}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "condition", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanCondition {
@@ -145,12 +250,33 @@ pub enum PlanCondition {
         /// The hash of what it must hold.
         hash: ContentHash,
     },
+    /// One link resolves as recorded before the plan, and as recorded after
+    /// it: one entry of the plan's resolution change set, keyed by the link
+    /// as it stands at the plan's after-state.
+    LinkResolution {
+        /// The link, as it stands at the plan's after-state.
+        link: LinkKey,
+        /// What its key resolves to from its holder with every target at its
+        /// before-state.
+        before: Resolves,
+        /// What it resolves to with every target at its after-state.
+        after: Resolves,
+    },
 }
 
 impl PlanCondition {
     /// The file at `path` holds the bytes whose hash is `hash`.
     pub const fn content_hash(path: DocumentPath, hash: ContentHash) -> Self {
         PlanCondition::ContentHash { path, hash }
+    }
+
+    /// `link` resolves to `before` before the plan and to `after` after it.
+    pub const fn link_resolution(link: LinkKey, before: Resolves, after: Resolves) -> Self {
+        PlanCondition::LinkResolution {
+            link,
+            before,
+            after,
+        }
     }
 }
 
@@ -335,6 +461,23 @@ impl AuthoredPlan {
             .collect();
         (!positions.is_empty()).then(|| PlanFault::where_target_ordered(positions))
     }
+
+    /// The fault of a plan whose operations carry a link cascade, naming each
+    /// such operation by its position; `None` where none does.
+    ///
+    /// **A cascade is planning's to write**: it is read off the links the
+    /// vault holds when the plan is resolved, so an authored one would either
+    /// repeat what planning finds or claim a rewrite no link calls for.
+    pub fn misplaced_cascades(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| !operation.cascade.is_empty())
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
+    }
 }
 
 /// A plan resolved against what the vault held: its operations, one transition
@@ -410,17 +553,36 @@ impl ResolvedPlan {
     }
 
     /// The fault of a resolved plan whose operations still carry a `where`
-    /// target, naming each such operation by its position; `None` where
-    /// every target is a path, as planning makes them.
+    /// target or move a folder, naming each such operation by its position;
+    /// `None` where every operation names its documents by path, as planning
+    /// makes them.
     pub fn unexpanded_targets(&self) -> Option<PlanFault> {
         let positions: Vec<usize> = self
             .operations
             .iter()
             .enumerate()
-            .filter(|(_, operation)| matches!(operation.kind.target(), Some(WriteTarget::Where(_))))
+            .filter(|(_, operation)| {
+                matches!(operation.kind.target(), Some(WriteTarget::Where(_)))
+                    || matches!(operation.kind, OperationKind::MoveFolder { .. })
+            })
             .map(|(position, _)| position)
             .collect();
         (!positions.is_empty()).then(|| PlanFault::unexpanded_target(positions))
+    }
+
+    /// The fault of a resolved plan whose operations carry a link cascade on
+    /// a kind that does not cascade, naming each such operation by its
+    /// position; `None` where only a document move, a document removal or a
+    /// wikilink rewrite carries one.
+    pub fn misplaced_cascades(&self) -> Option<PlanFault> {
+        let positions: Vec<usize> = self
+            .operations
+            .iter()
+            .enumerate()
+            .filter(|(_, operation)| !operation.cascade.is_empty() && !operation.kind.cascades())
+            .map(|(position, _)| position)
+            .collect();
+        (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
     }
 
     /// The plan carrying `footnote`.
@@ -513,9 +675,10 @@ struct DocumentFields {
     footnote: Option<String>,
 }
 
-/// Whether a flag is left out of a plan's bytes: `false`, which is what its
-/// absence reads as. serde hands the field by reference.
-const fn is_false(flag: &bool) -> bool {
+/// Whether a flag is left out of a plan's or a write request's bytes:
+/// `false`, which is what its absence reads as. serde hands the field by
+/// reference.
+pub(crate) const fn is_false(flag: &bool) -> bool {
     !*flag
 }
 

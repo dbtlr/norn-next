@@ -538,11 +538,7 @@ impl<'a> LinkAddress<'a> {
         else {
             return false;
         };
-        let leaf = address.rsplit(SEPARATOR).next().unwrap_or(address);
-        match leaf.rfind('.') {
-            Some(dot) if dot > 0 => !leaf[dot + 1..].eq_ignore_ascii_case(DOCUMENT_EXTENSION),
-            _ => false,
-        }
+        leaf_extension(address).is_some_and(|extension| !is_document_extension(extension))
     }
 
     /// How the address stands to judging the link: the one classification a
@@ -591,6 +587,24 @@ impl LinkAddressKind {
     }
 }
 
+/// The extension the last segment of `path` carries: what follows the last
+/// dot inside that segment. A dot leading the segment starts a name rather
+/// than an extension, so `.md` carries none. The one reading of a leaf's
+/// extension that a link's address and a `move` request's ends are judged
+/// by.
+pub(crate) fn leaf_extension(path: &str) -> Option<&str> {
+    let leaf = path.rsplit(SEPARATOR).next().unwrap_or(path);
+    match leaf.rfind('.') {
+        Some(dot) if dot > 0 => Some(&leaf[dot + 1..]),
+        _ => None,
+    }
+}
+
+/// Whether `extension` is [`DOCUMENT_EXTENSION`], in any ASCII case.
+pub(crate) fn is_document_extension(extension: &str) -> bool {
+    extension.eq_ignore_ascii_case(DOCUMENT_EXTENSION)
+}
+
 /// `target` with its query — from the first `?` — cut off.
 fn without_query(target: &str) -> &str {
     target.split_once('?').map_or(target, |(path, _)| path)
@@ -610,6 +624,24 @@ fn opens_with_a_scheme(target: &str) -> bool {
         && characters.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.')
         })
+}
+
+/// The protocol `address` is written under, or `None`: a lowercase RFC 3986
+/// scheme, then `://`, then a stem that is not empty — the narrow
+/// recognition the text layer reads a link's protocol by, so `HTTPS://x`
+/// and `note:draft` are addresses with no protocol.
+pub(crate) fn written_protocol(address: &str) -> Option<&str> {
+    let (scheme, stem) = address.split_once("://")?;
+    let mut characters = scheme.chars();
+    let is_scheme = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '+' | '-' | '.')
+        });
+    (is_scheme && !stem.is_empty()).then_some(scheme)
 }
 
 /// What resolving a link's target found.

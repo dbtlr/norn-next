@@ -37,6 +37,64 @@
 //! absent is `set_frontmatter` under an expected-value condition of absent,
 //! and appending is `push_frontmatter`.
 //!
+//! **Three kinds carry a link cascade, and three are minted for it.** A
+//! `move_document`, a `delete_document` and a `rewrite_wikilink` change what
+//! links elsewhere in the vault resolve to. `rewrite_link` is what such a
+//! cascade expands into: in one document, every link of one syntax whose
+//! address is `from` respelled `to`, only the address changing, so an embed
+//! marker, a title and an anchor survive. An author may write it directly —
+//! Layer 5 repair does — and it names its document by path.
+//!
+//! **A link's address is its target as written, protocol prefix included.**
+//! What a link resolves to depends on the document holding it, its syntax,
+//! its protocol and its target text — `[[vault://notes/a]]` is read from the
+//! vault root and `[[notes/a]]` by suffix — so a link is keyed by its holder,
+//! its syntax and its address: the target text, prefixed with
+//! `<protocol>://` where the link is written with a protocol. A rewrite
+//! changes the target text and never the protocol.
+//! `rewrite_wikilink` is the vault-wide kind an author writes: every wikilink
+//! naming `old` respelled to name `new`. Its `old` need not name a document
+//! that stands, so a broken link is repaired by the same kind; an `old` naming
+//! several documents does not resolve. `move_folder` moves every document a
+//! folder holds, and planning expands it into one `move_document` per
+//! document, as it expands a `where` target, so a resolved plan never carries
+//! one. A `delete_document` says what becomes of the links naming its
+//! document: rewritten to name `rewrite_to`, left broken where
+//! `allow_broken_links` says so out loud, or — saying neither — forbidden, so
+//! that it does not resolve while any link names its document. Saying both is
+//! refused at the read.
+//!
+//! **A cascade travels on the operation that caused it.** In a resolved
+//! plan a `move_document`, a `delete_document` and a `rewrite_wikilink` carry
+//! the link rewrites their planning generated as their `cascade`, one per
+//! document, syntax and address among the links the operation changes, each a
+//! `rewrite_link`'s four fields. The operation and its cascade are one
+//! operation: they resolve, land and are left unresolved together. A caller
+//! authors the operation and planning writes its cascade, so a cascade on an
+//! operation of an authored plan, or on a kind that does not cascade, is a
+//! fault in the plan's shape rather than a refusal at the read.
+//!
+//! **Planning does not read backlinks yet, so the cascade is vocabulary
+//! ahead of its planner (NORN-297).** Until link cascades are planned, a
+//! plain `move_document` and a `delete_document` saying neither flag plan and
+//! land as they did before this vocabulary: with no cascade and no backlink
+//! check, so a move leaves the links naming its source as written and a
+//! delete leaves the links naming its document broken, the forecast advising
+//! on neither. Every other part of the vocabulary — a folder move, both link
+//! rewrites, a delete saying either flag, and an operation carrying a cascade
+//! — is left unresolved by the planner, naming that limit, and the applier
+//! refuses a resolved plan carrying one. Both limits close when the cascade
+//! is planned.
+//!
+//! **A resolution target here names a document, never a place inside one.**
+//! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
+//! and an anchor on any of them is refused at the read. A rewrite changes a
+//! link's target text and keeps the anchor the link was written with, so an
+//! anchor on `new` or `rewrite_to` would write a second anchor into every
+//! link already carrying one, and an anchor on `old` would ask for a narrower
+//! rewrite — only the links naming that heading or block — that no kind
+//! offers.
+//!
 //! **An expected value is the author's condition on one field.** It is
 //! checked at planning and becomes the document's before-state, as a content
 //! hash on a document the plan writes does. Its observation is tagged
@@ -50,11 +108,14 @@ use schemars::transform::transform_subschemas;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::document::DocumentPath;
+use crate::document::{DocumentPath, LinkFamily, written_protocol};
+use crate::plan::backlinks::Backlinks;
+use crate::plan::forecast::FolderPath;
 use crate::plan::hash::ContentHash;
 use crate::plan::value::AuthoredValue;
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
+use crate::target::{ResolutionTarget, whole_document_schema};
 
 /// The identifier an operation is required by: a string naming something
 /// rather than nothing.
@@ -172,10 +233,53 @@ pub enum OperationKind {
         /// operation of the same plan moves or removes what does.
         to: DocumentPath,
     },
-    /// Remove a document.
+    /// Remove a document, saying what becomes of the links naming it. Until
+    /// link cascades are planned, a delete forbidding them plans with no
+    /// backlink check, and one rewriting or breaking them does not resolve.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
+        /// What becomes of the links naming it: forbidden, rewritten to
+        /// `rewrite_to`, or left broken where `allow_broken_links` says so.
+        #[serde(flatten)]
+        backlinks: Backlinks,
+    },
+    /// Move every document a folder holds to the same place under another
+    /// folder. Planning expands it into one `move_document` per document.
+    MoveFolder {
+        /// The folder whose documents are moved.
+        from: FolderPath,
+        /// The folder they are moved to.
+        to: FolderPath,
+    },
+    /// In one document, respell every link of one syntax whose address is
+    /// `from` to `to`. Only the address changes: an embed marker, a title
+    /// and an anchor survive.
+    RewriteLink {
+        /// The document holding the links.
+        path: DocumentPath,
+        /// The syntax of the links rewritten.
+        syntax: LinkFamily,
+        /// The address a rewritten link is written with, exactly as written,
+        /// its protocol prefix included: `vault://notes/a` and `notes/a` are
+        /// two addresses. Never empty.
+        #[schemars(length(min = 1))]
+        from: String,
+        /// The address it is written with after, protocol prefix included. A
+        /// rewrite never changes a link's protocol, so a `to` whose protocol
+        /// differs from `from`'s is refused.
+        to: String,
+    },
+    /// Respell every wikilink in the vault naming one document to name
+    /// another.
+    RewriteWikilink {
+        /// What the links name now. It need not name a document that
+        /// stands, and naming several does not resolve.
+        #[schemars(schema_with = "whole_document_schema")]
+        old: ResolutionTarget,
+        /// What they name after.
+        #[schemars(schema_with = "whole_document_schema")]
+        new: ResolutionTarget,
     },
     /// Set a frontmatter field to exactly this value, adding the field where
     /// the document does not carry it.
@@ -314,9 +418,60 @@ impl OperationKind {
         OperationKind::MoveDocument { from, to }
     }
 
-    /// Remove the document at `path`.
+    /// Remove the document at `path`, which no link may name — a limit the
+    /// planner does not yet hold: until link cascades are planned, the
+    /// delete lands whatever links name the document.
     pub const fn delete_document(path: DocumentPath) -> Self {
-        OperationKind::DeleteDocument { path }
+        OperationKind::DeleteDocument {
+            path,
+            backlinks: Backlinks::Forbidden,
+        }
+    }
+
+    /// Remove the document at `path`, rewriting every link naming it to name
+    /// `rewrite_to`.
+    pub const fn delete_document_rewriting(
+        path: DocumentPath,
+        rewrite_to: ResolutionTarget,
+    ) -> Self {
+        OperationKind::DeleteDocument {
+            path,
+            backlinks: Backlinks::RewrittenTo(rewrite_to),
+        }
+    }
+
+    /// Remove the document at `path`, leaving every link naming it broken.
+    pub const fn delete_document_breaking_links(path: DocumentPath) -> Self {
+        OperationKind::DeleteDocument {
+            path,
+            backlinks: Backlinks::LeftBroken,
+        }
+    }
+
+    /// Move every document the folder `from` holds under `to`.
+    pub const fn move_folder(from: FolderPath, to: FolderPath) -> Self {
+        OperationKind::MoveFolder { from, to }
+    }
+
+    /// In the document at `path`, respell every link of `syntax` whose
+    /// address is `from` to `to`.
+    pub fn rewrite_link(
+        path: DocumentPath,
+        syntax: LinkFamily,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        OperationKind::RewriteLink {
+            path,
+            syntax,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// Respell every wikilink naming `old` to name `new`.
+    pub const fn rewrite_wikilink(old: ResolutionTarget, new: ResolutionTarget) -> Self {
+        OperationKind::RewriteWikilink { old, new }
     }
 
     /// Set `field` to `value` in the documents `target` names.
@@ -440,6 +595,33 @@ impl OperationKind {
         }
     }
 
+    /// Whether the kind changes what links elsewhere in the vault resolve
+    /// to, so that a resolved plan may carry its link cascade: a document
+    /// move, a document removal and a wikilink rewrite.
+    pub const fn cascades(&self) -> bool {
+        match self {
+            OperationKind::MoveDocument { .. }
+            | OperationKind::DeleteDocument { .. }
+            | OperationKind::RewriteWikilink { .. } => true,
+            // A folder move cascades through the document moves planning
+            // expands it into, and a link rewrite is a cascade's own unit.
+            OperationKind::MoveFolder { .. }
+            | OperationKind::RewriteLink { .. }
+            | OperationKind::CreateDocument { .. }
+            | OperationKind::StrReplace { .. }
+            | OperationKind::SetFrontmatter { .. }
+            | OperationKind::RemoveFrontmatter { .. }
+            | OperationKind::PushFrontmatter { .. }
+            | OperationKind::PopFrontmatter { .. }
+            | OperationKind::ReplaceBody { .. }
+            | OperationKind::ReplaceSection { .. }
+            | OperationKind::AppendToSection { .. }
+            | OperationKind::DeleteSection { .. }
+            | OperationKind::InsertBeforeHeading { .. }
+            | OperationKind::InsertAfterHeading { .. } => false,
+        }
+    }
+
     /// The kind's name, as the wire writes it under `kind`.
     pub const fn name(&self) -> &'static str {
         self.kind_name().as_str()
@@ -452,6 +634,9 @@ impl OperationKind {
             OperationKind::StrReplace { .. } => KindName::StrReplace,
             OperationKind::MoveDocument { .. } => KindName::MoveDocument,
             OperationKind::DeleteDocument { .. } => KindName::DeleteDocument,
+            OperationKind::MoveFolder { .. } => KindName::MoveFolder,
+            OperationKind::RewriteLink { .. } => KindName::RewriteLink,
+            OperationKind::RewriteWikilink { .. } => KindName::RewriteWikilink,
             OperationKind::SetFrontmatter { .. } => KindName::SetFrontmatter,
             OperationKind::RemoveFrontmatter { .. } => KindName::RemoveFrontmatter,
             OperationKind::PushFrontmatter { .. } => KindName::PushFrontmatter,
@@ -477,6 +662,9 @@ impl OperationKind {
             | OperationKind::StrReplace { .. }
             | OperationKind::MoveDocument { .. }
             | OperationKind::DeleteDocument { .. }
+            | OperationKind::MoveFolder { .. }
+            | OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteWikilink { .. }
             | OperationKind::ReplaceBody { .. }
             | OperationKind::ReplaceSection { .. }
             | OperationKind::AppendToSection { .. }
@@ -524,6 +712,106 @@ impl<'de> Deserialize<'de> for OperationKind {
     {
         let KindKeys { kind, fields } = KindKeys::deserialize(deserializer)?;
         fields.into_kind(kind)
+    }
+}
+
+/// One rewrite of a link cascade: in the document at `path`, every link of
+/// `syntax` whose address is `from` respelled `to`. A cascade holds one per
+/// document, syntax and address, so a document naming the moved document
+/// under two addresses carries two. It is a `rewrite_link` operation's four
+/// fields, carried in a cascading operation's `cascade`.
+///
+/// On the wire a rewrite is one object:
+/// `{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}`.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRewrite {
+    /// The document holding the links.
+    pub path: DocumentPath,
+    /// The syntax of the links rewritten.
+    pub syntax: LinkFamily,
+    /// The address a rewritten link is written with, exactly as written, its
+    /// protocol prefix included: `vault://notes/a` and `notes/a` are two
+    /// addresses. Never empty.
+    #[schemars(length(min = 1))]
+    pub from: String,
+    /// The address it is written with after, protocol prefix included. A
+    /// rewrite never changes a link's protocol, so a `to` whose protocol
+    /// differs from `from`'s is refused.
+    pub to: String,
+}
+
+impl LinkRewrite {
+    /// In the document at `path`, every link of `syntax` whose address is
+    /// `from` respelled `to`.
+    pub fn new(
+        path: DocumentPath,
+        syntax: LinkFamily,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        LinkRewrite {
+            path,
+            syntax,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+}
+
+/// Why respelling the address `from` to `to` is no link rewrite, or `None`
+/// where it is one. An empty `from` is an anchor-only link's, which names
+/// its holder wherever the holder goes, so nothing respells it; and a
+/// rewrite changes a link's address and never its protocol, so a `to`
+/// written under another protocol than `from`'s cannot be written into the
+/// link. An empty `to` and a `to` equal to `from` are rewrites.
+fn rewrite_refusal(from: &str, to: &str) -> Option<&'static str> {
+    if from.is_empty() {
+        return Some("`from` is empty, and an anchor-only link is never respelled");
+    }
+    if written_protocol(from) != written_protocol(to) {
+        return Some(
+            "`to` is written under another protocol than `from`, and a rewrite keeps a link's protocol",
+        );
+    }
+    None
+}
+
+/// A cascade's rewrite as it arrives: its four keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkRewriteKeys {
+    path: DocumentPath,
+    syntax: LinkFamily,
+    from: String,
+    to: String,
+}
+
+impl<'de> Deserialize<'de> for LinkRewrite {
+    /// The four keys are read by the derive, refusing any other and any
+    /// written twice; the two addresses are then held to the rule a
+    /// `rewrite_link` operation's are.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let LinkRewriteKeys {
+            path,
+            syntax,
+            from,
+            to,
+        } = LinkRewriteKeys::deserialize(deserializer)?;
+        if let Some(problem) = rewrite_refusal(&from, &to) {
+            return Err(D::Error::custom(format_args!(
+                "a cascade's rewrite of `{from}` to `{to}` is refused: {problem}"
+            )));
+        }
+        Ok(LinkRewrite {
+            path,
+            syntax,
+            from,
+            to,
+        })
     }
 }
 
@@ -608,8 +896,9 @@ impl ExpectedField {
 }
 
 /// One change a plan is authored in: a kind and its fields, and optionally an
-/// identifier, the operations it requires, a footnote and the conditions its
-/// author observed.
+/// identifier, the operations it requires, a footnote, the conditions its
+/// author observed and, in a resolved plan, the link cascade its planning
+/// generated.
 ///
 /// On the wire an operation is one object:
 /// `{"kind":"move_document","fields":{"from":"a.md","to":"b.md"},"id":"move-a"}`.
@@ -633,6 +922,11 @@ pub struct Operation {
     /// What the author observed and requires to hold.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<AuthorCondition>,
+    /// The link rewrites a cascading operation's planning generated, one per
+    /// document, syntax and address among the links it changes. Only a
+    /// resolved plan's move, delete or wikilink rewrite carries one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cascade: Vec<LinkRewrite>,
 }
 
 impl Operation {
@@ -644,6 +938,7 @@ impl Operation {
             requires: Vec::new(),
             footnote: None,
             conditions: Vec::new(),
+            cascade: Vec::new(),
         }
     }
 
@@ -674,6 +969,13 @@ impl Operation {
         self.conditions = conditions;
         self
     }
+
+    /// The operation carrying the link rewrites `cascade` as its cascade.
+    #[must_use]
+    pub fn with_cascade(mut self, cascade: Vec<LinkRewrite>) -> Self {
+        self.cascade = cascade;
+        self
+    }
 }
 
 /// The name under an operation's `kind`: one member per [`OperationKind`]
@@ -685,6 +987,9 @@ enum KindName {
     StrReplace,
     MoveDocument,
     DeleteDocument,
+    MoveFolder,
+    RewriteLink,
+    RewriteWikilink,
     SetFrontmatter,
     RemoveFrontmatter,
     PushFrontmatter,
@@ -705,6 +1010,9 @@ impl KindName {
             KindName::StrReplace => "str_replace",
             KindName::MoveDocument => "move_document",
             KindName::DeleteDocument => "delete_document",
+            KindName::MoveFolder => "move_folder",
+            KindName::RewriteLink => "rewrite_link",
+            KindName::RewriteWikilink => "rewrite_wikilink",
             KindName::SetFrontmatter => "set_frontmatter",
             KindName::RemoveFrontmatter => "remove_frontmatter",
             KindName::PushFrontmatter => "push_frontmatter",
@@ -720,13 +1028,16 @@ impl KindName {
 
     /// The fields the kind takes, as the wire writes them. A frontmatter
     /// kind's target is one of `path` and `where`, so it takes both keys and
-    /// the target decides which one is written.
+    /// the target decides which one is written; a delete takes its two link
+    /// keys, each of which may be left out.
     const fn takes(self) -> &'static [&'static str] {
         match self {
             KindName::CreateDocument | KindName::ReplaceBody => &["path", "content"],
             KindName::StrReplace => &["path", "old_str", "new_str"],
-            KindName::MoveDocument => &["from", "to"],
-            KindName::DeleteDocument => &["path"],
+            KindName::MoveDocument | KindName::MoveFolder => &["from", "to"],
+            KindName::DeleteDocument => &["path", "rewrite_to", "allow_broken_links"],
+            KindName::RewriteLink => &["path", "syntax", "from", "to"],
+            KindName::RewriteWikilink => &["old", "new"],
             KindName::SetFrontmatter | KindName::PushFrontmatter | KindName::PopFrontmatter => {
                 &["path", "where", "field", "value"]
             }
@@ -743,6 +1054,11 @@ impl KindName {
 /// Every field any kind names, each held as whether it was written. A key no
 /// kind names is refused here, a key written twice is refused here, and which
 /// of them the kind takes is decided once the kind is known.
+///
+/// **`from` and `to` are read as text.** A document move's ends are document
+/// paths, a folder move's folder paths and a link rewrite's target texts, so
+/// the two keys are read once as strings and each kind then reads them
+/// through its own grammar.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KindFields {
@@ -757,15 +1073,25 @@ struct KindFields {
     #[serde(default, deserialize_with = "written")]
     new_str: Option<String>,
     #[serde(default, deserialize_with = "written")]
-    from: Option<DocumentPath>,
+    from: Option<String>,
     #[serde(default, deserialize_with = "written")]
-    to: Option<DocumentPath>,
+    to: Option<String>,
     #[serde(default, deserialize_with = "written")]
     field: Option<String>,
     #[serde(default, deserialize_with = "written")]
     value: Option<AuthoredValue>,
     #[serde(default, deserialize_with = "written")]
     heading: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    syntax: Option<LinkFamily>,
+    #[serde(default, deserialize_with = "written")]
+    old: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    new: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    rewrite_to: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    allow_broken_links: Option<bool>,
 }
 
 /// A field that was written, read as its own type: `null` is a value the
@@ -788,6 +1114,38 @@ fn required<T, E: serde::de::Error>(kind: KindName, name: &str, value: Option<T>
     })
 }
 
+/// The field `name` of a `kind` operation, which the kind requires, read
+/// through the grammar `parse` keeps.
+fn required_as<T, P: fmt::Display, E: serde::de::Error>(
+    kind: KindName,
+    name: &str,
+    value: Option<String>,
+    parse: impl FnOnce(String) -> Result<T, P>,
+) -> Result<T, E> {
+    let text: String = required(kind, name, value)?;
+    parse(text).map_err(|problem| {
+        E::custom(format_args!(
+            "a `{}` operation's `{name}` is refused: {problem}",
+            kind.as_str()
+        ))
+    })
+}
+
+/// The resolution target `name` of a `kind` operation, read as the whole
+/// document it names ([`ResolutionTarget::whole_document`]).
+fn whole_document<E: serde::de::Error>(
+    kind: KindName,
+    name: &str,
+    target: ResolutionTarget,
+) -> Result<ResolutionTarget, E> {
+    target.whole_document().map_err(|problem| {
+        E::custom(format_args!(
+            "a `{}` operation's `{name}` is refused: {problem}",
+            kind.as_str()
+        ))
+    })
+}
+
 /// The target of a `kind` operation, from its two keys: exactly one of them
 /// written.
 fn target<E: serde::de::Error>(
@@ -805,7 +1163,7 @@ fn target<E: serde::de::Error>(
 
 impl KindFields {
     /// Each field any kind names, and whether it was written.
-    const fn written_names(&self) -> [(&'static str, bool); 10] {
+    const fn written_names(&self) -> [(&'static str, bool); 15] {
         [
             ("path", self.path.is_some()),
             ("where", self.predicates.is_some()),
@@ -817,6 +1175,11 @@ impl KindFields {
             ("field", self.field.is_some()),
             ("value", self.value.is_some()),
             ("heading", self.heading.is_some()),
+            ("syntax", self.syntax.is_some()),
+            ("old", self.old.is_some()),
+            ("new", self.new.is_some()),
+            ("rewrite_to", self.rewrite_to.is_some()),
+            ("allow_broken_links", self.allow_broken_links.is_some()),
         ]
     }
 
@@ -842,6 +1205,11 @@ impl KindFields {
             field,
             value,
             heading,
+            syntax,
+            old,
+            new,
+            rewrite_to,
+            allow_broken_links,
         } = self;
         Ok(match kind {
             KindName::CreateDocument => OperationKind::CreateDocument {
@@ -854,11 +1222,50 @@ impl KindFields {
                 new_str: required(kind, "new_str", new_str)?,
             },
             KindName::MoveDocument => OperationKind::MoveDocument {
-                from: required(kind, "from", from)?,
-                to: required(kind, "to", to)?,
+                from: required_as(kind, "from", from, DocumentPath::new)?,
+                to: required_as(kind, "to", to, DocumentPath::new)?,
             },
-            KindName::DeleteDocument => OperationKind::DeleteDocument {
-                path: required(kind, "path", path)?,
+            KindName::DeleteDocument => {
+                let rewrite_to = rewrite_to
+                    .map(|target| whole_document(kind, "rewrite_to", target))
+                    .transpose()?;
+                OperationKind::DeleteDocument {
+                    path: required(kind, "path", path)?,
+                    backlinks: Backlinks::from_keys(
+                        rewrite_to,
+                        allow_broken_links.unwrap_or(false),
+                    )
+                    .map_err(|problem| {
+                        E::custom(format_args!(
+                            "a `delete_document` operation's fields say what becomes of its links: {problem}"
+                        ))
+                    })?,
+                }
+            }
+            KindName::MoveFolder => OperationKind::MoveFolder {
+                from: required_as(kind, "from", from, FolderPath::new)?,
+                to: required_as(kind, "to", to, FolderPath::new)?,
+            },
+            KindName::RewriteLink => {
+                let path = required(kind, "path", path)?;
+                let syntax = required(kind, "syntax", syntax)?;
+                let from: String = required(kind, "from", from)?;
+                let to: String = required(kind, "to", to)?;
+                if let Some(problem) = rewrite_refusal(&from, &to) {
+                    return Err(E::custom(format_args!(
+                        "a `rewrite_link` operation's rewrite of `{from}` to `{to}` is refused: {problem}"
+                    )));
+                }
+                OperationKind::RewriteLink {
+                    path,
+                    syntax,
+                    from,
+                    to,
+                }
+            }
+            KindName::RewriteWikilink => OperationKind::RewriteWikilink {
+                old: whole_document(kind, "old", required(kind, "old", old)?)?,
+                new: whole_document(kind, "new", required(kind, "new", new)?)?,
             },
             KindName::SetFrontmatter => OperationKind::SetFrontmatter {
                 target: target(kind, path, predicates)?,
@@ -926,6 +1333,8 @@ struct OperationFields {
     footnote: Option<String>,
     #[serde(default)]
     conditions: Vec<AuthorCondition>,
+    #[serde(default)]
+    cascade: Vec<LinkRewrite>,
 }
 
 impl<'de> Deserialize<'de> for Operation {
@@ -944,6 +1353,7 @@ impl<'de> Deserialize<'de> for Operation {
             requires,
             footnote,
             conditions,
+            cascade,
         } = OperationFields::deserialize(deserializer)?;
         Ok(Operation {
             kind: fields.into_kind(kind)?,
@@ -951,6 +1361,7 @@ impl<'de> Deserialize<'de> for Operation {
             requires,
             footnote,
             conditions,
+            cascade,
         })
     }
 }
@@ -970,7 +1381,7 @@ impl JsonSchema for Operation {
     /// not name, so the parts are added inside it rather than beside it. Each
     /// part is advertised as the reader takes it: the identifier and the
     /// footnote admit `null`, read as absent, as a derived optional field
-    /// advertises; the two lists do not.
+    /// advertises; the three lists do not.
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let optional_parts = [
             (
@@ -993,6 +1404,11 @@ impl JsonSchema for Operation {
                 generator.subschema_for::<Vec<AuthorCondition>>(),
                 "What the author observed and requires to hold.",
             ),
+            (
+                "cascade",
+                generator.subschema_for::<Vec<LinkRewrite>>(),
+                "The link rewrites a cascading operation's planning generated, one per document, syntax and address among the links it changes. Only a resolved plan's move, delete or wikilink rewrite carries one.",
+            ),
         ];
         let mut schema = OperationKind::json_schema(generator);
         transform_subschemas(
@@ -1011,7 +1427,7 @@ impl JsonSchema for Operation {
         );
         schema.insert(
             "description".to_string(),
-            "One change a plan is authored in: a kind and its fields, and optionally an identifier, the operations it requires, a footnote and the conditions its author observed. The optional parts are left out where they are not written, and a key the operation does not name is refused."
+            "One change a plan is authored in: a kind and its fields, and optionally an identifier, the operations it requires, a footnote, the conditions its author observed and, in a resolved plan, the link cascade its planning generated. The optional parts are left out where they are not written, and a key the operation does not name is refused."
                 .into(),
         );
         schema

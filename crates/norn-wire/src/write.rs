@@ -1,13 +1,23 @@
-//! What each document-local write verb is asked for.
+//! What each write verb is asked for.
 //!
-//! **A write verb is a plan of its operations.** `set`, `edit` and `new` each
-//! carry what a person or an agent names in one request — a document or a
-//! predicate list, the changes, the conditions it observed, whether it forces
-//! — and each compiles to an [`AuthoredPlan`](crate::AuthoredPlan) by a pure
-//! method, so the host plans and applies it through the one planner and the
-//! one applier `apply` goes through, and answers with the same
+//! **A write verb is a plan of its operations.** `set`, `edit` and `new`
+//! write one document's frontmatter or text, or create one; `move`,
+//! `delete` and `rewrite_wikilink` move, remove or retarget documents and
+//! carry the link cascade that follows. Each carries what a person or an
+//! agent names in one request — a document, a folder or a predicate list,
+//! the changes, the conditions it observed, whether it forces — and each
+//! compiles to an [`AuthoredPlan`](crate::AuthoredPlan) by a pure method, so
+//! the host plans and applies it through the one planner and the one applier
+//! `apply` goes through, and answers with the same
 //! [`ApplyReport`](crate::ApplyReport). No write verb has a report or a code
 //! of its own.
+//!
+//! **`move`, `delete` and `rewrite_wikilink` are spelled ahead of their
+//! handlers (NORN-297).** Each is a registered verb with its request and its
+//! plan, but the host serves only `set`, `edit` and `new` so far, and its
+//! planner does not yet plan a link cascade: a caller sends the plan one of
+//! these requests compiles to through `apply`, and the module of each verb
+//! says what that plan does until cascades are planned.
 //!
 //! **A write states its mode, as `apply` does.** There is no default: a
 //! request naming neither `preview` nor `apply` does not read.
@@ -27,8 +37,13 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
+use crate::target::ResolutionTarget;
+
+pub(crate) mod delete;
 pub(crate) mod edit;
+pub(crate) mod moves;
 pub(crate) mod new;
+pub(crate) mod rewrite_wikilink;
 pub(crate) mod set;
 
 /// A list read with the floor of one member, refused as `what` when empty.
@@ -46,8 +61,13 @@ where
     Ok(members)
 }
 
-/// Whether a flag is left out of a request's bytes: `false`, which is what
-/// its absence reads as. serde hands the field by reference.
-const fn is_false(flag: &bool) -> bool {
-    !*flag
+/// A resolution target read as the whole document it names
+/// ([`ResolutionTarget::whole_document`]).
+fn document_target<'de, D>(deserializer: D) -> Result<ResolutionTarget, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ResolutionTarget::deserialize(deserializer)?
+        .whole_document()
+        .map_err(D::Error::custom)
 }

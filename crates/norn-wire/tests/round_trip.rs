@@ -16,32 +16,34 @@
 use norn_wire::{
     Addressing, Advisory, Anchor, AnswerAdvisory, AnswerReading, AnswerShape, AppliedTarget,
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
-    AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
-    Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey, CursorOrderChanged,
-    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
-    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
-    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FileState, FindParams, FindingKind, FindingRow,
-    FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey,
-    HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId, InterruptionCause, KindTally,
-    LadderDeclaration, LinkAddress, LinkFamily, LinkHealth, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, ModelIdentity, Moved, NameSet, NewParams, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
-    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag,
-    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer,
-    VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus,
-    Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead,
+    ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column, ComparedBy,
+    ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor, CursorKey,
+    CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory, DoctorRegistryParams,
+    DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams,
+    ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope,
+    ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath, FileState,
+    FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast,
+    Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
+    IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
+    NewParams, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
+    OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport,
+    RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams,
+    SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey,
+    Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult,
+    TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
+    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName,
+    VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase,
+    WatcherLossCause, WriteTarget,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -2471,8 +2473,8 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds fifteen verbs, and every one of them is the flat string
-/// it renders as, read back as the verb it renders.
+/// The registry holds twenty-one verbs, and every one of them is the flat
+/// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
     let strings = [
@@ -2486,6 +2488,9 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "set",
         "edit",
         "new",
+        "move",
+        "delete",
+        "rewrite_wikilink",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2495,7 +2500,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 18);
+    assert_eq!(Verb::ALL.len(), 21);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2583,17 +2588,20 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 18);
+    assert_eq!(Verb::ALL.len(), 21);
     assert_eq!(
         addressed(Addressing::Required),
         [
             "apply",
             "count",
+            "delete",
             "describe",
             "edit",
             "find",
             "get",
+            "move",
             "new",
+            "rewrite_wikilink",
             "search",
             "set",
             "validate",
@@ -6669,6 +6677,9 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
         OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
         OperationKind::delete_document(path("notes/b.md")),
+        OperationKind::move_folder(folder("notes"), folder("archive/notes")),
+        OperationKind::rewrite_link(path("notes/c.md"), LinkFamily::Wikilink, "a", "archive/a"),
+        OperationKind::rewrite_wikilink(target("a"), target("archive/a")),
         OperationKind::set_frontmatter(
             WriteTarget::path(path("notes/a.md")),
             "status",
@@ -6708,12 +6719,27 @@ fn author_conditions() -> Vec<AuthorCondition> {
     ]
 }
 
-/// Every condition a resolved plan carries.
+/// The link `[[a]]` in `notes/c.md`.
+fn a_link_key() -> LinkKey {
+    LinkKey::new(path("notes/c.md"), LinkFamily::Wikilink, "a")
+}
+
+/// Every condition a resolved plan carries: a file's content, and an entry of
+/// the resolution change set over every resolution on each side.
 fn plan_conditions() -> Vec<PlanCondition> {
-    vec![PlanCondition::content_hash(
-        path("notes/c.md"),
-        content_hash(0xcd),
-    )]
+    vec![
+        PlanCondition::content_hash(path("notes/c.md"), content_hash(0xcd)),
+        PlanCondition::link_resolution(
+            a_link_key(),
+            Resolves::one(path("notes/a.md")),
+            Resolves::none(),
+        ),
+        PlanCondition::link_resolution(
+            LinkKey::new(path("notes/d.md"), LinkFamily::Markdown, "vault://notes/a"),
+            Resolves::several(),
+            Resolves::one(path("archive/a.md")),
+        ),
+    ]
 }
 
 /// Every state a side of a transition holds.
@@ -6721,10 +6747,32 @@ fn file_states() -> Vec<FileState> {
     vec![FileState::absent(), FileState::present(content_hash(0x01))]
 }
 
-/// Every kind bare, and one operation carrying every optional part.
+/// The link cascade a move of `notes/a.md` to `archive/a.md` carries: one
+/// rewrite per document holding a link to it.
+fn a_cascade() -> Vec<LinkRewrite> {
+    vec![
+        LinkRewrite::new(path("notes/c.md"), LinkFamily::Wikilink, "a", "archive/a"),
+        LinkRewrite::new(
+            path("notes/d.md"),
+            LinkFamily::Markdown,
+            "a.md",
+            "../archive/a.md",
+        ),
+    ]
+}
+
+/// Every kind bare, a move carrying its cascade, and one operation carrying
+/// every part an author writes.
 fn operations() -> Vec<Operation> {
     let mut operations: Vec<Operation> =
         operation_kinds().into_iter().map(Operation::new).collect();
+    operations.push(
+        Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        ))
+        .with_cascade(a_cascade()),
+    );
     operations.push(
         Operation::new(OperationKind::str_replace(
             path("notes/a.md"),
@@ -6806,7 +6854,11 @@ fn resolved_plan_json() -> String {
             r#""operations":[{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}}],"#,
             r#""transitions":[{{"path":"notes/a.md","before":{{"state":"present","hash":"{ab}"}},"#,
             r#""after":{{"state":"present","hash":"{one}"}}}}],"#,
-            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}}],"#,
+            r#""conditions":[{{"condition":"content_hash","path":"notes/c.md","hash":"{cd}"}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/c.md","syntax":"wikilink","address":"a"}},"#,
+            r#""before":{{"resolves":"one","path":"notes/a.md"}},"after":{{"resolves":"none"}}}},"#,
+            r#"{{"condition":"link_resolution","link":{{"holder":"notes/d.md","syntax":"markdown","address":"vault://notes/a"}},"#,
+            r#""before":{{"resolves":"several"}},"after":{{"resolves":"one","path":"archive/a.md"}}}}],"#,
             r#""provenance":{{"finding_generation":7,"skipped":[{{"finding":42,"reason":"the target names two documents"}}]}},"#,
             r#""footnote":"finish the draft"}}"#
         ),
@@ -6851,6 +6903,9 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
         r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
         r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+        r#"{"kind":"move_folder","fields":{"from":"notes","to":"archive/notes"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}}"#,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"archive/a"}}"#,
         r#"{"kind":"set_frontmatter","fields":{"path":"notes/a.md","field":"status","value":"done"}}"#,
         r#"{"kind":"remove_frontmatter","fields":{"where":[{"op":"eq","key":"status","value":"draft"}],"field":"due"}}"#,
         r#"{"kind":"push_frontmatter","fields":{"path":"notes/a.md","field":"tags","value":"project"}}"#,
@@ -6931,6 +6986,162 @@ fn an_operation_refuses_fields_that_are_not_its_kinds() {
     assert_eq!(OperationId::new(""), Err(IllegalOperationId));
 }
 
+/// **A delete says out loud what becomes of the links naming its
+/// document.** It rewrites them to `rewrite_to`, or leaves them broken where
+/// `allow_broken_links` is `true`; each is left out where it is not written,
+/// `false` reads as absent, and saying both is refused at the read.
+#[test]
+fn a_delete_rewrites_or_breaks_its_backlinks_only_where_it_says_so() {
+    let rewriting = OperationKind::delete_document_rewriting(path("notes/b.md"), target("c"));
+    let breaking = OperationKind::delete_document_breaking_links(path("notes/b.md"));
+    for (kind, json) in [
+        (
+            &rewriting,
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c"}}"#,
+        ),
+        (
+            &breaking,
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","allow_broken_links":true}}"#,
+        ),
+    ] {
+        assert_eq!(wire(kind), json);
+        round_trip(kind);
+        round_trip(&Operation::new(kind.clone()));
+    }
+    assert_eq!(
+        serde_json::from_str::<OperationKind>(
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c","allow_broken_links":false}}"#
+        )
+        .ok(),
+        Some(rewriting)
+    );
+    for json in [
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c","allow_broken_links":true}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":null}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","allow_broken_links":null}}"#,
+        r##"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c#Notes"}}"##,
+        r##"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c#^a1"}}"##,
+        r#"{"kind":"move_document","fields":{"from":"a.md","to":"b.md","allow_broken_links":true}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+}
+
+/// **The link kinds read each end through its own grammar.** A folder move's
+/// ends are folder paths, a link rewrite's are target texts and a wikilink
+/// rewrite's are resolution targets naming a document — one that need not
+/// stand — and never a place inside one.
+#[test]
+fn a_link_kind_reads_its_ends_through_their_own_grammars() {
+    let read: OperationKind = serde_json::from_str(
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"gone/never-was","new":"here"}}"#,
+    )
+    .expect("a wikilink rewrite of a document no vault need hold");
+    assert_eq!(
+        read,
+        OperationKind::rewrite_wikilink(target("gone/never-was"), target("here"))
+    );
+    let rewrite: OperationKind = serde_json::from_str(
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"markdown","from":"../a.md","to":"../archive/a.md"}}"#,
+    )
+    .expect("a Markdown link rewrite");
+    assert_eq!(
+        rewrite,
+        OperationKind::rewrite_link(
+            path("notes/c.md"),
+            LinkFamily::Markdown,
+            "../a.md",
+            "../archive/a.md"
+        )
+    );
+    for json in [
+        r#"{"kind":"move_folder","fields":{"from":"","to":"archive"}}"#,
+        r#"{"kind":"move_folder","fields":{"from":"notes","to":"/archive"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"","to":"b.md"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"a.md","to":"/b.md"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","from":"a","to":"b"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"embed","from":"a","to":"b"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"b","old":"a"}}"#,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"a#Notes","new":"b"}}"##,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"b#^a1"}}"##,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"#Notes","new":"b"}}"##,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a"}}"#,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"b","path":"notes/c.md"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+}
+
+/// **A link rewrite names an address to respell and keeps its protocol**,
+/// as an operation and as a cascade's rewrite alike. An empty `from` is
+/// refused — an anchor-only link names its holder wherever it goes, so no
+/// rewrite respells one — and so is a `to` written under another protocol
+/// than `from`, which no rewrite can write into the link. An empty `to`, a
+/// `to` equal to `from`, and two addresses under one protocol all read.
+#[test]
+fn a_link_rewrite_respells_an_address_and_never_its_protocol() {
+    let kind = |from: &str, to: &str| {
+        format!(
+            r#"{{"kind":"rewrite_link","fields":{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}}}"#
+        )
+    };
+    let rewrite = |from: &str, to: &str| {
+        format!(r#"{{"path":"notes/c.md","syntax":"wikilink","from":"{from}","to":"{to}"}}"#)
+    };
+    for (from, to) in [
+        ("", "b"),
+        ("vault://a", "b"),
+        ("a", "vault://b"),
+        ("vault://a", "https://a"),
+    ] {
+        assert!(
+            serde_json::from_str::<OperationKind>(&kind(from, to)).is_err(),
+            "a rewrite of `{from}` to `{to}` read as an operation"
+        );
+        assert!(
+            serde_json::from_str::<LinkRewrite>(&rewrite(from, to)).is_err(),
+            "a rewrite of `{from}` to `{to}` read as a cascade's rewrite"
+        );
+    }
+    for (from, to) in [
+        ("a", ""),
+        ("a", "a"),
+        ("vault://notes/a", "vault://archive/a"),
+        ("a", "b"),
+        // Not a protocol: the sentinel is a lowercase scheme, `://` and a
+        // stem, so each end reads as a plain address.
+        ("HTTPS://a", "b"),
+        ("note:draft", "b"),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<OperationKind>(&kind(from, to)).ok(),
+            Some(OperationKind::rewrite_link(
+                path("notes/c.md"),
+                LinkFamily::Wikilink,
+                from,
+                to
+            )),
+            "a rewrite of `{from}` to `{to}`"
+        );
+        assert_eq!(
+            serde_json::from_str::<LinkRewrite>(&rewrite(from, to)).ok(),
+            Some(LinkRewrite::new(
+                path("notes/c.md"),
+                LinkFamily::Wikilink,
+                from,
+                to
+            )),
+            "a cascade's rewrite of `{from}` to `{to}`"
+        );
+    }
+}
+
 /// A file state is absent, or present with the hash of what it holds.
 #[test]
 fn a_file_state_is_an_object_tagged_state() {
@@ -6941,8 +7152,54 @@ fn a_file_state_is_an_object_tagged_state() {
     );
 }
 
+/// **A link is keyed by its holder, its syntax and its address as written,
+/// protocol prefix included**, and an entry of the resolution change set
+/// names what that link resolves to on each side of the plan; a refusal names
+/// an entry computed again that the plan does not record in the same shape.
+#[test]
+fn a_link_resolution_is_one_entry_of_the_change_set() {
+    let entry = PlanCondition::link_resolution(
+        a_link_key(),
+        Resolves::several(),
+        Resolves::one(path("notes/a.md")),
+    );
+    let json = r#"{"condition":"link_resolution","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"},"before":{"resolves":"several"},"after":{"resolves":"one","path":"notes/a.md"}}"#;
+    assert_eq!(wire(&entry), json);
+    round_trip(&entry);
+    // An anchor-only link has the empty address, and its resolution changes
+    // when its holder moves, so the empty address is a key: here of a link
+    // whose holder moved from `notes/c.md`, named where it stands after.
+    round_trip(&PlanCondition::link_resolution(
+        LinkKey::new(path("archive/c.md"), LinkFamily::Wikilink, ""),
+        Resolves::one(path("notes/c.md")),
+        Resolves::one(path("archive/c.md")),
+    ));
+    assert_eq!(
+        wire(&RefusedCheck::condition_unrecorded(entry.clone())),
+        format!(r#"{{"check":"condition_unrecorded","condition":{json}}}"#)
+    );
+    for refused in [
+        json.replace(r#""resolves":"several""#, r#""resolves":"many""#),
+        json.replace(
+            r#""resolves":"several""#,
+            r#""resolves":"several","path":"a.md""#,
+        ),
+        json.replace(
+            r#""resolves":"one","path":"notes/a.md""#,
+            r#""resolves":"one""#,
+        ),
+        json.replace(r#""address":"a""#, r#""address":"a","anchor":"x""#),
+        json.replace(r#""syntax":"wikilink","#, ""),
+    ] {
+        assert!(
+            serde_json::from_str::<PlanCondition>(&refused).is_err(),
+            "{refused} read as a condition"
+        );
+    }
+}
+
 /// An author's condition and a plan's condition are two types, each tagged
-/// `condition`, and today each says what one file holds.
+/// `condition`.
 #[test]
 fn a_condition_is_an_object_tagged_condition() {
     assert_eq!(
@@ -7042,6 +7299,10 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         "/transitions/0/before",
         "/transitions/0/after",
         "/conditions/0",
+        "/conditions/1",
+        "/conditions/1/link",
+        "/conditions/1/before",
+        "/conditions/1/after",
         "/provenance",
         "/provenance/skipped/0",
     ] {
@@ -7063,9 +7324,10 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         .expect("an authored plan as JSON");
     for pointer in [
         "",
-        "/operations/14",
-        "/operations/14/fields",
-        "/operations/14/conditions/0",
+        "/operations/17/cascade/0",
+        "/operations/18",
+        "/operations/18/fields",
+        "/operations/18/conditions/0",
     ] {
         let json = with_surprise(&authored, pointer);
         assert!(
@@ -7412,6 +7674,11 @@ fn refused_checks() -> Vec<RefusedCheck> {
             path("notes/c.md"),
             content_hash(0xcd),
         )),
+        RefusedCheck::condition_unrecorded(PlanCondition::link_resolution(
+            a_link_key(),
+            Resolves::one(path("notes/a.md")),
+            Resolves::several(),
+        )),
         RefusedCheck::schema_violation(
             path("notes/a.md"),
             FindingKind::UndeclaredTag,
@@ -7434,6 +7701,30 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
         UnresolvedReason::part_landed(),
         UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
         UnresolvedReason::requires_unresolved(operation_id("make-b")),
+        UnresolvedReason::has_backlinks(vec![path("notes/c.md"), path("notes/d.md")], 3),
+        UnresolvedReason::ambiguous_target(
+            CandidateHead::new(
+                [
+                    Candidate::new(path("notes/a.md"), "notes/a"),
+                    Candidate::new(path("archive/a.md"), "archive/a"),
+                ],
+                2,
+            )
+            .expect("a head"),
+        ),
+    ]
+}
+
+/// Every advice a forecast gives about one link.
+fn link_advisories() -> Vec<LinkAdvisory> {
+    vec![
+        LinkAdvisory::skipped_ambiguous(a_link_key()),
+        LinkAdvisory::skipped_unrepresentable(a_link_key()),
+        LinkAdvisory::skipped_would_corrupt_frontmatter(a_link_key()),
+        LinkAdvisory::skipped_not_rewritable(a_link_key()),
+        LinkAdvisory::left_broken(a_link_key()),
+        LinkAdvisory::made_ambiguous(a_link_key()),
+        LinkAdvisory::retargeted(a_link_key()),
     ]
 }
 
@@ -7456,6 +7747,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::transitions_disagree(vec![path("notes/a.md"), path("notes/b.md")]),
         PlanFault::unexpanded_target(vec![1]),
         PlanFault::where_target_ordered(vec![2]),
+        PlanFault::misplaced_cascade(vec![0]),
     ]
 }
 
@@ -7589,6 +7881,10 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
         advertised::<UnresolvedReason>(Some("kind"))
     );
     assert_eq!(
+        tags(&link_advisories(), "advisory"),
+        advertised::<LinkAdvisory>(Some("advisory"))
+    );
+    assert_eq!(
         tags(&interruption_causes(), "kind"),
         advertised::<InterruptionCause>(Some("kind"))
     );
@@ -7626,6 +7922,10 @@ fn every_plan_vector_here_holds_the_members_the_schema_advertises() {
 #[test]
 fn every_apply_shape_survives_the_round_trip() {
     round_trip(&a_forecast());
+    round_trip(&a_forecast_of_links());
+    for advisory in link_advisories() {
+        round_trip(&advisory);
+    }
     for check in refused_checks() {
         round_trip(&check);
     }
@@ -7687,7 +7987,7 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
 fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
     assert_eq!(
         wire(&a_forecast()),
-        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[]}"#
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[],"links":[],"left_behind":[]}"#
     );
     let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
     for transition in &a_resolved_plan().transitions {
@@ -7699,6 +7999,56 @@ fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
             transition.path
         );
     }
+}
+
+/// A forecast advising on every link it can and naming a file a folder move
+/// leaves behind.
+fn a_forecast_of_links() -> Forecast {
+    a_forecast()
+        .with_links(link_advisories())
+        .with_left_behind(vec![file("notes/diagram.png")])
+}
+
+fn file(text: &str) -> FilePath {
+    FilePath::new(text).expect("a legal file path")
+}
+
+/// **A link advisory points into the change set by the link's key**, never
+/// repeating a resolution, and a folder move's left-behind file is named by a
+/// path of its own.
+#[test]
+fn a_forecast_advises_on_links_by_their_key_and_names_files_left_behind() {
+    assert_eq!(
+        wire(&LinkAdvisory::left_broken(a_link_key())),
+        r#"{"advisory":"left_broken","link":{"holder":"notes/c.md","syntax":"wikilink","address":"a"}}"#
+    );
+    let json = wire(&a_forecast_of_links());
+    assert!(!json.contains("resolves"), "{json}");
+    assert!(
+        json.ends_with(r#""left_behind":["notes/diagram.png"]}"#),
+        "{json}"
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::has_backlinks(
+            vec![path("notes/c.md")],
+            2
+        )),
+        r#"{"kind":"has_backlinks","holders":["notes/c.md"],"total":2}"#
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::ambiguous_target(
+            CandidateHead::new([Candidate::new(path("a.md"), "a")], 2).expect("a head")
+        )),
+        r#"{"kind":"ambiguous_target","candidates":{"candidates":[{"path":"a.md","suffix":"a"}],"total":2}}"#
+    );
+    for text in ["", "/", "/notes/a.png"] {
+        assert!(FilePath::new(text).is_err(), "`{text}` was built");
+        assert!(
+            serde_json::from_str::<FilePath>(&format!("\"{text}\"")).is_err(),
+            "`{text}` was read back as a file path"
+        );
+    }
+    assert_eq!(FilePath::new("/a").expect_err("rooted").what(), "file path");
 }
 
 /// A forecast is an answer, so it drops a field it does not know where a plan
@@ -7819,7 +8169,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
         format!(
             concat!(
                 r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
-                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[]}},"#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[],"links":[],"left_behind":[]}},"#,
                 r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
                 r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
@@ -8120,6 +8470,7 @@ fn applier_decision(operation: &Operation) -> String {
         requires,
         footnote,
         conditions,
+        cascade,
     } = operation;
     let writes = match kind {
         OperationKind::CreateDocument { path, content } => {
@@ -8131,7 +8482,21 @@ fn applier_decision(operation: &Operation) -> String {
             new_str,
         } => format!("edit {path}: {old_str} to {new_str}"),
         OperationKind::MoveDocument { from, to } => format!("move {from} to {to}"),
-        OperationKind::DeleteDocument { path } => format!("delete {path}"),
+        OperationKind::DeleteDocument { path, backlinks } => match backlinks {
+            Backlinks::Forbidden => format!("delete {path}"),
+            Backlinks::RewrittenTo(rewrite_to) => {
+                format!("delete {path}, its links to {rewrite_to}")
+            }
+            Backlinks::LeftBroken => format!("delete {path}, its links broken"),
+        },
+        OperationKind::MoveFolder { from, to } => format!("move folder {from} to {to}"),
+        OperationKind::RewriteLink {
+            path,
+            syntax,
+            from,
+            to,
+        } => format!("in {path}, {syntax:?} {from} to {to}"),
+        OperationKind::RewriteWikilink { old, new } => format!("wikilinks to {old} to {new}"),
         OperationKind::SetFrontmatter {
             target,
             field,
@@ -8204,13 +8569,29 @@ fn applier_decision(operation: &Operation) -> String {
         })
         .collect();
     let requires: Vec<&str> = requires.iter().map(OperationId::as_str).collect();
-    format!(
+    let cascade: Vec<String> = cascade
+        .iter()
+        .map(
+            |LinkRewrite {
+                 path,
+                 syntax,
+                 from,
+                 to,
+             }| format!("{path}: {syntax:?} {from} to {to}"),
+        )
+        .collect();
+    let decided = format!(
         "{writes} as {}, after [{}], noting {}; {}",
         id.as_ref().map_or("-", OperationId::as_str),
         requires.join(", "),
         footnote.as_deref().unwrap_or("-"),
         observed.join(", ")
-    )
+    );
+    if cascade.is_empty() {
+        decided
+    } else {
+        format!("{decided}; cascading {}", cascade.join(", "))
+    }
 }
 
 /// Which documents a frontmatter kind writes, decided with no wildcard arm.
@@ -8252,6 +8633,28 @@ fn value_decision(value: &AuthoredValue) -> String {
 fn plan_check(condition: &PlanCondition) -> String {
     match condition {
         PlanCondition::ContentHash { path, hash } => format!("{path} at {hash}"),
+        PlanCondition::LinkResolution {
+            link:
+                LinkKey {
+                    holder,
+                    syntax,
+                    address,
+                },
+            before,
+            after,
+        } => format!(
+            "{syntax:?} {address} in {holder}: {} to {}",
+            resolution_check(before),
+            resolution_check(after)
+        ),
+    }
+}
+
+fn resolution_check(resolves: &Resolves) -> String {
+    match resolves {
+        Resolves::One { path } => format!("one {path}"),
+        Resolves::None {} => "none".to_string(),
+        Resolves::Several {} => "several".to_string(),
     }
 }
 
@@ -8325,6 +8728,10 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
     let decisions: Vec<String> = operations().iter().map(applier_decision).collect();
     assert_eq!(decisions.len(), operations().len());
     assert_eq!(
+        decisions[decisions.len() - 2],
+        "move notes/a.md to archive/a.md as -, after [], noting -; ; cascading notes/c.md: Wikilink a to archive/a, notes/d.md: Markdown a.md to ../archive/a.md"
+    );
+    assert_eq!(
         decisions.last().map(String::as_str),
         Some(
             format!(
@@ -8335,7 +8742,15 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         )
     );
     assert_eq!(
-        decisions[4..8],
+        decisions[4..7],
+        [
+            "move folder notes to archive/notes as -, after [], noting -; ",
+            "in notes/c.md, Wikilink a to archive/a as -, after [], noting -; ",
+            "wikilinks to a to archive/a as -, after [], noting -; ",
+        ]
+    );
+    assert_eq!(
+        decisions[7..11],
         [
             "set status of notes/a.md to string done as -, after [], noting -; ",
             "remove due of 1 predicates' matches as -, after [], noting -; ",
@@ -8345,7 +8760,11 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
     );
     assert_eq!(
         plan_conditions().iter().map(plan_check).collect::<Vec<_>>(),
-        [format!("notes/c.md at {}", hash_text(0xcd))]
+        [
+            format!("notes/c.md at {}", hash_text(0xcd)),
+            "Wikilink a in notes/c.md: one notes/a.md to none".to_string(),
+            "Markdown vault://notes/a in notes/d.md: several to one archive/a.md".to_string(),
+        ]
     );
     assert_eq!(
         file_states().iter().map(state_check).collect::<Vec<_>>(),
@@ -8787,6 +9206,130 @@ fn a_resolved_plan_with_a_where_target_is_a_fault() {
     );
 }
 
+/// **A cascade travels on the operation that caused it**, after every part
+/// an author writes, as one rewrite per holding document in a
+/// `rewrite_link`'s own four fields; it is left out where there is none.
+#[test]
+fn a_cascade_travels_on_the_operation_that_caused_it() {
+    let moved = Operation::new(OperationKind::move_document(
+        path("notes/a.md"),
+        path("archive/a.md"),
+    ))
+    .with_id(operation_id("move-a"))
+    .with_cascade(a_cascade());
+    let json = concat!(
+        r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"},"id":"move-a","#,
+        r#""cascade":[{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"},"#,
+        r#"{"path":"notes/d.md","syntax":"markdown","from":"a.md","to":"../archive/a.md"}]}"#
+    );
+    assert_eq!(wire(&moved), json);
+    round_trip(&moved);
+    for rewrite in a_cascade() {
+        round_trip(&rewrite);
+        let LinkRewrite {
+            path,
+            syntax,
+            from,
+            to,
+        } = rewrite.clone();
+        let as_kind = serde_json::to_value(OperationKind::rewrite_link(path, syntax, from, to))
+            .expect("a kind as JSON");
+        assert_eq!(as_kind["kind"], "rewrite_link");
+        assert_eq!(
+            as_kind["fields"],
+            serde_json::to_value(&rewrite).expect("a rewrite as JSON"),
+            "a cascade's rewrite is not a `rewrite_link`'s fields"
+        );
+    }
+    for refused in [
+        json.replace(r#""syntax":"wikilink""#, r#""syntax":"embed""#),
+        json.replace(r#""to":"archive/a"}"#, r#""to":"archive/a","anchor":"x"}"#),
+        json.replace(r#""path":"notes/c.md","#, ""),
+        json.replace(r#""cascade":["#, r#""cascade":null,"x":["#),
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(&refused).is_err(),
+            "{refused} read as an operation"
+        );
+    }
+}
+
+/// **Planning writes a cascade; an author does not.** An authored plan
+/// carrying one names each operation that does, and a resolved plan names
+/// each operation carrying one on a kind that does not cascade — a document
+/// move, a document removal and a wikilink rewrite may.
+#[test]
+fn a_cascade_where_planning_writes_none_is_a_fault() {
+    let cascading = |kind| Operation::new(kind).with_cascade(a_cascade());
+    let target = |text: &str| ResolutionTarget::new(text).expect("a target");
+    let mut authored = AuthoredPlan::new(
+        VaultAddress::name(name("notes")),
+        vec![Operation::new(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        ))],
+    );
+    assert_eq!(authored.misplaced_cascades(), None);
+    authored
+        .operations
+        .push(cascading(OperationKind::move_document(
+            path("notes/b.md"),
+            path("archive/b.md"),
+        )));
+    assert_eq!(
+        authored.misplaced_cascades(),
+        Some(PlanFault::misplaced_cascade(vec![1]))
+    );
+
+    let mut resolved = a_bare_resolved_plan();
+    resolved.operations = vec![
+        cascading(OperationKind::move_document(
+            path("notes/a.md"),
+            path("archive/a.md"),
+        )),
+        cascading(OperationKind::delete_document_rewriting(
+            path("notes/b.md"),
+            target("c"),
+        )),
+        cascading(OperationKind::rewrite_wikilink(target("a"), target("b"))),
+    ];
+    assert_eq!(resolved.misplaced_cascades(), None);
+    resolved.operations.extend([
+        cascading(OperationKind::str_replace(path("notes/a.md"), "x", "y")),
+        cascading(OperationKind::rewrite_link(
+            path("notes/c.md"),
+            LinkFamily::Wikilink,
+            "a",
+            "b",
+        )),
+    ]);
+    assert_eq!(
+        resolved.misplaced_cascades(),
+        Some(PlanFault::misplaced_cascade(vec![3, 4]))
+    );
+    assert_eq!(
+        wire(&PlanFault::misplaced_cascade(vec![3, 4])),
+        r#"{"kind":"misplaced_cascade","positions":[3,4]}"#
+    );
+}
+
+/// **A resolved plan carries no folder move.** Planning expands one into a
+/// document move per document the folder holds, as it expands a `where`
+/// target, so a resolved plan still carrying one names it in the same fault.
+#[test]
+fn a_resolved_plan_with_a_folder_move_is_a_fault() {
+    let mut plan = a_bare_resolved_plan();
+    plan.operations
+        .push(Operation::new(OperationKind::move_folder(
+            folder("notes"),
+            folder("archive"),
+        )));
+    assert_eq!(
+        plan.unexpanded_targets(),
+        Some(PlanFault::unexpanded_target(vec![1]))
+    );
+}
+
 /// **An operation with a `where` target carries no identifier and requires
 /// nothing.** It expands into one operation per matched document, so it
 /// names no one operation another could require, and what it would require
@@ -8853,7 +9396,9 @@ fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
     round_trip(&forecast);
     let forced_json = wire(&vec![violation.clone()]);
     assert!(
-        wire(&forecast).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        wire(&forecast).ends_with(&format!(
+            r#""forced":{forced_json},"links":[],"left_behind":[]}}"#
+        )),
         "{}",
         wire(&forecast)
     );
@@ -9067,6 +9612,232 @@ fn a_new_request_compiles_to_one_create() {
         assert!(
             serde_json::from_str::<NewParams>(refused).is_err(),
             "{refused} read as a new request"
+        );
+    }
+}
+
+/// **A `move` reads what it moves from its source.** A `from` carrying the
+/// document extension, in any case, compiles to one `move_document`, and any
+/// other `from` to one `move_folder`; each carries the request's conditions,
+/// forced as the request is, and the ends cross as the paths they are.
+#[test]
+fn a_move_request_compiles_to_the_move_its_source_names() {
+    let condition = AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab));
+    let document = MoveParams::new(
+        notes(),
+        ApplyMode::Preview,
+        MoveSubject::new("notes/a.md", "archive/A.MD").expect("a document move"),
+    )
+    .with_conditions(vec![condition.clone()])
+    .with_force(true);
+    round_trip(&document);
+    assert_eq!(
+        document.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![
+                Operation::new(OperationKind::move_document(
+                    path("notes/a.md"),
+                    path("archive/A.MD")
+                ))
+                .with_conditions(vec![condition])
+            ],
+        )
+        .with_force(true)
+    );
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","from":"notes","to":"archive/notes"}"#;
+    let folder_move: MoveParams = serde_json::from_str(json).expect("a folder move");
+    assert_eq!(wire(&folder_move), json);
+    assert_eq!(
+        folder_move.subject,
+        MoveSubject::folder(folder("notes"), folder("archive/notes"))
+    );
+    assert_eq!(
+        folder_move.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::move_folder(
+                folder("notes"),
+                folder("archive/notes")
+            ))],
+        )
+    );
+    for (from, to) in [
+        ("notes/a.md", "archive"),
+        ("notes", "archive/a.md"),
+        ("", "archive"),
+        ("notes/a.md", "/archive/a.md"),
+        ("notes/.md", "archive/a.md"),
+    ] {
+        assert!(
+            MoveSubject::new(from, to).is_err(),
+            "moving `{from}` to `{to}` read as a move"
+        );
+    }
+    assert_eq!(
+        MoveSubject::new(".md", "x").ok(),
+        Some(MoveSubject::folder(folder(".md"), folder("x"))),
+        "a leaf that is only an extension names no document"
+    );
+    for refused in [
+        json.replace(r#""mode":"apply","#, ""),
+        json.replace(r#""to":"archive/notes""#, r#""to":"archive/notes.md""#),
+        json.replace(
+            r#""to":"archive/notes""#,
+            r#""to":"archive/notes","parents":true"#,
+        ),
+        json.replace(
+            r#""to":"archive/notes""#,
+            r#""to":"archive/notes","force":null"#,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<MoveParams>(&refused).is_err(),
+            "{refused} read as a move request"
+        );
+    }
+}
+
+/// **A trailing slash does not change what a `move` moves.** Its leaf is
+/// judged with the slash removed, so a source whose last segment carries the
+/// document extension names a document, slash or not: moved to a folder's
+/// name it is refused, as it is without the slash, rather than read as a
+/// move of a folder named `a.md`. A folder's own trailing slash leaves it a
+/// folder.
+#[test]
+fn a_trailing_slash_does_not_turn_a_document_into_a_folder() {
+    for (from, to) in [("a.md/", "b/"), ("notes/a.md/", "archive"), ("a/", "b.md/")] {
+        assert!(
+            MoveSubject::new(from, to).is_err(),
+            "moving `{from}` to `{to}` read as a move"
+        );
+    }
+    assert!(
+        serde_json::from_str::<MoveParams>(
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","from":"a.md/","to":"b/"}"#
+        )
+        .is_err(),
+        "a document's name with a trailing slash read as a folder move"
+    );
+    assert_eq!(
+        MoveSubject::new("notes/", "archive/").ok(),
+        Some(MoveSubject::folder(folder("notes/"), folder("archive/")))
+    );
+}
+
+/// **A `delete` compiles to one `delete_document` saying what its request
+/// says of the links naming its document**: rewritten to `rewrite_to`, left
+/// broken, or — saying neither — neither, and saying both is refused.
+#[test]
+fn a_delete_request_compiles_to_one_delete_saying_what_becomes_of_its_links() {
+    let plain = DeleteParams::new(notes(), ApplyMode::Apply, path("notes/b.md"));
+    assert_eq!(
+        wire(&plain),
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md"}"#
+    );
+    assert_eq!(
+        plain.clone().plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![Operation::new(OperationKind::delete_document(path(
+                "notes/b.md"
+            )))]
+        )
+    );
+    let rewriting = plain.clone().rewriting_to(target("notes/c"));
+    let breaking = plain.clone().breaking_links().with_force(true);
+    for (request, json, kind) in [
+        (
+            &rewriting,
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md","rewrite_to":"notes/c"}"#,
+            OperationKind::delete_document_rewriting(path("notes/b.md"), target("notes/c")),
+        ),
+        (
+            &breaking,
+            r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","path":"notes/b.md","allow_broken_links":true,"force":true}"#,
+            OperationKind::delete_document_breaking_links(path("notes/b.md")),
+        ),
+    ] {
+        assert_eq!(wire(request), json);
+        round_trip(request);
+        assert_eq!(
+            request.clone().plan().operations,
+            vec![Operation::new(kind)]
+        );
+    }
+    assert_eq!(rewriting.breaking_links(), plain.clone().breaking_links());
+    let json = wire(&plain);
+    for refused in [
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","rewrite_to":"c","allow_broken_links":true"#,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r##""path":"notes/b.md","rewrite_to":"c#Notes""##,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","rewrite_to":null"#,
+        ),
+        json.replace(
+            r#""path":"notes/b.md""#,
+            r#""path":"notes/b.md","recursive":true"#,
+        ),
+        json.replace(r#""mode":"apply","#, ""),
+    ] {
+        assert!(
+            serde_json::from_str::<DeleteParams>(&refused).is_err(),
+            "{refused} read as a delete request"
+        );
+    }
+}
+
+/// **A `rewrite_wikilink` compiles to one `rewrite_wikilink`**, its `old`
+/// free to name a document no vault holds, and neither end carrying an
+/// anchor.
+#[test]
+fn a_rewrite_wikilink_request_compiles_to_one_rewrite() {
+    let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","old":"gone/never-was","new":"plans/2026"}"#;
+    let request: RewriteWikilinkParams = serde_json::from_str(json).expect("a rewrite request");
+    assert_eq!(wire(&request), json);
+    assert_eq!(
+        request,
+        RewriteWikilinkParams::new(
+            notes(),
+            ApplyMode::Preview,
+            target("gone/never-was"),
+            target("plans/2026")
+        )
+    );
+    let condition = AuthorCondition::content_hash(path("notes/a.md"), content_hash(0xab));
+    let conditioned = request.with_conditions(vec![condition.clone()]);
+    round_trip(&conditioned);
+    assert_eq!(
+        conditioned.plan(),
+        AuthoredPlan::new(
+            notes(),
+            vec![
+                Operation::new(OperationKind::rewrite_wikilink(
+                    target("gone/never-was"),
+                    target("plans/2026")
+                ))
+                .with_conditions(vec![condition])
+            ],
+        )
+    );
+    for refused in [
+        json.replace(r#""old":"gone/never-was""#, r##""old":"gone#Heading""##),
+        json.replace(r#""new":"plans/2026""#, r##""new":"plans/2026#^a1""##),
+        json.replace(r#""old":"gone/never-was","#, ""),
+        json.replace(
+            r#""new":"plans/2026""#,
+            r#""new":"plans/2026","path":"a.md""#,
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<RewriteWikilinkParams>(&refused).is_err(),
+            "{refused} read as a rewrite request"
         );
     }
 }

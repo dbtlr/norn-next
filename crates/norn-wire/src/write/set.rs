@@ -28,11 +28,12 @@ use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
 use crate::document::DocumentPath;
 use crate::plan::document::AuthoredPlan;
+use crate::plan::document::is_false;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind, written};
 use crate::plan::value::AuthoredValue;
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
-use crate::write::{at_least_one, is_false};
+use crate::write::at_least_one;
 
 /// One change to a frontmatter field.
 ///

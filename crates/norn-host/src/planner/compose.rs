@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
-use norn_wire::{ContentHash, DocumentPath, FileState, Operation, OperationKind};
+use norn_wire::{Backlinks, ContentHash, DocumentPath, FileState, Operation, OperationKind};
 
 use super::edit;
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
@@ -58,6 +58,20 @@ pub(crate) fn compose<V: VaultView>(
     let mut vault = Simulated::over(view);
     let mut unresolvable = Vec::new();
     for &position in order {
+        // NORN-297: an operation and its link cascade are one operation, and
+        // the cascade's rewrites are not composed yet, so an operation
+        // carrying one is left unresolved whole rather than composed without
+        // the rewrites it says it makes.
+        if !operations[position].cascade.is_empty() {
+            unresolvable.push(Unresolvable {
+                position,
+                detail: format!(
+                    "a `{}` operation carrying a link cascade is not planned yet: link cascades are not planned yet",
+                    operations[position].kind.name()
+                ),
+            });
+            continue;
+        }
         if let Err(detail) = vault.apply(&operations[position].kind)? {
             unresolvable.push(Unresolvable { position, detail });
         }
@@ -303,9 +317,26 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 }
             },
             OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
-            OperationKind::DeleteDocument { path } => self.standing(path)?.map(|spelling| {
+            OperationKind::DeleteDocument {
+                path,
+                backlinks: Backlinks::Forbidden,
+            } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
+            // NORN-297: link cascades are vocabulary before they are planned.
+            // Until the planner reads backlinks and expands cascades, a delete
+            // saying what becomes of the links naming its document, a folder
+            // move and both link rewrites are left unresolved in words rather
+            // than planned as something they do not say.
+            OperationKind::DeleteDocument { path, .. } => Err(format!(
+                "a delete rewriting or breaking the links naming `{path}` is not planned yet: link cascades are not planned yet"
+            )),
+            OperationKind::MoveFolder { .. }
+            | OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteWikilink { .. } => Err(format!(
+                "a `{}` operation is not planned yet: link cascades are not planned yet",
+                kind.name()
+            )),
             OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }
             | OperationKind::PushFrontmatter { .. }
@@ -427,12 +458,15 @@ pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
 
 /// The files an operation touches: a move touches its source and its
 /// destination, a frontmatter kind with a `where` target none until planning
-/// expands it, and every other kind the one file it names.
+/// expands it, a folder move and a wikilink rewrite none — each names its
+/// documents only once planning expands it — and every other kind the one
+/// file it names.
 pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
     let (first, second) = match kind {
         OperationKind::CreateDocument { path, .. }
         | OperationKind::StrReplace { path, .. }
-        | OperationKind::DeleteDocument { path }
+        | OperationKind::DeleteDocument { path, .. }
+        | OperationKind::RewriteLink { path, .. }
         | OperationKind::ReplaceBody { path, .. }
         | OperationKind::ReplaceSection { path, .. }
         | OperationKind::AppendToSection { path, .. }
@@ -444,6 +478,7 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         | OperationKind::PushFrontmatter { target, .. }
         | OperationKind::PopFrontmatter { target, .. } => (target.as_path(), None),
         OperationKind::MoveDocument { from, to } => (Some(from), Some(to)),
+        OperationKind::MoveFolder { .. } | OperationKind::RewriteWikilink { .. } => (None, None),
     };
     first.into_iter().chain(second)
 }

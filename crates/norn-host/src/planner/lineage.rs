@@ -84,7 +84,7 @@ impl Lineage {
             let kind = &operations[position].kind;
             match kind {
                 OperationKind::CreateDocument { path, .. }
-                | OperationKind::DeleteDocument { path } => {
+                | OperationKind::DeleteDocument { path, .. } => {
                     if let Some(file) = identity(path.as_str()) {
                         lineage.at_end.insert(file, None);
                     }
@@ -124,6 +124,14 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
+                // NORN-297: none of these kinds is planned yet, so none draws
+                // content from a before-state here. A hand-built resolved plan
+                // can still carry a wikilink rewrite this far, and recompose
+                // refuses it. A folder move will arrive expanded into moves,
+                // and a link rewrite is an edit in place, drawing on nothing.
+                OperationKind::MoveFolder { .. }
+                | OperationKind::RewriteLink { .. }
+                | OperationKind::RewriteWikilink { .. } => {}
             }
         }
         lineage

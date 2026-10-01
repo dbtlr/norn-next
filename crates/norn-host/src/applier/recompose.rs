@@ -108,12 +108,18 @@ pub(super) fn recompose<V: VaultView>(
     let composition = compose(&plan.operations, &recorded, &before)?;
     let unseen = |file: &NormalizedPath| before.unseen.contains(file);
     let mut disagreeing: Vec<DocumentPath> = Vec::new();
+    // An operation that does not act refuses the plan whatever files it
+    // names: one naming none — a wikilink rewrite without a cascade — would
+    // otherwise add nothing here and be dropped while the rest landed.
+    let mut inactive = false;
     for unresolvable in &composition.unresolvable {
         let operation = &plan.operations[unresolvable.position];
         let stood_in = edits_in_place(&operation.kind)
             && lineage.edited(unresolvable.position).is_some_and(unseen);
         if !stood_in {
+            inactive = true;
             disagreeing.extend(touches(&operation.kind).cloned());
+            disagreeing.extend(operation.cascade.iter().map(|rewrite| rewrite.path.clone()));
         }
     }
     disagreeing.extend(transitions_differ(
@@ -124,7 +130,7 @@ pub(super) fn recompose<V: VaultView>(
         &before,
     ));
     disagreeing.extend(conditions_differ(plan, &composition, &before)?);
-    if !disagreeing.is_empty() {
+    if inactive || !disagreeing.is_empty() {
         return Ok(Recomposed::Invalid(disagreement(disagreeing)));
     }
     Ok(Recomposed::Sound(composition))
@@ -207,8 +213,13 @@ fn conditions_differ<V: VaultView>(
     let carried: Vec<(NormalizedPath, &norn_wire::ContentHash)> = plan
         .conditions
         .iter()
-        .filter_map(|PlanCondition::ContentHash { path, hash }| {
-            Some((identity(normalizer, path.as_str())?, hash))
+        .filter_map(|condition| match condition {
+            PlanCondition::ContentHash { path, hash } => {
+                Some((identity(normalizer, path.as_str())?, hash))
+            }
+            // A link entry says how a link resolves, not what a file holds,
+            // so no author condition is carried by one.
+            PlanCondition::LinkResolution { .. } => None,
         })
         .collect();
     let carries = |file: &NormalizedPath, hash: Option<&norn_wire::ContentHash>| {

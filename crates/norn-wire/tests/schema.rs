@@ -15,27 +15,27 @@ use norn_wire::{
     ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition, AuthoredPlan,
     AuthoredValue, BlockRow, BodyText, CANDIDATE_HEAD, Candidate, CandidateHead, ChangesetOutcome,
     Collection, CollectionPage, CollectionSelector, Column, ComparedBy, ContainerKind, ContentHash,
-    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DescribeParams,
+    ControlFileFailure, CountParams, CountReport, Cursor, CursorKey, DeleteParams, DescribeParams,
     DescribeReport, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
     DocumentPath, DocumentRow, Drift, EditParams, EngineHealth, EngineSection, EngineStatus,
     ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType,
-    FieldValue, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
     Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkFamily, LinkHealth, LinkRow,
-    ListParams, ListReport, MaintainerIdentity, Moved, NameSet, NewParams, NotReady, Operation,
-    OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart,
-    RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, RollUp,
-    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
-    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
-    WriteTarget,
+    Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory, LinkFamily,
+    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
+    MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId, OperationKind, Page,
+    PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate,
+    Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport,
+    Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams,
+    ReloadReport, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
+    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation,
+    UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap,
+    VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams,
+    VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -283,6 +283,14 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<DocumentEdit>(),
         schema_of::<EditParams>(),
         schema_of::<NewParams>(),
+        schema_of::<MoveParams>(),
+        schema_of::<DeleteParams>(),
+        schema_of::<RewriteWikilinkParams>(),
+        schema_of::<LinkRewrite>(),
+        schema_of::<LinkKey>(),
+        schema_of::<Resolves>(),
+        schema_of::<LinkAdvisory>(),
+        schema_of::<FilePath>(),
     ]
 }
 
@@ -2858,7 +2866,9 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("create_document", vec!["path", "content"]),
         ("str_replace", vec!["path", "old_str", "new_str"]),
         ("move_document", vec!["from", "to"]),
-        ("delete_document", vec!["path"]),
+        ("move_folder", vec!["from", "to"]),
+        ("rewrite_link", vec!["path", "syntax", "from", "to"]),
+        ("rewrite_wikilink", vec!["old", "new"]),
         ("replace_body", vec!["path", "content"]),
         ("replace_section", vec!["path", "heading", "content"]),
         ("append_to_section", vec!["path", "heading", "content"]),
@@ -2866,6 +2876,83 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
     ];
+    let delete = branch(&schema, "kind", "delete_document");
+    let delete_fields = &delete["properties"]["fields"];
+    assert_eq!(
+        property_names(delete_fields),
+        ["path", "rewrite_to", "allow_broken_links"]
+            .into_iter()
+            .collect(),
+        "the delete_document fields"
+    );
+    assert_eq!(
+        required_names(delete_fields),
+        ["path"].into_iter().collect(),
+        "a delete requires more than its path"
+    );
+    assert!(refuses_unknown_keys(delete_fields), "{delete_fields}");
+    assert_names_a_whole_document(
+        &delete_fields["properties"]["rewrite_to"],
+        "a delete's `rewrite_to`",
+    );
+    assert_eq!(
+        delete_fields["properties"]["allow_broken_links"]["type"].as_str(),
+        Some("boolean")
+    );
+    assert_eq!(
+        delete_fields["not"],
+        rewrite_to_beside_broken_links(),
+        "a delete's fields admit `rewrite_to` beside `allow_broken_links: true`"
+    );
+    for end in ["old", "new"] {
+        assert_names_a_whole_document(
+            &branch(&schema, "kind", "rewrite_wikilink")["properties"]["fields"]["properties"][end],
+            &format!("a wikilink rewrite's `{end}`"),
+        );
+    }
+    for (kind, end) in [
+        ("move_document", "DocumentPath"),
+        ("move_folder", "FolderPath"),
+    ] {
+        let fields = &branch(&schema, "kind", kind)["properties"]["fields"];
+        for key in ["from", "to"] {
+            assert_eq!(
+                fields["properties"][key]["$ref"].as_str(),
+                Some(format!("#/$defs/{end}").as_str()),
+                "the {kind} `{key}`"
+            );
+        }
+    }
+    let rewrite = &branch(&schema, "kind", "rewrite_link")["properties"]["fields"];
+    assert_eq!(
+        rewrite["properties"]["syntax"]["$ref"].as_str(),
+        Some("#/$defs/LinkFamily")
+    );
+    assert_eq!(
+        rewrite["properties"]["from"]["minLength"].as_u64(),
+        Some(1),
+        "a link rewrite's `from` admits the empty address its reader refuses"
+    );
+    // A link rewrite's `to` admits what its reader refuses: an address under
+    // another protocol than `from`'s. Which protocol `to` may carry is decided
+    // by `from`, a rule the schema states in words rather than relating the
+    // two fields, so the over-admission is pinned here and changes only on
+    // purpose.
+    let to = &rewrite["properties"]["to"];
+    assert!(
+        to.get("pattern").is_none(),
+        "a link rewrite's `to` advertises a pattern: {to}"
+    );
+    assert!(
+        to["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("never changes a link's protocol")),
+        "a link rewrite's `to` does not state in words what decides its protocol: {to}"
+    );
+    assert!(
+        rewrite.get("if").is_none() && rewrite.get("oneOf").is_none(),
+        "a link rewrite's schema now relates `from` and `to`; unpin the over-admission: {rewrite}"
+    );
     let targeted = [
         ("set_frontmatter", vec!["field", "value"]),
         ("remove_frontmatter", vec!["field"]),
@@ -2874,7 +2961,13 @@ fn an_operation_advertises_each_kind_with_its_fields() {
     ];
     assert_eq!(
         sorted(tag_constants(&schema, "kind")),
-        sorted(kinds.iter().chain(&targeted).map(|(kind, _)| *kind))
+        sorted(
+            kinds
+                .iter()
+                .chain(&targeted)
+                .map(|(kind, _)| *kind)
+                .chain(["delete_document"])
+        )
     );
     for (kind, own) in &targeted {
         let fields_schema = &branch(&schema, "kind", kind)["properties"]["fields"];
@@ -2900,14 +2993,31 @@ fn an_operation_advertises_each_kind_with_its_fields() {
             "the {kind} fields carry the target's description: {fields_schema}"
         );
     }
-    for (kind, _) in kinds.iter().chain(&targeted) {
+    for kind in kinds
+        .iter()
+        .chain(&targeted)
+        .map(|(kind, _)| *kind)
+        .chain(["delete_document"])
+    {
         let branch = branch(&schema, "kind", kind);
         assert_eq!(
             property_names(branch),
-            ["kind", "fields", "id", "requires", "footnote", "conditions"]
-                .into_iter()
-                .collect(),
+            [
+                "kind",
+                "fields",
+                "id",
+                "requires",
+                "footnote",
+                "conditions",
+                "cascade"
+            ]
+            .into_iter()
+            .collect(),
             "the {kind} branch"
+        );
+        assert_eq!(
+            branch["properties"]["cascade"]["items"]["$ref"].as_str(),
+            Some("#/$defs/LinkRewrite")
         );
         assert_eq!(
             required_names(branch),
@@ -2949,6 +3059,38 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         definition(&schema, "OperationId")["minLength"].as_u64(),
         Some(1)
     );
+    let rewrite = definition(&schema, "LinkRewrite");
+    let fields: BTreeSet<&str> = ["path", "syntax", "from", "to"].into_iter().collect();
+    assert_eq!(property_names(rewrite), fields);
+    assert_eq!(required_names(rewrite), fields);
+    assert!(refuses_unknown_keys(rewrite), "{rewrite} admits any key");
+    assert_eq!(
+        rewrite["properties"]["from"]["minLength"].as_u64(),
+        Some(1),
+        "a cascade's `from` admits the empty address its reader refuses"
+    );
+}
+
+/// What a delete may not carry, as its schema's `not` states it: a
+/// `rewrite_to` beside an `allow_broken_links` of `true`, which its reader
+/// refuses. `false` beside it reads as left out.
+fn rewrite_to_beside_broken_links() -> Value {
+    serde_json::json!({
+        "required": ["rewrite_to", "allow_broken_links"],
+        "properties": {"allow_broken_links": {"const": true}},
+    })
+}
+
+/// Hold that `schema` advertises a target naming a whole document, as its
+/// reader reads one: a string with no `#`, since the first `#` opens an
+/// anchor, which the reader refuses.
+fn assert_names_a_whole_document(schema: &Value, what: &str) {
+    assert_eq!(schema["type"].as_str(), Some("string"), "{what}: {schema}");
+    assert_eq!(
+        schema["pattern"].as_str(),
+        Some("^[^#]+$"),
+        "{what} admits an anchor its reader refuses: {schema}"
+    );
 }
 
 /// Whether a schema admits `null`: its type is `null` or a list naming it, or
@@ -2977,7 +3119,7 @@ fn admits_null(schema: &Value) -> bool {
 fn an_operation_advertises_null_exactly_where_its_reader_takes_one() {
     let schema = schema_of::<Operation>();
     let branch = branch(&schema, "kind", "delete_document");
-    for part in ["id", "requires", "footnote", "conditions"] {
+    for part in ["id", "requires", "footnote", "conditions", "cascade"] {
         let json = format!(
             r#"{{"kind":"delete_document","fields":{{"path":"notes/b.md"}},"{part}":null}}"#
         );
@@ -3042,9 +3184,34 @@ fn every_plan_type_advertises_its_fields_and_admits_no_other() {
         sorted(["content_hash", "expected_value"])
     );
     assert_eq!(
-        tag_constants(&schema_of::<PlanCondition>(), "condition"),
-        ["content_hash"]
+        sorted(tag_constants(&schema_of::<PlanCondition>(), "condition")),
+        sorted(["content_hash", "link_resolution"])
     );
+    let conditions = schema_of::<PlanCondition>();
+    let entry = branch(&conditions, "condition", "link_resolution");
+    assert_eq!(
+        required_names(entry),
+        ["condition", "link", "before", "after"]
+            .into_iter()
+            .collect()
+    );
+    assert!(refuses_unknown_keys(entry), "{entry} admits any key");
+    let key = definition(&conditions, "LinkKey");
+    assert_eq!(
+        property_names(key),
+        ["holder", "syntax", "address"].into_iter().collect()
+    );
+    assert!(refuses_unknown_keys(key), "{key} admits any key");
+    let resolves = definition(&conditions, "Resolves");
+    assert_eq!(
+        sorted(tag_constants(resolves, "resolves")),
+        sorted(["one", "none", "several"])
+    );
+    for resolution in ["one", "none", "several"] {
+        assert!(refuses_unknown_keys(branch(
+            resolves, "resolves", resolution
+        )));
+    }
     for schema in [schema_of::<AuthorCondition>(), schema_of::<PlanCondition>()] {
         let branch = branch(&schema, "condition", "content_hash");
         assert!(refuses_unknown_keys(branch), "{branch} admits any key");
@@ -3213,9 +3380,16 @@ fn an_apply_report_advertises_its_outcome_tag() {
     let forecast = schema_of::<Forecast>();
     assert_eq!(
         property_names(&forecast),
-        ["drifted", "folders_made", "folders_removed", "forced"]
-            .into_iter()
-            .collect()
+        [
+            "drifted",
+            "folders_made",
+            "folders_removed",
+            "forced",
+            "links",
+            "left_behind"
+        ]
+        .into_iter()
+        .collect()
     );
     assert_eq!(
         forecast["properties"]["drifted"]["items"]["$ref"].as_str(),
@@ -3228,9 +3402,38 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "an answer refuses a key: {answer}"
         );
     }
-    let folder = schema_of::<FolderPath>();
-    assert_eq!(folder["type"].as_str(), Some("string"));
-    assert_eq!(folder["minLength"].as_u64(), Some(1));
+    assert_eq!(
+        forecast["properties"]["left_behind"]["items"]["$ref"].as_str(),
+        Some("#/$defs/FilePath")
+    );
+    assert_eq!(
+        forecast["properties"]["links"]["items"]["$ref"].as_str(),
+        Some("#/$defs/LinkAdvisory")
+    );
+    let advisories = definition(&forecast, "LinkAdvisory");
+    assert_eq!(
+        sorted(tag_constants(advisories, "advisory")),
+        sorted([
+            "skipped_ambiguous",
+            "skipped_unrepresentable",
+            "skipped_would_corrupt_frontmatter",
+            "skipped_not_rewritable",
+            "left_broken",
+            "made_ambiguous",
+            "retargeted"
+        ])
+    );
+    for advisory in branches(advisories) {
+        assert_eq!(
+            advisory["properties"]["link"]["$ref"].as_str(),
+            Some("#/$defs/LinkKey"),
+            "an advisory names its link otherwise than the change set: {advisory}"
+        );
+    }
+    for path in [schema_of::<FolderPath>(), schema_of::<FilePath>()] {
+        assert_eq!(path["type"].as_str(), Some("string"));
+        assert_eq!(path["minLength"].as_u64(), Some(1));
+    }
 }
 
 /// The reasons an apply's codes carry advertise their tags, and each apply
@@ -3242,13 +3445,30 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
         sorted([
             "drifted",
             "condition_failed",
+            "condition_unrecorded",
             "schema_violation",
             "name_taken"
         ])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<UnresolvedReason>(), "kind")),
-        sorted(["part_landed", "no_longer_resolves", "requires_unresolved"])
+        sorted([
+            "part_landed",
+            "no_longer_resolves",
+            "requires_unresolved",
+            "has_backlinks",
+            "ambiguous_target"
+        ])
+    );
+    let reasons = schema_of::<UnresolvedReason>();
+    assert_eq!(
+        branch(&reasons, "kind", "ambiguous_target")["properties"]["candidates"]["$ref"].as_str(),
+        Some("#/$defs/CandidateHead"),
+        "an ambiguous target's candidates are not the one bounded head"
+    );
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "has_backlinks")),
+        ["kind", "holders", "total"].into_iter().collect()
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<InterruptionCause>(), "kind")),
@@ -3263,7 +3483,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "content_cycle",
             "transitions_disagree",
             "unexpanded_target",
-            "where_target_ordered"
+            "where_target_ordered",
+            "misplaced_cascade"
         ])
     );
     let schema = schema_of::<ErrorDetail>();
@@ -3422,6 +3643,29 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             vec!["vault", "mode", "path", "content", "conditions", "force"],
             vec!["vault", "mode", "path", "content"],
         ),
+        (
+            schema_of::<MoveParams>(),
+            vec!["vault", "mode", "from", "to", "conditions", "force"],
+            vec!["vault", "mode", "from", "to"],
+        ),
+        (
+            schema_of::<DeleteParams>(),
+            vec![
+                "vault",
+                "mode",
+                "path",
+                "rewrite_to",
+                "allow_broken_links",
+                "conditions",
+                "force",
+            ],
+            vec!["vault", "mode", "path"],
+        ),
+        (
+            schema_of::<RewriteWikilinkParams>(),
+            vec!["vault", "mode", "old", "new", "conditions", "force"],
+            vec!["vault", "mode", "old", "new"],
+        ),
     ] {
         assert_eq!(property_names(&schema), fields.into_iter().collect());
         assert_eq!(required_names(&schema), required.into_iter().collect());
@@ -3429,6 +3673,48 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
         assert_eq!(
             schema["properties"]["mode"]["$ref"].as_str(),
             Some("#/$defs/ApplyMode")
+        );
+    }
+    // A move's two ends admit what its reader refuses: a document moved to a
+    // name that is not a document's, and a folder to one that is. Which
+    // grammar reads `to` is decided by `from`'s last segment, a rule the
+    // schema states in words rather than as a pattern on each end, so the
+    // over-admission is pinned here and changes only on purpose.
+    let move_schema = schema_of::<MoveParams>();
+    for end in ["from", "to"] {
+        let schema = &move_schema["properties"][end];
+        assert_eq!(schema["type"].as_str(), Some("string"));
+        assert_eq!(schema["minLength"].as_u64(), Some(1));
+        assert!(
+            schema.get("pattern").is_none(),
+            "a move's `{end}` advertises a pattern: {schema}"
+        );
+        assert!(
+            schema["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("document extension")),
+            "a move's `{end}` does not state in words what decides its grammar: {schema}"
+        );
+    }
+    assert!(
+        move_schema.get("if").is_none() && move_schema.get("oneOf").is_none(),
+        "a move's schema now relates its two ends; unpin the over-admission: {move_schema}"
+    );
+    let delete = schema_of::<DeleteParams>();
+    assert_names_a_whole_document(
+        &delete["properties"]["rewrite_to"],
+        "a delete's `rewrite_to`",
+    );
+    assert_eq!(
+        delete["not"],
+        rewrite_to_beside_broken_links(),
+        "a delete admits `rewrite_to` beside `allow_broken_links: true`"
+    );
+    let rewrite = schema_of::<RewriteWikilinkParams>();
+    for end in ["old", "new"] {
+        assert_names_a_whole_document(
+            &rewrite["properties"][end],
+            &format!("a wikilink rewrite's `{end}`"),
         );
     }
     let set = schema_of::<SetParams>();

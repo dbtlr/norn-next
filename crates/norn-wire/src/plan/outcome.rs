@@ -13,6 +13,15 @@
 //! identifier, or, for a resolved plan whose transitions are not what its
 //! operations do, the files involved.
 //!
+//! **An ambiguous target is spelled as a finding spells one.** A wikilink
+//! rewrite whose `old` names several documents carries the same bounded
+//! [`CandidateHead`] a link row and the ambiguous-target refusal carry, so a
+//! vault-wide ambiguity class never crosses whole. A delete left unresolved
+//! for its backlinks names every holding document, each once — the documents
+//! a cascade would rewrite links in, which the cascade itself carries once
+//! per holder, syntax and address — so it is never longer than the plan it
+//! stands in for.
+//!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
 //! refused check carries the finding kind, the subject inside the document and
@@ -24,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::DocumentPath;
 use crate::finding::FindingKind;
+use crate::finding_row::CandidateHead;
 use crate::plan::document::{FileState, PlanCondition};
 use crate::plan::operation::{Operation, OperationId};
 
@@ -43,10 +53,21 @@ pub enum RefusedCheck {
         /// What it holds.
         holds: FileState,
     },
-    /// A condition the plan carries does not hold.
+    /// A condition the plan carries does not hold: a file holds other
+    /// bytes, or the plan's resolution change set, computed again, does not
+    /// hold a link entry the plan records.
     #[non_exhaustive]
     ConditionFailed {
         /// The condition.
+        condition: PlanCondition,
+    },
+    /// The plan's resolution change set, computed again, holds an entry the
+    /// plan does not record: a link whose resolution the plan now changes,
+    /// which it did not when it was planned.
+    #[non_exhaustive]
+    ConditionUnrecorded {
+        /// The entry the change set holds, as the plan would have recorded
+        /// it.
         condition: PlanCondition,
     },
     /// A target's result would violate the vault schema where the plan writes,
@@ -74,6 +95,12 @@ impl RefusedCheck {
     /// The plan's `condition` does not hold.
     pub const fn condition_failed(condition: PlanCondition) -> Self {
         RefusedCheck::ConditionFailed { condition }
+    }
+
+    /// The plan's resolution change set holds `condition`, which the plan
+    /// does not record.
+    pub const fn condition_unrecorded(condition: PlanCondition) -> Self {
+        RefusedCheck::ConditionUnrecorded { condition }
     }
 
     /// The result at `path` would be filed under `kind`, about `target`,
@@ -160,6 +187,31 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
+    // Minted with the link-cascade vocabulary before the planner reads
+    // backlinks (NORN-297): a later change of the same task plans a delete's
+    // backlinks and a wikilink rewrite's `old`, and is what answers these
+    // two. Until then nothing answers either: a delete saying neither flag
+    // plans and lands with no backlink check, leaving every link naming its
+    // document broken, and a wikilink rewrite is left unresolved in words,
+    // naming the limit.
+    /// It removes a document links still name, and says neither what to
+    /// rewrite them to nor that they may be left broken.
+    #[non_exhaustive]
+    HasBacklinks {
+        /// Every document holding a link that names the removed one, each
+        /// once.
+        holders: Vec<DocumentPath>,
+        /// How many links name it, across every holder.
+        total: u64,
+    },
+    /// It rewrites the wikilinks naming a target that resolves to more than
+    /// one document, so which links name the document meant is not known.
+    #[non_exhaustive]
+    AmbiguousTarget {
+        /// The documents the target resolves to, in the resolution ladder's
+        /// order, and how many there were.
+        candidates: CandidateHead,
+    },
 }
 
 impl UnresolvedReason {
@@ -178,6 +230,16 @@ impl UnresolvedReason {
     /// The operation requires the unresolved operation `requires`.
     pub const fn requires_unresolved(requires: OperationId) -> Self {
         UnresolvedReason::RequiresUnresolved { requires }
+    }
+
+    /// The operation removes a document `total` links in `holders` name.
+    pub const fn has_backlinks(holders: Vec<DocumentPath>, total: u64) -> Self {
+        UnresolvedReason::HasBacklinks { holders, total }
+    }
+
+    /// The operation's target resolves to the documents `candidates` heads.
+    pub const fn ambiguous_target(candidates: CandidateHead) -> Self {
+        UnresolvedReason::AmbiguousTarget { candidates }
     }
 }
 
@@ -316,16 +378,31 @@ pub enum PlanFault {
         /// Every file the disagreement touches, sorted and each once as the
         /// constructor builds it: every transition's path that disagrees,
         /// and every path an operation writes or names that no transition or
-        /// checked condition matches.
+        /// checked condition matches. An operation that does not act refuses
+        /// the plan even where it names no file, so the list may be empty.
         paths: Vec<DocumentPath>,
     },
-    /// A resolved plan's operations still carry a `where` target. Planning
-    /// expands every `where` target into one operation per matched document,
-    /// each naming its document by path, so a resolved plan carrying one was
-    /// not made by planning. Preview its operations again.
+    /// A resolved plan's operations still carry what planning expands into
+    /// one operation per document: a `where` target, or a folder move.
+    /// Planning expands every `where` target into one operation per matched
+    /// document, and every folder move into one document move per document
+    /// the folder holds, each naming its document by path, so a resolved plan
+    /// carrying either was not made by planning. Preview its operations
+    /// again.
     #[non_exhaustive]
     UnexpandedTarget {
-        /// The positions of the operations carrying a `where` target.
+        /// The positions of the operations carrying a `where` target or
+        /// moving a folder.
+        positions: Vec<usize>,
+    },
+    /// An operation carries a link cascade where none may stand: on an
+    /// operation of an authored plan, since planning generates a cascade
+    /// from what the vault's links hold, or on a kind that does not cascade —
+    /// anything but a document move, a document removal and a wikilink
+    /// rewrite. Leave the cascade out and preview the operations again.
+    #[non_exhaustive]
+    MisplacedCascade {
+        /// The positions of the operations carrying a cascade they may not.
         positions: Vec<usize>,
     },
     /// An authored operation with a `where` target carries an identifier or
@@ -342,10 +419,15 @@ pub enum PlanFault {
 }
 
 impl PlanFault {
-    /// The operations at `positions` carry a `where` target a resolved plan
-    /// may not.
+    /// The operations at `positions` carry a `where` target or move a folder,
+    /// which a resolved plan's operations may not.
     pub const fn unexpanded_target(positions: Vec<usize>) -> Self {
         PlanFault::UnexpandedTarget { positions }
+    }
+
+    /// The operations at `positions` carry a link cascade they may not.
+    pub const fn misplaced_cascade(positions: Vec<usize>) -> Self {
+        PlanFault::MisplacedCascade { positions }
     }
 
     /// The `where` operations at `positions` carry an identifier or a

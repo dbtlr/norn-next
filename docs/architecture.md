@@ -2459,6 +2459,37 @@ the shape a refusal carries, on the preview's forecast, the applied report, and 
 interruption for the targets that landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
 
+Link cascades are spelled in the plan vocabulary ahead of the planning that reads
+them. A document move, a document removal and a wikilink rewrite change what links
+elsewhere in the vault resolve to. In a resolved plan each is to carry its cascade, one
+`rewrite_link` per document, syntax and address among the links it changes, which an
+author may also write as an operation of its own; the plan is to record every link whose
+resolution it changes as a condition naming the link as the plan leaves it — by its
+holder, its syntax and its address as written, protocol prefix included — with what it
+resolves to before and after the plan, a link the plan removes or respells away being
+no entry, since that file's hashes guard it; and the forecast is to name the links the
+plan leaves as written, leaves broken, makes ambiguous or retargets, and the files a
+folder move leaves behind. A folder move expands at planning into one document move per
+document, as a `where` target does. A delete says what becomes of the links naming its
+document: rewritten to `rewrite_to`, left broken where `allow_broken_links` says so, or
+— saying neither — forbidden, so that a delete any link names does not resolve. The
+`move`, `delete` and `rewrite_wikilink` requests compile to one such operation each. A
+cascade on an authored operation or on a kind that does not cascade, and a folder move
+left in a resolved plan, are `request/plan-invalid`.
+
+What runs today is narrower, and the limits close when link cascades are planned. The
+planner does not read backlinks or compose a cascade: a plain document move and a delete
+saying neither flag plan and land as they did before the vocabulary, with no cascade and
+no backlink check, so the move leaves the links naming its source as written and the
+delete leaves the links naming its document broken, the forecast advising on neither.
+The planner leaves a folder move, both link rewrites, a delete saying either flag and any
+operation carrying a cascade unresolved, naming that limit. The applier refuses a
+resolved plan carrying any of them as `request/plan-invalid` — a folder move as an
+unexpanded target, and every other as an operation that does not act, which refuses the
+plan even where it touches no file — and refuses every link-resolution condition as
+failed, since nothing checks one yet. The host serves no `move`, `delete` or `rewrite_wikilink` verb:
+those requests compile to plans a caller sends through `apply`.
+
 **The apply seam: how an apply is admitted, ordered and answered.** An apply is a
 request-driven job whose outcome returns to its caller the way an explicit reload's does: the
 reply rides in the job. The seam holds these invariants; which gate hold carries each is

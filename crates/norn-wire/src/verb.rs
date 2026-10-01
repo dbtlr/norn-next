@@ -213,6 +213,14 @@ pub enum Verb {
     Edit,
     /// Create one document at a path.
     New,
+    /// Move one document, or every document a folder holds. The links
+    /// naming what moves are rewritten once link cascades are planned; until
+    /// then a document move leaves them as written.
+    Move,
+    /// Remove one document, saying what becomes of the links naming it.
+    Delete,
+    /// Respell every wikilink naming one document to name another.
+    RewriteWikilink,
     /// Register a vault under a name.
     VaultRegister,
     /// Stop serving a registered name and remove its registration.
@@ -238,7 +246,7 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 18] = [
+    pub const ALL: [Verb; 21] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
@@ -249,6 +257,9 @@ impl Verb {
         Verb::Set,
         Verb::Edit,
         Verb::New,
+        Verb::Move,
+        Verb::Delete,
+        Verb::RewriteWikilink,
         Verb::VaultRegister,
         Verb::VaultUnregister,
         Verb::VaultList,
@@ -272,6 +283,9 @@ impl Verb {
             Verb::Set => "set",
             Verb::Edit => "edit",
             Verb::New => "new",
+            Verb::Move => "move",
+            Verb::Delete => "delete",
+            Verb::RewriteWikilink => "rewrite_wikilink",
             Verb::VaultRegister => "vault_register",
             Verb::VaultUnregister => "vault_unregister",
             Verb::VaultList => "vault_list",
@@ -305,6 +319,9 @@ impl Verb {
             | Verb::Set
             | Verb::Edit
             | Verb::New
+            | Verb::Move
+            | Verb::Delete
+            | Verb::RewriteWikilink
             | Verb::VaultReload => Addressing::Required,
             // No vault address is carried; the request is answered from the
             // serving set and the registry, naming no entry to be held.
