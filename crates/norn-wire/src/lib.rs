@@ -176,10 +176,12 @@
 //!   keys among those fields, exactly one of them written, so the target is
 //!   written by hand on both sides too, and [`SetParams`], which holds a
 //!   target among its own keys, is read the way an operation is.
+//!   A delete's [`Backlinks`] is likewise at most one of two keys among the
+//!   fields that name the delete, so it is written by hand, and
+//!   [`DeleteParams`] reads its two keys the way an operation does.
 //!   [`MoveParams`] reads its two ends together, as text, before deciding
-//!   which grammar reads them, and [`DeleteParams`] refuses a request that
-//!   both rewrites and breaks its links, so each is read by the derive into
-//!   a private shape first.
+//!   which grammar reads them, so it is read by the derive into a private
+//!   shape first.
 //!   [`Cursor`] and [`PlanDocument`] are written by
 //!   hand on both sides: a cursor's wire shape is one opaque string rather
 //!   than the fields a derive would emit, and a document is written as the
@@ -205,6 +207,10 @@
 //!   name; [`WriteTarget`] advertises its two keys with exactly one required,
 //!   and [`OperationKind`] and [`SetParams`] keep the derive but settle
 //!   the target flattened into them as an object whose keys are all its own;
+//!   [`Backlinks`] advertises its two keys and states as a `not` the pair its
+//!   reader refuses, and [`OperationKind`] and [`DeleteParams`] settle it the
+//!   same way; a wikilink rewrite's ends and a delete's `rewrite_to` advertise
+//!   a target with no `#`, since each names a whole document;
 //!   [`MoveParams`] advertises the private shape it is read through, its two
 //!   ends the paths they are written as;
 //!   [`AuthoredValue`] and [`ValueMap`] are a tree of plain values, stating in
@@ -379,14 +385,14 @@
 //! every caller that *composes*, which is what a vocabulary wants when no
 //! reader can carry on without deciding. [`EngineSection`],
 //! [`FindingScope`], [`RungSelection`], [`ApplyMode`], [`PlanDocument`],
-//! [`OperationKind`], [`WriteTarget`], [`AuthoredValue`], [`FileState`],
-//! [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`] and [`Resolves`]
-//! are the thirteen members of that class: a section composes with an engine's
+//! [`OperationKind`], [`WriteTarget`], [`Backlinks`], [`AuthoredValue`],
+//! [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
+//! and [`Resolves`] are the fourteen members of that class: a section composes with an engine's
 //! own refusal to say what a client should do, a scope decides whether a
 //! finding is withheld from a document row, a selection is resolved to the
 //! ladder a search runs, and the one applier must decide what every mode,
-//! plan document, operation kind, target, written value, file state,
-//! condition and link resolution means — whether a
+//! plan document, operation kind, target, delete's links, written value,
+//! file state, condition and link resolution means — whether a
 //! request writes, how a document is planned, how a kind resolves into
 //! transitions, which documents it writes and what it writes there, how a
 //! state is verified, how a condition is checked — since a
@@ -401,8 +407,8 @@
 //! composer.
 //!
 //! **What the one applier interprets is exhaustively destructurable.** The
-//! payload variants of [`OperationKind`], [`WriteTarget`], [`AuthoredValue`],
-//! [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
+//! payload variants of [`OperationKind`], [`WriteTarget`], [`Backlinks`],
+//! [`AuthoredValue`], [`FileState`], [`AuthorCondition`], [`ExpectedField`], [`PlanCondition`]
 //! and [`Resolves`], and the structs [`Operation`], [`LinkRewrite`],
 //! [`LinkKey`], [`Transition`], [`ResolvedPlan`], [`AuthoredPlan`],
 //! [`Provenance`] and [`SkippedFinding`],
@@ -582,6 +588,7 @@ pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, Unkno
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
 pub use glob::{CaseFold, Pattern, PatternError};
 pub use name::{IllegalVaultName, VaultName};
+pub use plan::backlinks::Backlinks;
 pub use plan::document::{
     AuthoredPlan, FileState, LinkKey, OperationsTag, PlanCondition, PlanDocument, Provenance,
     ResolvedPlan, ResolvedTag, Resolves, SkippedFinding, Transition,

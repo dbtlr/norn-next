@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use norn_fs::NormalizedPath;
-use norn_wire::{ContentHash, DocumentPath, FileState, Operation, OperationKind};
+use norn_wire::{Backlinks, ContentHash, DocumentPath, FileState, Operation, OperationKind};
 
 use super::edit;
 use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
@@ -319,8 +319,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
             OperationKind::DeleteDocument {
                 path,
-                rewrite_to: None,
-                allow_broken_links: false,
+                backlinks: Backlinks::Forbidden,
             } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),

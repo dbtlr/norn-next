@@ -2891,15 +2891,25 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         "a delete requires more than its path"
     );
     assert!(refuses_unknown_keys(delete_fields), "{delete_fields}");
-    assert_eq!(
-        delete_fields["properties"]["rewrite_to"]["$ref"].as_str(),
-        Some("#/$defs/ResolutionTarget"),
-        "a delete's `rewrite_to` admits what its reader refuses"
+    assert_names_a_whole_document(
+        &delete_fields["properties"]["rewrite_to"],
+        "a delete's `rewrite_to`",
     );
     assert_eq!(
         delete_fields["properties"]["allow_broken_links"]["type"].as_str(),
         Some("boolean")
     );
+    assert_eq!(
+        delete_fields["not"],
+        rewrite_to_beside_broken_links(),
+        "a delete's fields admit `rewrite_to` beside `allow_broken_links: true`"
+    );
+    for end in ["old", "new"] {
+        assert_names_a_whole_document(
+            &branch(&schema, "kind", "rewrite_wikilink")["properties"]["fields"]["properties"][end],
+            &format!("a wikilink rewrite's `{end}`"),
+        );
+    }
     for (kind, end) in [
         ("move_document", "DocumentPath"),
         ("move_folder", "FolderPath"),
@@ -3029,6 +3039,28 @@ fn an_operation_advertises_each_kind_with_its_fields() {
     assert_eq!(property_names(rewrite), fields);
     assert_eq!(required_names(rewrite), fields);
     assert!(refuses_unknown_keys(rewrite), "{rewrite} admits any key");
+}
+
+/// What a delete may not carry, as its schema's `not` states it: a
+/// `rewrite_to` beside an `allow_broken_links` of `true`, which its reader
+/// refuses. `false` beside it reads as left out.
+fn rewrite_to_beside_broken_links() -> Value {
+    serde_json::json!({
+        "required": ["rewrite_to", "allow_broken_links"],
+        "properties": {"allow_broken_links": {"const": true}},
+    })
+}
+
+/// Hold that `schema` advertises a target naming a whole document, as its
+/// reader reads one: a string with no `#`, since the first `#` opens an
+/// anchor, which the reader refuses.
+fn assert_names_a_whole_document(schema: &Value, what: &str) {
+    assert_eq!(schema["type"].as_str(), Some("string"), "{what}: {schema}");
+    assert_eq!(
+        schema["pattern"].as_str(),
+        Some("^[^#]+$"),
+        "{what} admits an anchor its reader refuses: {schema}"
+    );
 }
 
 /// Whether a schema admits `null`: its type is `null` or a list naming it, or
@@ -3624,17 +3656,21 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
             Some(1)
         );
     }
+    let delete = schema_of::<DeleteParams>();
+    assert_names_a_whole_document(
+        &delete["properties"]["rewrite_to"],
+        "a delete's `rewrite_to`",
+    );
     assert_eq!(
-        schema_of::<DeleteParams>()["properties"]["rewrite_to"]["$ref"].as_str(),
-        Some("#/$defs/ResolutionTarget"),
-        "a delete's `rewrite_to` admits what its reader refuses"
+        delete["not"],
+        rewrite_to_beside_broken_links(),
+        "a delete admits `rewrite_to` beside `allow_broken_links: true`"
     );
     let rewrite = schema_of::<RewriteWikilinkParams>();
     for end in ["old", "new"] {
-        assert_eq!(
-            rewrite["properties"][end]["$ref"].as_str(),
-            Some("#/$defs/ResolutionTarget"),
-            "a wikilink rewrite's `{end}`"
+        assert_names_a_whole_document(
+            &rewrite["properties"][end],
+            &format!("a wikilink rewrite's `{end}`"),
         );
     }
     let set = schema_of::<SetParams>();

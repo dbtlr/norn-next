@@ -18,9 +18,11 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
 use crate::document::DocumentPath;
+use crate::plan::backlinks::Backlinks;
 use crate::plan::document::AuthoredPlan;
 use crate::plan::document::is_false;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind};
+use crate::plan::write_target::settle_flattened_target;
 use crate::target::ResolutionTarget;
 use crate::write::document_target;
 
@@ -29,6 +31,7 @@ use crate::write::document_target;
 /// On the wire: `{"vault":…,"mode":"apply","path":"notes/b.md","rewrite_to":"notes/c"}`.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = settle_flattened_target)]
 #[non_exhaustive]
 pub struct DeleteParams {
     /// The vault written.
@@ -37,15 +40,10 @@ pub struct DeleteParams {
     pub mode: ApplyMode,
     /// The document removed.
     pub path: DocumentPath,
-    /// The document every link naming the removed one is rewritten to name.
-    /// Never written beside `allow_broken_links`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "ResolutionTarget")]
-    pub rewrite_to: Option<ResolutionTarget>,
-    /// Whether the links naming the removed document are left broken. Absent
-    /// is `false`.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub allow_broken_links: bool,
+    /// What becomes of the links naming it: forbidden, rewritten to
+    /// `rewrite_to`, or left broken where `allow_broken_links` says so.
+    #[serde(flatten)]
+    pub backlinks: Backlinks,
     /// What the author observed and requires to hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<AuthorCondition>,
@@ -62,8 +60,7 @@ impl DeleteParams {
             vault,
             mode,
             path,
-            rewrite_to: None,
-            allow_broken_links: false,
+            backlinks: Backlinks::Forbidden,
             conditions: Vec::new(),
             force: false,
         }
@@ -73,8 +70,7 @@ impl DeleteParams {
     /// `rewrite_to`, in place of leaving any broken.
     #[must_use]
     pub fn rewriting_to(mut self, rewrite_to: ResolutionTarget) -> Self {
-        self.rewrite_to = Some(rewrite_to);
-        self.allow_broken_links = false;
+        self.backlinks = Backlinks::RewrittenTo(rewrite_to);
         self
     }
 
@@ -82,8 +78,7 @@ impl DeleteParams {
     /// place of rewriting any.
     #[must_use]
     pub fn breaking_links(mut self) -> Self {
-        self.rewrite_to = None;
-        self.allow_broken_links = true;
+        self.backlinks = Backlinks::LeftBroken;
         self
     }
 
@@ -109,17 +104,12 @@ impl DeleteParams {
             vault,
             mode: _,
             path,
-            rewrite_to,
-            allow_broken_links,
+            backlinks,
             conditions,
             force,
         } = self;
-        let operation = Operation::new(OperationKind::DeleteDocument {
-            path,
-            rewrite_to,
-            allow_broken_links,
-        })
-        .with_conditions(conditions);
+        let operation = Operation::new(OperationKind::DeleteDocument { path, backlinks })
+            .with_conditions(conditions);
         AuthoredPlan::new(vault, vec![operation]).with_force(force)
     }
 }
@@ -152,8 +142,9 @@ where
 
 impl<'de> Deserialize<'de> for DeleteParams {
     /// Every key is read by the derive, refusing any the request does not
-    /// name and any written twice; a request rewriting its links and leaving
-    /// them broken at once is then refused.
+    /// name and any written twice; what becomes of the links is then read
+    /// from its two keys, refusing a request that rewrites them and leaves
+    /// them broken at once.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -167,17 +158,17 @@ impl<'de> Deserialize<'de> for DeleteParams {
             conditions,
             force,
         } = DeleteKeys::deserialize(deserializer)?;
-        if allow_broken_links && rewrite_to.is_some() {
-            return Err(D::Error::custom(
-                "a `delete` request rewrites the links naming its document to `rewrite_to` or leaves them broken, not both",
-            ));
-        }
+        let backlinks =
+            Backlinks::from_keys(rewrite_to, allow_broken_links).map_err(|problem| {
+                D::Error::custom(format_args!(
+                    "a `delete` request says what becomes of its links: {problem}"
+                ))
+            })?;
         Ok(DeleteParams {
             vault,
             mode,
             path,
-            rewrite_to,
-            allow_broken_links,
+            backlinks,
             conditions,
             force,
         })

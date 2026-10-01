@@ -96,13 +96,13 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::document::{DocumentPath, LinkFamily};
-use crate::plan::document::is_false;
+use crate::plan::backlinks::Backlinks;
 use crate::plan::forecast::FolderPath;
 use crate::plan::hash::ContentHash;
 use crate::plan::value::AuthoredValue;
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
-use crate::target::ResolutionTarget;
+use crate::target::{ResolutionTarget, whole_document_schema};
 
 /// The identifier an operation is required by: a string naming something
 /// rather than nothing.
@@ -220,21 +220,14 @@ pub enum OperationKind {
         /// operation of the same plan moves or removes what does.
         to: DocumentPath,
     },
-    /// Remove a document. A link naming it is rewritten to name
-    /// `rewrite_to`, or left broken where `allow_broken_links` says so; with
-    /// neither, a document any link names is not removed.
+    /// Remove a document, saying what becomes of the links naming it.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
-        /// The document every link naming the removed one is rewritten to
-        /// name. Never written beside `allow_broken_links`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(with = "ResolutionTarget")]
-        rewrite_to: Option<ResolutionTarget>,
-        /// Whether the links naming the removed document are left broken.
-        /// Absent is `false`, and `false` is left out.
-        #[serde(default, skip_serializing_if = "is_false")]
-        allow_broken_links: bool,
+        /// What becomes of the links naming it: forbidden, rewritten to
+        /// `rewrite_to`, or left broken where `allow_broken_links` says so.
+        #[serde(flatten)]
+        backlinks: Backlinks,
     },
     /// Move every document a folder holds to the same place under another
     /// folder. Planning expands it into one `move_document` per document.
@@ -266,8 +259,10 @@ pub enum OperationKind {
     RewriteWikilink {
         /// What the links name now. It need not name a document that
         /// stands, and naming several does not resolve.
+        #[schemars(schema_with = "whole_document_schema")]
         old: ResolutionTarget,
         /// What they name after.
+        #[schemars(schema_with = "whole_document_schema")]
         new: ResolutionTarget,
     },
     /// Set a frontmatter field to exactly this value, adding the field where
@@ -411,8 +406,7 @@ impl OperationKind {
     pub const fn delete_document(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,
-            rewrite_to: None,
-            allow_broken_links: false,
+            backlinks: Backlinks::Forbidden,
         }
     }
 
@@ -424,8 +418,7 @@ impl OperationKind {
     ) -> Self {
         OperationKind::DeleteDocument {
             path,
-            rewrite_to: Some(rewrite_to),
-            allow_broken_links: false,
+            backlinks: Backlinks::RewrittenTo(rewrite_to),
         }
     }
 
@@ -433,8 +426,7 @@ impl OperationKind {
     pub const fn delete_document_breaking_links(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,
-            rewrite_to: None,
-            allow_broken_links: true,
+            backlinks: Backlinks::LeftBroken,
         }
     }
 
@@ -1158,18 +1150,20 @@ impl KindFields {
                 to: required_as(kind, "to", to, DocumentPath::new)?,
             },
             KindName::DeleteDocument => {
-                let allow_broken_links = allow_broken_links.unwrap_or(false);
-                if allow_broken_links && rewrite_to.is_some() {
-                    return Err(E::custom(
-                        "a `delete_document` operation rewrites the links naming its document to `rewrite_to` or leaves them broken, not both",
-                    ));
-                }
+                let rewrite_to = rewrite_to
+                    .map(|target| whole_document(kind, "rewrite_to", target))
+                    .transpose()?;
                 OperationKind::DeleteDocument {
                     path: required(kind, "path", path)?,
-                    rewrite_to: rewrite_to
-                        .map(|target| whole_document(kind, "rewrite_to", target))
-                        .transpose()?,
-                    allow_broken_links,
+                    backlinks: Backlinks::from_keys(
+                        rewrite_to,
+                        allow_broken_links.unwrap_or(false),
+                    )
+                    .map_err(|problem| {
+                        E::custom(format_args!(
+                            "a `delete_document` operation's fields say what becomes of its links: {problem}"
+                        ))
+                    })?,
                 }
             }
             KindName::MoveFolder => OperationKind::MoveFolder {

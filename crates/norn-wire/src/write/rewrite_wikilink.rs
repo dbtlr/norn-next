@@ -19,7 +19,7 @@ use crate::apply::ApplyMode;
 use crate::plan::document::AuthoredPlan;
 use crate::plan::document::is_false;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind};
-use crate::target::ResolutionTarget;
+use crate::target::{ResolutionTarget, whole_document_schema};
 use crate::write::document_target;
 
 /// What a `rewrite_wikilink` request carries.
@@ -36,9 +36,11 @@ pub struct RewriteWikilinkParams {
     /// What the rewritten wikilinks name now. It need not name a document
     /// that stands, and naming several does not resolve.
     #[serde(deserialize_with = "document_target")]
+    #[schemars(schema_with = "whole_document_schema")]
     pub old: ResolutionTarget,
     /// What they name after.
     #[serde(deserialize_with = "document_target")]
+    #[schemars(schema_with = "whole_document_schema")]
     pub new: ResolutionTarget,
     /// What the author observed and requires to hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
