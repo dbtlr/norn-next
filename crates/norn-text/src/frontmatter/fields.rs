@@ -438,7 +438,17 @@ fn is_null_token(text: &str) -> bool {
 /// Re-parse a value slice through the same pipeline the block went through, so
 /// `12:30`, `1.10` and `yes` are read identically on both sides.
 pub(crate) fn reparse(text: &str) -> Option<Value> {
-    let parsed = crate::frontmatter::extract::parse_block(text).ok()?;
+    clean_value(crate::frontmatter::extract::parse_block(text).ok()?)
+}
+
+/// [`reparse`] past the size gate, for an admitted block re-read with a few
+/// bytes changed ([`crate::frontmatter::extract::parse_admitted`]).
+pub(crate) fn reparse_admitted(text: &str) -> Option<Value> {
+    clean_value(crate::frontmatter::extract::parse_admitted(text).ok()?)
+}
+
+/// `parsed` in the value model, where the conversion strips nothing.
+fn clean_value(parsed: serde_yaml::Value) -> Option<Value> {
     let mut discarded = Vec::new();
     let mut strip = StripReport::default();
     let value =

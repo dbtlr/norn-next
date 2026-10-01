@@ -8,7 +8,9 @@
 
 use std::ops::Range;
 
-use crate::frontmatter::fields::{Field, ValueStyle, classify_value, parse_top_level_key, reparse};
+use crate::frontmatter::fields::{
+    Field, ValueStyle, classify_value, parse_top_level_key, reparse, reparse_admitted,
+};
 use crate::span::split_lines_inclusive;
 use crate::value::Value;
 
@@ -137,7 +139,9 @@ pub(crate) fn key_line_value_point(content: &str, line_start: usize) -> Option<R
 ///
 /// Every candidate is probed at once first, and a block that still reads
 /// the same holds a comment; only otherwise is each judged alone, stopping at
-/// the first comment. An entry with no `#` is not re-read.
+/// the first comment. An entry with no `#` is not re-read. A probed block is
+/// re-read past the size gate, because a bare `#`'s probe grows it, and the
+/// bound that admitted the block says nothing about what its bytes mean.
 pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &Field) -> bool {
     let yaml = &content[block.clone()];
     let entry = field.line_range.start - block.start..field.line_range.end - block.start;
@@ -148,7 +152,7 @@ pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &
     if candidates.len() > MAX_JUDGED_CANDIDATES {
         return true;
     }
-    let Some(written) = reparse(yaml) else {
+    let Some(written) = reparse_admitted(yaml) else {
         return true;
     };
     // Each candidate's probe edit: its text truncated, or, for a bare `#`,
@@ -169,7 +173,7 @@ pub(crate) fn entry_carries_comment(content: &str, block: Range<usize>, field: &
             kept_from = probe.end;
         }
         probed.push_str(&yaml[kept_from..]);
-        reparse(&probed).as_ref() == Some(&written)
+        reparse_admitted(&probed).as_ref() == Some(&written)
     };
     reads_as_written(&candidates)
         || candidates

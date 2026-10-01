@@ -8,7 +8,8 @@
 //! written.
 
 use norn_text::{
-    Document, EditError, LineEnding, Mapping, Value, frontmatter_reads_back, render_document,
+    Document, EditError, FRONTMATTER_MAX_BYTES, LineEnding, Mapping, Value, frontmatter_reads_back,
+    render_document,
 };
 
 fn map<const N: usize>(entries: [(&str, Value); N]) -> Value {
@@ -390,6 +391,31 @@ fn a_bare_hash_is_a_comment_only_where_the_reader_reads_one() {
             set(source, "k", &value),
             comment_lost("k"),
             "for {source:?}"
+        );
+    }
+}
+
+/// **A block at the size bound is judged as any other.** The bound admits a
+/// document; it is no part of what the block means, so probing a bare `#`
+/// by writing past it, which grows the block, still reads the block and
+/// still finds the comment.
+#[test]
+fn a_bare_comment_in_a_block_at_the_size_bound_refuses_a_whole_entry_rewrite() {
+    for (entry, value) in [
+        ("k: [a]#\n", Value::from("z")),
+        ("k: [a] #\n", Value::from("z")),
+        ("k:\n  a: 1\n  #\n  b: 2\n", map([("z", Value::Int(9))])),
+    ] {
+        let unpadded = format!("{entry}pad: ''\n");
+        let padding = "a".repeat(FRONTMATTER_MAX_BYTES - unpadded.len());
+        let block = format!("{entry}pad: '{padding}'\n");
+        assert_eq!(block.len(), FRONTMATTER_MAX_BYTES);
+        let source = format!("---\n{block}---\n");
+        assert!(Document::parse(&source).frontmatter().is_some());
+        assert_eq!(
+            set(&source, "k", &value),
+            comment_lost("k"),
+            "for {entry:?}"
         );
     }
 }
