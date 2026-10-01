@@ -706,6 +706,29 @@ fn a_move_making_a_link_to_an_unmoved_document_ambiguous_rewrites_nothing() {
     assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]]\n"));
 }
 
+/// **A link to a document the plan edits but does not move is no backlink
+/// of a move**: `[[n]]` named `p/n.md`, which the plan edits where it stands,
+/// and the moved document landing as another `n.md` makes it ambiguous. The
+/// edit makes `p/n.md` a file the plan writes, so the link is judged beside
+/// the moved one; it is still not respelled toward the document it named, and
+/// the forecast says it is made ambiguous.
+#[test]
+fn a_link_to_an_edited_unmoved_document_made_ambiguous_rewrites_nothing() {
+    let mut fixture = Fixture::new(&[("p/n.md", "P\n"), ("a.md", "A\n"), ("h.md", "[[n]]\n")]);
+    let resolution =
+        fixture.previewed_and_applied(vec![moving("a.md", "q/n.md"), editing("p/n.md", "P", "P2")]);
+    assert_eq!(resolution.plan.operations[0].cascade, []);
+    assert_eq!(
+        resolution.forecast.links,
+        vec![LinkAdvisory::made_ambiguous(key(
+            "h.md",
+            LinkFamily::Wikilink,
+            "n"
+        ))]
+    );
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[n]]\n"));
+}
+
 /// **A move that falls takes down only what its own operation touches**: the
 /// cascade it would have carried is discarded with it, so a holder only that
 /// cascade shared with another move does not take the other move down. Both
