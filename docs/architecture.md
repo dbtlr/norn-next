@@ -2549,9 +2549,9 @@ plan's cascades and never generates one: a backlink another writer adds after pl
 an entry the set computed again holds and the plan does not record, which refuses the
 plan, and the refusal's fresh plan generates the cascade afresh from the links standing
 then. The applier does not hold a resolved plan's cascade to the one planning would
-generate: a hand-built plan whose move or rewriting delete carries a cascade omitting a
-rewrite records the link that rewrite would have followed as the set computed again
-records it, and lands leaving it as written (NORN-297, an open question).
+generate: a hand-built plan whose move, rewriting delete or wikilink rewrite carries a
+cascade omitting a rewrite records the link that rewrite would have followed as the set
+computed again records it, and lands leaving it as written (NORN-297, an open question).
 
 **A document delete reads its backlinks the same way.** A link is a backlink of the document
 a delete removes where it resolves before the plan to exactly that document — wherever the
