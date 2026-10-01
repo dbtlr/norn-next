@@ -1,10 +1,10 @@
 //! The bytes of a list field: where a block list's items are, where its key
 //! line takes a value, and whether an entry carries a comment.
 //!
-//! A push or a pop splices one item's line rather than rewriting the field,
-//! so every byte it does not change — comments, the other items' quoting, the
-//! key's spelling — stays. What this module names is only the bytes; the
-//! document's re-read after the splice is what proves them.
+//! A push or a pop splices one item's lines rather than rewriting the field,
+//! so every byte it does not change — comments, the other items' quoting and
+//! layout, the key's spelling — stays. What this module names is only the
+//! bytes; the document's re-read after the splice is what proves them.
 
 use std::ops::Range;
 
@@ -12,25 +12,30 @@ use crate::frontmatter::fields::{Field, ValueStyle, classify_value, parse_top_le
 use crate::span::split_lines_inclusive;
 use crate::value::Value;
 
-/// One item of a block list, written on a line of its own.
+/// One item of a block list: the lines it is written on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockItem {
-    /// The item's whole line, its terminator included.
-    pub(crate) line: Range<usize>,
+    /// The item's lines, from its `-` line through its last line of content,
+    /// terminators included. A comment or blank line inside that run is the
+    /// item's; one after it is not.
+    pub(crate) lines: Range<usize>,
     /// The bytes before the item's `-`.
     pub(crate) indent: Range<usize>,
 }
 
 /// The items of the block-list `field` in `content`, one per parsed item, or
-/// `None` where the entry is not a list whose items can be spliced line by
-/// line.
+/// `None` where the entry is not a list whose items can be spliced as runs of
+/// whole lines.
 ///
-/// Below the key line, every line of the entry must be blank, a comment, or
-/// one `- item` whose value ends on that line and re-reads as the parsed item
-/// at its position; and there must be exactly as many item lines as parsed
-/// items. A multi-line item, a nested collection written over several lines
-/// or a scan that disagrees with the parse answers `None`, and the caller
-/// does not splice.
+/// Below the key line, every line of the entry must be blank, a comment, a
+/// `- item` line at the indent the first item sets, or a line indented past
+/// it, which continues the item above; an item may span any number of lines,
+/// a map or a nested list written over several included. Each item's lines,
+/// re-read alone, must be a list holding exactly the parsed item at its
+/// position, and there must be exactly as many items as parsed ones. A line
+/// that fits none of these, or a run that does not re-read as its item —
+/// one naming an anchor written outside it, a block scalar whose kept blank
+/// lines trail it — answers `None`, and the caller does not splice.
 pub(crate) fn block_item_lines(
     content: &str,
     field: &Field,
@@ -41,7 +46,8 @@ pub(crate) fn block_item_lines(
     }
     let mut lines = split_lines_inclusive(&content[field.line_range.clone()]);
     let mut line_start = field.line_range.start + lines.next()?.len();
-    let mut found = Vec::new();
+    let mut item_indent = None;
+    let mut found: Vec<BlockItem> = Vec::new();
     for line in lines {
         let start = line_start;
         line_start += line.len();
@@ -50,41 +56,33 @@ pub(crate) fn block_item_lines(
         if body.is_empty() || body.starts_with('#') {
             continue;
         }
-        let item = block_item(start, line, text.len() - body.len())?;
-        let value = reparse(&content[item.value.clone()])?;
-        if items.get(found.len()) != Some(&value) {
+        let indent = text.len() - body.len();
+        if item_indent.is_some_and(|column| indent > column) {
+            found.last_mut()?.lines.end = line_start;
+            continue;
+        }
+        if item_indent.is_some_and(|column| indent != column) || !opens_item(body) {
             return None;
         }
-        found.push(item.line_item);
-    }
-    (found.len() == items.len()).then_some(found)
-}
-
-/// A `- item` line's item and the bytes of its value.
-struct ScannedItem {
-    line_item: BlockItem,
-    value: Range<usize>,
-}
-
-/// Read `line` — its terminator included, starting at `start` in the block
-/// and indented by `indent` bytes — as one block-list item whose value ends
-/// on the line.
-fn block_item(start: usize, line: &str, indent: usize) -> Option<ScannedItem> {
-    let text = line.trim_end_matches(['\r', '\n']);
-    let rest = text[indent..].strip_prefix('-')?;
-    if !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
-        return None;
-    }
-    let after_dash = indent + 1;
-    let (value, _, complete) = classify_value(start, after_dash, &text[after_dash..]);
-    let value = value.filter(|_| complete)?;
-    Some(ScannedItem {
-        line_item: BlockItem {
-            line: start..start + line.len(),
+        item_indent = Some(indent);
+        found.push(BlockItem {
+            lines: start..line_start,
             indent: start..start + indent,
-        },
-        value,
-    })
+        });
+    }
+    let proven = found.len() == items.len()
+        && found.iter().zip(items).all(|(item, value)| {
+            matches!(reparse(&content[item.lines.clone()]),
+                Some(Value::Sequence(read)) if read.len() == 1 && &read[0] == value)
+        });
+    proven.then_some(found)
+}
+
+/// Whether `body` — a line from its first non-blank byte — opens a block-list
+/// item: a `-` followed by a space, a tab or the end of the line.
+fn opens_item(body: &str) -> bool {
+    body.strip_prefix('-')
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
 }
 
 /// Where the key line starting at `line_start` takes a value when it holds

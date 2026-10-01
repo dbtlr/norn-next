@@ -330,3 +330,87 @@ fn awkward_nested_values_round_trip() {
         assert!(!rendered.replace("\r\n", "").contains('\n'), "{rendered:?}");
     }
 }
+
+// ── Pushing and popping a nested element ─────────────────────────────────
+
+/// A block list of maps whose items each span several lines, with comments
+/// inside an item, between items and after the list.
+const PEOPLE: &str = "---\ntitle: t\npeople:\n- name: ada # first\n  role: author\n# between\n- name: bo\n  # inside\n  role: editor\nafter: x\n---\nbody\n";
+
+/// **A map pushed onto a block list of maps is one item spliced below the
+/// last**, at the list's item indent, and every other byte stands — the
+/// comments inside and between the items included.
+#[test]
+fn a_map_pushed_onto_a_block_list_of_maps_splices_one_item() {
+    assert_eq!(
+        Document::parse(PEOPLE).push_to_list(
+            "people",
+            &map([("name", "cy".into()), ("role", "reader".into())])
+        ),
+        Ok(PEOPLE.replace(
+            "  role: editor\n",
+            "  role: editor\n- name: cy\n  role: reader\n"
+        ))
+    );
+}
+
+/// **A map popped from a block list of maps deletes only that item's lines**,
+/// its own comments with them; the other items and the comments between
+/// them stand.
+#[test]
+fn a_map_popped_from_a_block_list_of_maps_deletes_only_its_lines() {
+    let ada = map([("name", "ada".into()), ("role", "author".into())]);
+    assert_eq!(
+        Document::parse(PEOPLE).pop_from_list("people", &ada),
+        Ok(PEOPLE.replace("- name: ada # first\n  role: author\n", ""))
+    );
+    let bo = map([("name", "bo".into()), ("role", "editor".into())]);
+    assert_eq!(
+        Document::parse(PEOPLE).pop_from_list("people", &bo),
+        Ok(PEOPLE.replace("- name: bo\n  # inside\n  role: editor\n", ""))
+    );
+}
+
+/// **Popping every item of a block list of maps writes `[]` on its key
+/// line**, as popping a flat list's last item does; the comment between the
+/// items stays below it.
+#[test]
+fn popping_the_last_maps_of_a_block_list_leaves_an_empty_list() {
+    let source = "---\nrows:\n  - k: v\n    n: 1\n  # between\n  - k: v\n    n: 1\n---\n";
+    assert_eq!(
+        Document::parse(source)
+            .pop_from_list("rows", &map([("k", "v".into()), ("n", Value::Int(1))])),
+        Ok("---\nrows: []\n  # between\n---\n".to_string())
+    );
+}
+
+/// **A pushed map takes the list's indent and line terminator on every one
+/// of its lines.**
+#[test]
+fn a_pushed_map_takes_the_lists_indent_and_terminator_on_every_line() {
+    assert_eq!(
+        Document::parse("---\r\nrows:\r\n    - a\r\n---\r\n").push_to_list(
+            "rows",
+            &map([("k", list(["v".into()])), ("n", Value::Int(1))])
+        ),
+        Ok(
+            "---\r\nrows:\r\n    - a\r\n    - k:\r\n        - v\r\n      n: 1\r\n---\r\n"
+                .to_string()
+        )
+    );
+}
+
+/// **A nested element pushed onto a flow list, or onto a field the block
+/// lacks, is written as a set writes it**: in block style, since only a flat
+/// list is written inline.
+#[test]
+fn a_nested_element_pushed_onto_a_flow_or_absent_list_is_written_in_block_style() {
+    assert_eq!(
+        Document::parse("---\nrows: [a]\n---\n").push_to_list("rows", &list(["b".into()])),
+        Ok("---\nrows:\n  - a\n  - - b\n---\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("---\ntitle: t\n---\n").push_to_list("rows", &map([("k", "v".into())])),
+        Ok("---\ntitle: t\nrows:\n  - k: v\n---\n".to_string())
+    );
+}

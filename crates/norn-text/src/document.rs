@@ -1023,14 +1023,19 @@ impl<'a> Document<'a> {
     /// scalar or a map refuses with [`EditError::FieldNotAList`]: turning it
     /// into a list is a set.
     ///
+    /// `value` may be any shape the model holds; a collection is written in
+    /// block style, as [`Document::set_field`] writes one.
+    ///
     /// **Every byte the push does not change stays.** A block list whose
-    /// items each sit on a line of their own gains one item line below its
-    /// last item, at that item's indent and with its line terminator;
-    /// comments, the other items' quoting and the key's spelling are not
-    /// touched. Every other list — a flow list, a block list with a multi-line
-    /// item — and an absent or null field, which becomes a one-element list,
-    /// are written whole by [`Document::set_field`], and only where the entry
-    /// carries no comment: a comment the rewrite would drop refuses with
+    /// items each re-read alone as themselves — on one line or several, a map
+    /// or a nested list included — gains one item below the last line of its
+    /// last item, at that item's indent and with its line terminator on every
+    /// line; comments, the other items' quoting and layout and the key's
+    /// spelling are not touched. Every other list — a flow list, a block list
+    /// whose items cannot be proven one by one — and an absent or null field,
+    /// which becomes a one-element list, are written whole by
+    /// [`Document::set_field`], and only where the entry carries no comment: a
+    /// comment the rewrite would drop refuses with
     /// [`EditError::CommentWouldBeLost`] instead. Either way the result is
     /// re-read and proven as a set is.
     pub fn push_to_list(&self, field: &str, value: &Value) -> Result<String, EditError> {
@@ -1043,9 +1048,9 @@ impl<'a> Document<'a> {
             return self.rewrite_list(field, items);
         };
         let terminator =
-            trailing_break(&self.source[last.line.clone()]).unwrap_or(self.line_ending.as_str());
-        let line = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
-        let edited = splice(self.source, last.line.end..last.line.end, &line);
+            trailing_break(&self.source[last.lines.clone()]).unwrap_or(self.line_ending.as_str());
+        let item = render_block_item(value, &self.source[last.indent.clone()], terminator)?;
+        let edited = splice(self.source, last.lines.end..last.lines.end, &item);
         refuse_past_bound(&edited)?;
         items.push(value.clone());
         self.verified_list(edited, field, items)
@@ -1088,11 +1093,12 @@ impl<'a> Document<'a> {
     /// with [`EditError::FieldNotAList`].
     ///
     /// **Every byte the pop does not change stays.** From a block list whose
-    /// items each sit on a line of their own, the lines of the matching items
-    /// are deleted and nothing else; popping its last item writes `[]` on the
-    /// key line, before any comment there, because a key with nothing under
-    /// it reads as null and `[]` reads back as the empty list. A comment
-    /// trailing a matching item on its own line goes with that line: it
+    /// items each re-read alone as themselves, on one line or several, the
+    /// lines of the matching items are deleted and nothing else; popping its
+    /// last item writes `[]` on the key line, before any comment there,
+    /// because a key with nothing under it reads as null and `[]` reads back
+    /// as the empty list. A comment on a matching item's own lines — trailing
+    /// one of them, or between two of them — goes with those lines: it
     /// annotates the item being removed. Comments on every other line stay.
     /// Every other list is written whole by [`Document::set_field`], only
     /// where its entry carries no comment; a comment that rewrite would drop
@@ -1124,7 +1130,7 @@ impl<'a> Document<'a> {
             .iter()
             .zip(&items)
             .filter(|(_, item)| *item == value)
-            .map(|(line, _)| line)
+            .map(|(lines, _)| lines)
             .collect();
         let mut edits: Vec<(Range<usize>, &str)> = Vec::new();
         if kept.is_empty() {
@@ -1133,7 +1139,7 @@ impl<'a> Document<'a> {
             };
             edits.push((point, " []"));
         }
-        edits.extend(popped.iter().map(|line| (line.line.clone(), "")));
+        edits.extend(popped.iter().map(|item| (item.lines.clone(), "")));
         self.verified_list(splice_all(self.source, &edits), field, kept)
     }
 

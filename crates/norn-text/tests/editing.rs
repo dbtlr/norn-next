@@ -1727,19 +1727,30 @@ fn a_push_that_would_drop_a_comment_refuses() {
     );
 }
 
-/// **A block list whose items are not one per line is rewritten whole only
-/// where it carries no comment**: a multi-line item cannot be spliced around,
-/// so the list is written as a set writes it, or refused where that would
-/// drop a comment.
+/// **A block list whose items span several lines takes a splice too**: the
+/// pushed item goes below the last line of the last item, and that item's
+/// lines — and the comment above them — stand.
 #[test]
-fn a_block_list_with_a_multi_line_item_is_rewritten_only_without_comments() {
+fn a_block_list_with_a_multi_line_item_takes_a_push_as_a_splice() {
     assert_eq!(
-        Document::parse("---\ntags:\n  - a\n  - \"two\n    lines\"\n---\n")
+        Document::parse("---\ntags:\n  # why\n  - a\n  - \"two\n    lines\"\n---\n")
             .push_to_list("tags", &string("c")),
-        Ok("---\ntags:\n  - a\n  - two lines\n  - c\n---\n".to_string())
+        Ok("---\ntags:\n  # why\n  - a\n  - \"two\n    lines\"\n  - c\n---\n".to_string())
+    );
+}
+
+/// **A block list whose items cannot be proven line by line is rewritten
+/// whole, and only where it carries no comment**: an item naming an anchor
+/// another item writes does not re-read alone, so the list is written as a
+/// set writes it, or refused where that would drop a comment.
+#[test]
+fn a_block_list_whose_items_do_not_re_read_alone_is_rewritten_only_without_comments() {
+    assert_eq!(
+        Document::parse("---\ntags:\n  - &x a\n  - *x\n---\n").push_to_list("tags", &string("c")),
+        Ok("---\ntags:\n  - a\n  - a\n  - c\n---\n".to_string())
     );
     assert_eq!(
-        Document::parse("---\ntags:\n  # why\n  - \"two\n    lines\"\n---\n")
+        Document::parse("---\ntags:\n  # why\n  - &x a\n  - *x\n---\n")
             .push_to_list("tags", &string("c")),
         Err(EditError::CommentWouldBeLost {
             field: "tags".into()
