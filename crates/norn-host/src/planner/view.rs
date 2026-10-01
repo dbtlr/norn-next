@@ -4,7 +4,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::OsStr;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,14 +37,29 @@ pub(crate) trait VaultView {
     /// Whether a folder stands at `folder`.
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Self::Error>;
 
-    /// The name of every entry directly inside `folder`, whatever its kind:
-    /// a document, a folder, or anything else that keeps it from being
-    /// empty. Nothing where no folder stands.
-    fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, Self::Error>;
+    /// Hand `visit` the name of every entry directly inside `folder`,
+    /// whatever its kind — a document, a folder, or anything else that keeps
+    /// it from being empty — in no promised order, until it breaks. Nothing
+    /// where no folder stands.
+    ///
+    /// **The listing streams**: no name is kept once visited, so a listing
+    /// holds one name however wide the folder is.
+    fn visit_folder_names(
+        &self,
+        folder: &NormalizedPath,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error>;
 
-    /// The name of every entry directly inside the vault root, as
-    /// [`folder_names`](Self::folder_names) lists a folder's.
-    fn root_names(&self) -> Result<Vec<OsString>, Self::Error>;
+    /// Hand `visit` the name of every entry directly inside the vault root,
+    /// as [`visit_folder_names`](Self::visit_folder_names) lists a folder's.
+    ///
+    /// The root is its own method because a [`NormalizedPath`] cannot be
+    /// empty, so no `folder` names it; `norn-fs` spells the same listing
+    /// `visit_folder_names("")`.
+    fn visit_root_names(
+        &self,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), Self::Error>;
 
     /// Everything beneath `folder`, at any depth, as a folder move takes it
     /// ([`FolderContents`]); `None` where no folder stands there.
@@ -206,12 +222,19 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
         self.view.folder_stands(folder)
     }
 
-    fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, V::Error> {
-        self.view.folder_names(folder)
+    fn visit_folder_names(
+        &self,
+        folder: &NormalizedPath,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.view.visit_folder_names(folder, visit)
     }
 
-    fn root_names(&self) -> Result<Vec<OsString>, V::Error> {
-        self.view.root_names()
+    fn visit_root_names(
+        &self,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.view.visit_root_names(visit)
     }
 
     fn folder_contents(&self, folder: &NormalizedPath) -> Result<Option<FolderContents>, V::Error> {
@@ -387,20 +410,25 @@ impl VaultView for TreeView {
         ))
     }
 
-    fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, TreeViewError> {
-        Ok(self
-            .vault
-            .folder_names(folder.as_path())
-            .map_err(TreeViewError::Walk)?
-            .unwrap_or_default())
+    fn visit_folder_names(
+        &self,
+        folder: &NormalizedPath,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), TreeViewError> {
+        self.vault
+            .visit_folder_names(folder.as_path(), visit)
+            .map(drop)
+            .map_err(TreeViewError::Walk)
     }
 
-    fn root_names(&self) -> Result<Vec<OsString>, TreeViewError> {
-        Ok(self
-            .vault
-            .folder_names(Path::new(""))
-            .map_err(TreeViewError::Walk)?
-            .unwrap_or_default())
+    fn visit_root_names(
+        &self,
+        visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<(), TreeViewError> {
+        self.vault
+            .visit_folder_names(Path::new(""), visit)
+            .map(drop)
+            .map_err(TreeViewError::Walk)
     }
 
     /// **The vault's own walk, narrowed to the folder**: it follows no link,
@@ -437,7 +465,8 @@ pub(crate) mod memory {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
     use std::convert::Infallible;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
+    use std::ops::ControlFlow;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -454,6 +483,9 @@ pub(crate) mod memory {
         empty_folders: BTreeSet<String>,
         /// How many times each name was read.
         pub(crate) reads: RefCell<BTreeMap<String, usize>>,
+        /// How many times each folder was listed, the root as the empty
+        /// name.
+        pub(crate) listings: RefCell<BTreeMap<String, usize>>,
     }
 
     impl Default for MemoryVault {
@@ -463,6 +495,7 @@ pub(crate) mod memory {
                 files: BTreeMap::new(),
                 empty_folders: BTreeSet::new(),
                 reads: RefCell::default(),
+                listings: RefCell::default(),
             }
         }
     }
@@ -496,6 +529,15 @@ pub(crate) mod memory {
         pub(crate) fn with_empty_folder(mut self, folder: &str) -> Self {
             self.empty_folders.insert(folder.to_string());
             self
+        }
+
+        /// Count one listing of `folder`.
+        fn listed(&self, folder: &str) {
+            *self
+                .listings
+                .borrow_mut()
+                .entry(folder.to_string())
+                .or_default() += 1;
         }
 
         fn identity(&self, spelling: &str) -> NormalizedPath {
@@ -613,7 +655,12 @@ pub(crate) mod memory {
             Ok(Some(contents))
         }
 
-        fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<OsString>, Infallible> {
+        fn visit_folder_names(
+            &self,
+            folder: &NormalizedPath,
+            visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+        ) -> Result<(), Infallible> {
+            self.listed(&folder.as_path().to_string_lossy());
             let depth = folder.as_path().components().count();
             let names: BTreeSet<OsString> = self
                 .every_name()
@@ -625,23 +672,39 @@ pub(crate) mod memory {
                         .then(|| next.as_os_str().to_owned())
                 })
                 .collect();
-            Ok(names.into_iter().collect())
+            visited(names, visit);
+            Ok(())
         }
 
-        fn root_names(&self) -> Result<Vec<OsString>, Infallible> {
+        fn visit_root_names(
+            &self,
+            visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>,
+        ) -> Result<(), Infallible> {
+            self.listed("");
             let names: BTreeSet<OsString> = self
                 .every_name()
                 .filter_map(|name| {
                     Some(Path::new(name).components().next()?.as_os_str().to_owned())
                 })
                 .collect();
-            Ok(names.into_iter().collect())
+            visited(names, visit);
+            Ok(())
+        }
+    }
+
+    /// Hand `visit` each of `names`, in byte order, until it breaks.
+    fn visited(names: BTreeSet<OsString>, visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>) {
+        for name in names {
+            if visit(&name).is_break() {
+                break;
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::Path;
 
     use norn_testkit::scratch::Scratch;
@@ -704,16 +767,24 @@ mod tests {
             .normalize(Path::new("folder"))
             .expect("a vault path");
         assert!(view.folder_stands(&folder).expect("a readable tree"));
-        assert_eq!(
-            view.folder_names(&folder).expect("a readable tree"),
-            vec![OsString::from("a.md")]
-        );
+        let mut names = Vec::new();
+        view.visit_folder_names(&folder, &mut |name| {
+            names.push(name.to_owned());
+            ControlFlow::Continue(())
+        })
+        .expect("a readable tree");
+        assert_eq!(names, vec![OsString::from("a.md")]);
     }
 
     #[test]
     fn the_tree_view_lists_the_root_s_names() {
         let (_scratch, view) = tree();
-        let mut names = view.root_names().expect("a readable tree");
+        let mut names = Vec::new();
+        view.visit_root_names(&mut |name| {
+            names.push(name.to_owned());
+            ControlFlow::Continue(())
+        })
+        .expect("a readable tree");
         names.sort();
         assert_eq!(
             names,

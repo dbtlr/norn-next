@@ -40,6 +40,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
+use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -267,9 +268,15 @@ impl Vault {
         })
     }
 
-    /// The name of every entry directly inside the folder at `relative` —
-    /// the vault root where `relative` is empty — whatever its kind, or
-    /// `None` where the walk reaches no folder there.
+    /// Hand `visit` the name of every entry directly inside the folder at
+    /// `relative` — the vault root where `relative` is empty — whatever its
+    /// kind, until it breaks; `false`, visiting nothing, where the walk
+    /// reaches no folder there.
+    ///
+    /// **The listing streams**: each name is handed over as the directory
+    /// yields it and none is kept, so a listing holds one name however wide
+    /// the folder is, and a visitor that has its answer breaks rather than
+    /// paying for the rest.
     ///
     /// **The folder is reached the way [`reach`](Self::reach) reaches a
     /// name**: an excluded root covering it, and a name above or at it the
@@ -281,22 +288,25 @@ impl Vault {
     /// folder would be empty counts a shadow or an excluded entry inside it as
     /// something that keeps it standing.
     #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and its listings.
-    pub fn folder_names(&self, relative: &Path) -> Result<Option<Vec<OsString>>, WalkError> {
+    pub fn visit_folder_names(
+        &self,
+        relative: &Path,
+        mut visit: impl FnMut(&OsStr) -> ControlFlow<()>,
+    ) -> Result<bool, WalkError> {
         let (directory, access) = if relative.as_os_str().is_empty() {
             (self.root_fd.clone(), self.root.to_path_buf())
         } else {
             let folder = self.normalize(relative)?;
             if self.exclusions.covering_root(&folder).is_some() {
-                return Ok(None);
+                return Ok(false);
             }
             let Descent::Reached { directory, .. } = self.descend(folder.as_path())? else {
-                return Ok(None);
+                return Ok(false);
             };
             (directory, self.root.join(folder.as_path()))
         };
         let entries = Dir::read_from(&directory)
             .map_err(|source| environment_errno("reading directory", &access, source))?;
-        let mut names = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|source| environment_errno("reading entry in", &access, source))?;
@@ -305,9 +315,11 @@ impl Vault {
                 continue;
             }
             crate::reads::count_dirents(1);
-            names.push(OsStr::from_bytes(name).to_owned());
+            if visit(OsStr::from_bytes(name)).is_break() {
+                break;
+            }
         }
-        Ok(Some(names))
+        Ok(true)
     }
 
     /// Descends `names` from this vault's root, deciding each name the way the
@@ -3232,6 +3244,41 @@ mod tests {
         );
     }
 
+    /// Every name the folder at `relative` lists, or `None` where no folder
+    /// stands there.
+    fn listed(vault: &Vault, relative: &str) -> Option<Vec<OsString>> {
+        let mut names = Vec::new();
+        let stood = vault
+            .visit_folder_names(Path::new(relative), |name| {
+                names.push(name.to_owned());
+                ControlFlow::Continue(())
+            })
+            .expect("a decided folder");
+        stood.then_some(names)
+    }
+
+    /// **A listing streams to its visitor and stops where the visitor
+    /// breaks**: no name past the break is handed over, and the folder still
+    /// stood.
+    #[test]
+    fn a_listing_stops_where_its_visitor_breaks() {
+        let scratch = Scratch::new("vault-folder-names-break");
+        scratch.directory("vault/dir");
+        scratch.place("dir/a.md", b"a");
+        scratch.place("dir/b.md", b"b");
+        scratch.place("dir/c.md", b"c");
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        let mut visited = 0;
+        let stood = vault
+            .visit_folder_names(Path::new("dir"), |_| {
+                visited += 1;
+                ControlFlow::Break(())
+            })
+            .expect("a decided folder");
+        assert!(stood);
+        assert_eq!(visited, 1);
+    }
+
     /// **A folder lists every name directly inside it, whatever its kind**, and
     /// a path the walk reaches no folder at lists nothing: a missing name, a
     /// document, a name beneath a document, one under a symbolic link and one
@@ -3250,13 +3297,10 @@ mod tests {
 
         let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
         let names = |relative: &str| {
-            vault
-                .folder_names(Path::new(relative))
-                .expect("a decided folder")
-                .map(|mut names| {
-                    names.sort();
-                    names
-                })
+            listed(&vault, relative).map(|mut names| {
+                names.sort();
+                names
+            })
         };
         let os = |names: &[&str]| names.iter().map(OsString::from).collect::<Vec<_>>();
         assert_eq!(
@@ -3283,10 +3327,7 @@ mod tests {
         scratch.place("a.md", b"a");
 
         let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
-        let mut names = vault
-            .folder_names(Path::new(""))
-            .expect("a decided folder")
-            .expect("the root stands");
+        let mut names = listed(&vault, "").expect("the root stands");
         names.sort();
         assert_eq!(
             names,

@@ -53,7 +53,7 @@
 //! renderer refuses — a block past the bound the reader admits among them —
 //! leaves the operation unresolved naming the refusal.
 //!
-//! **`{{seq}}` is the highest number already used, plus one** ([`allocated`]),
+//! **`{{seq}}` is the highest number already used, plus one** ([`Numbering`]),
 //! counted per slot: the folder and the file name around the number a
 //! target fills to, every other token filled. The numbers already used are
 //! read from the names the folder lists — the same files the planner reads
@@ -73,6 +73,8 @@
 //! create's is, and the caller plans again.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use norn_config::schema::{
@@ -103,38 +105,30 @@ pub(crate) fn expand<V: VaultView>(
     rules: &Rules<'_>,
     view: &V,
 ) -> Result<(), V::Error> {
-    // Every name the plan puts a document at, each a number a slot may
-    // already hold; each creation by rule adds the one it takes.
-    let mut arrivals: Vec<String> = operations
-        .iter()
-        .filter_map(|operation| match &operation.kind {
-            OperationKind::CreateDocument { path, .. } => Some(path.as_str().to_string()),
-            OperationKind::MoveDocument { to, .. } => Some(to.as_str().to_string()),
-            _ => None,
-        })
-        .collect();
+    let mut numbering = None;
     let mut reading = None;
-    for (position, operation) in operations.iter_mut().enumerate() {
+    for position in 0..operations.len() {
         let OperationKind::CreateByRule {
             rule,
             variables,
             fields,
             body,
-        } = &operation.kind
+        } = &operations[position].kind
         else {
             continue;
         };
         let at = *reading.get_or_insert_with(|| (rules.clock)());
+        let numbering = numbering.get_or_insert_with(|| Numbering::of(operations));
         let asked = Asked {
             rule: rule.as_deref(),
             variables,
             fields,
             body: body.as_deref(),
         };
-        match made(&asked, rules.schema, at, &arrivals, view)? {
+        match made(&asked, rules.schema, at, numbering, view)? {
             Ok((path, content)) => {
-                arrivals.push(path.as_str().to_string());
-                operation.kind = OperationKind::create_document(path, content);
+                numbering.arrivals.push(path.as_str().to_string());
+                operations[position].kind = OperationKind::create_document(path, content);
             }
             Err(detail) => {
                 left_out.insert(position, UnresolvedReason::no_longer_resolves(detail));
@@ -142,6 +136,120 @@ pub(crate) fn expand<V: VaultView>(
         }
     }
     Ok(())
+}
+
+/// What a plan's numbers are allocated past, gathered the first time one of
+/// its operations creates by rule, and never for a plan that does not.
+struct Numbering {
+    /// Every name the plan puts a document at, each a number a slot may
+    /// already hold; each creation by rule adds the one it takes.
+    arrivals: Vec<String>,
+    /// The highest number each slot's folder lists, or why none can be
+    /// counted, by the slot's folder, prefix and suffix: a folder is listed
+    /// once for a plan, however many of its creations number in that slot.
+    listed: BTreeMap<(String, String, String), Result<u64, String>>,
+}
+
+impl Numbering {
+    /// The numbering of a plan of `operations`, its slots not yet listed.
+    fn of(operations: &[Operation]) -> Self {
+        let arrivals = operations
+            .iter()
+            .filter_map(|operation| match &operation.kind {
+                OperationKind::CreateDocument { path, .. } => Some(path.as_str().to_string()),
+                OperationKind::MoveDocument { to, .. } => Some(to.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        Numbering {
+            arrivals,
+            listed: BTreeMap::new(),
+        }
+    }
+
+    /// The number the next document in `slot` takes: one past the highest
+    /// any name in the slot's folder, or any of the plan's arrivals, already
+    /// holds there; or why there is none, in words.
+    fn allocated<V: VaultView>(
+        &mut self,
+        slot: &SeqSlot,
+        view: &V,
+    ) -> Result<Result<u64, String>, V::Error> {
+        let key = (
+            slot.folder().to_string(),
+            slot.prefix().to_string(),
+            slot.suffix().to_string(),
+        );
+        let listed = match self.listed.get(&key) {
+            Some(listed) => listed.clone(),
+            None => {
+                let listed = listed_highest(slot, view)?;
+                self.listed.insert(key, listed.clone());
+                listed
+            }
+        };
+        let mut highest = match listed {
+            Ok(highest) => highest,
+            Err(detail) => return Ok(Err(detail)),
+        };
+        for path in &self.arrivals {
+            match numbered(slot, path, view) {
+                None => {}
+                Some(Some(seq)) => highest = highest.max(seq),
+                Some(None) => return Ok(Err(past_the_largest(path))),
+            }
+        }
+        Ok(highest.checked_add(1).ok_or_else(|| {
+            format!(
+                "a document is already numbered {highest} in `{}`, the largest number a document can take",
+                slot.path(highest)
+            )
+        }))
+    }
+}
+
+/// The highest number any name `slot`'s folder lists holds there — 0 where
+/// none does, or the folder does not stand — or why it cannot be counted,
+/// in words.
+///
+/// **The listing is folded as it streams**, never collected, so counting a
+/// folder holds one name however wide it is. A name that is not UTF-8 is no
+/// slot's text. A directory at a matching name counts like a file: it
+/// occupies the name, so the number it spells is used — up to a name past
+/// the largest number, which leaves the creation unresolved naming it.
+fn listed_highest<V: VaultView>(slot: &SeqSlot, view: &V) -> Result<Result<u64, String>, V::Error> {
+    let mut highest = 0;
+    let mut past = None;
+    let mut visit = |name: &OsStr| {
+        let Some(name) = name.to_str() else {
+            return ControlFlow::Continue(());
+        };
+        let path = at_folder(slot.folder(), name);
+        match numbered(slot, &path, view) {
+            None => ControlFlow::Continue(()),
+            Some(Some(seq)) => {
+                highest = highest.max(seq);
+                ControlFlow::Continue(())
+            }
+            Some(None) => {
+                past = Some(past_the_largest(&path));
+                ControlFlow::Break(())
+            }
+        }
+    };
+    if slot.folder().is_empty() {
+        view.visit_root_names(&mut visit)?;
+    } else if let Ok(folder) = view.normalizer().normalize(Path::new(slot.folder())) {
+        // A slot's folder is a filled target's, which schema read and the
+        // fill hold to a path inside the vault, so it always normalizes.
+        view.visit_folder_names(&folder, &mut visit)?;
+    }
+    Ok(past.map_or(Ok(highest), Err))
+}
+
+/// Why `path` cannot be counted, in words.
+fn past_the_largest(path: &str) -> String {
+    format!("`{path}` is numbered past the largest number a document can take")
 }
 
 /// What one `create_by_rule` asks for.
@@ -153,13 +261,13 @@ struct Asked<'a> {
 }
 
 /// The path and text of the document `asked` makes under `schema`, read at
-/// `at`, numbered past `arrivals` and what `view` lists; or why it makes
+/// `at`, numbered by `numbering` past what `view` lists; or why it makes
 /// none, in words.
 fn made<V: VaultView>(
     asked: &Asked<'_>,
     schema: &VaultSchema,
     at: Result<LocalTimestamp, NotALocalTimestamp>,
-    arrivals: &[String],
+    numbering: &mut Numbering,
     view: &V,
 ) -> Result<Result<(DocumentPath, String), String>, V::Error> {
     let (target, rule, named) = match asked.rule {
@@ -209,7 +317,7 @@ fn made<V: VaultView>(
     let values = match target.seq_slot(&values) {
         Err(error) => return Ok(Err(cannot(error.to_string()))),
         Ok(None) => values,
-        Ok(Some(slot)) => match allocated(&slot, arrivals, view)? {
+        Ok(Some(slot)) => match numbering.allocated(&slot, view)? {
             Ok(seq) => values.with_seq(seq),
             Err(detail) => return Ok(Err(format!("{named} cannot number a document: {detail}"))),
         },
@@ -265,49 +373,6 @@ fn composed(
     }
     render_document(&frontmatter, &body, LineEnding::Lf)
         .map_err(|error| format!("its document cannot be written: {error}"))
-}
-
-/// The number the next document in `slot` takes: one past the highest any
-/// name in the slot's folder, or any of `arrivals`, already holds there; or
-/// why there is none, in words.
-fn allocated<V: VaultView>(
-    slot: &SeqSlot,
-    arrivals: &[String],
-    view: &V,
-) -> Result<Result<u64, String>, V::Error> {
-    let normalizer = view.normalizer();
-    // A slot's folder is a filled target's, which schema read and the fill
-    // hold to a path inside the vault, so it always normalizes.
-    let listed = if slot.folder().is_empty() {
-        view.root_names()?
-    } else {
-        match normalizer.normalize(Path::new(slot.folder())) {
-            Ok(folder) => view.folder_names(&folder)?,
-            Err(_) => Vec::new(),
-        }
-    };
-    let standing = listed
-        .iter()
-        .filter_map(|name| name.to_str())
-        .map(|name| at_folder(slot.folder(), name));
-    let mut highest = 0;
-    for path in standing.chain(arrivals.iter().cloned()) {
-        match numbered(slot, &path, view) {
-            None => {}
-            Some(Some(seq)) => highest = highest.max(seq),
-            Some(None) => {
-                return Ok(Err(format!(
-                    "`{path}` is numbered past the largest number a document can take"
-                )));
-            }
-        }
-    }
-    Ok(highest.checked_add(1).ok_or_else(|| {
-        format!(
-            "a document is already numbered {highest} in `{}`, the largest number a document can take",
-            slot.path(highest)
-        )
-    }))
 }
 
 /// `name` in `folder`, as a vault-relative spelling.
@@ -619,6 +684,26 @@ inbox:
             })
             .collect();
         assert_eq!(paths, ["tasks/NORN-2.md", "tasks/NORN-3.md"]);
+    }
+
+    /// **A slot's folder is listed once for a plan**, however many of its
+    /// creations number in that slot, and each still numbers past the last.
+    #[test]
+    fn a_slots_folder_is_listed_once_per_plan() {
+        let vault = MemoryVault::with(&[("tasks/NORN-1.md", "1\n")]);
+        let resolution = planned(&vault, vec![task(), task(), task()]);
+        let paths: Vec<String> = kinds(&resolution)
+            .iter()
+            .map(|kind| match kind {
+                OperationKind::CreateDocument { path, .. } => path.as_str().to_string(),
+                other => panic!("a create: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            ["tasks/NORN-2.md", "tasks/NORN-3.md", "tasks/NORN-4.md"]
+        );
+        assert_eq!(*vault.listings.borrow(), [("tasks".to_string(), 1)].into());
     }
 
     /// **A number the plan itself frees is never taken again**: a document

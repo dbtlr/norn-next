@@ -391,12 +391,19 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
         self.view.folder_stands(folder)
     }
 
-    fn folder_names(&self, folder: &NormalizedPath) -> Result<Vec<std::ffi::OsString>, V::Error> {
-        self.view.folder_names(folder)
+    fn visit_folder_names(
+        &self,
+        folder: &NormalizedPath,
+        visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.view.visit_folder_names(folder, visit)
     }
 
-    fn root_names(&self) -> Result<Vec<std::ffi::OsString>, V::Error> {
-        self.view.root_names()
+    fn visit_root_names(
+        &self,
+        visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.view.visit_root_names(visit)
     }
 
     fn folder_contents(
