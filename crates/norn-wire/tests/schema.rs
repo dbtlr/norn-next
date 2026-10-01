@@ -2878,6 +2878,29 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
     ];
+    // A creation by rule names every part optionally: absent, the rule is the
+    // inbox and the rest are empty.
+    let by_rule = &branch(&schema, "kind", "create_by_rule")["properties"]["fields"];
+    assert_eq!(
+        property_names(by_rule),
+        ["rule", "variables", "fields", "body"]
+            .into_iter()
+            .collect(),
+        "the create_by_rule fields"
+    );
+    assert!(
+        required_names(by_rule).is_empty(),
+        "a create_by_rule requires a part: {by_rule}"
+    );
+    assert!(refuses_unknown_keys(by_rule), "{by_rule}");
+    assert_eq!(
+        by_rule["properties"]["variables"]["$ref"].as_str(),
+        Some("#/$defs/Variables")
+    );
+    assert_eq!(
+        by_rule["properties"]["fields"]["$ref"].as_str(),
+        Some("#/$defs/ValueMap")
+    );
     let delete = branch(&schema, "kind", "delete_document");
     let delete_fields = &delete["properties"]["fields"];
     assert_eq!(
@@ -2968,7 +2991,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
                 .iter()
                 .chain(&targeted)
                 .map(|(kind, _)| *kind)
-                .chain(["delete_document"])
+                .chain(["delete_document", "create_by_rule"])
         )
     );
     for (kind, own) in &targeted {
@@ -3520,6 +3543,7 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "content_cycle",
             "transitions_disagree",
             "unexpanded_target",
+            "unexpanded_rule",
             "expanded_target_ordered",
             "misplaced_cascade"
         ])
@@ -3677,8 +3701,19 @@ fn every_write_request_advertises_what_it_carries_and_admits_no_other() {
         ),
         (
             schema_of::<NewParams>(),
-            vec!["vault", "mode", "path", "content", "conditions", "force"],
-            vec!["vault", "mode", "path", "content"],
+            vec![
+                "vault",
+                "mode",
+                "path",
+                "content",
+                "as",
+                "variables",
+                "fields",
+                "body",
+                "conditions",
+                "force",
+            ],
+            vec!["vault", "mode"],
         ),
         (
             schema_of::<MoveParams>(),

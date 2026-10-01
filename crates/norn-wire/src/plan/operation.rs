@@ -26,6 +26,10 @@
 //!
 //! **The kind map.** Four kinds place, edit, move and remove whole documents:
 //! `create_document`, `str_replace`, `move_document` and `delete_document`.
+//! A fifth, `create_by_rule`, names a schema's creation rule — or, naming
+//! none, the vault's inbox — with the variables, frontmatter fields and body
+//! it takes, and planning expands it into one `create_document` holding the
+//! path and content the rule makes, so a resolved plan never carries one.
 //! Four write one frontmatter field of the documents a target names —
 //! `set_frontmatter`, `remove_frontmatter`, `push_frontmatter` and
 //! `pop_frontmatter` — and six edit one document's text: `replace_body` and
@@ -117,7 +121,7 @@ use crate::document::{DocumentPath, LinkFamily, written_protocol};
 use crate::plan::backlinks::Backlinks;
 use crate::plan::forecast::FolderPath;
 use crate::plan::hash::ContentHash;
-use crate::plan::value::AuthoredValue;
+use crate::plan::value::{AuthoredValue, ValueMap, Variables};
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
 use crate::target::{ResolutionTarget, whole_document_schema};
@@ -219,6 +223,24 @@ pub enum OperationKind {
         path: DocumentPath,
         /// The document's full text.
         content: String,
+    },
+    /// Create a document by a schema's creation rule, which planning expands
+    /// into one `create_document` holding a concrete path and content.
+    CreateByRule {
+        /// The creation rule that places and shapes the document. Absent
+        /// names the vault's inbox.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule: Option<String>,
+        /// The values the rule's path and template take, by variable name.
+        #[serde(default, skip_serializing_if = "Variables::is_empty")]
+        variables: Variables,
+        /// The frontmatter fields the document is created with, written
+        /// exactly.
+        #[serde(default, skip_serializing_if = "ValueMap::is_empty")]
+        fields: ValueMap,
+        /// The document's body, where the rule's template takes one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
     },
     /// Replace one occurrence of a text in a document. The text must occur
     /// exactly once.
@@ -403,6 +425,22 @@ impl OperationKind {
         OperationKind::CreateDocument {
             path,
             content: content.into(),
+        }
+    }
+
+    /// Create a document by the creation rule `rule`, the vault's inbox where
+    /// it is `None`, taking `variables`, `fields` and `body`.
+    pub const fn create_by_rule(
+        rule: Option<String>,
+        variables: Variables,
+        fields: ValueMap,
+        body: Option<String>,
+    ) -> Self {
+        OperationKind::CreateByRule {
+            rule,
+            variables,
+            fields,
+            body,
         }
     }
 
@@ -623,6 +661,7 @@ impl OperationKind {
             OperationKind::MoveFolder { .. }
             | OperationKind::RewriteLink { .. }
             | OperationKind::CreateDocument { .. }
+            | OperationKind::CreateByRule { .. }
             | OperationKind::StrReplace { .. }
             | OperationKind::SetFrontmatter { .. }
             | OperationKind::RemoveFrontmatter { .. }
@@ -646,6 +685,7 @@ impl OperationKind {
     const fn kind_name(&self) -> KindName {
         match self {
             OperationKind::CreateDocument { .. } => KindName::CreateDocument,
+            OperationKind::CreateByRule { .. } => KindName::CreateByRule,
             OperationKind::StrReplace { .. } => KindName::StrReplace,
             OperationKind::MoveDocument { .. } => KindName::MoveDocument,
             OperationKind::DeleteDocument { .. } => KindName::DeleteDocument,
@@ -674,6 +714,7 @@ impl OperationKind {
             | OperationKind::PushFrontmatter { target, .. }
             | OperationKind::PopFrontmatter { target, .. } => Some(target),
             OperationKind::CreateDocument { .. }
+            | OperationKind::CreateByRule { .. }
             | OperationKind::StrReplace { .. }
             | OperationKind::MoveDocument { .. }
             | OperationKind::DeleteDocument { .. }
@@ -999,6 +1040,7 @@ impl Operation {
 #[serde(rename_all = "snake_case")]
 enum KindName {
     CreateDocument,
+    CreateByRule,
     StrReplace,
     MoveDocument,
     DeleteDocument,
@@ -1022,6 +1064,7 @@ impl KindName {
     const fn as_str(self) -> &'static str {
         match self {
             KindName::CreateDocument => "create_document",
+            KindName::CreateByRule => "create_by_rule",
             KindName::StrReplace => "str_replace",
             KindName::MoveDocument => "move_document",
             KindName::DeleteDocument => "delete_document",
@@ -1048,6 +1091,7 @@ impl KindName {
     const fn takes(self) -> &'static [&'static str] {
         match self {
             KindName::CreateDocument | KindName::ReplaceBody => &["path", "content"],
+            KindName::CreateByRule => &["rule", "variables", "fields", "body"],
             KindName::StrReplace => &["path", "old_str", "new_str"],
             KindName::MoveDocument | KindName::MoveFolder => &["from", "to"],
             KindName::DeleteDocument => &["path", "rewrite_to", "allow_broken_links"],
@@ -1107,6 +1151,14 @@ struct KindFields {
     rewrite_to: Option<ResolutionTarget>,
     #[serde(default, deserialize_with = "written")]
     allow_broken_links: Option<bool>,
+    #[serde(default, deserialize_with = "written")]
+    rule: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    variables: Option<Variables>,
+    #[serde(default, deserialize_with = "written")]
+    fields: Option<ValueMap>,
+    #[serde(default, deserialize_with = "written")]
+    body: Option<String>,
 }
 
 /// A field that was written, read as its own type: `null` is a value the
@@ -1178,7 +1230,7 @@ fn target<E: serde::de::Error>(
 
 impl KindFields {
     /// Each field any kind names, and whether it was written.
-    const fn written_names(&self) -> [(&'static str, bool); 15] {
+    const fn written_names(&self) -> [(&'static str, bool); 19] {
         [
             ("path", self.path.is_some()),
             ("where", self.predicates.is_some()),
@@ -1195,6 +1247,10 @@ impl KindFields {
             ("new", self.new.is_some()),
             ("rewrite_to", self.rewrite_to.is_some()),
             ("allow_broken_links", self.allow_broken_links.is_some()),
+            ("rule", self.rule.is_some()),
+            ("variables", self.variables.is_some()),
+            ("fields", self.fields.is_some()),
+            ("body", self.body.is_some()),
         ]
     }
 
@@ -1225,11 +1281,23 @@ impl KindFields {
             new,
             rewrite_to,
             allow_broken_links,
+            rule,
+            variables,
+            fields,
+            body,
         } = self;
         Ok(match kind {
             KindName::CreateDocument => OperationKind::CreateDocument {
                 path: required(kind, "path", path)?,
                 content: required(kind, "content", content)?,
+            },
+            // Every part of a creation by rule is optional: absent, the rule
+            // is the inbox and the rest are empty.
+            KindName::CreateByRule => OperationKind::CreateByRule {
+                rule,
+                variables: variables.unwrap_or_default(),
+                fields: fields.unwrap_or_default(),
+                body,
             },
             KindName::StrReplace => OperationKind::StrReplace {
                 path: required(kind, "path", path)?,

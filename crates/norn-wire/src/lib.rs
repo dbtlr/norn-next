@@ -608,7 +608,9 @@ pub use plan::outcome::{
     UnresolvedReason,
 };
 pub use plan::root::RootIdentity;
-pub use plan::value::{AuthoredValue, DuplicateKey, FiniteFloat, NonFiniteFloat, ValueMap};
+pub use plan::value::{
+    AuthoredValue, DuplicateKey, FiniteFloat, NonFiniteFloat, ValueMap, Variables,
+};
 pub use plan::write_target::WriteTarget;
 pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
@@ -648,6 +650,6 @@ pub use verb::{
 pub use write::delete::DeleteParams;
 pub use write::edit::{DocumentEdit, EditParams};
 pub use write::moves::{IllegalMove, MoveParams, MoveSubject};
-pub use write::new::NewParams;
+pub use write::new::{NewParams, NewSubject};
 pub use write::rewrite_wikilink::RewriteWikilinkParams;
 pub use write::set::{FieldChange, SetParams};
