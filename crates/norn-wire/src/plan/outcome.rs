@@ -363,8 +363,11 @@ pub enum PlanFault {
     /// before-states: a transition is missing, added, repeated or changed, a
     /// target is at a place the vault reads no documents at or the store
     /// cannot name, an operation does not act or is recorded out of the order
-    /// its requirements allow, or an author condition its operations carry is
-    /// not one the plan checks. Planning never makes such a plan; one sent
+    /// its requirements allow, an author condition its operations carry is
+    /// not one the plan checks, or a delete is recorded acting where its link
+    /// choice leaves it unresolved — forbidding the links naming its document
+    /// while the plan records one, or rewriting them to a `rewrite_to` naming
+    /// no one document where the plan leaves the vault. Planning never makes such a plan; one sent
     /// back altered is refused whole, since none of its transitions can be
     /// trusted to say what would land. Preview its operations again.
     ///
@@ -396,8 +399,9 @@ pub enum PlanFault {
     /// An operation carries a link cascade where none may stand: on an
     /// operation of an authored plan, since planning generates a cascade
     /// from what the vault's links hold, or on a kind that does not cascade —
-    /// anything but a document move, a document removal and a wikilink
-    /// rewrite. Leave the cascade out and preview the operations again.
+    /// anything but a document move, a document removal rewriting the links
+    /// naming its document, and a wikilink rewrite. Leave the cascade out and
+    /// preview the operations again.
     #[non_exhaustive]
     MisplacedCascade {
         /// The positions of the operations carrying a cascade they may not.

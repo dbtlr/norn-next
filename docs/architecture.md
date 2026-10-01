@@ -2548,7 +2548,10 @@ condition entries the applier checks stay exact. The applier recomposes a
 plan's cascades and never generates one: a backlink another writer adds after planning is
 an entry the set computed again holds and the plan does not record, which refuses the
 plan, and the refusal's fresh plan generates the cascade afresh from the links standing
-then.
+then. The applier does not hold a resolved plan's cascade to the one planning would
+generate: a hand-built plan whose move or rewriting delete carries a cascade omitting a
+rewrite records the link that rewrite would have followed as the set computed again
+records it, and lands leaving it as written (NORN-297, an open question).
 
 **A document delete reads its backlinks the same way.** A link is a backlink of the document
 a delete removes where it resolves before the plan to exactly that document — wherever the
@@ -2573,7 +2576,12 @@ forecast says it was skipped for its ambiguity. Every link that named a removed 
 an entry of the change set, even where the path it named is refilled, so a backlink another
 writer adds after planning is an entry the plan does not record: the apply is refused, and
 the fresh plan rewrites the new backlink too or, for a delete saying neither flag, is left
-unresolved naming its holder.
+unresolved naming its holder. The applier holds a resolved plan's delete to its link choice
+from the set it computes again, reading nothing more: a delete forbidding the links naming
+its document whose plan records one, or one rewriting them whose `rewrite_to` names no one
+document where the plan leaves the vault, is one planning leaves unresolved, so the plan is
+`request/plan-invalid` (`transitions_disagree`, naming the deleted document); where the
+vault moved since planning, the refusal's fresh plan answers for it instead.
 
 **A wikilink rewrite reads the wikilinks naming its `old` the same way.** Its `old` is read
 through the same door as the vault stands before the plan — the side every link's own
@@ -2623,8 +2631,10 @@ once through link health's own head statement, cut at two rows past the targets 
 name: the work is the links the plan reaches plus the candidates they resolve against,
 with one limit link health's head statement carries too: a head is read past every member
 of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
-plan that changes no document's presence, writes no link and carries no wikilink rewrite
-records nothing and reads no snapshot. A link a move's cascade leaves naming a path the plan vacates and refills is an
+plan that changes no document's presence, deletes no document, writes no link and carries
+no wikilink rewrite records nothing and reads no snapshot; a delete is read even where the
+plan refills its path, since the document there is then replaced with every presence as it
+was. A link a move's cascade leaves naming a path the plan vacates and refills is an
 entry too, naming that path on both sides, since the document there is not the one it
 named. The forecast advises on the links the set leaves broken, makes ambiguous or
 retargets, each side judged by link health's own verdict rule, so a link to an attachment
@@ -2673,10 +2683,10 @@ bound by the applier's lifecycle tests.
   snapshot is the job's one read handle. Planning mints it the first time a `where` target
   is matched or the plan's resolution change set reads the link index, and hands it to the
   applier; a resolved plan sent back plans nothing, so the job mints it just before the
-  applier's check where the plan changes some document's presence or rewrites a link, as a
-  link rewrite, a wikilink rewrite or a cascade — the
-  one predicate the change set's own answer-without-reading path reads — and a plan doing
-  neither mints none. Planning matches and records the set on it, the applier computes the
+  applier's check where the plan changes some document's presence, deletes a document or
+  rewrites a link, as a link rewrite, a wikilink rewrite or a cascade — the one predicate
+  the change set's own answer-without-reading path reads — and a plan doing none of these
+  mints none. Planning matches and records the set on it, the applier computes the
   set again on it, and it is given back before the changeset commits. No commit
   lands in the registration's store between that snapshot and the apply's changeset, so the
   changeset builds on exactly the state the apply read. From planning to its changeset the

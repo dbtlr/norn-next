@@ -9,7 +9,7 @@ use norn_wire::{
     UnresolvedReason,
 };
 
-use super::{Fixture, applied, breaking, creating, deleting, editing, path};
+use super::{Fixture, applied, breaking, creating, deleting, editing, moving, path};
 
 /// A delete of the document at `at` rewriting every link naming it to name
 /// `to`.
@@ -315,6 +315,36 @@ fn a_delete_whose_target_names_no_one_document_is_unresolved_saying_why() {
     );
 }
 
+/// **A delete's `rewrite_to` is read whatever the document it removes
+/// was.** A document the plan itself creates and then deletes stood nowhere
+/// before the plan, so no link names it, yet a `rewrite_to` naming no
+/// document still leaves the delete unresolved in words, as it would for a
+/// document that stood, and the create sharing its file falls with it.
+#[test]
+fn a_delete_of_a_document_the_plan_creates_still_reads_its_target() {
+    let fixture = Fixture::new(&[("h.md", "H\n")]);
+    let resolution = fixture.planned(vec![
+        creating("transient.md", "T\n"),
+        rewriting("transient.md", "absent-replacement"),
+    ]);
+    let [create, delete] = &resolution.unresolved[..] else {
+        panic!(
+            "both operations are unresolved: {:?}",
+            resolution.unresolved
+        );
+    };
+    assert_eq!(create.operation, creating("transient.md", "T\n"));
+    assert_eq!(
+        delete.operation,
+        rewriting("transient.md", "absent-replacement")
+    );
+    let UnresolvedReason::NoLongerResolves { detail, .. } = &delete.reason else {
+        panic!("the delete no longer resolves: {:?}", delete.reason);
+    };
+    assert!(detail.contains("names no one document"), "{detail}");
+    assert!(resolution.plan.transitions.is_empty());
+}
+
 /// **An ambiguous link that could name the deleted document is never
 /// rewritten**, and the forecast says it was skipped for its ambiguity; a
 /// link naming the document alone beside it is rewritten.
@@ -411,6 +441,223 @@ fn a_backlink_added_after_preview_refuses_and_the_fresh_plan_answers_for_it() {
     );
     assert!(refused.plan.operations.is_empty());
     assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+}
+
+/// **A delete whose path the plan refills still reads its backlinks.**
+/// Deleting `a.md` and creating another document there leaves a document at
+/// the path on both sides, but not the one a link naming it named, so the
+/// plan records every link naming it and the applier computes them again: a
+/// backlink another writer adds after the preview is an entry the plan does
+/// not record, and refuses it. A plain delete's fresh plan is left
+/// unresolved for that backlink; one rewriting its links to the document
+/// refilling the path records the backlink it already has, and its fresh
+/// plan, recording the new one too, lands.
+#[test]
+fn a_backlink_added_after_preview_to_a_deleted_and_refilled_path_refuses_the_apply() {
+    let unrecorded = || {
+        norn_wire::RefusedCheck::condition_unrecorded(PlanCondition::link_resolution(
+            key("k.md", LinkFamily::Wikilink, "a"),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("a.md")),
+        ))
+    };
+
+    let mut fixture = Fixture::new(&[("a.md", "Old\n")]);
+    let plan = fixture.plan(vec![deleting("a.md"), creating("a.md", "New\n")]);
+    assert_eq!(plan.conditions, []);
+    fixture.foreign("k.md", "[[a]]\n");
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(refused.checks, [unrecorded()]);
+    assert!(
+        refused.unresolved.contains(&UnresolvedOperation::new(
+            deleting("a.md"),
+            UnresolvedReason::has_backlinks(vec![path("k.md")], 1),
+        )),
+        "{:?}",
+        refused.unresolved
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("Old\n"));
+
+    let mut fixture = Fixture::new(&[("a.md", "Old\n"), ("h.md", "[[a]]\n")]);
+    let plan = fixture.plan(vec![rewriting("a.md", "a"), creating("a.md", "New\n")]);
+    assert_eq!(
+        plan.conditions,
+        [PlanCondition::link_resolution(
+            key("h.md", LinkFamily::Wikilink, "a"),
+            Resolves::one(path("a.md")),
+            Resolves::one(path("a.md")),
+        )]
+    );
+    fixture.foreign("k.md", "[[a]]\n");
+    let refused = super::refused(fixture.apply(plan));
+    assert_eq!(refused.checks, [unrecorded()]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("Old\n"));
+    applied(fixture.apply(refused.plan));
+    assert_eq!(fixture.read("a.md").as_deref(), Some("New\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+    assert_eq!(fixture.read("k.md").as_deref(), Some("[[a]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A holder the plan moves names the delete's target from where it
+/// lands.** `x/h.md` names `x/a.md` by a relative Markdown link and by a bare
+/// wikilink, and moves to `deep/h.md` in the plan deleting `x/a.md` rewriting
+/// its links to `x/c.md`: each link is respelled once, to the target, from
+/// the holder's new folder — the Markdown link keeping its anchor and title —
+/// whichever of the move and the delete comes first.
+#[test]
+fn a_moved_holder_of_a_rewriting_deletes_backlink_names_its_target_from_where_it_lands() {
+    for delete_first in [true, false] {
+        let mut fixture = Fixture::new(&[
+            ("x/a.md", "A\n"),
+            ("x/c.md", "C\n"),
+            ("x/h.md", "[keep text](a.md#part \"Title\") [[a]]\n"),
+        ]);
+        let (delete, moved) = (rewriting("x/a.md", "x/c"), moving("x/h.md", "deep/h.md"));
+        let operations = if delete_first {
+            vec![delete, moved]
+        } else {
+            vec![moved, delete]
+        };
+        let resolution = fixture.resolution(operations);
+        assert!(
+            resolution.forecast.links.is_empty(),
+            "delete first {delete_first}: {:?}",
+            resolution.forecast.links
+        );
+        let mut cascade: Vec<LinkRewrite> = resolution
+            .plan
+            .operations
+            .iter()
+            .flat_map(|operation| operation.cascade.iter().cloned())
+            .collect();
+        cascade.sort_by(|left, right| left.path.cmp(&right.path).then(left.from.cmp(&right.from)));
+        assert_eq!(
+            cascade,
+            [
+                wikilink("deep/h.md", "a", "c"),
+                markdown("deep/h.md", "a.md", "../x/c.md"),
+            ],
+            "delete first {delete_first}"
+        );
+        applied(fixture.apply(resolution.plan));
+        assert_eq!(fixture.read("x/a.md"), None);
+        assert_eq!(
+            fixture.read("deep/h.md").as_deref(),
+            Some("[keep text](../x/c.md#part \"Title\") [[c]]\n"),
+            "delete first {delete_first}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+    }
+}
+
+/// **A document moved and then deleted in one plan has the backlinks it had
+/// before the move**, read by the delete's choice and never by the move:
+/// `[[a]]` and `[x](a.md)` named `a.md`, which moves to `b.md` and is
+/// deleted there. Forbidding them, the delete is left unresolved naming
+/// their holder; rewriting them, each is respelled to the delete's target,
+/// never to `b.md`; leaving them broken, each is advised left broken, and
+/// the move carries no cascade toward a document the plan removes.
+#[test]
+fn a_document_moved_then_deleted_has_its_backlinks_read_by_the_deletes_choice() {
+    let files = [
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[a]] [x](a.md)\n"),
+    ];
+
+    let forbidden = Fixture::new(&files).planned(vec![moving("a.md", "b.md"), deleting("b.md")]);
+    assert!(
+        forbidden.unresolved.contains(&UnresolvedOperation::new(
+            deleting("b.md"),
+            UnresolvedReason::has_backlinks(vec![path("h.md")], 2),
+        )),
+        "{:?}",
+        forbidden.unresolved
+    );
+    assert!(forbidden.plan.transitions.is_empty());
+
+    let mut fixture = Fixture::new(&files);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md"), rewriting("b.md", "c")]);
+    assert!(resolution.plan.operations[0].cascade.is_empty());
+    assert_eq!(
+        resolution.plan.operations[1].cascade,
+        [markdown("h.md", "a.md", "c.md"), wikilink("h.md", "a", "c"),]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]] [x](c.md)\n"));
+    assert_eq!(fixture.read("a.md"), None);
+    assert_eq!(fixture.read("b.md"), None);
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = Fixture::new(&files);
+    let resolution = fixture.resolution(vec![moving("a.md", "b.md"), breaking("b.md")]);
+    assert!(
+        resolution
+            .plan
+            .operations
+            .iter()
+            .all(|operation| operation.cascade.is_empty()),
+        "{:?}",
+        resolution.plan.operations
+    );
+    assert_eq!(
+        resolution.forecast.links,
+        [
+            LinkAdvisory::left_broken(key("h.md", LinkFamily::Markdown, "a.md")),
+            LinkAdvisory::left_broken(key("h.md", LinkFamily::Wikilink, "a")),
+        ]
+    );
+    applied(fixture.apply(resolution.plan));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]] [x](a.md)\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A resolved plan whose delete says another link choice than its plan
+/// does is invalid**, judged from the set the applier computes again and
+/// nothing more. A plan previewed leaving `a.md`'s links broken, sent back
+/// with its delete forbidding them, records a link naming `a.md` that its
+/// delete forbids; a plan previewed rewriting them to `c`, sent back with
+/// its delete rewriting them to a name no document holds, or to `a` itself,
+/// names no one document to rewrite them to. Each answers
+/// `request/plan-invalid` naming the deleted document, and nothing is
+/// written.
+#[test]
+fn a_resolved_delete_whose_link_choice_its_plan_does_not_keep_is_invalid() {
+    let files = [("a.md", "A\n"), ("c.md", "C\n"), ("h.md", "[[a]]\n")];
+
+    let mut fixture = Fixture::new(&files);
+    let mut plan = fixture.plan(vec![breaking("a.md")]);
+    let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[0].kind else {
+        panic!(
+            "the plan's one operation is the delete: {:?}",
+            plan.operations
+        );
+    };
+    *backlinks = norn_wire::Backlinks::Forbidden;
+    assert_eq!(fixture.refuses_disagreeing(plan), [path("a.md")]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+
+    for retargeted in ["zzz", "a"] {
+        let mut fixture = Fixture::new(&files);
+        let mut plan = fixture.plan(vec![rewriting("a.md", "c")]);
+        let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[0].kind else {
+            panic!(
+                "the plan's one operation is the delete: {:?}",
+                plan.operations
+            );
+        };
+        *backlinks =
+            norn_wire::Backlinks::RewrittenTo(ResolutionTarget::new(retargeted).expect("a target"));
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            [path("a.md")],
+            "rewritten to {retargeted}"
+        );
+        assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+        assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
+    }
 }
 
 /// **Re-sending an interrupted rewriting delete finishes its cascade.** One

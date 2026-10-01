@@ -9257,7 +9257,9 @@ fn a_cascade_travels_on_the_operation_that_caused_it() {
 /// **Planning writes a cascade; an author does not.** An authored plan
 /// carrying one names each operation that does, and a resolved plan names
 /// each operation carrying one on a kind that does not cascade — a document
-/// move, a document removal and a wikilink rewrite may.
+/// move, a document removal rewriting the links naming its document and a
+/// wikilink rewrite may. A removal forbidding those links, or leaving them
+/// broken, rewrites none, so it carries no cascade either.
 #[test]
 fn a_cascade_where_planning_writes_none_is_a_fault() {
     let cascading = |kind| Operation::new(kind).with_cascade(a_cascade());
@@ -9302,10 +9304,14 @@ fn a_cascade_where_planning_writes_none_is_a_fault() {
             "a",
             "b",
         )),
+        cascading(OperationKind::delete_document(path("notes/d.md"))),
+        cascading(OperationKind::delete_document_breaking_links(path(
+            "notes/e.md",
+        ))),
     ]);
     assert_eq!(
         resolved.misplaced_cascades(),
-        Some(PlanFault::misplaced_cascade(vec![3, 4]))
+        Some(PlanFault::misplaced_cascade(vec![3, 4, 5, 6]))
     );
     assert_eq!(
         wire(&PlanFault::misplaced_cascade(vec![3, 4])),

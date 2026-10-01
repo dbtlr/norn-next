@@ -26,7 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{Backlinks, Operation, OperationKind};
+use norn_store::TargetNaming;
+use norn_wire::{Backlinks, Operation, OperationKind, Resolves};
 
 use super::compose::touches;
 
@@ -72,9 +73,13 @@ pub(crate) struct Lineage {
     /// Each file whose before-state ends the plan at another file, and that
     /// file: [`Self::at_end`] read the other way.
     carried: BTreeMap<NormalizedPath, NormalizedPath>,
+    /// Every delete of the plan, in the order they compose, whatever the
+    /// content it removes was drawn from.
+    removals: Vec<Removal>,
     /// Each file whose before-state a delete of the plan removes, wherever
-    /// the plan's moves carried it first, and that delete.
-    removed: BTreeMap<NormalizedPath, Removal>,
+    /// the plan's moves carried it first, and that delete's place in
+    /// [`Self::removals`].
+    removed: BTreeMap<NormalizedPath, usize>,
     /// Each wikilink rewrite of the plan, in the order it composes.
     retargets: Vec<Retarget>,
 }
@@ -91,14 +96,49 @@ pub(crate) struct Retarget {
     pub(crate) new: String,
 }
 
-/// The delete that removes a document standing before the plan.
+/// A delete of the plan, and what it says of the links naming the document
+/// it removes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Removal {
     /// The delete's position.
     pub(crate) position: usize,
-    /// The address the delete rewrites the links naming the document to,
+    /// The delete's link choice: forbidding the links naming its document,
+    /// rewriting them, or leaving them broken.
+    pub(crate) backlinks: Backlinks,
+}
+
+impl Removal {
+    /// The address the delete rewrites the links naming its document to,
     /// where it rewrites them.
-    pub(crate) rewrite_to: Option<String>,
+    pub(crate) fn rewrite_to(&self) -> Option<&str> {
+        match &self.backlinks {
+            Backlinks::RewrittenTo(target) => Some(target.address()),
+            Backlinks::Forbidden | Backlinks::LeftBroken => None,
+        }
+    }
+
+    /// **The one rule a delete's link choice is held to** where the plan
+    /// leaves the vault, with `named` whether a link resolving before the
+    /// plan to exactly the document it removes holds an entry of the plan's
+    /// resolution change set, and `target` what its `rewrite_to` names
+    /// there: a delete forbidding the links naming its document is kept
+    /// where no link names it; one rewriting them, where its `rewrite_to`
+    /// names exactly one document — never the removed one, which stands
+    /// nowhere after the plan, though another may stand at its path; one
+    /// leaving them broken, always.
+    ///
+    /// Planning leaves a delete it does not keep unresolved, and the applier
+    /// refuses a resolved plan holding one; neither reads anything more than
+    /// the change set it computes.
+    pub(crate) fn kept_by(&self, named: bool, target: Option<&TargetNaming>) -> bool {
+        match &self.backlinks {
+            Backlinks::Forbidden => !named,
+            Backlinks::RewrittenTo(_) => {
+                target.is_some_and(|target| matches!(target.after, Resolves::One { .. }))
+            }
+            Backlinks::LeftBroken => true,
+        }
+    }
 }
 
 impl Lineage {
@@ -120,23 +160,18 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
+                // Every delete is a removal, so its link choice is read
+                // though the content it removes is one the plan created; only
+                // one removing a before-state can have links naming it.
                 OperationKind::DeleteDocument { path, backlinks } => {
                     if let Some(file) = identity(path.as_str()) {
                         if let Some(drawn) = lineage.source(&file) {
-                            let rewrite_to = match backlinks {
-                                Backlinks::RewrittenTo(target) => {
-                                    Some(target.address().to_string())
-                                }
-                                Backlinks::Forbidden | Backlinks::LeftBroken => None,
-                            };
-                            lineage.removed.insert(
-                                drawn.from,
-                                Removal {
-                                    position,
-                                    rewrite_to,
-                                },
-                            );
+                            lineage.removed.insert(drawn.from, lineage.removals.len());
                         }
+                        lineage.removals.push(Removal {
+                            position,
+                            backlinks: backlinks.clone(),
+                        });
                         lineage.at_end.insert(file, None);
                     }
                 }
@@ -235,12 +270,13 @@ impl Lineage {
     /// which of the links the store's resolution door reaches are its own,
     /// and what it rewrites them to.
     pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<&Removal> {
-        self.removed.get(from)
+        self.removed.get(from).map(|&at| &self.removals[at])
     }
 
-    /// Every delete of the plan that removes a document standing before it.
+    /// Every delete of the plan, in the order they compose — one removing a
+    /// document the plan itself created among them.
     pub(crate) fn removals(&self) -> impl Iterator<Item = &Removal> + '_ {
-        self.removed.values()
+        self.removals.iter()
     }
 
     /// Every wikilink rewrite of the plan, in the order it composes.

@@ -195,8 +195,8 @@ pub(crate) fn resolve_on(
 /// planning's change set and the applier's check of it
 /// ([`PlanSnapshot::established`]), and the applier gives it back
 /// ([`LinkIndex::release`]) before its changeset commits. A plan with no
-/// `where` target that changes no document's presence and writes no link
-/// mints none. Either way the match is the find a caller would have been
+/// `where` target that changes no document's presence, deletes none and
+/// writes no link mints none. Either way the match is the find a caller would have been
 /// answered at the same instant, paged to its end.
 ///
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):

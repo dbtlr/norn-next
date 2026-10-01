@@ -10,9 +10,11 @@
 //! `rewrite_to` beside an `allow_broken_links` of `true` is refused at the
 //! read, and the schema states the same exclusion as a `not`.
 //!
-//! **What each plans.** A link naming the document is one resolving to it
-//! alone where the plan leaves the vault, so a link naming several documents
-//! names none of them and a link the document holds goes with it. A delete
+//! **What each plans.** A link naming the document is one held where the
+//! plan leaves the vault that resolved, before the plan, to the document
+//! alone: a link naming several documents names none of them, a link the
+//! document holds goes with it, a link in a holder the plan removes or
+//! edits away is none, and one the plan writes is one. A delete
 //! forbidding the links does not resolve while one names its document, and
 //! is left unresolved naming every holder and how many links. One rewriting
 //! them carries the cascade respelling each, in its own form, to name
