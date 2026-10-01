@@ -277,6 +277,24 @@ impl Lineage {
         Some((file, drawn))
     }
 
+    /// The file the document standing at `from` before the plan stands at
+    /// after it: where the plan's moves carry it, `from` itself where it
+    /// stays — edited in place, or moved away and back — and `None` where no
+    /// file holds it at the end of the plan.
+    ///
+    /// **Which document a name meant.** A name read before the plan and one
+    /// read after it name one document where the first's document lands
+    /// where the second names, so a wikilink rewrite reads here whether its
+    /// two ends name one document across the plan's moves.
+    pub(crate) fn landing(&self, from: &NormalizedPath) -> Option<NormalizedPath> {
+        if let Some((to, _)) = self.carried_to(from) {
+            return Some(to.clone());
+        }
+        self.source(from)
+            .is_some_and(|drawn| drawn.from == *from)
+            .then(|| from.clone())
+    }
+
     /// The delete that removes the document standing at `from` before the
     /// plan — at `from`, or wherever the plan's moves carried it first — and
     /// `None` where no delete of the plan removes it.

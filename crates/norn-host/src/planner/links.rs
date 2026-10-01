@@ -658,11 +658,12 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
     Ok(targets)
 }
 
-/// The one document a rewriting delete's target `named` names where the
-/// plan leaves the vault, as the file the vault's rule reads and the path the
-/// store's grammar reads: what its backlinks are respelled toward. `None`
-/// where it names no one document, or one at a path either refuses, which no
-/// link can be respelled toward.
+/// The one document the target `named` names where the plan leaves the
+/// vault, as the file the vault's rule reads and the path the store's
+/// grammar reads: what a rewriting delete's backlinks, or a wikilink
+/// rewrite's wikilinks, are respelled toward. `None` where it names no one
+/// document, or one at a path either refuses, which no link can be respelled
+/// toward.
 pub(crate) fn rewrite_destination(
     named: &TargetNaming,
     normalizer: &PathNormalizer,
@@ -711,6 +712,41 @@ pub(crate) struct RetargetNaming {
     pub(crate) old: TargetNaming,
     /// What its `new` names, headed where it names several after the plan.
     pub(crate) new: TargetNaming,
+}
+
+impl RetargetNaming {
+    /// **The one rule a wikilink rewrite resolves by**: the one document its
+    /// wikilinks are retargeted to, its ends naming as this says — the one
+    /// document its `new` names where the plan leaves the vault, at a path a
+    /// link can be respelled toward ([`rewrite_destination`]), where its
+    /// `old` names one document or none before the plan, and the document
+    /// `old` names is not the one `new` names where the plan leaves it
+    /// ([`Lineage::landing`]). `None` otherwise: planning leaves such a
+    /// rewrite unresolved, and it selects no wikilink ([`selecting`]).
+    pub(crate) fn destination(
+        &self,
+        lineage: &Lineage,
+        normalizer: &PathNormalizer,
+    ) -> Option<(NormalizedPath, norn_store::DocumentPath)> {
+        if matches!(self.old.before, Resolves::Several {}) {
+            return None;
+        }
+        let (file, at) = rewrite_destination(&self.new, normalizer)?;
+        (self.old_lands(lineage, normalizer).as_ref() != Some(&file)).then_some((file, at))
+    }
+
+    /// The file the one document `old` names before the plan stands at
+    /// after it, where `old` names one and a file holds it then.
+    pub(crate) fn old_lands(
+        &self,
+        lineage: &Lineage,
+        normalizer: &PathNormalizer,
+    ) -> Option<NormalizedPath> {
+        let Resolves::One { path } = &self.old.before else {
+            return None;
+        };
+        lineage.landing(&normalizer.normalize(Path::new(path.as_str())).ok()?)
+    }
 }
 
 /// What the two ends of each wikilink rewrite of the plan name, by the
@@ -835,7 +871,9 @@ impl Decider<'_> {
 /// `old` exactly, by the key the root's resolution files the link and looks
 /// `old` up by ([`LinkChange::filed_under`]) — never one sharing only part
 /// of `old`'s keys. A Markdown link, and a wikilink resolving to several
-/// documents, is named by none.
+/// documents, is named by none; and a rewrite with no document to retarget
+/// to ([`RetargetNaming::destination`]), which planning leaves unresolved,
+/// names none, so it never takes a wikilink from a rewrite that has one.
 pub(crate) fn selecting<'l>(
     link: &LinkFact,
     named: Named<'_>,
@@ -850,7 +888,10 @@ pub(crate) fn selecting<'l>(
     let mut selecting: Vec<&Retarget> = lineage
         .retargets()
         .filter(|retarget| {
-            let Some(ends) = namings.get(&retarget.position) else {
+            let Some(ends) = namings
+                .get(&retarget.position)
+                .filter(|ends| ends.destination(lineage, normalizer).is_some())
+            else {
                 return false;
             };
             match (&ends.old.before, named) {
@@ -928,7 +969,8 @@ pub(crate) fn respells(
         Decider::Retarget(retarget) => {
             let new = namings
                 .get(&retarget.position)
-                .and_then(|ends| one(&ends.new.after));
+                .and_then(|ends| ends.destination(lineage, normalizer))
+                .map(|(file, _)| file);
             new.is_none() || one(after) != new
         }
         Decider::Removal(removal) => rewritten_for(removal, after, rewritten_to, normalizer),
@@ -1711,5 +1753,69 @@ mod tests {
                 "{before:?} -> {after:?}, written {written}, moved {moved}"
             );
         }
+    }
+
+    /// **A wikilink rewrite resolves only where its ends name a document to
+    /// retarget to that is not the one `old` named, where the plan leaves
+    /// it.** An `old` naming one document or none and a `new` naming one
+    /// document at a path both the vault's rule and the store's grammar read
+    /// resolve; a `new` at a path either refuses, an `old` naming several,
+    /// and the two naming one document — at one path, or across the move
+    /// carrying `old`'s document to where `new` names — do not. A `new`
+    /// naming the path `old`'s document leaves names whatever stands there
+    /// after, never that document.
+    #[test]
+    fn a_wikilink_rewrite_resolves_only_to_an_addressable_other_document() {
+        use norn_store::TargetNaming;
+
+        use super::RetargetNaming;
+
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let one = |at: &str| Resolves::one(path(at));
+        let ends = |old: Resolves, new: Resolves| RetargetNaming {
+            old: TargetNaming::new(old, Resolves::none(), None),
+            new: TargetNaming::new(Resolves::none(), new, None),
+        };
+        let still = Lineage::default();
+        let resolves = |named: &RetargetNaming, lineage: &Lineage| {
+            named
+                .destination(lineage, &normalizer)
+                .map(|(_, at)| at.as_str().to_string())
+        };
+        assert_eq!(
+            resolves(&ends(one("a.md"), one("x/c.md")), &still).as_deref(),
+            Some("x/c.md")
+        );
+        assert_eq!(
+            resolves(&ends(Resolves::none(), one("x/c.md")), &still).as_deref(),
+            Some("x/c.md")
+        );
+        for unreadable in ["../c.md", "x/...md"] {
+            assert_eq!(
+                resolves(&ends(one("a.md"), one(unreadable)), &still),
+                None,
+                "{unreadable}"
+            );
+        }
+        assert_eq!(
+            resolves(&ends(Resolves::several(), one("c.md")), &still),
+            None
+        );
+        assert_eq!(resolves(&ends(one("a.md"), Resolves::none()), &still), None);
+        assert_eq!(resolves(&ends(one("a.md"), one("a.md")), &still), None);
+
+        let moved = Lineage::of(
+            &[Operation::new(OperationKind::move_document(
+                path("a.md"),
+                path("b.md"),
+            ))],
+            &[0],
+            &normalizer,
+        );
+        assert_eq!(resolves(&ends(one("a.md"), one("b.md")), &moved), None);
+        assert_eq!(
+            resolves(&ends(one("a.md"), one("a.md")), &moved).as_deref(),
+            Some("a.md")
+        );
     }
 }

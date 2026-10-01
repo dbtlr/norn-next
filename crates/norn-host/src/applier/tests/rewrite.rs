@@ -250,6 +250,22 @@ fn a_later_wikilink_rewrite_selecting_an_earlier_ones_wikilink_is_unresolved_nam
     assert!(detail.contains("`first`"), "{detail}");
 }
 
+/// **A wikilink rewrite left unresolved takes no wikilink from another.**
+/// `zzz` names no document, so the rewrite of `a` to it is left unresolved
+/// saying so, and the later rewrite of `a.md` to `d`, selecting the same
+/// `[[a]]`, retargets it rather than being left unresolved naming the first.
+#[test]
+fn a_wikilink_rewrite_left_unresolved_takes_no_wikilink_from_a_later_one() {
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("d.md", "D\n"), ("h.md", "[[a]]\n")]);
+    let resolution = fixture.planned(vec![retargeting("a", "zzz"), retargeting("a.md", "d")]);
+    let detail = unresolved_detail(&resolution);
+    assert!(detail.contains("names no one document"), "{detail}");
+    assert_eq!(
+        resolution.plan.operations[0].cascade,
+        [wikilink("h.md", "a", "d")]
+    );
+}
+
 /// **A `new` must name one document where the plan leaves the vault.**
 /// Naming none leaves the rewrite unresolved in words, naming several leaves
 /// it unresolved with the head of them, and one the plan creates is named.
@@ -303,6 +319,23 @@ fn a_rewrite_with_nothing_to_rewrite_to_or_from_is_unresolved_saying_why() {
     let detail = unresolved_detail(&unnamed);
     assert!(detail.contains("no wikilink"), "{detail}");
     assert!(unnamed.plan.transitions.is_empty());
+}
+
+/// **`old` and `new` naming one document across a move are the same
+/// document.** `a` names `a.md` before the plan and `b` names `b.md` after
+/// it, where the move lands that same document, so no wikilink would change:
+/// the rewrite is left unresolved saying so, and the move lands with its own
+/// cascade.
+#[test]
+fn a_rewrite_naming_a_moved_document_before_and_after_its_move_is_unresolved_as_one_document() {
+    let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
+    let resolution = fixture.planned(vec![super::moving("a.md", "b.md"), retargeting("a", "b")]);
+    let detail = unresolved_detail(&resolution);
+    assert!(detail.contains("the same document"), "{detail}");
+    assert_eq!(
+        resolution.plan.operations[0].cascade,
+        [wikilink("h.md", "a", "b")]
+    );
 }
 
 /// **An ambiguous wikilink is never rewritten**, and the forecast says it

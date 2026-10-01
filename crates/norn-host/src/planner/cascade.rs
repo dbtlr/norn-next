@@ -236,7 +236,7 @@ impl Deletes {
 ///   cascades ([`Deletes::unkept`]).
 /// - **Each wikilink rewrite**: its `old` must name one document or none
 ///   before the plan, and its `new` one other document after it
-///   ([`retarget_destination`]); where they do, every wikilink naming `old`
+///   ([`RetargetNaming::destination`]); where they do, every wikilink naming `old`
 ///   that does not already name `new` after the plan ([`respells`]) is
 ///   respelled to name it, by the same spellings, and a rewrite retargeting
 ///   none is left unresolved ([`unmatched`]), as is one selecting a wikilink
@@ -302,15 +302,13 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     let mut unresolved: BTreeMap<usize, UnresolvedReason> = BTreeMap::new();
     cascade.namings = retarget_namings(lineage, &overlay, index)?;
     for retarget in lineage.retargets() {
-        match retarget_destination(retarget, &cascade.namings[&retarget.position], normalizer) {
-            Ok(path) => {
-                if let (Some(file), Some(at)) = (cascade.identity(path.as_str()), stored_path(path))
-                {
-                    cascade.destinations.insert(retarget.position, (file, at));
-                }
+        let named = &cascade.namings[&retarget.position];
+        match named.destination(lineage, normalizer) {
+            Some(destination) => {
+                cascade.destinations.insert(retarget.position, destination);
             }
-            Err(reason) => {
-                unresolved.insert(retarget.position, reason);
+            None => {
+                unresolved.insert(retarget.position, unretargeted(retarget, named, normalizer));
             }
         }
     }
@@ -546,47 +544,46 @@ fn unnamed(
     })
 }
 
-/// The document the wikilink rewrite `retarget` retargets its wikilinks to,
-/// its ends naming as `named` says, or why it does not resolve: its `old`
-/// names several documents before the plan, headed there; its `new` names
-/// none or several where the plan leaves the vault, the latter headed; or
-/// the two name one document, so no wikilink would change.
-fn retarget_destination<'n>(
+/// Why the wikilink rewrite `retarget`, its ends naming as `named` says,
+/// has no document to retarget its wikilinks to
+/// ([`RetargetNaming::destination`]): its `old` names several documents
+/// before the plan, headed there; its `new` names none or several where the
+/// plan leaves the vault, the latter headed, or one at a path the vault's
+/// rule or the store's grammar refuses; or the two name one document where
+/// the plan leaves it, so no wikilink would change.
+fn unretargeted(
     retarget: &Retarget,
-    named: &'n RetargetNaming,
+    named: &RetargetNaming,
     normalizer: &PathNormalizer,
-) -> Result<&'n DocumentPath, UnresolvedReason> {
+) -> UnresolvedReason {
     let (old, new) = (&retarget.old, &retarget.new);
-    if let (Resolves::Several {}, Some(candidates)) = (&named.old.before, &named.old.candidates) {
-        return Err(UnresolvedReason::ambiguous_target(
-            AmbiguousEnd::Old,
-            candidates.clone(),
-        ));
-    }
-    let to = match (&named.new.after, &named.new.candidates) {
-        (Resolves::One { path }, _) => path,
+    match (&named.old.before, &named.old.candidates) {
         (Resolves::Several {}, Some(candidates)) => {
-            return Err(UnresolvedReason::ambiguous_target(
-                AmbiguousEnd::Target,
-                candidates.clone(),
+            return UnresolvedReason::ambiguous_target(AmbiguousEnd::Old, candidates.clone());
+        }
+        (Resolves::Several {}, None) => {
+            return UnresolvedReason::no_longer_resolves(format!(
+                "`old` `{old}` names several documents before the plan, so which wikilinks it names is not known"
             ));
         }
-        _ => {
-            return Err(UnresolvedReason::no_longer_resolves(format!(
-                "`new` `{new}` names no one document where the plan leaves the vault, so the wikilinks naming `{old}` have nothing to be retargeted to"
-            )));
-        }
-    };
-    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
-    if let Resolves::One { path: from } = &named.old.before
-        && identity(from).is_some()
-        && identity(from) == identity(to)
-    {
-        return Err(UnresolvedReason::no_longer_resolves(format!(
-            "`old` `{old}` and `new` `{new}` name the same document, `{to}`, so no wikilink would change"
-        )));
+        _ => {}
     }
-    Ok(to)
+    match (&named.new.after, &named.new.candidates) {
+        (Resolves::Several {}, Some(candidates)) => {
+            UnresolvedReason::ambiguous_target(AmbiguousEnd::Target, candidates.clone())
+        }
+        (Resolves::One { path }, _) if rewrite_destination(&named.new, normalizer).is_none() => {
+            UnresolvedReason::no_longer_resolves(format!(
+                "`new` `{new}` names `{path}`, which is no path the wikilinks naming `{old}` can be retargeted toward"
+            ))
+        }
+        (Resolves::One { path }, _) => UnresolvedReason::no_longer_resolves(format!(
+            "`old` `{old}` and `new` `{new}` name the same document, `{path}` where the plan leaves it, so no wikilink would change"
+        )),
+        _ => UnresolvedReason::no_longer_resolves(format!(
+            "`new` `{new}` names no one document where the plan leaves the vault, so the wikilinks naming `{old}` have nothing to be retargeted to"
+        )),
+    }
 }
 
 /// Why the wikilink rewrite `retarget`, its ends naming as `named` says,
@@ -884,4 +881,46 @@ fn entry(holder: &DocumentPath, link: &LinkFact) -> EntryKey {
         family_name(wire_family(link.family)),
         address(link),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use norn_fs::CaseSensitivity;
+    use norn_store::TargetNaming;
+    use norn_wire::{DocumentPath, Resolves, UnresolvedReason};
+
+    use super::{PathNormalizer, Retarget, RetargetNaming, unretargeted};
+
+    /// **A wikilink rewrite with no document to retarget to says why in
+    /// words**: a `new` naming one document at a path no link can be
+    /// respelled toward names that path, and one naming the document `old`
+    /// named, where the plan leaves it, says the two name one document.
+    #[test]
+    fn a_rewrite_with_no_document_to_retarget_to_says_why() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let retarget = Retarget {
+            position: 0,
+            id: None,
+            old: "a".to_string(),
+            new: "c".to_string(),
+        };
+        let one = |at: &str| Resolves::one(DocumentPath::new(at).expect("a document path"));
+        let detail = |new: &str| {
+            let named = RetargetNaming {
+                old: TargetNaming::new(one("a.md"), Resolves::none(), None),
+                new: TargetNaming::new(Resolves::none(), one(new), None),
+            };
+            match unretargeted(&retarget, &named, &normalizer) {
+                UnresolvedReason::NoLongerResolves { detail, .. } => detail,
+                other => panic!("no longer resolves: {other:?}"),
+            }
+        };
+        let unaddressable = detail("../c.md");
+        assert!(
+            unaddressable.contains("`../c.md`, which is no path"),
+            "{unaddressable}"
+        );
+        let itself = detail("a.md");
+        assert!(itself.contains("the same document"), "{itself}");
+    }
 }
