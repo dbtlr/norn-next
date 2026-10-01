@@ -46,30 +46,43 @@
 //! path another writer adds after planning is then an entry the plan does
 //! not record, and refuses it as one to a vacated path does.
 //!
-//! **A plan that changes no document's presence and writes no link is
-//! answered without reading anything.** No link's resolution moves unless a
-//! document appears or disappears somewhere a key names, or the plan writes
-//! the link's text, so such a plan — every edit-only plan, a frontmatter set
-//! among them — records nothing, and the index is never asked: nothing is
-//! minted for it. A document a move carries away lands somewhere nothing
-//! stood or leaves somewhere nothing stands after, since moves closing a
-//! cycle are refused, so a plan replacing a document a link follows always
-//! changes a presence too.
+//! **A plan that changes no document's presence, deletes none and writes no
+//! link is answered without reading anything.** No link's resolution moves
+//! unless a document appears or disappears somewhere a key names, the
+//! document at a path a key names is replaced, or the plan writes the link's
+//! text, so such a plan — every edit-only plan, a frontmatter set among them —
+//! records nothing, and the index is never asked: nothing is minted for it.
+//! A plan replaces the document at a path while every presence stays as it
+//! was only by deleting it and refilling the path: a document a move carries
+//! away lands somewhere nothing stood or leaves somewhere nothing stands
+//! after, since moves closing a cycle are refused, and a create with no
+//! delete adds a document. So a plan holding a delete is read — a delete
+//! whose path the plan refills among them, whose backlinks are judged as any
+//! other delete's.
 //!
 //! **Which links a plan writes is one predicate** ([`WrittenLinks::holds`]):
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
 //! one of a cascade's — held in its document under the syntax and the
 //! address the rewrite writes. Every such link is an entry whatever it
-//! resolves to, so a cascade's rewrite is checked where it lands. NORN-297:
+//! resolves to, so a cascade's rewrite is checked where it lands. Whether it
+//! is a backlink of a document a delete removes is read from the text it
+//! had — the address the rewrite matched, probed from where its holder's
+//! content stood ([`Reached::originals`]) — never from its new text. NORN-297:
 //! no planning resolves an authored `rewrite_link` yet, so the links a
 //! resolved plan writes are its cascades' until it does.
 //!
 //! **What the forecast says of a link a cascade did not follow.** A link
 //! that named a document a move carries away, and does not name it where it
-//! lands, is advised on as the cascade's skip — the text layer's reason, or
-//! unrepresentable where no spelling read back — and an ambiguous link that
-//! could name a moved document as skipped for its ambiguity, each in place
-//! of what its resolution alone would say. Both are read from the links the
+//! lands, or a document a delete removes rewriting the links naming it, and
+//! does not name the delete's target, is advised on as the cascade's skip —
+//! the text layer's reason, or unrepresentable where no spelling read back —
+//! and an ambiguous link that could name such a document as skipped for its
+//! ambiguity, each in place of what its resolution alone would say. A link
+//! that named a document a delete forbidding or breaking its links removes
+//! is advised on as its resolution says: left broken, or retargeted where it
+//! was ambiguous. Every link that named a removed document is an entry,
+//! though the path it resolves to is refilled, so a backlink another writer
+//! adds after planning refuses the plan. Both are read from the links the
 //! plan does not write — a link a cascade respells to a path the plan
 //! refills reads as left behind from its new address — and said even where a
 //! cascade respelled another link of the holder to the same address, so the
@@ -84,15 +97,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{LinkChange, PathOverlay, ProbedLink};
+use norn_store::{LinkChange, PathOverlay, ProbedLink, TargetNaming};
 use norn_text::RewriteSkip;
 use norn_wire::{
-    DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
-    Operation, OperationKind, PlanCondition, Resolves,
+    Backlinks, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth,
+    LinkKey, Operation, OperationKind, PlanCondition, Resolves,
 };
 
 use super::compose::{Composition, Kept, Skipped, content_hash, holding};
-use super::lineage::{Drawn, Lineage};
+use super::lineage::{Drawn, Lineage, Removal};
 use crate::derivation::document_links;
 
 /// Where the links a plan does not write are judged: what each link the plan
@@ -113,6 +126,11 @@ pub(crate) trait LinkIndex {
         each: &mut dyn FnMut(LinkChange),
     ) -> Result<(), Self::Error>;
 
+    /// What the suffix address `address` names on each side of the plan
+    /// `overlay` describes, read as a wikilink written with it is, with the
+    /// head of what it names after where that is several.
+    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, Self::Error>;
+
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
     /// another.
@@ -122,21 +140,25 @@ pub(crate) trait LinkIndex {
 /// **The one fast-path predicate**: whether a plan whose targets each stand
 /// as `presence` — whether a document stands there before the plan, and
 /// after it — and whose operations are `operations` reads the link index:
-/// some target holds a document on one side and not the other, or some
-/// operation rewrites a link, as a `rewrite_link` or through its cascade. A
-/// file whose bytes start or stop decoding holds a document on one side only,
-/// though a file stands there on both. A
-/// plan of which neither holds records no entry and reads nothing, so
-/// [`change_set`] answers it without asking, and an apply job whose index is
-/// asked by nothing else mints no handle for it.
+/// some target holds a document on one side and not the other; some
+/// operation deletes a document, which is how a plan replaces the document
+/// at a path it refills, every presence staying as it was ([`replaces`]); or
+/// some operation rewrites a link, as a `rewrite_link` or through its
+/// cascade. A file whose bytes start or stop decoding holds a document on
+/// one side only, though a file stands there on both. A plan of which none
+/// holds records no entry and reads nothing, so [`change_set`] answers it
+/// without asking, and an apply job whose index is asked by nothing else
+/// mints no handle for it.
 fn reads_links_over<'o>(
     presence: impl IntoIterator<Item = (bool, bool)>,
     operations: impl IntoIterator<Item = &'o Operation>,
 ) -> bool {
     presence.into_iter().any(|(before, after)| before != after)
         || operations.into_iter().any(|operation| {
-            matches!(operation.kind, OperationKind::RewriteLink { .. })
-                || !operation.cascade.is_empty()
+            matches!(
+                operation.kind,
+                OperationKind::RewriteLink { .. } | OperationKind::DeleteDocument { .. }
+            ) || !operation.cascade.is_empty()
         })
 }
 
@@ -207,6 +229,11 @@ pub(crate) struct ChangeSet {
     /// What the plan does to a link a caller should look at, in the same
     /// order.
     pub(crate) advisories: Vec<LinkAdvisory>,
+    /// The position of each delete whose link choice the set contradicts
+    /// ([`Removal::kept_by`]), in order. Planning leaves every such delete
+    /// unresolved by the same rule, so a plan it resolved holds none; the applier refuses a
+    /// resolved plan holding one as one that is not what its operations do.
+    pub(crate) unkept: Vec<usize>,
 }
 
 /// The resolution change set of the plan writing `targets`, whose content
@@ -231,13 +258,25 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         return Ok(ChangeSet::default());
     }
     let written = WrittenLinks::of(operations, normalizer);
-    let (overlay, probed) = reach(targets, lineage, normalizer, &written);
-    let moved = |path: &str| {
+    let Reached {
+        overlay,
+        probed,
+        originals,
+    } = reach(targets, lineage, normalizer, &written);
+    let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
+    // A document a move carries away, or a delete removes rewriting the
+    // links naming it: one an ambiguous link could name is a document a
+    // cascade would follow, were it known which the link names.
+    let followed = |path: &str| {
         normalizer
             .normalize(Path::new(path))
             .ok()
-            .and_then(|file| lineage.carried_to(&file))
-            .is_some()
+            .is_some_and(|file| {
+                lineage.carried_to(&file).is_some()
+                    || lineage
+                        .removed_by(&file)
+                        .is_some_and(|removal| removal.rewrite_to().is_some())
+            })
     };
 
     // Each key holding a link the cascades left as written, matched or not.
@@ -258,6 +297,8 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         })
         .collect();
     let mut judged: BTreeMap<EntryKey, Judged> = BTreeMap::new();
+    // Each delete a link naming its document contradicts.
+    let mut named: BTreeSet<usize> = BTreeSet::new();
     index.changes(&overlay, &probed, &mut |change| {
         let key = LinkKey::new(
             wire_path(&change.holder),
@@ -269,19 +310,32 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // under a key a rewrite writes reads as written, so one a cascade
         // left as written there is known by its key alone.
         let unwritten = !change.written || kept.contains(&entry);
-        // A link left behind by the cascade, and an ambiguous link that could
-        // name a document a move carries away, which is left as written since
-        // which it names is not known — each read from a link the plan does
-        // not write, since one it respells to a path it refills reads as
-        // left behind from its new address.
-        let left_behind =
-            unwritten && left_behind(&change.before, &change.after, lineage, normalizer).is_some();
+        // A backlink of a document a delete removes, a link left behind by
+        // a cascade — a move's, or a delete's rewriting the links naming its
+        // document — and an ambiguous link that could name a document either
+        // follows, which is left as written since which it names is not
+        // known — each read here from a link the plan does not write. A link
+        // a rewrite writes is a backlink by the text it had, read below from
+        // its original, never by what its new text names before the plan;
+        // one respelled to a path the plan refills reads as left behind from
+        // its new address.
+        let removal = unwritten
+            .then(|| removed_by(&change.before, lineage, normalizer))
+            .flatten();
+        if let Some(removal) = removal {
+            named.insert(removal.position);
+        }
+        let left_behind = unwritten
+            && (left_behind(&change.before, &change.after, lineage, normalizer).is_some()
+                || removal.is_some_and(|removal| {
+                    rewritten_for(removal, &change.after, &rewritten_to, normalizer)
+                }));
         let ambiguous_among_moved = unwritten
             && matches!(change.before, Resolves::Several {})
             && change
                 .before_targets
                 .iter()
-                .any(|target| moved(target.as_str()));
+                .any(|target| followed(target.as_str()));
         let held = judged.entry(entry).or_insert_with(|| Judged {
             key,
             address: change.address,
@@ -290,15 +344,38 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             written: false,
             unwritten: false,
             members_moved: false,
+            named_removed: false,
             left_behind: false,
             ambiguous_among_moved: false,
         });
         held.written |= change.written;
         held.unwritten |= unwritten;
         held.members_moved |= change.members_moved;
+        held.named_removed |= removal.is_some();
         held.left_behind |= left_behind;
         held.ambiguous_among_moved |= ambiguous_among_moved;
     })?;
+    // A link a rewrite writes names the document a delete removes where the
+    // text it had resolved before the plan to exactly that document, read
+    // from where its holder's content stood: a backlink respelled away, or
+    // respelled from where its moved holder lands, is still one, and a link
+    // respelled toward the deleted document's name is none. Only a delete
+    // forbidding the links naming its document reads whether one does
+    // ([`Removal::kept_by`]), so the originals are read only where one does.
+    if !originals.is_empty()
+        && lineage
+            .removals()
+            .any(|removal| removal.backlinks == Backlinks::Forbidden)
+    {
+        index.changes(&overlay, &originals, &mut |change| {
+            if let (true, Some(removal)) = (
+                change.written,
+                removed_by(&change.before, lineage, normalizer),
+            ) {
+                named.insert(removal.position);
+            }
+        })?;
+    }
 
     let skips: BTreeMap<EntryKey, RewriteSkip> = skipped
         .iter()
@@ -311,7 +388,20 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
             (key, skip.reason)
         })
         .collect();
-    let mut set = ChangeSet::default();
+    let mut set = ChangeSet {
+        unkept: lineage
+            .removals()
+            .filter(|removal| {
+                !removal.kept_by(
+                    named.contains(&removal.position),
+                    rewritten_to.get(&removal.position),
+                    normalizer,
+                )
+            })
+            .map(|removal| removal.position)
+            .collect(),
+        ..ChangeSet::default()
+    };
     let mut advised: BTreeMap<EntryKey, LinkAdvisory> = BTreeMap::new();
     for (entry, judged) in judged {
         if let Some(advisory) = judged.advisory(skips.get(&entry).copied()) {
@@ -346,9 +436,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 
 /// What a plan reaches of the links the store holds: the overlay of every
 /// target the plan writes, present before where a document stands there
-/// before the plan and after where one stands after, and every link a
-/// document the plan writes holds at its after-state, read from the bytes the
-/// plan composed and probed from where its content stood before the plan.
+/// before the plan and after where one stands after; every link a document
+/// the plan writes holds at its after-state, read from the bytes the plan
+/// composed and probed from where its content stood before the plan; and
+/// each link the plan writes as it was written before a rewrite respelled
+/// it ([`Reached::originals`]).
 ///
 /// **The one place a plan's two vaults are drawn.** The change set judges its
 /// entries through this overlay and these probes, and a link cascade reads
@@ -375,7 +467,7 @@ pub(crate) fn reach(
     lineage: &Lineage,
     normalizer: &PathNormalizer,
     written: &WrittenLinks,
-) -> (PathOverlay, Vec<ProbedLink>) {
+) -> Reached {
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
     // The spelling each file standing before the plan is written at, which
     // a moved document's links are read from before the plan. Where its
@@ -389,6 +481,7 @@ pub(crate) fn reach(
         .collect();
     let mut overlay = PathOverlay::new();
     let mut probed = Vec::new();
+    let mut originals = Vec::new();
     for target in targets {
         let Some(stored) = stored_path(target.path) else {
             continue;
@@ -409,16 +502,44 @@ pub(crate) fn reach(
             .and_then(stored_path)
             .unwrap_or_else(|| stored.clone());
         for link in document_links(bytes) {
-            let written = file.as_ref().is_some_and(|file| written.holds(file, &link));
+            let rewritten = file.as_ref().is_some_and(|file| written.holds(file, &link));
+            if let (true, Some(file)) = (rewritten, file.as_ref()) {
+                originals.extend(written.originals(file, &link).map(|original| ProbedLink {
+                    before_holder: before_holder.clone(),
+                    after_holder: stored.clone(),
+                    link: original,
+                    written: true,
+                }));
+            }
             probed.push(ProbedLink {
                 before_holder: before_holder.clone(),
                 after_holder: stored.clone(),
                 link,
-                written,
+                written: rewritten,
             });
         }
     }
-    (overlay, probed)
+    Reached {
+        overlay,
+        probed,
+        originals,
+    }
+}
+
+/// What [`reach`] draws of a plan.
+pub(crate) struct Reached {
+    /// Every target the plan writes, on each side of it.
+    pub(crate) overlay: PathOverlay,
+    /// Every link a document the plan writes holds at its after-state.
+    pub(crate) probed: Vec<ProbedLink>,
+    /// **Each link the plan writes as it was written before**: for every
+    /// link a rewrite of the plan writes, the link with each address a
+    /// rewrite writing it respelled it from, held where it is held after the
+    /// plan and read before the plan from where its holder's content stood
+    /// — where the link a rewrite matched stood, so what it resolves to
+    /// before the plan is what the link itself named. Marked written, so
+    /// each is judged and handed back whatever it resolves to.
+    pub(crate) originals: Vec<ProbedLink>,
 }
 
 /// Whether the plan replaces the document standing at `target`, the file
@@ -467,6 +588,87 @@ pub(crate) fn left_behind<'l>(
     }
 }
 
+/// **The one rule a delete's backlinks are read by**: where a link resolved
+/// before the plan to exactly one document a delete of the plan removes, that
+/// delete. A link resolving to several documents is a backlink of none of
+/// them, and a link a removed document holds is gone with it, so neither is
+/// ever handed here.
+pub(crate) fn removed_by<'l>(
+    before: &Resolves,
+    lineage: &'l Lineage,
+    normalizer: &PathNormalizer,
+) -> Option<&'l Removal> {
+    let Resolves::One { path } = before else {
+        return None;
+    };
+    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
+    lineage.removed_by(&file)
+}
+
+/// What the `rewrite_to` of each delete of the plan rewriting the links
+/// naming its document names, by the delete's position, on each side of the
+/// plan `overlay` describes, read through `index`: the one reading of it
+/// planning resolves the delete by and the change set judges its cascade by.
+pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
+    lineage: &Lineage,
+    overlay: &PathOverlay,
+    index: &I,
+) -> Result<BTreeMap<usize, TargetNaming>, I::Error> {
+    let mut targets = BTreeMap::new();
+    for removal in lineage.removals() {
+        if let Some(address) = removal.rewrite_to() {
+            targets.insert(removal.position, index.target(overlay, address)?);
+        }
+    }
+    Ok(targets)
+}
+
+/// The one document a rewriting delete's target `named` names where the
+/// plan leaves the vault, as the file the vault's rule reads and the path the
+/// store's grammar reads: what its backlinks are respelled toward. `None`
+/// where it names no one document, or one at a path either refuses, which no
+/// link can be respelled toward.
+pub(crate) fn rewrite_destination(
+    named: &TargetNaming,
+    normalizer: &PathNormalizer,
+) -> Option<(NormalizedPath, norn_store::DocumentPath)> {
+    let Resolves::One { path } = &named.after else {
+        return None;
+    };
+    let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
+    Some((file, stored_path(path)?))
+}
+
+/// **The one rule a delete's cascade follows**: whether a link that
+/// resolved before the plan to exactly the document `removal` removes, and
+/// resolves to `after` after it, is one the delete rewrites — the delete
+/// rewrites the links naming its document, and the link does not already
+/// name, after the plan, the one document its `rewrite_to` names there
+/// (`targets`, by the delete's position).
+///
+/// A delete's cascade rewrites exactly the links this names; the change set
+/// records every link a removed document leaves and advises on each this
+/// names that the cascade left as written.
+pub(crate) fn rewritten_for(
+    removal: &Removal,
+    after: &Resolves,
+    targets: &BTreeMap<usize, TargetNaming>,
+    normalizer: &PathNormalizer,
+) -> bool {
+    if removal.rewrite_to().is_none() {
+        return false;
+    }
+    let target = targets
+        .get(&removal.position)
+        .and_then(|target| rewrite_destination(target, normalizer));
+    match (after, target) {
+        (Resolves::One { path }, Some((target, _))) => {
+            normalizer.normalize(Path::new(path.as_str())).ok().as_ref() != Some(&target)
+        }
+        _ => true,
+    }
+}
+
 /// What a link-resolution entry is ordered and matched by: its holder, its
 /// syntax as the store names it — `None` for a syntax the store holds no link
 /// of — then its address.
@@ -493,21 +695,27 @@ struct Judged {
     /// or one a cascade kept beside a link it wrote there.
     unwritten: bool,
     members_moved: bool,
+    /// The link named a document a delete of the plan removes.
+    named_removed: bool,
     /// The link named a document a move of the plan carries away, and does
-    /// not name it where it lands: its cascade left it as written.
+    /// not name it where it lands, or a document a delete of the plan removes
+    /// rewriting the links naming it, and does not name the delete's target:
+    /// its cascade left it as written.
     left_behind: bool,
     /// The link was ambiguous before the plan, and one of the documents it
-    /// could name is one a move of the plan carries away.
+    /// could name is one a move of the plan carries away, or a delete removes
+    /// rewriting the links naming it.
     ambiguous_among_moved: bool,
 }
 
 impl Judged {
     /// Whether the change set records the link: what it resolves to changes,
-    /// the plan writes its text, or it is left behind — which, where the
-    /// path it resolves to is the same on both sides, says the document
-    /// there is not the one it named.
+    /// the plan writes its text, it is left behind, or it named a document
+    /// the plan removes — the last two, where the path it resolves to is the
+    /// same on both sides, saying the document there is not the one it
+    /// named.
     fn records(&self) -> bool {
-        self.before != self.after || self.written || self.left_behind
+        self.before != self.after || self.written || self.left_behind || self.named_removed
     }
 
     /// What the forecast says about the link, where it says anything.
@@ -593,38 +801,45 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
 
 /// The links a plan writes: each a link of one syntax, at one address, in
 /// one document's after-state, which a `rewrite_link` of the plan or a
-/// rewrite of one of its cascades writes.
+/// rewrite of one of its cascades writes — with each address a rewrite
+/// writing it there respelled it from.
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
-    rewritten: BTreeSet<(NormalizedPath, &'static str, String)>,
+    rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,
 }
 
 impl WrittenLinks {
     /// The links `operations` write: each `rewrite_link`'s and each
     /// cascade rewrite's document identity, syntax, and the address it
-    /// writes.
+    /// writes, with the address it respells.
     fn of<'o>(
         operations: impl IntoIterator<Item = &'o Operation>,
         normalizer: &PathNormalizer,
     ) -> Self {
-        let mut rewritten = BTreeSet::new();
+        let mut rewritten: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
         for operation in operations {
             let authored = match &operation.kind {
                 OperationKind::RewriteLink {
-                    path, syntax, to, ..
-                } => Some((path, *syntax, to)),
+                    path,
+                    syntax,
+                    from,
+                    to,
+                } => Some((path, *syntax, from, to)),
                 _ => None,
             };
             let cascaded = operation
                 .cascade
                 .iter()
-                .map(|rewrite| (&rewrite.path, rewrite.syntax, &rewrite.to));
-            for (path, syntax, to) in authored.into_iter().chain(cascaded) {
+                .map(|rewrite| (&rewrite.path, rewrite.syntax, &rewrite.from, &rewrite.to));
+            for (path, syntax, from, to) in authored.into_iter().chain(cascaded) {
                 if let (Ok(file), Some(syntax)) = (
                     normalizer.normalize(Path::new(path.as_str())),
                     family_name(syntax),
                 ) {
-                    rewritten.insert((file, syntax, to.clone()));
+                    rewritten
+                        .entry((file, syntax, to.clone()))
+                        .or_default()
+                        .insert(from.clone());
                 }
             }
         }
@@ -636,7 +851,48 @@ impl WrittenLinks {
     /// writes" is read by.
     fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
         self.rewritten
-            .contains(&(holder.clone(), link.family.as_str(), address(link)))
+            .contains_key(&(holder.clone(), link.family.as_str(), address(link)))
+    }
+
+    /// `link`, which the plan writes in the document `holder`, as it was
+    /// written before each rewrite writing it there respelled it: the link
+    /// with the address that rewrite matched. A rewrite never changes a
+    /// link's protocol, so an address under another protocol than the
+    /// link's is none it was respelled from.
+    fn originals<'w>(
+        &'w self,
+        holder: &NormalizedPath,
+        link: &'w norn_store::LinkFact,
+    ) -> impl Iterator<Item = norn_store::LinkFact> + 'w {
+        self.rewritten
+            .get(&(holder.clone(), link.family.as_str(), address(link)))
+            .into_iter()
+            .flatten()
+            .filter_map(move |from| {
+                let target = match &link.protocol {
+                    Some(protocol) => from.strip_prefix(protocol.as_str())?.strip_prefix("://")?,
+                    None => from.as_str(),
+                };
+                Some(spelled(link, target))
+            })
+    }
+}
+
+/// `link` written with the target `target`, its protocol kept and nothing
+/// else of it: how a link is probed under another spelling of its address.
+pub(crate) fn spelled(link: &norn_store::LinkFact, target: &str) -> norn_store::LinkFact {
+    norn_store::LinkFact {
+        family: link.family,
+        embed: false,
+        protocol: link.protocol.clone(),
+        target: target.to_string(),
+        title: None,
+        anchor: None,
+        span: norn_store::Span {
+            line: 0,
+            column: 0,
+            byte_offset: 0,
+        },
     }
 }
 
@@ -712,6 +968,14 @@ pub(crate) mod testing {
                 "a plan that moves no document's presence and writes no link read the link index"
             )
         }
+
+        fn target(
+            &self,
+            _: &norn_store::PathOverlay,
+            address: &str,
+        ) -> Result<norn_store::TargetNaming, E> {
+            panic!("a plan that rewrites no link to a target named `{address}`")
+        }
     }
 
     /// A snapshot established now over `store`, whose reader is the
@@ -782,6 +1046,17 @@ pub(crate) mod testing {
             self.0
                 .index()
                 .changes(overlay, probed, each)
+                .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+
+        fn target(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            address: &str,
+        ) -> Result<norn_store::TargetNaming, E> {
+            self.0
+                .index()
+                .target(overlay, address)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
         }
     }
@@ -900,6 +1175,22 @@ mod tests {
         assert!(resolution.forecast.links.is_empty());
     }
 
+    /// **A plan holding a delete reads the link index, though every
+    /// presence stays as it was.** Deleting `a.md` and creating another
+    /// document there replaces the document a link naming the path follows,
+    /// so the job takes a read handle for it as the change set reads one; an
+    /// edit in place reads none.
+    #[test]
+    fn a_delete_whose_path_the_plan_refills_reads_the_link_index() {
+        // A document stands at `a.md` before the plan and after it.
+        let refilled = [(true, true)];
+        let deleted = Operation::new(OperationKind::delete_document(path("a.md")));
+        let created = Operation::new(OperationKind::create_document(path("a.md"), "New\n"));
+        assert!(super::reads_links_over(refilled, &[deleted, created]));
+        let edited = Operation::new(OperationKind::str_replace(path("a.md"), "Old", "New"));
+        assert!(!super::reads_links_over(refilled, &[edited]));
+    }
+
     /// **A link a created document holds is keyed where it stands after the
     /// plan, and read before it from the same place**: `[[b]]` in a created
     /// `a.md` named nothing before the plan, which also creates `b.md`, and
@@ -972,6 +1263,7 @@ mod tests {
                     Resolves::none(),
                 )],
                 advisories: Vec::new(),
+                unkept: Vec::new(),
             }
         );
     }
@@ -1026,6 +1318,7 @@ mod tests {
                     Resolves::one(path("x/b.md")),
                 )],
                 advisories: Vec::new(),
+                unkept: Vec::new(),
             }
         );
         assert!(super::reads_links_over([(true, true)], &operations));
@@ -1140,13 +1433,14 @@ mod tests {
 
     /// **Bytes that stop decoding take a document away**, though a file
     /// stands there throughout: replacing the document `d.md` with
-    /// quarantined bytes leaves `[[d]]` broken.
+    /// quarantined bytes, by a delete leaving the links naming it broken,
+    /// leaves `[[d]]` broken.
     #[test]
     fn a_document_replaced_by_quarantined_bytes_leaves_the_links_naming_it_broken() {
         let resolution = planned_with_the_linker(
             &[("d.md", b"a document\n"), ("q.md", UNDECODABLE)],
             vec![
-                Operation::new(OperationKind::delete_document(path("d.md"))),
+                Operation::new(OperationKind::delete_document_breaking_links(path("d.md"))),
                 Operation::new(OperationKind::move_document(path("q.md"), path("d.md"))),
             ],
         );
@@ -1202,6 +1496,7 @@ mod tests {
                 written: false,
                 unwritten: true,
                 members_moved: true,
+                named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
             }
@@ -1235,6 +1530,7 @@ mod tests {
                 written,
                 unwritten: !written,
                 members_moved,
+                named_removed: false,
                 left_behind: false,
                 ambiguous_among_moved: false,
             }

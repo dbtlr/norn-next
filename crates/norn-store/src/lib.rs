@@ -151,7 +151,7 @@ pub use find::{
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
-pub use health::resolution::{LinkChange, PathOverlay, ProbedLink, ResolutionWork};
+pub use health::resolution::{LinkChange, PathOverlay, ProbedLink, ResolutionWork, TargetNaming};
 pub use health::run::ResolutionStatement;
 pub use health::{KeySummaries, LinkSelection};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};

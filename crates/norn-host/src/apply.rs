@@ -25,9 +25,10 @@
 //! resolution change set reads the links the store holds.
 //!
 //! **The write verbs enter here.** [`Host::set`], [`Host::edit`],
-//! [`Host::new_document`] and [`Host::move_path`] each compile their request
-//! to an authored plan and answer through [`Host::apply`], so a verb previews
-//! and applies exactly as the same operations sent as a plan do.
+//! [`Host::new_document`], [`Host::move_path`] and [`Host::delete`] each
+//! compile their request to an authored plan and answer through
+//! [`Host::apply`], so a verb previews and applies exactly as the same
+//! operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
 //! applier's checks run over it, reading the vault and writing nothing, and
@@ -55,11 +56,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use norn_fs::WatchError;
-use norn_store::{ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot};
+use norn_store::{
+    ContentModel, LinkChange, PageRefusal, PathOverlay, ProbedLink, Snapshot, TargetNaming,
+};
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, EditParams, ErrorDetail, ErrorEnvelope,
-    FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity, SetParams,
-    TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, EditParams, ErrorDetail,
+    ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate, RootIdentity,
+    SetParams, TrustState, UntrustedReason, VaultAddress, VaultAnswer, VaultName,
 };
 
 use crate::address::registered_name;
@@ -190,10 +193,10 @@ pub(crate) fn resolve_on(
 /// planning's change set, the applier's check of it and the fresh plan a
 /// refusal resolves, whichever of them asks first, and the applier gives it
 /// back ([`LinkIndex::release`]) before its changeset commits. A plan with no
-/// `where` target that changes no document's presence and writes no link
-/// mints none unless the applier refuses it and the plan resolved afresh does
-/// one of those. Either way the match is the find a caller would have been
-/// answered at the same instant, paged to its end.
+/// `where` target that changes no document's presence, deletes none and
+/// writes no link mints none unless the applier refuses it and the plan
+/// resolved afresh does one of those. Either way the match is the find a
+/// caller would have been answered at the same instant, paged to its end.
 ///
 /// **What its link judgments cost is kept** ([`PlanSnapshot::link_judgment_cost`]):
 /// every judgment of the resolution door it runs adds what the door reported
@@ -374,6 +377,24 @@ impl LinkIndex for PlanSnapshot<'_> {
         Ok(())
     }
 
+    fn target(&self, overlay: &PathOverlay, address: &str) -> Result<TargetNaming, PageRefused> {
+        let (naming, work) = self
+            .reading(|snapshot| {
+                let before = snapshot.counters();
+                snapshot
+                    .target_naming(overlay, address, self.declared)
+                    .map(|(naming, work)| {
+                        (
+                            naming,
+                            LinkJudgmentCost::of(&work, before, snapshot.counters()),
+                        )
+                    })
+            })?
+            .map_err(page_refusal)?;
+        self.judged.set(self.judged.get().plus(work));
+        Ok(naming)
+    }
+
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
     /// its read hold's, and stays.
     fn release(&self) {
@@ -532,6 +553,20 @@ where
     /// leaves behind. `move` is a Rust keyword, so the verb's method is
     /// named for what it moves.
     pub fn move_path(&self, params: MoveParams) -> Result<PendingApply, ErrorEnvelope> {
+        let mode = params.mode;
+        self.apply_operations(mode, params.plan())
+    }
+
+    /// Answer a `delete`: the document `params` removes, compiled to one
+    /// operation and previewed or applied through [`Host::apply`].
+    ///
+    /// **The delete says what becomes of the links naming its document.**
+    /// Saying neither flag, it is refused while any link names the document,
+    /// its operation unresolved naming every holder and how many links; with
+    /// `rewrite_to` it carries the cascade respelling each of them to name
+    /// that document; with `allow_broken_links` it lands, the forecast
+    /// advising on each link it leaves broken.
+    pub fn delete(&self, params: DeleteParams) -> Result<PendingApply, ErrorEnvelope> {
         let mode = params.mode;
         self.apply_operations(mode, params.plan())
     }

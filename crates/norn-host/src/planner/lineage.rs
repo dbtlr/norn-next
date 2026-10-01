@@ -26,9 +26,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_wire::{Operation, OperationKind};
+use norn_store::TargetNaming;
+use norn_wire::{Backlinks, Operation, OperationKind};
 
 use super::compose::touches;
+use super::links::rewrite_destination;
 
 /// Where the content a file holds was drawn from.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +73,70 @@ pub(crate) struct Lineage {
     /// Each file whose before-state ends the plan at another file, and that
     /// file: [`Self::at_end`] read the other way.
     carried: BTreeMap<NormalizedPath, NormalizedPath>,
+    /// Every delete of the plan, in the order they compose, whatever the
+    /// content it removes was drawn from.
+    removals: Vec<Removal>,
+    /// Each file whose before-state a delete of the plan removes, wherever
+    /// the plan's moves carried it first, and that delete's place in
+    /// [`Self::removals`].
+    removed: BTreeMap<NormalizedPath, usize>,
+}
+
+/// A delete of the plan, and what it says of the links naming the document
+/// it removes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Removal {
+    /// The delete's position.
+    pub(crate) position: usize,
+    /// The delete's link choice: forbidding the links naming its document,
+    /// rewriting them, or leaving them broken.
+    pub(crate) backlinks: Backlinks,
+}
+
+impl Removal {
+    /// The address the delete rewrites the links naming its document to,
+    /// where it rewrites them.
+    pub(crate) fn rewrite_to(&self) -> Option<&str> {
+        match &self.backlinks {
+            Backlinks::RewrittenTo(target) => Some(target.address()),
+            Backlinks::Forbidden | Backlinks::LeftBroken => None,
+        }
+    }
+
+    /// **The one rule a delete's link choice is held to** where the plan
+    /// leaves the vault, with `named` whether a backlink of the document it
+    /// removes is held there — a link that itself resolved before the plan
+    /// to exactly that document, a link a rewrite writes judged by the text
+    /// it had and never by its new spelling — and `target` what its
+    /// `rewrite_to` names there: a delete forbidding the links naming its
+    /// document is kept where no link names it; one rewriting them, where
+    /// its `rewrite_to` names exactly one document at a path a link can be
+    /// respelled toward ([`rewrite_destination`]) — never the removed one,
+    /// which stands nowhere after the plan, though another may stand at its
+    /// path; one leaving them broken, always.
+    ///
+    /// Planning resolves every delete by this rule, leaving one it does not
+    /// keep unresolved, and the applier refuses a resolved plan holding one
+    /// by it again; neither reads anything more than the links and the
+    /// target it judges. Planning reads `named` before any cascade writes a
+    /// link, and the change set after, reading each link a rewrite writes as
+    /// the text that rewrite matched, from where its holder's content stood,
+    /// so the two read the same backlinks: one a cascade respells — away
+    /// from the document, or from where its moved holder lands — stays one.
+    pub(crate) fn kept_by(
+        &self,
+        named: bool,
+        target: Option<&TargetNaming>,
+        normalizer: &PathNormalizer,
+    ) -> bool {
+        match &self.backlinks {
+            Backlinks::Forbidden => !named,
+            Backlinks::RewrittenTo(_) => {
+                target.is_some_and(|target| rewrite_destination(target, normalizer).is_some())
+            }
+            Backlinks::LeftBroken => true,
+        }
+    }
 }
 
 impl Lineage {
@@ -86,9 +152,23 @@ impl Lineage {
         for &position in order {
             let kind = &operations[position].kind;
             match kind {
-                OperationKind::CreateDocument { path, .. }
-                | OperationKind::DeleteDocument { path, .. } => {
+                OperationKind::CreateDocument { path, .. } => {
                     if let Some(file) = identity(path.as_str()) {
+                        lineage.at_end.insert(file, None);
+                    }
+                }
+                // Every delete is a removal, so its link choice is read
+                // though the content it removes is one the plan created; only
+                // one removing a before-state can have links naming it.
+                OperationKind::DeleteDocument { path, backlinks } => {
+                    if let Some(file) = identity(path.as_str()) {
+                        if let Some(drawn) = lineage.source(&file) {
+                            lineage.removed.insert(drawn.from, lineage.removals.len());
+                        }
+                        lineage.removals.push(Removal {
+                            position,
+                            backlinks: backlinks.clone(),
+                        });
                         lineage.at_end.insert(file, None);
                     }
                 }
@@ -157,6 +237,24 @@ impl Lineage {
         let file = self.carried.get(from)?;
         let drawn = self.at_end.get(file)?.as_ref()?;
         Some((file, drawn))
+    }
+
+    /// The delete that removes the document standing at `from` before the
+    /// plan — at `from`, or wherever the plan's moves carried it first — and
+    /// `None` where no delete of the plan removes it.
+    ///
+    /// **What a delete's backlinks are.** A link that named the document
+    /// before the plan names nothing of it after, so the delete reads here
+    /// which of the links the store's resolution door reaches are its own,
+    /// and what it rewrites them to.
+    pub(crate) fn removed_by(&self, from: &NormalizedPath) -> Option<&Removal> {
+        self.removed.get(from).map(|&at| &self.removals[at])
+    }
+
+    /// Every delete of the plan, in the order they compose — one removing a
+    /// document the plan itself created among them.
+    pub(crate) fn removals(&self) -> impl Iterator<Item = &Removal> + '_ {
+        self.removals.iter()
     }
 
     /// The source of what `file` holds at the end of the plan, where its
@@ -266,7 +364,7 @@ fn carriers(cycle: &[&NormalizedPath], drawing: &BTreeMap<&NormalizedPath, &Draw
 #[cfg(test)]
 mod tests {
     use norn_fs::CaseSensitivity;
-    use norn_wire::DocumentPath;
+    use norn_wire::{DocumentPath, ResolutionTarget, Resolves};
 
     use super::*;
 
@@ -301,5 +399,31 @@ mod tests {
             "the walk followed {steps} steps over {} files",
             drawing.len()
         );
+    }
+
+    /// **A rewriting delete is kept only where its `rewrite_to` names one
+    /// document at a path a link can be respelled toward.** One document at
+    /// a path both the vault's rule and the store's grammar read keeps it; a
+    /// path either refuses — one the vault's rule does not read, or one
+    /// whose leaf the store's grammar reduces to no stem — does not, nor
+    /// does naming no document, as planning leaves each unresolved.
+    #[test]
+    fn a_rewriting_delete_is_kept_only_where_its_target_is_a_path_links_can_name() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let removal = Removal {
+            position: 0,
+            backlinks: Backlinks::RewrittenTo(ResolutionTarget::new("c").expect("a target")),
+        };
+        let naming = |after: Resolves| TargetNaming::new(Resolves::none(), after, None);
+        let one = |at: &str| Resolves::one(DocumentPath::new(at).expect("a document path"));
+        assert!(removal.kept_by(false, Some(&naming(one("x/c.md"))), &normalizer));
+        for unreadable in ["../c.md", "x/...md"] {
+            assert!(
+                !removal.kept_by(false, Some(&naming(one(unreadable))), &normalizer),
+                "{unreadable}"
+            );
+        }
+        assert!(!removal.kept_by(false, Some(&naming(Resolves::none())), &normalizer));
+        assert!(!removal.kept_by(false, None, &normalizer));
     }
 }

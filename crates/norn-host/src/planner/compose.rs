@@ -8,8 +8,7 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_text::RewriteSkip;
 use norn_wire::{
-    Backlinks, ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation,
-    OperationKind,
+    ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation, OperationKind,
 };
 
 use super::edit;
@@ -394,24 +393,20 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 }
             },
             OperationKind::MoveDocument { from, to } => self.move_document(from, to)?,
-            OperationKind::DeleteDocument {
-                path,
-                backlinks: Backlinks::Forbidden,
-            } => self.standing(path)?.map(|spelling| {
+            // What becomes of the links naming the document is its link
+            // cascade's, which composes after every operation, and planning's
+            // to judge (`super::cascade`): the removal is the same whatever
+            // the delete says of them.
+            OperationKind::DeleteDocument { path, .. } => self.standing(path)?.map(|spelling| {
                 self.set_after(&spelling, None);
             }),
-            // NORN-297: a delete's own link cascade and both link rewrites are
-            // vocabulary before they are planned. Until the planner plans a
-            // delete's backlinks and an authored rewrite, a delete saying what
-            // becomes of the links naming its document and both link rewrites
-            // are left unresolved in words rather than planned as something
-            // they do not say.
-            OperationKind::DeleteDocument { path, .. } => Err(format!(
-                "a delete rewriting or breaking the links naming `{path}` is not planned yet: a delete's link cascade is not planned yet"
-            )),
+            // NORN-297: both link rewrites are vocabulary before they are
+            // planned. Until the planner plans an authored rewrite, each is
+            // left unresolved in words rather than planned as something it
+            // does not say.
             OperationKind::RewriteLink { .. } | OperationKind::RewriteWikilink { .. } => {
                 Err(format!(
-                    "a `{}` operation is not planned yet: only a move's link cascade is planned yet",
+                    "a `{}` operation is not planned yet: only a move's and a delete's link cascades are planned yet",
                     kind.name()
                 ))
             }

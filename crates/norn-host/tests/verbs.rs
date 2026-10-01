@@ -1,14 +1,15 @@
 //! **The write verbs, end to end**: `Host::set`, `Host::edit`,
-//! `Host::new_document` and `Host::move_path` over a real vault and a real
-//! attachment.
+//! `Host::new_document`, `Host::move_path` and `Host::delete` over a real
+//! vault and a real attachment.
 //!
 //! Each verb compiles its request to operations and enters the one `apply`
 //! path, so what is pinned here is what a caller of each verb sees: a
 //! preview that writes nothing and answers the plan its apply lands, a
 //! `where` target expanded into exactly the documents the store matches, a
 //! move carrying the link cascade it plans and a folder move naming what it
-//! leaves behind, and the refusals the planner and the applier answer for a
-//! write.
+//! leaves behind, a delete refused while links name its document unless it
+//! rewrites them or leaves them broken, and the refusals the planner and the
+//! applier answer for a write.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
@@ -20,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use norn_testkit::process::Sandbox;
 use norn_wire::{
-    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthorCondition, AuthoredValue,
-    ChangesetOutcome, DocumentEdit, DocumentPath, EditParams, ErrorDetail, ErrorEnvelope,
-    ExpectedField, FieldChange, FilePath, FindParams, FindingKind, FolderPath, LinkFamily,
-    LinkRewrite, MoveParams, MoveSubject, NewParams, OperationKind, PlanDocument, Predicate,
-    ReasonCode, RefusedCheck, ResolvedPlan, SetParams, TargetResult, UnresolvedReason,
-    VaultAddress, WriteTarget,
+    AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthorCondition, AuthoredPlan,
+    AuthoredValue, ChangesetOutcome, DeleteParams, DocumentEdit, DocumentPath, EditParams,
+    ErrorDetail, ErrorEnvelope, ExpectedField, FieldChange, FilePath, FindParams, FindingKind,
+    FolderPath, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, MoveParams, MoveSubject, NewParams,
+    Operation, OperationKind, PlanDocument, Predicate, ReasonCode, RefusedCheck, ResolutionTarget,
+    ResolvedPlan, SetParams, TargetResult, UnresolvedReason, VaultAddress, WriteTarget,
 };
 
 /// The generated profile every case here attaches.
@@ -727,4 +728,253 @@ fn a_folder_move_previews_what_it_leaves_behind() {
     assert_eq!(read(&vault, "moved/move-folder/a.md"), "[b](b.md)\n");
     assert_eq!(read(&vault, "move-folder/diagram.png"), "png");
     assert!(!vault.path().join("move-folder/a.md").exists());
+}
+
+/// The linker and the second holder the delete cases plant, each naming the
+/// subject.
+const DELETE_LINKER: &str = "See [[delete-gate-subject]] and [s](delete-gate-subject.md).\n";
+const DELETE_HOLDER: &str = "Also ![[delete-gate-subject#Part]].\n";
+
+/// A vault holding the delete cases' subject, its target, and the two
+/// documents naming the subject.
+fn a_delete_vault(label: &str) -> (Sandbox, attach::Vault) {
+    a_vault(
+        label,
+        &[
+            ("delete-gate/delete-gate-subject.md", "# Subject\n"),
+            ("delete-gate/kept/delete-gate-target.md", "# Target\n"),
+            ("delete-gate/linker.md", DELETE_LINKER),
+            ("delete-gate/holder.md", DELETE_HOLDER),
+        ],
+    )
+}
+
+fn deleting_the_subject(vault: &attach::Vault, mode: ApplyMode) -> DeleteParams {
+    DeleteParams::new(
+        address(vault),
+        mode,
+        path("delete-gate/delete-gate-subject.md"),
+    )
+}
+
+/// **A delete saying neither flag is refused while links name its
+/// document**, preview and apply alike: its operation is unresolved naming
+/// both holders, once each, and the three links, and nothing is written.
+#[test]
+fn a_plain_delete_of_a_linked_document_is_refused_naming_every_holder() {
+    let (_sandbox, vault) = a_delete_vault("host-verbs-delete-refused");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let previewed = refused(host.delete(deleting_the_subject(&vault, ApplyMode::Preview)));
+    let applied = refused(host.delete(deleting_the_subject(&vault, ApplyMode::Apply)));
+    assert_eq!(previewed.code(), &ReasonCode::VaultPlanRefused);
+    assert_eq!(previewed.detail(), applied.detail());
+    let ErrorDetail::PlanRefused { unresolved, .. } = previewed.detail() else {
+        panic!("the refusal carries {:?}", previewed.detail());
+    };
+    let [left] = unresolved.as_slice() else {
+        panic!("one operation is unresolved: {unresolved:?}");
+    };
+    assert_eq!(
+        left.reason,
+        UnresolvedReason::has_backlinks(
+            vec![path("delete-gate/holder.md"), path("delete-gate/linker.md")],
+            3,
+        )
+    );
+    assert!(
+        vault
+            .path()
+            .join("delete-gate/delete-gate-subject.md")
+            .exists()
+    );
+}
+
+/// **A delete rewriting its links previews its cascade, then applies the
+/// plan it previewed**: each link naming the subject is respelled, in its
+/// own form, to name the target, the embed keeping its anchor, and the
+/// subject is gone.
+#[test]
+fn a_delete_rewriting_its_links_previews_its_cascade_then_applies_it() {
+    let (_sandbox, vault) = a_delete_vault("host-verbs-delete-rewrite");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let rewriting = |mode| {
+        deleting_the_subject(&vault, mode)
+            .rewriting_to(ResolutionTarget::new("delete-gate-target").expect("a target"))
+    };
+
+    let plan = previewed(host.delete(rewriting(ApplyMode::Preview)));
+    assert_eq!(
+        read(&vault, "delete-gate/linker.md"),
+        DELETE_LINKER,
+        "a preview wrote"
+    );
+    assert_eq!(
+        plan.operations[0].cascade,
+        vec![
+            LinkRewrite::new(
+                path("delete-gate/holder.md"),
+                LinkFamily::Wikilink,
+                "delete-gate-subject",
+                "delete-gate-target",
+            ),
+            LinkRewrite::new(
+                path("delete-gate/linker.md"),
+                LinkFamily::Markdown,
+                "delete-gate-subject.md",
+                "kept/delete-gate-target.md",
+            ),
+            LinkRewrite::new(
+                path("delete-gate/linker.md"),
+                LinkFamily::Wikilink,
+                "delete-gate-subject",
+                "delete-gate-target",
+            ),
+        ]
+    );
+    let (landed, changeset, _) = applied(host.delete(rewriting(ApplyMode::Apply)));
+    assert_eq!(
+        landed, plan,
+        "the apply landed another plan than it previewed"
+    );
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        read(&vault, "delete-gate/linker.md"),
+        "See [[delete-gate-target]] and [s](kept/delete-gate-target.md).\n"
+    );
+    assert_eq!(
+        read(&vault, "delete-gate/holder.md"),
+        "Also ![[delete-gate-target#Part]].\n"
+    );
+    assert!(
+        !vault
+            .path()
+            .join("delete-gate/delete-gate-subject.md")
+            .exists()
+    );
+}
+
+/// **A delete leaving its links broken lands, advising each**, and a plain
+/// delete of a document no link names lands with nothing to say.
+#[test]
+fn a_delete_leaving_its_links_broken_lands_and_an_unlinked_delete_lands() {
+    let (_sandbox, vault) = a_delete_vault("host-verbs-delete-broken");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let breaking = |mode| deleting_the_subject(&vault, mode).breaking_links();
+
+    let answered = host
+        .delete(breaking(ApplyMode::Preview))
+        .expect("a preview is answered")
+        .wait()
+        .expect("the delete previews");
+    let ApplyReport::Previewed { plan, forecast, .. } = answered.report else {
+        panic!("a preview answered {:?}", answered.report);
+    };
+    let link = |holder: &str, syntax, address: &str| LinkKey::new(path(holder), syntax, address);
+    assert_eq!(
+        forecast.links,
+        vec![
+            LinkAdvisory::left_broken(link(
+                "delete-gate/holder.md",
+                LinkFamily::Wikilink,
+                "delete-gate-subject"
+            )),
+            LinkAdvisory::left_broken(link(
+                "delete-gate/linker.md",
+                LinkFamily::Markdown,
+                "delete-gate-subject.md"
+            )),
+            LinkAdvisory::left_broken(link(
+                "delete-gate/linker.md",
+                LinkFamily::Wikilink,
+                "delete-gate-subject"
+            )),
+        ]
+    );
+    let (landed, _, _) = applied(host.delete(breaking(ApplyMode::Apply)));
+    assert_eq!(landed, plan);
+    assert_eq!(read(&vault, "delete-gate/linker.md"), DELETE_LINKER);
+
+    let (landed, _, targets) = applied(host.delete(DeleteParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("delete-gate/kept/delete-gate-target.md"),
+    )));
+    assert_eq!(landed.conditions, vec![]);
+    assert_eq!(targets.len(), 1);
+    assert!(
+        !vault
+            .path()
+            .join("delete-gate/kept/delete-gate-target.md")
+            .exists()
+    );
+}
+
+/// Wait until the attachment has derived the document another writer wrote
+/// at `at`, as the watcher delivers it.
+fn derived(vault: &attach::Vault, at: &str) {
+    let document = norn_store::DocumentPath::new(at).expect("a stored document path");
+    norn_testkit::wait::wait_until(
+        "the other writer's document is derived",
+        attach::state_budget(std::time::Duration::from_secs(10)),
+        || match vault.store().begin_request().stored_facts(&document) {
+            Ok(Some(_)) => norn_testkit::wait::Observed::Met(()),
+            _ => norn_testkit::wait::Observed::pending("not derived yet"),
+        },
+    )
+    .expect("the other writer's document is derived");
+}
+
+/// **A delete whose path the plan refills is refused for a backlink another
+/// writer adds after its preview**, its plan sent back resolved: nothing
+/// named the document at preview, so the delete needed no flag, but the
+/// document the plan replaces is named when the apply's check reads its
+/// links again — the job mints a read handle for the check though every
+/// presence stays as it was — and nothing is written.
+#[test]
+fn a_delete_refilling_its_path_is_refused_for_a_backlink_added_after_its_preview() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-delete-refill",
+        &[("delete-refill/delete-refill-subject.md", "# Old\n")],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let subject = path("delete-refill/delete-refill-subject.md");
+    let plan = previewed(host.apply(ApplyParams::new(
+        ApplyMode::Preview,
+        PlanDocument::operations(AuthoredPlan::new(
+            address(&vault),
+            vec![
+                Operation::new(OperationKind::delete_document(subject.clone())),
+                Operation::new(OperationKind::create_document(subject, "# New\n")),
+            ],
+        )),
+    )));
+    assert_eq!(plan.conditions, vec![]);
+
+    std::fs::write(
+        vault.path().join("delete-refill/linker.md"),
+        "[[delete-refill-subject]]\n",
+    )
+    .expect("another writer links the subject");
+    derived(&vault, "delete-refill/linker.md");
+    let refusal = refused(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(plan),
+    )));
+    assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+        panic!("the refusal carries {:?}", refusal.detail());
+    };
+    assert!(
+        matches!(&checks[..], [RefusedCheck::ConditionUnrecorded { .. }]),
+        "{checks:?}"
+    );
+    assert_eq!(
+        read(&vault, "delete-refill/delete-refill-subject.md"),
+        "# Old\n"
+    );
 }

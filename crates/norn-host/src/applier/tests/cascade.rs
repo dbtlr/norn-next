@@ -29,7 +29,7 @@ fn key(holder: &str, syntax: LinkFamily, address: &str) -> LinkKey {
 impl Fixture {
     /// `operations` planned against the vault, its links judged on the store
     /// as it stands, whether or not every operation resolves.
-    fn planned(&self, operations: Vec<Operation>) -> Resolution {
+    pub(super) fn planned(&self, operations: Vec<Operation>) -> Resolution {
         let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
         let links = self.links();
         crate::planner::resolve::resolve(

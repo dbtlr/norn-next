@@ -14,7 +14,8 @@
 //! operations do, the files involved.
 //!
 //! **An ambiguous target is spelled as a finding spells one.** A wikilink
-//! rewrite whose `old` names several documents carries the same bounded
+//! rewrite whose `old`, or a delete whose `rewrite_to`, names several
+//! documents carries the same bounded
 //! [`CandidateHead`] a link row and the ambiguous-target refusal carry, so a
 //! vault-wide ambiguity class never crosses whole. A delete left unresolved
 //! for its backlinks names every holding document, each once — the documents
@@ -187,13 +188,6 @@ pub enum UnresolvedReason {
         /// The identifier of the unresolved operation it requires.
         requires: OperationId,
     },
-    // Minted with the link-cascade vocabulary before the planner reads a
-    // delete's backlinks (NORN-297): a later change of the same task plans a
-    // delete's backlinks and a wikilink rewrite's `old`, and is what answers
-    // these two. Until then nothing answers either: a delete saying neither flag
-    // plans and lands with no backlink check, leaving every link naming its
-    // document broken, and a wikilink rewrite is left unresolved in words,
-    // naming the limit.
     /// It removes a document links still name, and says neither what to
     /// rewrite them to nor that they may be left broken.
     #[non_exhaustive]
@@ -204,8 +198,13 @@ pub enum UnresolvedReason {
         /// How many links name it, across every holder.
         total: u64,
     },
-    /// It rewrites the wikilinks naming a target that resolves to more than
-    /// one document, so which links name the document meant is not known.
+    /// A target it reads resolves to more than one document: a wikilink
+    /// rewrite's `old`, so which links name the document meant is not known,
+    /// or a delete's `rewrite_to` where the plan leaves the vault, so which
+    /// document the links naming the removed one should name is not known.
+    // NORN-297: a wikilink rewrite is not planned yet, so only a delete's
+    // `rewrite_to` answers this so far; a wikilink rewrite is left unresolved
+    // in words, naming the limit.
     #[non_exhaustive]
     AmbiguousTarget {
         /// The documents the target resolves to, in the resolution ladder's
@@ -365,8 +364,14 @@ pub enum PlanFault {
     /// before-states: a transition is missing, added, repeated or changed, a
     /// target is at a place the vault reads no documents at or the store
     /// cannot name, an operation does not act or is recorded out of the order
-    /// its requirements allow, or an author condition its operations carry is
-    /// not one the plan checks. Planning never makes such a plan; one sent
+    /// its requirements allow, an author condition its operations carry is
+    /// not one the plan checks, or a delete is recorded acting where its link
+    /// choice leaves it unresolved — forbidding the links naming its document
+    /// while the plan records one that itself named the document before the
+    /// plan, or rewriting them to a `rewrite_to` naming no one document a
+    /// link can be respelled toward where the plan leaves the vault, by the
+    /// one rule planning resolves a delete by. Planning never makes such a
+    /// plan; one sent
     /// back altered is refused whole, since none of its transitions can be
     /// trusted to say what would land. Preview its operations again.
     ///
@@ -398,8 +403,9 @@ pub enum PlanFault {
     /// An operation carries a link cascade where none may stand: on an
     /// operation of an authored plan, since planning generates a cascade
     /// from what the vault's links hold, or on a kind that does not cascade —
-    /// anything but a document move, a document removal and a wikilink
-    /// rewrite. Leave the cascade out and preview the operations again.
+    /// anything but a document move, a document removal rewriting the links
+    /// naming its document, and a wikilink rewrite. Leave the cascade out and
+    /// preview the operations again.
     #[non_exhaustive]
     MisplacedCascade {
         /// The positions of the operations carrying a cascade they may not.

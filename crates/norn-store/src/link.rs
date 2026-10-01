@@ -123,21 +123,28 @@ pub(crate) fn link_keys(link: &LinkFact, holder: &DocumentPath) -> Vec<LinkKey> 
                 segments: None,
             })
             .collect(),
-        Addressing::Suffix(target) => {
-            let Ok(probe) = suffix_probe(target) else {
-                return Vec::new();
-            };
-            let segments = target.split(SEPARATOR).count() as u64;
-            probe
-                .ranges()
-                .map(|(lower, _)| LinkKey {
-                    key: lower.to_string(),
-                    folded_key: fold_ascii_case(lower),
-                    segments: Some(segments),
-                })
-                .collect()
-        }
+        Addressing::Suffix(target) => suffix_keys(target),
     }
+}
+
+/// The keys a suffix address `target` is read through: one per reduction of
+/// its leaf, each a prefix of the suffix keys of the documents it could name,
+/// beside how many segments the address spells. None where `target` is no
+/// suffix address. A wikilink written with the address is held under exactly
+/// these, and a request's target naming it is read through the same.
+pub(crate) fn suffix_keys(target: &str) -> Vec<LinkKey> {
+    let Ok(probe) = suffix_probe(target) else {
+        return Vec::new();
+    };
+    let segments = target.split(SEPARATOR).count() as u64;
+    probe
+        .ranges()
+        .map(|(lower, _)| LinkKey {
+            key: lower.to_string(),
+            folded_key: fold_ascii_case(lower),
+            segments: Some(segments),
+        })
+        .collect()
 }
 
 /// The keys, in the key space `key` selects, a link that could name

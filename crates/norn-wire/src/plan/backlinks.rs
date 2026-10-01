@@ -10,10 +10,20 @@
 //! `rewrite_to` beside an `allow_broken_links` of `true` is refused at the
 //! read, and the schema states the same exclusion as a `not`.
 //!
-//! **Only the first is planned yet (NORN-297).** Until a delete's link
-//! cascade is planned — a move's is — a delete forbidding its links plans
-//! with no backlink check, and one rewriting or breaking them is left
-//! unresolved, naming that limit.
+//! **What each plans.** A link naming the document is one held where the
+//! plan leaves the vault that itself resolved, before the plan, to the
+//! document alone: a link naming several documents names none of them, a
+//! link the document holds goes with it, a link in a holder the plan removes
+//! or edits away is none, and one the plan adds is one. A link a link
+//! rewrite respells is judged by the text it had, never by what its new
+//! spelling named before the plan, so a link that another document's move
+//! respells to the deleted document's name is none, and one that named the
+//! document is one however a cascade respells it. A delete
+//! forbidding the links does not resolve while one names its document, and
+//! is left unresolved naming every holder and how many links. One rewriting
+//! them carries the cascade respelling each, in its own form, to name
+//! `rewrite_to`, which must name one document where the plan leaves the
+//! vault, at a path a link can be respelled toward. One leaving them broken lands, its forecast advising on each.
 //!
 //! **`rewrite_to` names a whole document.** Each rewritten link keeps the
 //! anchor it was written with, so an anchor on `rewrite_to` is refused
@@ -35,9 +45,7 @@ use crate::target::{ResolutionTarget, whole_document_schema};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Backlinks {
     /// No link may name the document: a delete any link names does not
-    /// resolve. Until a delete's link cascade is planned the planner does not
-    /// read its backlinks, so such a delete lands whatever links name the
-    /// document.
+    /// resolve.
     Forbidden,
     /// Every link naming the document is rewritten to name this one.
     RewrittenTo(ResolutionTarget),

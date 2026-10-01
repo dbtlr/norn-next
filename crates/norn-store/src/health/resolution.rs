@@ -74,18 +74,32 @@
 //! Every judged link is handed back ([`LinkChange`]), whether or not its
 //! resolution moved: which of them a plan records, and what it advises, is
 //! the planner's to decide.
+//!
+//! # A target is named over the same two vaults
+//!
+//! What a request's target names on each side of a plan — a delete's
+//! `rewrite_to`, which must name one document where the plan leaves the
+//! vault — is read through the same keys a wikilink written with it is held
+//! under, and resolved by the same heads ([`Snapshot::target_naming`]). Where
+//! it names several documents after the plan, the head of them is what a
+//! store built at the after-state would report: the stored members of its
+//! classes less every target, read in ladder order a bound past the targets
+//! they could hold, counted where that read fills, and merged in that order
+//! with the targets standing after; each candidate is named by the first of
+//! its suffix spellings that names it alone after the plan, read the same
+//! way. Only that refusal path reads past the bound a link's judgment reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use norn_db::rusqlite::types::Value;
-use norn_wire::{LinkAddressKind, Resolves};
+use norn_wire::{Candidate, CandidateHead, LinkAddressKind, Resolves};
 
 use super::run::{OnSnapshot, ResolutionStatement, Runner};
 use super::{Held, Key, LINK_HEALTH_CHUNK, Pages, occupied_keys, statement};
 use crate::error::StoreError;
-use crate::facts::{LinkFact, StoredPathOrder};
+use crate::facts::{CANDIDATE_HEAD, LinkFact, StoredPathOrder};
 use crate::fields::ContentModel;
-use crate::link::{address_kind, keys_naming, link_keys};
+use crate::link::{self, address_kind, keys_naming, link_keys, suffix_keys};
 use crate::path::{DocumentPath, SuffixKey};
 use crate::read::{Lookups, PageRefusal, ReadStatement, wire_path};
 use crate::request::unreadable;
@@ -239,6 +253,34 @@ pub struct ResolutionWork {
     pub head_rows: u64,
 }
 
+/// What one target names on each side of a plan, read as a wikilink written
+/// with it is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct TargetNaming {
+    /// What it names with every target of the plan at its before-state.
+    pub before: Resolves,
+    /// What it names with every target at its after-state.
+    pub after: Resolves,
+    /// Where it names several documents after the plan, the head of them in
+    /// the resolution ladder's order, each named by its minimal
+    /// disambiguating suffix after the plan, beside how many there are;
+    /// `None` otherwise.
+    pub candidates: Option<CandidateHead>,
+}
+
+impl TargetNaming {
+    /// A target naming `before` before the plan and `after` after it, headed
+    /// by `candidates` where it names several after.
+    pub const fn new(before: Resolves, after: Resolves, candidates: Option<CandidateHead>) -> Self {
+        TargetNaming {
+            before,
+            after,
+            candidates,
+        }
+    }
+}
+
 impl Snapshot {
     /// Judge every link the plan `overlay` describes reaches, handing each to
     /// `each` with what it resolves to before the plan and after it: the
@@ -274,7 +316,47 @@ impl Snapshot {
             OnSnapshot::new(self),
         );
         judging.run(probed, &mut each).map_err(PageRefusal::from)?;
-        let ran = judging
+        Ok(judging.finished())
+    }
+
+    /// What the suffix address `address` names over the plan `overlay`, on
+    /// each side of it, read as a wikilink written with it is, a class's
+    /// members less the places `declared`'s ambiguity-ignore set keeps out;
+    /// and what reading it cost.
+    ///
+    /// Refused where `declared` is not the declaration this snapshot pins.
+    ///
+    /// **The work is the address's keys, and where it names several
+    /// documents after the plan, its head and their suffixes**: the keys are
+    /// resolved as a link's are, two rows past the targets each could name;
+    /// only where the target names several after the plan is each key's
+    /// head read [`CANDIDATE_HEAD`] rows past those targets, counted where
+    /// it fills, and each candidate's suffix spellings resolved the same way
+    /// until one names it alone.
+    pub fn target_naming(
+        &self,
+        overlay: &PathOverlay,
+        address: &str,
+        declared: &ContentModel,
+    ) -> Result<(TargetNaming, ResolutionWork), PageRefusal> {
+        let mut lookups = Lookups::default();
+        self.declaration_pinned(declared, &mut lookups)?;
+        let mut judging = Judging::new(
+            self.path_order(),
+            declared.ambiguity_ignore(),
+            overlay,
+            OnSnapshot::new(self),
+        );
+        let naming = judging.name(address).map_err(PageRefusal::from)?;
+        Ok((naming, judging.finished()))
+    }
+}
+
+impl Judging<'_, OnSnapshot<'_>> {
+    /// What the judgment cost, the statements its snapshot ran named in the
+    /// order they ran.
+    fn finished(self) -> ResolutionWork {
+        let ran = self
             .runner
             .record
             .into_inner()
@@ -284,10 +366,7 @@ impl Snapshot {
                 _ => None,
             })
             .collect();
-        Ok(ResolutionWork {
-            ran,
-            ..judging.work
-        })
+        ResolutionWork { ran, ..self.work }
     }
 }
 
@@ -444,7 +523,12 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// The keys `link`, held at `holder`, is read through, in the store's
     /// key space, each once.
     fn keys_of(&self, link: &LinkFact, holder: &DocumentPath) -> Vec<Key> {
-        let mut keys: Vec<Key> = link_keys(link, holder)
+        self.in_space(link_keys(link, holder))
+    }
+
+    /// `keys` in the store's key space, each once.
+    fn in_space(&self, keys: Vec<link::LinkKey>) -> Vec<Key> {
+        let mut keys: Vec<Key> = keys
             .into_iter()
             .map(|key| {
                 let text = match self.key {
@@ -457,6 +541,156 @@ impl<'a, R: Runner> Judging<'a, R> {
         keys.sort();
         keys.dedup();
         keys
+    }
+
+    /// What the suffix address `address` names on each side of the plan,
+    /// and the head of what it names after where that is several.
+    fn name(&mut self, address: &str) -> Result<TargetNaming, StoreError> {
+        let keys = self.in_space(suffix_keys(address));
+        self.resolve(&keys.iter().cloned().collect())?;
+        self.work.links_evaluated += 1;
+        let before = self.resolution(&keys, |target| target.before)?;
+        let after = self.resolution(&keys, |target| target.after)?;
+        let candidates = match after {
+            Resolves::Several {} => Some(self.head_after(&keys)?),
+            _ => None,
+        };
+        Ok(TargetNaming {
+            before,
+            after,
+            candidates,
+        })
+    }
+
+    /// The head of what `keys` name with every target at its after-state, as
+    /// a store built there would read it: the stored members of each key
+    /// less the targets, read [`CANDIDATE_HEAD`] rows past the targets the
+    /// key could hold and counted where that read fills, merged in ladder
+    /// order with the targets standing after; each candidate named by its
+    /// minimal suffix after the plan ([`Self::minimal_suffix`]).
+    fn head_after(&mut self, keys: &[Key]) -> Result<CandidateHead, StoreError> {
+        let bound = |judging: &Self, key: &Key| {
+            CANDIDATE_HEAD + judging.naming.get(&key.0).map_or(0, Vec::len)
+        };
+        let bounds: Vec<(&Key, usize)> = keys.iter().map(|key| (key, bound(self, key))).collect();
+        let heads = self.heads(&bounds)?;
+        let mut named: Vec<(String, String)> = Vec::new();
+        let mut total = 0u64;
+        let mut filled: Vec<&Key> = Vec::new();
+        for (key, bound) in &bounds {
+            let rows = heads.get(*key).map(Vec::as_slice).unwrap_or_default();
+            let mut stored = Vec::with_capacity(rows.len());
+            for row in rows {
+                if !self.targets(&row.1)? {
+                    stored.push(row.clone());
+                }
+            }
+            if rows.len() < *bound {
+                total += stored.len() as u64;
+            } else {
+                filled.push(key);
+            }
+            named.extend(stored);
+            for target in self.members(key).filter(|target| target.after) {
+                total += 1;
+                let rung = match key.1 {
+                    Some(_) => match self.key {
+                        SuffixKey::Raw => target.path.suffix_key().to_string(),
+                        SuffixKey::Folded => target.path.folded_suffix_key().to_string(),
+                    },
+                    None => key.0.clone(),
+                };
+                named.push((rung, target.path.as_str().to_string()));
+            }
+        }
+        if !filled.is_empty() {
+            total += self.stored_past_the_targets(&filled)?;
+        }
+        named.sort_by(|left, right| {
+            crate::resolve::ladder_cmp((&left.0, &left.1), (&right.0, &right.1))
+        });
+        named.truncate(CANDIDATE_HEAD);
+        let mut candidates = Vec::with_capacity(named.len());
+        for (_, path) in named {
+            let suffix = self.minimal_suffix(&path)?;
+            candidates.push(Candidate::new(wire_path(&path)?, suffix));
+        }
+        CandidateHead::new(candidates, total).map_err(|problem| StoreError::Damaged {
+            what: format!("a target's head outgrew its count: {problem}"),
+        })
+    }
+
+    /// How many documents the store holds under each of `filled`, keys whose
+    /// head filled its bound, at a path no target of the plan stands at: each
+    /// key's count, less the targets it could name that the store holds a
+    /// document at, which the overlay names instead.
+    fn stored_past_the_targets(&mut self, filled: &[&Key]) -> Result<u64, StoreError> {
+        let totals = self.totals(filled)?;
+        // Which of the targets the filled keys could name the store holds a
+        // document at, read by their path keys, one row each at most.
+        let mut held_at: Vec<Key> = Vec::new();
+        for key in filled {
+            for target in self.members(key) {
+                let at = (target.path.path_key_in(self.key).as_str().to_string(), None);
+                if !held_at.contains(&at) {
+                    held_at.push(at);
+                }
+            }
+        }
+        let bounds: Vec<(&Key, usize)> = held_at.iter().map(|key| (key, 1)).collect();
+        let held: BTreeSet<Key> = self
+            .heads(&bounds)?
+            .into_iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .map(|(key, _)| key)
+            .collect();
+        let mut stored = 0u64;
+        for key in filled {
+            let standing = self
+                .members(key)
+                .filter(|target| {
+                    held.contains(&(target.path.path_key_in(self.key).as_str().to_string(), None))
+                })
+                .count() as u64;
+            stored += totals
+                .get(*key)
+                .copied()
+                .unwrap_or_default()
+                .saturating_sub(standing);
+        }
+        Ok(stored)
+    }
+
+    /// The first of `path`'s suffix spellings that names the document there
+    /// alone after the plan, or the path itself where none does.
+    ///
+    /// **Each spelling is resolved through this judgment, not link health's
+    /// suffix statement** (`SuffixSpellings`): that statement reads the
+    /// classes as the store holds them, by stored document, so it would
+    /// count a document the plan removes or carries away and miss one it
+    /// creates or lands. Resolving each spelling here reads it over the
+    /// overlay, every target at its after-state, as the head it names is
+    /// read — so a candidate is named as a store built after the plan would
+    /// name it, at the cost of a bounded read of each spelling's keys.
+    fn minimal_suffix(&mut self, path: &str) -> Result<String, StoreError> {
+        let document = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
+        for spelling in document.suffix_spellings() {
+            let keys = self.in_space(suffix_keys(&spelling));
+            self.resolve(&keys.iter().cloned().collect())?;
+            if let Resolves::One { path: one } = self.resolution(&keys, |target| target.after)?
+                && one.as_str() == path
+            {
+                return Ok(spelling);
+            }
+        }
+        Ok(path.to_string())
+    }
+
+    /// Whether a target of the plan stands at the stored `path`, or why the
+    /// store holds a path its own grammar does not read.
+    fn targets(&self, path: &str) -> Result<bool, StoreError> {
+        let at = DocumentPath::new(path).map_err(|_| unreadable("documents.path", path))?;
+        Ok(self.target_keys.contains(at.path_key_in(self.key).as_str()))
     }
 
     /// Whether one of `keys` could name a target the plan changes.
@@ -566,27 +800,44 @@ impl<'a, R: Runner> Judging<'a, R> {
     /// The keys are read in one statement per head bound, and a key naming
     /// no target — almost every key — is cut at two.
     fn resolve(&mut self, keys: &BTreeSet<Key>) -> Result<(), StoreError> {
-        let mut by_bound: BTreeMap<usize, Vec<&Key>> = BTreeMap::new();
-        for key in keys.iter().filter(|key| !self.resolved.contains_key(*key)) {
-            let bound = self.naming.get(&key.0).map_or(0, Vec::len) + 2;
-            by_bound.entry(bound).or_default().push(key);
-        }
-        for (bound, listed) in by_bound {
-            let mut classes: Vec<(&str, u64)> = Vec::new();
-            let mut paths: Vec<&str> = Vec::new();
-            let mut arms: [Vec<&Key>; 2] = [Vec::new(), Vec::new()];
-            for key in listed {
-                match key {
-                    (text, Some(segments)) => {
-                        classes.push((text, *segments));
-                        arms[0].push(key);
-                    }
-                    (text, None) => {
-                        paths.push(text);
-                        arms[1].push(key);
-                    }
+        let bounds: Vec<(&Key, usize)> = keys
+            .iter()
+            .filter(|key| !self.resolved.contains_key(*key))
+            .map(|key| (key, self.naming.get(&key.0).map_or(0, Vec::len) + 2))
+            .collect();
+        for (key, head) in self.heads(&bounds)? {
+            let mut stored = Vec::new();
+            for (_, path) in head {
+                if !self.targets(&path)? && stored.len() < 2 {
+                    stored.push(path);
                 }
             }
+            self.work.keys_resolved += 1;
+            self.resolved.insert(key, KeyHeld { stored });
+        }
+        Ok(())
+    }
+
+    /// The head of what the store holds under each key `bounds` lists, cut
+    /// at the bound beside it, each row its rung and its path in ladder
+    /// order — the targets' paths among them. Every key listed has an entry.
+    ///
+    /// The keys are read in one statement per head bound.
+    fn heads(
+        &mut self,
+        bounds: &[(&Key, usize)],
+    ) -> Result<BTreeMap<Key, Vec<(String, String)>>, StoreError> {
+        let mut by_bound: BTreeMap<usize, Vec<&Key>> = BTreeMap::new();
+        for (key, bound) in bounds {
+            by_bound.entry(*bound).or_default().push(key);
+        }
+        let mut heads: BTreeMap<Key, Vec<(String, String)>> = BTreeMap::new();
+        for (bound, listed) in by_bound {
+            let Arms {
+                classes,
+                paths,
+                keys: arms,
+            } = arms(&listed);
             let values: Vec<Value> =
                 statement::keys_parameters(&classes, &paths, self.ignore, self.order, Some(bound))?;
             let rows = self.runner.read_all(
@@ -604,37 +855,101 @@ impl<'a, R: Runner> Judging<'a, R> {
                 "reading what a plan's link keys name",
             )?;
             self.work.head_rows += rows.len() as u64;
-            let mut heads: BTreeMap<Key, Vec<(String, String)>> = arms
-                .iter()
-                .flatten()
-                .map(|key| ((*key).clone(), Vec::new()))
-                .collect();
-            for (arm, at, path, rung) in rows {
-                let key = usize::try_from(arm)
-                    .ok()
-                    .and_then(|arm| arms.get(arm))
-                    .and_then(|keys| keys.get(at))
-                    .ok_or_else(|| StoreError::Damaged {
-                        what: format!("a key read answered a key it was not asked, {arm}:{at}"),
-                    })?;
-                heads.entry((*key).clone()).or_default().push((rung, path));
+            for key in arms.iter().flatten() {
+                heads.entry((*key).clone()).or_default();
             }
-            for (key, mut head) in heads {
-                head.sort();
-                let mut stored = Vec::new();
-                for (_, path) in head {
-                    let at = DocumentPath::new(&path)
-                        .map_err(|_| unreadable("documents.path", &path))?;
-                    if !self.target_keys.contains(at.path_key_in(self.key).as_str())
-                        && stored.len() < 2
-                    {
-                        stored.push(path);
-                    }
-                }
-                self.work.keys_resolved += 1;
-                self.resolved.insert(key, KeyHeld { stored });
+            for (arm, at, path, rung) in rows {
+                let key = asked(&arms, arm, at, "a key read")?;
+                heads.entry(key.clone()).or_default().push((rung, path));
             }
         }
-        Ok(())
+        for head in heads.values_mut() {
+            head.sort_by(|left, right| {
+                crate::resolve::ladder_cmp((&left.0, &left.1), (&right.0, &right.1))
+            });
+        }
+        Ok(heads)
     }
+
+    /// How many documents the store holds under each of `keys`, the places
+    /// the ambiguity-ignore set keeps out left out, in one statement.
+    fn totals(&mut self, keys: &[&Key]) -> Result<BTreeMap<Key, u64>, StoreError> {
+        let Arms {
+            classes,
+            paths,
+            keys: arms,
+        } = arms(keys);
+        let values: Vec<Value> =
+            statement::keys_parameters(&classes, &paths, self.ignore, self.order, None)?;
+        let rows = self.runner.read_all(
+            ResolutionStatement::Totals,
+            statement::totals_sql(self.key),
+            values,
+            |row| {
+                Ok(Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, usize>(1)?,
+                    row.get::<_, u64>(2)?,
+                )))
+            },
+            "counting what a target's keys name",
+        )?;
+        let mut totals = BTreeMap::new();
+        for (arm, at, total) in rows {
+            totals.insert(asked(&arms, arm, at, "a count")?.clone(), total);
+        }
+        Ok(totals)
+    }
+}
+
+/// Keys split into the two arms the key statements walk: the suffix keys
+/// beside their segment counts, the path keys, and each arm's keys in the
+/// order its list names them.
+struct Arms<'k> {
+    classes: Vec<(&'k str, u64)>,
+    paths: Vec<&'k str>,
+    keys: [Vec<&'k Key>; 2],
+}
+
+/// `keys` split into the two arms the key statements walk.
+fn arms<'k>(keys: &[&'k Key]) -> Arms<'k> {
+    let mut classes: Vec<(&str, u64)> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut arms: [Vec<&Key>; 2] = [Vec::new(), Vec::new()];
+    for key in keys {
+        match key {
+            (text, Some(segments)) => {
+                classes.push((text, *segments));
+                arms[0].push(key);
+            }
+            (text, None) => {
+                paths.push(text);
+                arms[1].push(key);
+            }
+        }
+    }
+    Arms {
+        classes,
+        paths,
+        keys: arms,
+    }
+}
+
+/// The key a row of a key statement answers, by its arm and its place in
+/// that arm's list; damage where the statement answered a key it was not
+/// asked, `what` naming the statement.
+fn asked<'k>(
+    arms: &[Vec<&'k Key>; 2],
+    arm: i64,
+    at: usize,
+    what: &str,
+) -> Result<&'k Key, StoreError> {
+    usize::try_from(arm)
+        .ok()
+        .and_then(|arm| arms.get(arm))
+        .and_then(|keys| keys.get(at))
+        .copied()
+        .ok_or_else(|| StoreError::Damaged {
+            what: format!("{what} answered a key it was not asked, {arm}:{at}"),
+        })
 }

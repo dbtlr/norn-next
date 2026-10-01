@@ -128,13 +128,16 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // Each move that resolves generates its cascade from the plan as it
         // composes without any, and a holder a left-out operation touches
         // takes the move down with it, as any file two operations share
-        // does; what is left composes again, until nothing more falls.
-        let cascades = generate(&composition, &lineage, view.normalizer(), links)
+        // does; a delete forbidding the links naming its document falls
+        // where one does. What is left composes again, until nothing more
+        // falls.
+        let generated = generate(&composition, &lineage, view.normalizer(), links)
             .map_err(PlanningFailure::Links)?;
-        for (position, cascade) in cascades {
+        for (position, cascade) in generated.cascades {
             operations[position].cascade = cascade;
         }
         let standing = left_out.len();
+        left_out.extend(generated.unresolved);
         leave_out_what_falls_with(&operations, &mut left_out, view);
         if left_out.len() == standing {
             // A cascade names only holders that stand, so it composes
@@ -853,14 +856,12 @@ mod tests {
         }
     }
 
-    /// **A link cascade is left unresolved until it is planned (NORN-297).**
-    /// A link rewrite, a wikilink rewrite and a delete saying what becomes
-    /// of the links naming its document are each left unresolved, naming the
-    /// limit, and write nothing — never planned as something they do not
-    /// say, such as a delete that silently breaks links its author asked to
-    /// rewrite.
+    /// **A link rewrite is left unresolved until it is planned (NORN-297).**
+    /// A link rewrite and a wikilink rewrite are each left unresolved, naming
+    /// the limit, and write nothing — never planned as something they do not
+    /// say.
     #[test]
-    fn a_link_cascade_is_left_unresolved_until_it_is_planned() {
+    fn a_link_rewrite_is_left_unresolved_until_it_is_planned() {
         let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
         let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
         for kind in [
@@ -871,8 +872,6 @@ mod tests {
                 "c",
             ),
             OperationKind::rewrite_wikilink(target("b"), target("c")),
-            OperationKind::delete_document_rewriting(path("notes/b.md"), target("a")),
-            OperationKind::delete_document_breaking_links(path("notes/b.md")),
         ] {
             let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
             let detail = unresolved_detail(&resolution);

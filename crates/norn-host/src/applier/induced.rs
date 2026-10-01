@@ -18,7 +18,7 @@ use norn_wire::{
 };
 
 use super::tests::{
-    Fixture, applied, creating, deleting, editing, moving, path, quarantined_fixture,
+    Fixture, applied, breaking, creating, deleting, editing, moving, path, quarantined_fixture,
 };
 
 const CHILD: &str = "NORN_APPLIER_CHILD";
@@ -386,6 +386,54 @@ fn a_staging_failure_writes_nothing_and_answers_write_failed() {
     );
 }
 
+/// **A rewriting delete cut short anywhere in its cascade is finished by
+/// sending it again.** The delete rewrites `[[a]]` in two holders and removes
+/// `a.md`: three publications — the two replacements, then the unlink —
+/// each followed by a folder sync. For each step the process ends there; the
+/// re-send lands what did not, and the store equals a build from zero over
+/// the vault it leaves, every holder naming the target and the document
+/// gone.
+#[test]
+fn a_rewriting_delete_cut_short_in_its_cascade_is_finished_by_sending_it_again() {
+    let mut fired = 0;
+    for armed in [
+        "swap@1=ends",
+        "swap@2=ends",
+        "unlink@3=ends",
+        "parent-sync@1=ends",
+        "parent-sync@2=ends",
+        "parent-sync@3=ends",
+    ] {
+        let mut fixture = Fixture::new(&[
+            ("a.md", "# A\n"),
+            ("c.md", "# C\n"),
+            ("h.md", "[[a]]\n"),
+            ("k.md", "see [[a]]\n"),
+        ]);
+        let plan = fixture.plan(vec![Operation::new(
+            norn_wire::OperationKind::delete_document_rewriting(
+                path("a.md"),
+                norn_wire::ResolutionTarget::new("c").expect("a target"),
+            ),
+        )]);
+        assert_eq!(plan.operations[0].cascade.len(), 2, "{armed}");
+        let child = run_child(&fixture, &plan, armed);
+        assert!(!child.hits.is_empty(), "{armed}: the arm fired");
+        assert!(!child.lived, "{armed}: the child outlived its end");
+        fired += 1;
+        applied(fixture.apply(plan));
+        assert_eq!(fixture.tree(), ["c.md", "h.md", "k.md"], "{armed}");
+        assert_eq!(fixture.read("h.md").as_deref(), Some("[[c]]\n"), "{armed}");
+        assert_eq!(
+            fixture.read("k.md").as_deref(),
+            Some("see [[c]]\n"),
+            "{armed}"
+        );
+        fixture.assert_store_is_a_build_from_zero();
+    }
+    assert_eq!(fired, 6, "every position was reached");
+}
+
 /// On a root that folds case, a respell that dies at either of its steps is
 /// finished by a re-send; one whose rename fails after its content landed is
 /// interrupted, and the changeset carries that first step at the old
@@ -491,10 +539,12 @@ fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
 /// is then not synced, stops publication** as one this apply wrote would: the
 /// removal the foreign writer made is found, its folder sync fails, and the
 /// apply is interrupted naming it, with the later removal left unpublished.
+/// `inbox/m.md` links `e.md`, so its delete says the link may be left
+/// broken.
 #[test]
 fn a_target_found_inside_its_publication_whose_folder_is_not_synced_interrupts_the_apply() {
     let (fixture, _) = every_position();
-    let plan = fixture.plan(vec![deleting("e.md"), deleting("gone.md")]);
+    let plan = fixture.plan(vec![breaking("e.md"), deleting("gone.md")]);
     let child = run_child(&fixture, &plan, "foreign@1=remove,parent-sync@1=fails");
     assert!(child.lived);
     assert!(child.hits.contains("stage=foreign"), "{}", child.hits);

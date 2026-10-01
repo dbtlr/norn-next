@@ -21,6 +21,7 @@ use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
 mod cascade;
+mod delete;
 mod differential;
 mod folder;
 
@@ -42,6 +43,11 @@ pub(super) fn moving(from: &str, to: &str) -> Operation {
 
 pub(super) fn deleting(at: &str) -> Operation {
     Operation::new(OperationKind::delete_document(path(at)))
+}
+
+/// A delete of the document at `at` leaving every link naming it broken.
+pub(super) fn breaking(at: &str) -> Operation {
+    Operation::new(OperationKind::delete_document_breaking_links(path(at)))
 }
 
 /// Every publication the applier recorded, with whether the file held the
@@ -1174,9 +1180,11 @@ fn a_resolved_plan_carrying_a_where_target_is_invalid() {
 
 /// **A resolved plan carrying a folder move, or a cascade on a kind that
 /// does not cascade, is invalid.** Planning expands a folder move into
-/// document moves and writes a cascade only on a move, a delete or a
-/// wikilink rewrite, so either plan was not made by planning: it answers
-/// `request/plan-invalid` naming the operation, and nothing is published.
+/// document moves and writes a cascade only on a move, a delete rewriting
+/// the links naming its document or a wikilink rewrite — never on a delete
+/// forbidding those links or leaving them broken — so each such plan was not
+/// made by planning: it answers `request/plan-invalid` naming the operation,
+/// and nothing is published.
 #[test]
 fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
     let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
@@ -1196,6 +1204,14 @@ fn a_resolved_plan_carrying_a_folder_move_or_a_misplaced_cascade_is_invalid() {
         ),
         (
             editing("a.md", "final", "done").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+        (
+            deleting("b.md").with_cascade(cascade.clone()),
+            norn_wire::PlanFault::misplaced_cascade(vec![1]),
+        ),
+        (
+            breaking("b.md").with_cascade(cascade.clone()),
             norn_wire::PlanFault::misplaced_cascade(vec![1]),
         ),
     ] {
@@ -1809,32 +1825,6 @@ fn link_entry(
     )
 }
 
-/// **A plain delete records the links it breaks, and applies.** No cascade
-/// is planned yet, so `[[a]]` is left broken: the plan records it, from one
-/// document to none, the forecast says it is left broken, and the applier
-/// computes the same set again and lands the plan.
-#[test]
-fn a_delete_records_the_links_it_breaks_and_applies() {
-    let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
-    let resolution = fixture.resolution(vec![deleting("a.md")]);
-    let entry = link_entry(
-        "b.md",
-        "a",
-        norn_wire::Resolves::one(path("a.md")),
-        norn_wire::Resolves::none(),
-    );
-    assert_eq!(resolution.plan.conditions, vec![entry]);
-    assert_eq!(
-        resolution.forecast.links,
-        vec![norn_wire::LinkAdvisory::left_broken(
-            norn_wire::LinkKey::new(path("b.md"), norn_wire::LinkFamily::Wikilink, "a")
-        )]
-    );
-    applied(fixture.apply(resolution.plan));
-    assert_eq!(fixture.read("a.md"), None);
-    fixture.assert_store_is_a_build_from_zero();
-}
-
 /// **A move respells the path links it would break, and applies.**
 /// `[x](notes/a.md)` in `b.md` names the moved document's source, and is
 /// respelled to name it at `archive/a.md`; `[y](c.md)` in the moved document
@@ -1906,7 +1896,7 @@ fn a_move_respells_the_path_links_it_would_break_and_applies() {
 #[test]
 fn a_delete_leaving_an_attachment_address_unresolved_records_it_and_advises_nothing() {
     let mut fixture = Fixture::new(&[("v1.2.md", "version\n"), ("b.md", "[[v1.2]]\n")]);
-    let resolution = fixture.resolution(vec![deleting("v1.2.md")]);
+    let resolution = fixture.resolution(vec![breaking("v1.2.md")]);
     assert_eq!(
         resolution.plan.conditions,
         vec![link_entry(
@@ -1946,7 +1936,7 @@ fn a_create_records_the_links_it_mends_and_applies() {
 #[test]
 fn a_foreign_create_moving_a_recorded_link_refuses_the_plan() {
     let mut fixture = Fixture::new(&[("x/a.md", "alpha\n"), ("b.md", "[[a]]\n")]);
-    let plan = fixture.plan(vec![deleting("x/a.md")]);
+    let plan = fixture.plan(vec![breaking("x/a.md")]);
     let recorded = link_entry(
         "b.md",
         "a",
@@ -2039,7 +2029,7 @@ fn a_foreign_change_moving_only_a_recorded_links_before_refuses_the_plan() {
 #[test]
 fn a_part_landed_resend_computes_the_set_it_recorded_and_finishes() {
     let mut fixture = Fixture::new(&[("a.md", "alpha\n"), ("b.md", "[[a]]\n\n[[n]]\n")]);
-    let plan = fixture.plan(vec![deleting("a.md"), creating("n.md", "n\n")]);
+    let plan = fixture.plan(vec![breaking("a.md"), creating("n.md", "n\n")]);
     assert_eq!(
         plan.conditions,
         vec![
@@ -2143,7 +2133,8 @@ fn a_move_of_a_quarantined_document_records_no_link_change_and_applies() {
 /// **Bytes that come to decode at a file put a document there, and bytes
 /// that stop decoding take one away**, though a file stands there
 /// throughout: a document moved over the quarantined `q.md` mends `[[q]]`,
-/// and the quarantined bytes moved over `d.md` leave `[[d]]` broken. Each
+/// and the quarantined bytes moved over `d.md`, deleted leaving the links
+/// naming it broken, leave `[[d]]` broken. Each
 /// plan applies, the applier computing the set it recorded.
 #[test]
 fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_applies() {
@@ -2164,7 +2155,7 @@ fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_app
     fixture.assert_store_is_a_build_from_zero();
 
     let mut fixture = quarantined_fixture();
-    let resolution = fixture.resolution(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    let resolution = fixture.resolution(vec![breaking("d.md"), moving("q.md", "d.md")]);
     assert_eq!(
         resolution.plan.conditions,
         vec![link_entry(
@@ -2264,7 +2255,7 @@ fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_docume
         ("x.md", "x\n"),
     ]);
     fixture.foreign("q.md", UNDECODABLE);
-    let plan = fixture.plan(vec![deleting("d.md"), moving("q.md", "d.md")]);
+    let plan = fixture.plan(vec![breaking("d.md"), moving("q.md", "d.md")]);
     assert_eq!(
         plan.conditions,
         vec![link_entry(
@@ -2290,7 +2281,7 @@ fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_docume
 fn a_recorded_flag_the_bytes_do_not_bear_out_is_invalid() {
     // A before-state the file still holds, which decodes, said quarantined.
     let mut fixture = quarantined_fixture();
-    let mut plan = fixture.plan(vec![deleting("d.md")]);
+    let mut plan = fixture.plan(vec![breaking("d.md")]);
     plan.transitions[0].before = quarantined(b"d\n");
     assert_eq!(fixture.refuses_disagreeing(plan), vec![path("d.md")]);
 

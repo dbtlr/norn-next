@@ -74,16 +74,17 @@
 //! operation of an authored plan, or on a kind that does not cascade, is a
 //! fault in the plan's shape rather than a refusal at the read.
 //!
-//! **A move's cascade is planned; a delete's and a rewrite's are vocabulary
-//! ahead of their planner (NORN-297).** Planning generates a
+//! **A move's and a delete's cascades are planned; a rewrite's is vocabulary
+//! ahead of its planner (NORN-297).** Planning generates a
 //! `move_document`'s cascade from the links the vault holds, and expands a
-//! `move_folder` into the document moves it makes. A `delete_document`
-//! saying neither flag plans and lands as it did before this vocabulary: with
-//! no cascade and no backlink check, so it leaves the links naming its
-//! document broken, the forecast advising on each. Both link rewrites and a
-//! delete saying either flag are left unresolved by the planner, naming that
-//! limit, and the applier refuses a resolved plan carrying one. The limits
-//! close when their cascades are planned.
+//! `move_folder` into the document moves it makes. It reads a
+//! `delete_document`'s backlinks the same way: saying neither flag, a delete
+//! any link names is left unresolved, naming every holder; `rewrite_to`
+//! carries the cascade respelling each backlink to name that document; and
+//! `allow_broken_links` lands, the forecast advising on each link it breaks.
+//! Both link rewrites are left unresolved by the planner, naming that limit,
+//! and the applier refuses a resolved plan carrying one. The limit closes
+//! when their cascades are planned.
 //!
 //! **A resolution target here names a document, never a place inside one.**
 //! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
@@ -232,10 +233,7 @@ pub enum OperationKind {
         /// operation of the same plan moves or removes what does.
         to: DocumentPath,
     },
-    /// Remove a document, saying what becomes of the links naming it. Until
-    /// a delete's link cascade is planned, a delete forbidding them plans with
-    /// no backlink check, and one rewriting or breaking them does not
-    /// resolve.
+    /// Remove a document, saying what becomes of the links naming it.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
@@ -418,9 +416,8 @@ impl OperationKind {
         OperationKind::MoveDocument { from, to }
     }
 
-    /// Remove the document at `path`, which no link may name — a limit the
-    /// planner does not yet hold: until a delete's link cascade is planned,
-    /// the delete lands whatever links name the document.
+    /// Remove the document at `path`, which no link may name: a delete any
+    /// link names does not resolve.
     pub const fn delete_document(path: DocumentPath) -> Self {
         OperationKind::DeleteDocument {
             path,
@@ -595,14 +592,23 @@ impl OperationKind {
         }
     }
 
-    /// Whether the kind changes what links elsewhere in the vault resolve
-    /// to, so that a resolved plan may carry its link cascade: a document
-    /// move, a document removal and a wikilink rewrite.
+    /// Whether the kind rewrites the links elsewhere in the vault that name
+    /// what it changes, so that a resolved plan may carry its link cascade: a
+    /// document move, a document removal rewriting the links naming its
+    /// document to `rewrite_to`, and a wikilink rewrite. A removal forbidding
+    /// those links, or leaving them broken, rewrites none.
     pub const fn cascades(&self) -> bool {
         match self {
             OperationKind::MoveDocument { .. }
-            | OperationKind::DeleteDocument { .. }
+            | OperationKind::DeleteDocument {
+                backlinks: Backlinks::RewrittenTo(_),
+                ..
+            }
             | OperationKind::RewriteWikilink { .. } => true,
+            OperationKind::DeleteDocument {
+                backlinks: Backlinks::Forbidden | Backlinks::LeftBroken,
+                ..
+            } => false,
             // A folder move cascades through the document moves planning
             // expands it into, and a link rewrite is a cascade's own unit.
             OperationKind::MoveFolder { .. }
