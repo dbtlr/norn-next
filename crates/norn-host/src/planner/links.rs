@@ -51,7 +51,10 @@
 //! a link a rewrite of the plan writes — a `rewrite_link` operation's, or
 //! one of a cascade's — held in its document under the syntax and the
 //! address the rewrite writes. Every such link is an entry whatever it
-//! resolves to, so a cascade's rewrite is checked where it lands. NORN-297:
+//! resolves to, so a cascade's rewrite is checked where it lands. Whether it
+//! is a backlink of a document a delete removes is read from the text it
+//! had — the address the rewrite matched, probed from where its holder's
+//! content stood ([`Reached::originals`]) — never from its new text. NORN-297:
 //! no planning resolves an authored `rewrite_link` yet, so the links a
 //! resolved plan writes are its cascades' until it does.
 //!
@@ -84,8 +87,8 @@ use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{LinkChange, PathOverlay, ProbedLink, TargetNaming};
 use norn_text::RewriteSkip;
 use norn_wire::{
-    DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth, LinkKey,
-    Operation, OperationKind, PlanCondition, Resolves, Transition,
+    Backlinks, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth,
+    LinkKey, Operation, OperationKind, PlanCondition, Resolves, Transition,
 };
 
 use super::compose::{Composition, Kept, Skipped};
@@ -227,7 +230,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         return Ok(ChangeSet::default());
     }
     let written = WrittenLinks::of(operations, normalizer);
-    let (overlay, probed) = reach(targets, lineage, normalizer, &written);
+    let Reached {
+        overlay,
+        probed,
+        originals,
+    } = reach(targets, lineage, normalizer, &written);
     let rewritten_to = rewrite_targets(lineage, &overlay, index)?;
     // A document a move carries away, or a delete removes rewriting the
     // links naming it: one an ambiguous link could name is a document a
@@ -279,12 +286,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         // a cascade — a move's, or a delete's rewriting the links naming its
         // document — and an ambiguous link that could name a document either
         // follows, which is left as written since which it names is not
-        // known — each read from a link the plan does not write. A link a
-        // rewrite writes is judged by the text it had, which the rewrite
-        // matched, never by what its new text names before the plan: one a
-        // move's cascade respells to the path of a document a delete removes
-        // is no backlink of it, and one respelled to a path the plan refills
-        // reads as left behind from its new address.
+        // known — each read here from a link the plan does not write. A link
+        // a rewrite writes is a backlink by the text it had, read below from
+        // its original, never by what its new text names before the plan;
+        // one respelled to a path the plan refills reads as left behind from
+        // its new address.
         let removal = unwritten
             .then(|| removed_by(&change.before, lineage, normalizer))
             .flatten();
@@ -321,6 +327,27 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
         held.left_behind |= left_behind;
         held.ambiguous_among_moved |= ambiguous_among_moved;
     })?;
+    // A link a rewrite writes names the document a delete removes where the
+    // text it had resolved before the plan to exactly that document, read
+    // from where its holder's content stood: a backlink respelled away, or
+    // respelled from where its moved holder lands, is still one, and a link
+    // respelled toward the deleted document's name is none. Only a delete
+    // forbidding the links naming its document reads whether one does
+    // ([`Removal::kept_by`]), so the originals are read only where one does.
+    if !originals.is_empty()
+        && lineage
+            .removals()
+            .any(|removal| removal.backlinks == Backlinks::Forbidden)
+    {
+        index.changes(&overlay, &originals, &mut |change| {
+            if let (true, Some(removal)) = (
+                change.written,
+                removed_by(&change.before, lineage, normalizer),
+            ) {
+                named.insert(removal.position);
+            }
+        })?;
+    }
 
     let skips: BTreeMap<EntryKey, RewriteSkip> = skipped
         .iter()
@@ -381,9 +408,11 @@ pub(crate) fn change_set<'o, I: LinkIndex + ?Sized>(
 
 /// What a plan reaches of the links the store holds: the overlay of every
 /// target the plan writes, present before where a document stands there
-/// before the plan and after where one stands after, and every link a
-/// document the plan writes holds at its after-state, read from the bytes the
-/// plan composed and probed from where its content stood before the plan.
+/// before the plan and after where one stands after; every link a document
+/// the plan writes holds at its after-state, read from the bytes the plan
+/// composed and probed from where its content stood before the plan; and
+/// each link the plan writes as it was written before a rewrite respelled
+/// it ([`Reached::originals`]).
 ///
 /// **The one place a plan's two vaults are drawn.** The change set judges its
 /// entries through this overlay and these probes, and a link cascade reads
@@ -410,7 +439,7 @@ pub(crate) fn reach(
     lineage: &Lineage,
     normalizer: &PathNormalizer,
     written: &WrittenLinks,
-) -> (PathOverlay, Vec<ProbedLink>) {
+) -> Reached {
     let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
     // The spelling each file standing before the plan is written at, which
     // a moved document's links are read from before the plan.
@@ -421,6 +450,7 @@ pub(crate) fn reach(
         .collect();
     let mut overlay = PathOverlay::new();
     let mut probed = Vec::new();
+    let mut originals = Vec::new();
     for target in targets {
         let Some(stored) = stored_path(target.path) else {
             continue;
@@ -441,16 +471,44 @@ pub(crate) fn reach(
             .and_then(stored_path)
             .unwrap_or_else(|| stored.clone());
         for link in document_links(bytes) {
-            let written = file.as_ref().is_some_and(|file| written.holds(file, &link));
+            let rewritten = file.as_ref().is_some_and(|file| written.holds(file, &link));
+            if let (true, Some(file)) = (rewritten, file.as_ref()) {
+                originals.extend(written.originals(file, &link).map(|original| ProbedLink {
+                    before_holder: before_holder.clone(),
+                    after_holder: stored.clone(),
+                    link: original,
+                    written: true,
+                }));
+            }
             probed.push(ProbedLink {
                 before_holder: before_holder.clone(),
                 after_holder: stored.clone(),
                 link,
-                written,
+                written: rewritten,
             });
         }
     }
-    (overlay, probed)
+    Reached {
+        overlay,
+        probed,
+        originals,
+    }
+}
+
+/// What [`reach`] draws of a plan.
+pub(crate) struct Reached {
+    /// Every target the plan writes, on each side of it.
+    pub(crate) overlay: PathOverlay,
+    /// Every link a document the plan writes holds at its after-state.
+    pub(crate) probed: Vec<ProbedLink>,
+    /// **Each link the plan writes as it was written before**: for every
+    /// link a rewrite of the plan writes, the link with each address a
+    /// rewrite writing it respelled it from, held where it is held after the
+    /// plan and read before the plan from where its holder's content stood
+    /// — where the link a rewrite matched stood, so what it resolves to
+    /// before the plan is what the link itself named. Marked written, so
+    /// each is judged and handed back whatever it resolves to.
+    pub(crate) originals: Vec<ProbedLink>,
 }
 
 /// Whether the plan replaces the document standing at `target`, the file
@@ -712,38 +770,45 @@ fn skip_advisory(link: LinkKey, reason: RewriteSkip) -> LinkAdvisory {
 
 /// The links a plan writes: each a link of one syntax, at one address, in
 /// one document's after-state, which a `rewrite_link` of the plan or a
-/// rewrite of one of its cascades writes.
+/// rewrite of one of its cascades writes — with each address a rewrite
+/// writing it there respelled it from.
 #[derive(Default)]
 pub(crate) struct WrittenLinks {
-    rewritten: BTreeSet<(NormalizedPath, &'static str, String)>,
+    rewritten: BTreeMap<(NormalizedPath, &'static str, String), BTreeSet<String>>,
 }
 
 impl WrittenLinks {
     /// The links `operations` write: each `rewrite_link`'s and each
     /// cascade rewrite's document identity, syntax, and the address it
-    /// writes.
+    /// writes, with the address it respells.
     fn of<'o>(
         operations: impl IntoIterator<Item = &'o Operation>,
         normalizer: &PathNormalizer,
     ) -> Self {
-        let mut rewritten = BTreeSet::new();
+        let mut rewritten: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
         for operation in operations {
             let authored = match &operation.kind {
                 OperationKind::RewriteLink {
-                    path, syntax, to, ..
-                } => Some((path, *syntax, to)),
+                    path,
+                    syntax,
+                    from,
+                    to,
+                } => Some((path, *syntax, from, to)),
                 _ => None,
             };
             let cascaded = operation
                 .cascade
                 .iter()
-                .map(|rewrite| (&rewrite.path, rewrite.syntax, &rewrite.to));
-            for (path, syntax, to) in authored.into_iter().chain(cascaded) {
+                .map(|rewrite| (&rewrite.path, rewrite.syntax, &rewrite.from, &rewrite.to));
+            for (path, syntax, from, to) in authored.into_iter().chain(cascaded) {
                 if let (Ok(file), Some(syntax)) = (
                     normalizer.normalize(Path::new(path.as_str())),
                     family_name(syntax),
                 ) {
-                    rewritten.insert((file, syntax, to.clone()));
+                    rewritten
+                        .entry((file, syntax, to.clone()))
+                        .or_default()
+                        .insert(from.clone());
                 }
             }
         }
@@ -755,7 +820,48 @@ impl WrittenLinks {
     /// writes" is read by.
     fn holds(&self, holder: &NormalizedPath, link: &norn_store::LinkFact) -> bool {
         self.rewritten
-            .contains(&(holder.clone(), link.family.as_str(), address(link)))
+            .contains_key(&(holder.clone(), link.family.as_str(), address(link)))
+    }
+
+    /// `link`, which the plan writes in the document `holder`, as it was
+    /// written before each rewrite writing it there respelled it: the link
+    /// with the address that rewrite matched. A rewrite never changes a
+    /// link's protocol, so an address under another protocol than the
+    /// link's is none it was respelled from.
+    fn originals<'w>(
+        &'w self,
+        holder: &NormalizedPath,
+        link: &'w norn_store::LinkFact,
+    ) -> impl Iterator<Item = norn_store::LinkFact> + 'w {
+        self.rewritten
+            .get(&(holder.clone(), link.family.as_str(), address(link)))
+            .into_iter()
+            .flatten()
+            .filter_map(move |from| {
+                let target = match &link.protocol {
+                    Some(protocol) => from.strip_prefix(protocol.as_str())?.strip_prefix("://")?,
+                    None => from.as_str(),
+                };
+                Some(spelled(link, target))
+            })
+    }
+}
+
+/// `link` written with the target `target`, its protocol kept and nothing
+/// else of it: how a link is probed under another spelling of its address.
+pub(crate) fn spelled(link: &norn_store::LinkFact, target: &str) -> norn_store::LinkFact {
+    norn_store::LinkFact {
+        family: link.family,
+        embed: false,
+        protocol: link.protocol.clone(),
+        target: target.to_string(),
+        title: None,
+        anchor: None,
+        span: norn_store::Span {
+            line: 0,
+            column: 0,
+            byte_offset: 0,
+        },
     }
 }
 

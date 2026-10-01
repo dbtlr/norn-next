@@ -25,8 +25,10 @@
 //! link the document holds goes with it, and a link in a holder the plan
 //! removes or edits away is none where the plan leaves the vault, while one
 //! the plan adds is. Backlinks are read here before any cascade writes a
-//! link, so a link a move's cascade respells to the deleted document's name
-//! is judged by the text it had, as the change set judges it. Each delete is
+//! link, so every link is judged by the text it had, as the change set
+//! judges a link a cascade writes by the text that cascade matched: one a
+//! move's cascade respells to the deleted document's name is none, and one
+//! that named it is one however it is respelled. Each delete is
 //! resolved by the one rule its link choice is held to
 //! ([`Removal::kept_by`]). Saying neither flag, a delete a backlink names is left
 //! unresolved naming every holder and how many links; leaving them broken it
@@ -92,8 +94,9 @@ use norn_wire::{
 use super::compose::Composition;
 use super::lineage::{Lineage, Removal};
 use super::links::{
-    EntryKey, LinkIndex, Target, WrittenLinks, address, family_name, left_behind, reach,
-    removed_by, rewrite_destination, rewrite_targets, rewritten_for, stored_path, wire_family,
+    EntryKey, LinkIndex, Reached, Target, WrittenLinks, address, family_name, left_behind, reach,
+    removed_by, rewrite_destination, rewrite_targets, rewritten_for, spelled, stored_path,
+    wire_family,
 };
 use crate::derivation::document_links;
 
@@ -148,7 +151,9 @@ pub(crate) fn generate<I: LinkIndex + ?Sized>(
         destinations: BTreeMap::new(),
     };
     let targets = Target::of(composition);
-    let (overlay, probed) = reach(&targets, lineage, normalizer, &WrittenLinks::default());
+    let Reached {
+        overlay, probed, ..
+    } = reach(&targets, lineage, normalizer, &WrittenLinks::default());
 
     // What each rewriting delete's target names after the plan, and the one
     // document its links are respelled toward where it names one a link can
@@ -567,24 +572,6 @@ fn strip_extension(path: &str) -> Option<&str> {
     leaf[dot + 1..]
         .eq_ignore_ascii_case(DOCUMENT_EXTENSION)
         .then(|| &path[..path.len() - (leaf.len() - dot)])
-}
-
-/// `link` written with the target `target`, its protocol kept and nothing
-/// else of it: what a candidate spelling is probed as.
-fn spelled(link: &LinkFact, target: &str) -> LinkFact {
-    LinkFact {
-        family: link.family,
-        embed: false,
-        protocol: link.protocol.clone(),
-        target: target.to_string(),
-        title: None,
-        anchor: None,
-        span: norn_store::Span {
-            line: 0,
-            column: 0,
-            byte_offset: 0,
-        },
-    }
 }
 
 /// A stored path as the wire names it.

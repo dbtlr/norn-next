@@ -119,8 +119,10 @@ impl Removal {
     /// keep unresolved, and the applier refuses a resolved plan holding one
     /// by it again; neither reads anything more than the links and the
     /// target it judges. Planning reads `named` before any cascade writes a
-    /// link, and the change set after, from the links it does not write, so
-    /// the two read the same backlinks.
+    /// link, and the change set after, reading each link a rewrite writes as
+    /// the text that rewrite matched, from where its holder's content stood,
+    /// so the two read the same backlinks: one a cascade respells — away
+    /// from the document, or from where its moved holder lands — stays one.
     pub(crate) fn kept_by(
         &self,
         named: bool,

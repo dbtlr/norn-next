@@ -5,7 +5,7 @@
 
 use norn_wire::{
     Candidate, CandidateHead, LinkAdvisory, LinkFamily, LinkKey, LinkRewrite, Operation,
-    OperationKind, PlanCondition, ResolutionTarget, Resolves, UnresolvedOperation,
+    OperationKind, PlanCondition, ResolutionTarget, ResolvedPlan, Resolves, UnresolvedOperation,
     UnresolvedReason,
 };
 
@@ -717,6 +717,107 @@ fn a_backlink_beside_a_link_respelled_to_its_address_still_refuses_a_plain_delet
         fixture.read("v/h.md").as_deref(),
         Some("[x](b.md) [[b]] [[a]]\n")
     );
+}
+
+/// The plan `operations` resolve to, with the delete at `position` sent back
+/// forbidding the links naming its document.
+fn forbidding_at(fixture: &Fixture, operations: Vec<Operation>, position: usize) -> ResolvedPlan {
+    let mut plan = fixture.plan(operations);
+    let OperationKind::DeleteDocument { backlinks, .. } = &mut plan.operations[position].kind
+    else {
+        panic!(
+            "the plan's operation {position} is the delete: {:?}",
+            plan.operations
+        );
+    };
+    *backlinks = norn_wire::Backlinks::Forbidden;
+    plan
+}
+
+/// **A link a cascade respells is judged by the text it had, so one whose
+/// text named the deleted document stays its backlink however it is
+/// respelled.** `v/h.md`'s `[y](a.md)` named `v/a.md`, and moving `v/h.md` to
+/// `w/h.md` respells it `../v/a.md` from there — alone, and beside `[[b]]`
+/// respelled `[[a]]` toward `v/b.md` moving into the deleted document's
+/// path. A plain delete of `v/a.md` is left unresolved for that one link;
+/// a plan leaving it broken, sent back with its delete forbidding it, is
+/// refused by the applier as invalid, and nothing is written.
+#[test]
+fn a_backlink_a_moved_holder_respells_still_refuses_a_plain_delete() {
+    let plans = [
+        (
+            "[y](a.md)\n",
+            vec![deleting("v/a.md"), moving("v/h.md", "w/h.md")],
+        ),
+        (
+            "[[b]] [y](a.md)\n",
+            vec![
+                deleting("v/a.md"),
+                moving("v/b.md", "v/a.md"),
+                moving("v/h.md", "w/h.md"),
+            ],
+        ),
+    ];
+    for (held, operations) in plans {
+        let files = [("v/a.md", "A\n"), ("v/b.md", "B\n"), ("v/h.md", held)];
+        let refused = Fixture::new(&files).planned(operations.clone());
+        assert!(
+            refused.unresolved.contains(&UnresolvedOperation::new(
+                deleting("v/a.md"),
+                UnresolvedReason::has_backlinks(vec![path("w/h.md")], 1),
+            )),
+            "{operations:?}: {:?}",
+            refused.unresolved
+        );
+
+        let mut fixture = Fixture::new(&files);
+        let mut breaking_first = operations.clone();
+        breaking_first[0] = breaking("v/a.md");
+        let plan = forbidding_at(&fixture, breaking_first, 0);
+        assert!(
+            plan.operations
+                .iter()
+                .flat_map(|operation| &operation.cascade)
+                .any(|rewrite| *rewrite == markdown("w/h.md", "a.md", "../v/a.md")),
+            "{:?}",
+            plan.operations
+        );
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            [path("v/a.md")],
+            "{operations:?}"
+        );
+        assert_eq!(fixture.read("v/a.md").as_deref(), Some("A\n"));
+        assert_eq!(fixture.read("v/h.md").as_deref(), Some(held));
+        assert_eq!(fixture.read("w/h.md"), None);
+    }
+}
+
+/// **A hand-built cascade that respells a backlink away from a forbidding
+/// delete's document leaves it a backlink**: a plan rewriting `a.md`'s links
+/// to `c` beside a move of `m.md`, sent back with its delete forbidding them
+/// and its cascade respelling `h.md`'s `[[a]]` to `[[c]]` carried by the
+/// move, still holds a link whose text named `a.md`. The applier refuses it
+/// as invalid, and nothing is written.
+#[test]
+fn a_cascade_respelling_a_forbidding_deletes_backlink_elsewhere_is_invalid() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[a]]\n"),
+        ("m.md", "M\n"),
+    ]);
+    let mut plan = forbidding_at(
+        &fixture,
+        vec![rewriting("a.md", "c"), moving("m.md", "n.md")],
+        0,
+    );
+    let cascade = std::mem::take(&mut plan.operations[0].cascade);
+    assert_eq!(cascade, [wikilink("h.md", "a", "c")]);
+    plan.operations[1].cascade = cascade;
+    assert_eq!(fixture.refuses_disagreeing(plan), [path("a.md")]);
+    assert_eq!(fixture.read("a.md").as_deref(), Some("A\n"));
+    assert_eq!(fixture.read("h.md").as_deref(), Some("[[a]]\n"));
 }
 
 /// **A resolved plan whose delete says another link choice than its plan
