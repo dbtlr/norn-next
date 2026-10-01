@@ -84,7 +84,7 @@ impl Lineage {
             let kind = &operations[position].kind;
             match kind {
                 OperationKind::CreateDocument { path, .. }
-                | OperationKind::DeleteDocument { path } => {
+                | OperationKind::DeleteDocument { path, .. } => {
                     if let Some(file) = identity(path.as_str()) {
                         lineage.at_end.insert(file, None);
                     }
@@ -124,6 +124,13 @@ impl Lineage {
                     lineage.at_end.insert(from, None);
                     lineage.at_end.insert(to, carried);
                 }
+                // NORN-297: the planner leaves every cascade kind unresolved
+                // until link cascades are planned, so none reaches a resolved
+                // plan's lineage yet. A folder move will arrive expanded into
+                // moves, and a link rewrite will be an edit in place.
+                OperationKind::MoveFolder { .. }
+                | OperationKind::RewriteLink { .. }
+                | OperationKind::RewriteWikilink { .. } => {}
             }
         }
         lineage

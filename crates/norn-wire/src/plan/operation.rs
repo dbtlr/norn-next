@@ -37,6 +37,41 @@
 //! absent is `set_frontmatter` under an expected-value condition of absent,
 //! and appending is `push_frontmatter`.
 //!
+//! **Three kinds carry a link cascade, and three are minted for it.** A
+//! `move_document`, a `delete_document` and a `rewrite_wikilink` change what
+//! links elsewhere in the vault resolve to. `rewrite_link` is what such a
+//! cascade expands into: in one document, every link of one syntax whose
+//! address is `from` respelled `to`, only the address changing, so an embed
+//! marker, a title and an anchor survive. An author may write it directly —
+//! Layer 5 repair does — and it names its document by path.
+//!
+//! **A link's address is its target as written, protocol prefix included.**
+//! What a link resolves to depends on the document holding it, its syntax,
+//! its protocol and its target text — `[[vault://notes/a]]` is read from the
+//! vault root and `[[notes/a]]` by suffix — so a link is keyed by its holder,
+//! its syntax and its address: the target text, prefixed with
+//! `<protocol>://` where the link is written with a protocol. A rewrite
+//! changes the target text and never the protocol.
+//! `rewrite_wikilink` is the vault-wide kind an author writes: every wikilink
+//! naming `old` respelled to name `new`. Its `old` need not name a document
+//! that stands, so a broken link is repaired by the same kind; an `old` naming
+//! several documents does not resolve. `move_folder` moves every document a
+//! folder holds, and planning expands it into one `move_document` per
+//! document, as it expands a `where` target, so a resolved plan never carries
+//! one. A `delete_document` leaves the links naming its document broken only
+//! where it says so out loud, with `allow_broken_links`, or rewrites them to
+//! name `rewrite_to`; saying neither, it does not resolve while any link names
+//! its document, and saying both is refused at the read.
+//!
+//! **A resolution target here names a document, never a place inside one.**
+//! `old`, `new` and `rewrite_to` are read through the one resolution grammar,
+//! and an anchor on any of them is refused at the read. A rewrite changes a
+//! link's target text and keeps the anchor the link was written with, so an
+//! anchor on `new` or `rewrite_to` would write a second anchor into every
+//! link already carrying one, and an anchor on `old` would ask for a narrower
+//! rewrite — only the links naming that heading or block — that no kind
+//! offers.
+//!
 //! **An expected value is the author's condition on one field.** It is
 //! checked at planning and becomes the document's before-state, as a content
 //! hash on a document the plan writes does. Its observation is tagged
@@ -50,11 +85,14 @@ use schemars::transform::transform_subschemas;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::document::DocumentPath;
+use crate::document::{DocumentPath, LinkFamily};
+use crate::plan::document::is_false;
+use crate::plan::forecast::FolderPath;
 use crate::plan::hash::ContentHash;
 use crate::plan::value::AuthoredValue;
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
+use crate::target::ResolutionTarget;
 
 /// The identifier an operation is required by: a string naming something
 /// rather than nothing.
@@ -172,10 +210,55 @@ pub enum OperationKind {
         /// operation of the same plan moves or removes what does.
         to: DocumentPath,
     },
-    /// Remove a document.
+    /// Remove a document. A link naming it is rewritten to name
+    /// `rewrite_to`, or left broken where `allow_broken_links` says so; with
+    /// neither, a document any link names is not removed.
     DeleteDocument {
         /// The document removed.
         path: DocumentPath,
+        /// The document every link naming the removed one is rewritten to
+        /// name. Never written beside `allow_broken_links`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "ResolutionTarget")]
+        rewrite_to: Option<ResolutionTarget>,
+        /// Whether the links naming the removed document are left broken.
+        /// Absent is `false`, and `false` is left out.
+        #[serde(default, skip_serializing_if = "is_false")]
+        allow_broken_links: bool,
+    },
+    /// Move every document a folder holds to the same place under another
+    /// folder. Planning expands it into one `move_document` per document.
+    MoveFolder {
+        /// The folder whose documents are moved.
+        from: FolderPath,
+        /// The folder they are moved to.
+        to: FolderPath,
+    },
+    /// In one document, respell every link of one syntax whose address is
+    /// `from` to `to`. Only the address changes: an embed marker, a title
+    /// and an anchor survive.
+    RewriteLink {
+        /// The document holding the links.
+        path: DocumentPath,
+        /// The syntax of the links rewritten.
+        syntax: LinkFamily,
+        /// The address a rewritten link is written with, exactly as written,
+        /// its protocol prefix included: `vault://notes/a` and `notes/a` are
+        /// two addresses.
+        from: String,
+        /// The address it is written with after, protocol prefix included. A
+        /// rewrite never changes a link's protocol, so a `to` whose protocol
+        /// differs from `from`'s cannot be written into the link.
+        to: String,
+    },
+    /// Respell every wikilink in the vault naming one document to name
+    /// another.
+    RewriteWikilink {
+        /// What the links name now. It need not name a document that
+        /// stands, and naming several does not resolve.
+        old: ResolutionTarget,
+        /// What they name after.
+        new: ResolutionTarget,
     },
     /// Set a frontmatter field to exactly this value, adding the field where
     /// the document does not carry it.
@@ -314,9 +397,61 @@ impl OperationKind {
         OperationKind::MoveDocument { from, to }
     }
 
-    /// Remove the document at `path`.
+    /// Remove the document at `path`, which no link may name.
     pub const fn delete_document(path: DocumentPath) -> Self {
-        OperationKind::DeleteDocument { path }
+        OperationKind::DeleteDocument {
+            path,
+            rewrite_to: None,
+            allow_broken_links: false,
+        }
+    }
+
+    /// Remove the document at `path`, rewriting every link naming it to name
+    /// `rewrite_to`.
+    pub const fn delete_document_rewriting(
+        path: DocumentPath,
+        rewrite_to: ResolutionTarget,
+    ) -> Self {
+        OperationKind::DeleteDocument {
+            path,
+            rewrite_to: Some(rewrite_to),
+            allow_broken_links: false,
+        }
+    }
+
+    /// Remove the document at `path`, leaving every link naming it broken.
+    pub const fn delete_document_breaking_links(path: DocumentPath) -> Self {
+        OperationKind::DeleteDocument {
+            path,
+            rewrite_to: None,
+            allow_broken_links: true,
+        }
+    }
+
+    /// Move every document the folder `from` holds under `to`.
+    pub const fn move_folder(from: FolderPath, to: FolderPath) -> Self {
+        OperationKind::MoveFolder { from, to }
+    }
+
+    /// In the document at `path`, respell every link of `syntax` whose target
+    /// text is `from` to `to`.
+    pub fn rewrite_link(
+        path: DocumentPath,
+        syntax: LinkFamily,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        OperationKind::RewriteLink {
+            path,
+            syntax,
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// Respell every wikilink naming `old` to name `new`.
+    pub const fn rewrite_wikilink(old: ResolutionTarget, new: ResolutionTarget) -> Self {
+        OperationKind::RewriteWikilink { old, new }
     }
 
     /// Set `field` to `value` in the documents `target` names.
@@ -452,6 +587,9 @@ impl OperationKind {
             OperationKind::StrReplace { .. } => KindName::StrReplace,
             OperationKind::MoveDocument { .. } => KindName::MoveDocument,
             OperationKind::DeleteDocument { .. } => KindName::DeleteDocument,
+            OperationKind::MoveFolder { .. } => KindName::MoveFolder,
+            OperationKind::RewriteLink { .. } => KindName::RewriteLink,
+            OperationKind::RewriteWikilink { .. } => KindName::RewriteWikilink,
             OperationKind::SetFrontmatter { .. } => KindName::SetFrontmatter,
             OperationKind::RemoveFrontmatter { .. } => KindName::RemoveFrontmatter,
             OperationKind::PushFrontmatter { .. } => KindName::PushFrontmatter,
@@ -477,6 +615,9 @@ impl OperationKind {
             | OperationKind::StrReplace { .. }
             | OperationKind::MoveDocument { .. }
             | OperationKind::DeleteDocument { .. }
+            | OperationKind::MoveFolder { .. }
+            | OperationKind::RewriteLink { .. }
+            | OperationKind::RewriteWikilink { .. }
             | OperationKind::ReplaceBody { .. }
             | OperationKind::ReplaceSection { .. }
             | OperationKind::AppendToSection { .. }
@@ -685,6 +826,9 @@ enum KindName {
     StrReplace,
     MoveDocument,
     DeleteDocument,
+    MoveFolder,
+    RewriteLink,
+    RewriteWikilink,
     SetFrontmatter,
     RemoveFrontmatter,
     PushFrontmatter,
@@ -705,6 +849,9 @@ impl KindName {
             KindName::StrReplace => "str_replace",
             KindName::MoveDocument => "move_document",
             KindName::DeleteDocument => "delete_document",
+            KindName::MoveFolder => "move_folder",
+            KindName::RewriteLink => "rewrite_link",
+            KindName::RewriteWikilink => "rewrite_wikilink",
             KindName::SetFrontmatter => "set_frontmatter",
             KindName::RemoveFrontmatter => "remove_frontmatter",
             KindName::PushFrontmatter => "push_frontmatter",
@@ -720,13 +867,16 @@ impl KindName {
 
     /// The fields the kind takes, as the wire writes them. A frontmatter
     /// kind's target is one of `path` and `where`, so it takes both keys and
-    /// the target decides which one is written.
+    /// the target decides which one is written; a delete takes its two link
+    /// keys, each of which may be left out.
     const fn takes(self) -> &'static [&'static str] {
         match self {
             KindName::CreateDocument | KindName::ReplaceBody => &["path", "content"],
             KindName::StrReplace => &["path", "old_str", "new_str"],
-            KindName::MoveDocument => &["from", "to"],
-            KindName::DeleteDocument => &["path"],
+            KindName::MoveDocument | KindName::MoveFolder => &["from", "to"],
+            KindName::DeleteDocument => &["path", "rewrite_to", "allow_broken_links"],
+            KindName::RewriteLink => &["path", "syntax", "from", "to"],
+            KindName::RewriteWikilink => &["old", "new"],
             KindName::SetFrontmatter | KindName::PushFrontmatter | KindName::PopFrontmatter => {
                 &["path", "where", "field", "value"]
             }
@@ -743,6 +893,11 @@ impl KindName {
 /// Every field any kind names, each held as whether it was written. A key no
 /// kind names is refused here, a key written twice is refused here, and which
 /// of them the kind takes is decided once the kind is known.
+///
+/// **`from` and `to` are read as text.** A document move's ends are document
+/// paths, a folder move's folder paths and a link rewrite's target texts, so
+/// the two keys are read once as strings and each kind then reads them
+/// through its own grammar.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KindFields {
@@ -757,15 +912,25 @@ struct KindFields {
     #[serde(default, deserialize_with = "written")]
     new_str: Option<String>,
     #[serde(default, deserialize_with = "written")]
-    from: Option<DocumentPath>,
+    from: Option<String>,
     #[serde(default, deserialize_with = "written")]
-    to: Option<DocumentPath>,
+    to: Option<String>,
     #[serde(default, deserialize_with = "written")]
     field: Option<String>,
     #[serde(default, deserialize_with = "written")]
     value: Option<AuthoredValue>,
     #[serde(default, deserialize_with = "written")]
     heading: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    syntax: Option<LinkFamily>,
+    #[serde(default, deserialize_with = "written")]
+    old: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    new: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    rewrite_to: Option<ResolutionTarget>,
+    #[serde(default, deserialize_with = "written")]
+    allow_broken_links: Option<bool>,
 }
 
 /// A field that was written, read as its own type: `null` is a value the
@@ -788,6 +953,39 @@ fn required<T, E: serde::de::Error>(kind: KindName, name: &str, value: Option<T>
     })
 }
 
+/// The field `name` of a `kind` operation, which the kind requires, read
+/// through the grammar `parse` keeps.
+fn required_as<T, P: fmt::Display, E: serde::de::Error>(
+    kind: KindName,
+    name: &str,
+    value: Option<String>,
+    parse: impl FnOnce(String) -> Result<T, P>,
+) -> Result<T, E> {
+    let text: String = required(kind, name, value)?;
+    parse(text).map_err(|problem| {
+        E::custom(format_args!(
+            "a `{}` operation's `{name}` is refused: {problem}",
+            kind.as_str()
+        ))
+    })
+}
+
+/// The resolution target `name` of a `kind` operation, which names a
+/// document and so carries no anchor (see the module's word on why).
+fn unanchored<E: serde::de::Error>(
+    kind: KindName,
+    name: &str,
+    target: ResolutionTarget,
+) -> Result<ResolutionTarget, E> {
+    if target.anchor().is_some() {
+        return Err(E::custom(format_args!(
+            "a `{}` operation's `{name}` names a document, not a place inside one: `{target}` carries an anchor",
+            kind.as_str()
+        )));
+    }
+    Ok(target)
+}
+
 /// The target of a `kind` operation, from its two keys: exactly one of them
 /// written.
 fn target<E: serde::de::Error>(
@@ -805,7 +1003,7 @@ fn target<E: serde::de::Error>(
 
 impl KindFields {
     /// Each field any kind names, and whether it was written.
-    const fn written_names(&self) -> [(&'static str, bool); 10] {
+    const fn written_names(&self) -> [(&'static str, bool); 15] {
         [
             ("path", self.path.is_some()),
             ("where", self.predicates.is_some()),
@@ -817,6 +1015,11 @@ impl KindFields {
             ("field", self.field.is_some()),
             ("value", self.value.is_some()),
             ("heading", self.heading.is_some()),
+            ("syntax", self.syntax.is_some()),
+            ("old", self.old.is_some()),
+            ("new", self.new.is_some()),
+            ("rewrite_to", self.rewrite_to.is_some()),
+            ("allow_broken_links", self.allow_broken_links.is_some()),
         ]
     }
 
@@ -842,6 +1045,11 @@ impl KindFields {
             field,
             value,
             heading,
+            syntax,
+            old,
+            new,
+            rewrite_to,
+            allow_broken_links,
         } = self;
         Ok(match kind {
             KindName::CreateDocument => OperationKind::CreateDocument {
@@ -854,11 +1062,37 @@ impl KindFields {
                 new_str: required(kind, "new_str", new_str)?,
             },
             KindName::MoveDocument => OperationKind::MoveDocument {
+                from: required_as(kind, "from", from, DocumentPath::new)?,
+                to: required_as(kind, "to", to, DocumentPath::new)?,
+            },
+            KindName::DeleteDocument => {
+                let allow_broken_links = allow_broken_links.unwrap_or(false);
+                if allow_broken_links && rewrite_to.is_some() {
+                    return Err(E::custom(
+                        "a `delete_document` operation rewrites the links naming its document to `rewrite_to` or leaves them broken, not both",
+                    ));
+                }
+                OperationKind::DeleteDocument {
+                    path: required(kind, "path", path)?,
+                    rewrite_to: rewrite_to
+                        .map(|target| unanchored(kind, "rewrite_to", target))
+                        .transpose()?,
+                    allow_broken_links,
+                }
+            }
+            KindName::MoveFolder => OperationKind::MoveFolder {
+                from: required_as(kind, "from", from, FolderPath::new)?,
+                to: required_as(kind, "to", to, FolderPath::new)?,
+            },
+            KindName::RewriteLink => OperationKind::RewriteLink {
+                path: required(kind, "path", path)?,
+                syntax: required(kind, "syntax", syntax)?,
                 from: required(kind, "from", from)?,
                 to: required(kind, "to", to)?,
             },
-            KindName::DeleteDocument => OperationKind::DeleteDocument {
-                path: required(kind, "path", path)?,
+            KindName::RewriteWikilink => OperationKind::RewriteWikilink {
+                old: unanchored(kind, "old", required(kind, "old", old)?)?,
+                new: unanchored(kind, "new", required(kind, "new", new)?)?,
             },
             KindName::SetFrontmatter => OperationKind::SetFrontmatter {
                 target: target(kind, path, predicates)?,

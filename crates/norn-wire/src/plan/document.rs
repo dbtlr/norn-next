@@ -515,7 +515,7 @@ struct DocumentFields {
 
 /// Whether a flag is left out of a plan's bytes: `false`, which is what its
 /// absence reads as. serde hands the field by reference.
-const fn is_false(flag: &bool) -> bool {
+pub(crate) const fn is_false(flag: &bool) -> bool {
     !*flag
 }
 

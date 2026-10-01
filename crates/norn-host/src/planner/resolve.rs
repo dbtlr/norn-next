@@ -763,6 +763,39 @@ mod tests {
         }
     }
 
+    /// **A link cascade is left unresolved until it is planned (NORN-297).**
+    /// A folder move, a link rewrite, a wikilink rewrite and a delete saying
+    /// what becomes of the links naming its document are each left
+    /// unresolved, naming the limit, and write nothing — never planned as
+    /// something they do not say, such as a delete that silently breaks
+    /// links its author asked to rewrite.
+    #[test]
+    fn a_link_cascade_is_left_unresolved_until_it_is_planned() {
+        let vault = MemoryVault::with(&[("notes/a.md", "[[b]]\n"), ("notes/b.md", "b\n")]);
+        let target = |text: &str| norn_wire::ResolutionTarget::new(text).expect("a target");
+        let folder = |text: &str| norn_wire::FolderPath::new(text).expect("a folder");
+        for kind in [
+            OperationKind::move_folder(folder("notes"), folder("archive")),
+            OperationKind::rewrite_link(
+                path("notes/a.md"),
+                norn_wire::LinkFamily::Wikilink,
+                "b",
+                "c",
+            ),
+            OperationKind::rewrite_wikilink(target("b"), target("c")),
+            OperationKind::delete_document_rewriting(path("notes/b.md"), target("a")),
+            OperationKind::delete_document_breaking_links(path("notes/b.md")),
+        ] {
+            let resolution = planned(&vault, vec![Operation::new(kind.clone())]);
+            let detail = unresolved_detail(&resolution);
+            assert!(
+                detail.contains("link cascades are not planned yet"),
+                "{kind:?}: {detail}"
+            );
+            assert!(resolution.plan.transitions.is_empty(), "{kind:?}");
+        }
+    }
+
     /// **An expected value of absent on a document the plan writes is judged
     /// against its before-state and becomes that before-state**: a set of a
     /// field the document does not carry resolves, carrying no plan

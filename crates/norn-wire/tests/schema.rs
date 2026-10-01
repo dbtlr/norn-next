@@ -2858,7 +2858,9 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("create_document", vec!["path", "content"]),
         ("str_replace", vec!["path", "old_str", "new_str"]),
         ("move_document", vec!["from", "to"]),
-        ("delete_document", vec!["path"]),
+        ("move_folder", vec!["from", "to"]),
+        ("rewrite_link", vec!["path", "syntax", "from", "to"]),
+        ("rewrite_wikilink", vec!["old", "new"]),
         ("replace_body", vec!["path", "content"]),
         ("replace_section", vec!["path", "heading", "content"]),
         ("append_to_section", vec!["path", "heading", "content"]),
@@ -2866,6 +2868,48 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
     ];
+    let delete = branch(&schema, "kind", "delete_document");
+    let delete_fields = &delete["properties"]["fields"];
+    assert_eq!(
+        property_names(delete_fields),
+        ["path", "rewrite_to", "allow_broken_links"]
+            .into_iter()
+            .collect(),
+        "the delete_document fields"
+    );
+    assert_eq!(
+        required_names(delete_fields),
+        ["path"].into_iter().collect(),
+        "a delete requires more than its path"
+    );
+    assert!(refuses_unknown_keys(delete_fields), "{delete_fields}");
+    assert_eq!(
+        delete_fields["properties"]["rewrite_to"]["$ref"].as_str(),
+        Some("#/$defs/ResolutionTarget"),
+        "a delete's `rewrite_to` admits what its reader refuses"
+    );
+    assert_eq!(
+        delete_fields["properties"]["allow_broken_links"]["type"].as_str(),
+        Some("boolean")
+    );
+    for (kind, end) in [
+        ("move_document", "DocumentPath"),
+        ("move_folder", "FolderPath"),
+    ] {
+        let fields = &branch(&schema, "kind", kind)["properties"]["fields"];
+        for key in ["from", "to"] {
+            assert_eq!(
+                fields["properties"][key]["$ref"].as_str(),
+                Some(format!("#/$defs/{end}").as_str()),
+                "the {kind} `{key}`"
+            );
+        }
+    }
+    let rewrite = &branch(&schema, "kind", "rewrite_link")["properties"]["fields"];
+    assert_eq!(
+        rewrite["properties"]["syntax"]["$ref"].as_str(),
+        Some("#/$defs/LinkFamily")
+    );
     let targeted = [
         ("set_frontmatter", vec!["field", "value"]),
         ("remove_frontmatter", vec!["field"]),
@@ -2874,7 +2918,13 @@ fn an_operation_advertises_each_kind_with_its_fields() {
     ];
     assert_eq!(
         sorted(tag_constants(&schema, "kind")),
-        sorted(kinds.iter().chain(&targeted).map(|(kind, _)| *kind))
+        sorted(
+            kinds
+                .iter()
+                .chain(&targeted)
+                .map(|(kind, _)| *kind)
+                .chain(["delete_document"])
+        )
     );
     for (kind, own) in &targeted {
         let fields_schema = &branch(&schema, "kind", kind)["properties"]["fields"];
@@ -2900,7 +2950,12 @@ fn an_operation_advertises_each_kind_with_its_fields() {
             "the {kind} fields carry the target's description: {fields_schema}"
         );
     }
-    for (kind, _) in kinds.iter().chain(&targeted) {
+    for kind in kinds
+        .iter()
+        .chain(&targeted)
+        .map(|(kind, _)| *kind)
+        .chain(["delete_document"])
+    {
         let branch = branch(&schema, "kind", kind);
         assert_eq!(
             property_names(branch),

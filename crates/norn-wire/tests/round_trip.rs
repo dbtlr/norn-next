@@ -6669,6 +6669,9 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::str_replace(path("notes/a.md"), "draft", "final"),
         OperationKind::move_document(path("notes/a.md"), path("archive/a.md")),
         OperationKind::delete_document(path("notes/b.md")),
+        OperationKind::move_folder(folder("notes"), folder("archive/notes")),
+        OperationKind::rewrite_link(path("notes/c.md"), LinkFamily::Wikilink, "a", "archive/a"),
+        OperationKind::rewrite_wikilink(target("a"), target("archive/a")),
         OperationKind::set_frontmatter(
             WriteTarget::path(path("notes/a.md")),
             "status",
@@ -6851,6 +6854,9 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"str_replace","fields":{"path":"notes/a.md","old_str":"draft","new_str":"final"}}"#,
         r#"{"kind":"move_document","fields":{"from":"notes/a.md","to":"archive/a.md"}}"#,
         r#"{"kind":"delete_document","fields":{"path":"notes/b.md"}}"#,
+        r#"{"kind":"move_folder","fields":{"from":"notes","to":"archive/notes"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"archive/a"}}"#,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"archive/a"}}"#,
         r#"{"kind":"set_frontmatter","fields":{"path":"notes/a.md","field":"status","value":"done"}}"#,
         r#"{"kind":"remove_frontmatter","fields":{"where":[{"op":"eq","key":"status","value":"draft"}],"field":"due"}}"#,
         r#"{"kind":"push_frontmatter","fields":{"path":"notes/a.md","field":"tags","value":"project"}}"#,
@@ -6929,6 +6935,98 @@ fn an_operation_refuses_fields_that_are_not_its_kinds() {
         );
     }
     assert_eq!(OperationId::new(""), Err(IllegalOperationId));
+}
+
+/// **A delete says out loud what becomes of the links naming its
+/// document.** It rewrites them to `rewrite_to`, or leaves them broken where
+/// `allow_broken_links` is `true`; each is left out where it is not written,
+/// `false` reads as absent, and saying both is refused at the read.
+#[test]
+fn a_delete_rewrites_or_breaks_its_backlinks_only_where_it_says_so() {
+    let rewriting = OperationKind::delete_document_rewriting(path("notes/b.md"), target("c"));
+    let breaking = OperationKind::delete_document_breaking_links(path("notes/b.md"));
+    for (kind, json) in [
+        (
+            &rewriting,
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c"}}"#,
+        ),
+        (
+            &breaking,
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","allow_broken_links":true}}"#,
+        ),
+    ] {
+        assert_eq!(wire(kind), json);
+        round_trip(kind);
+        round_trip(&Operation::new(kind.clone()));
+    }
+    assert_eq!(
+        serde_json::from_str::<OperationKind>(
+            r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c","allow_broken_links":false}}"#
+        )
+        .ok(),
+        Some(rewriting)
+    );
+    for json in [
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c","allow_broken_links":true}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":null}}"#,
+        r#"{"kind":"delete_document","fields":{"path":"notes/b.md","allow_broken_links":null}}"#,
+        r##"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c#Notes"}}"##,
+        r##"{"kind":"delete_document","fields":{"path":"notes/b.md","rewrite_to":"c#^a1"}}"##,
+        r#"{"kind":"move_document","fields":{"from":"a.md","to":"b.md","allow_broken_links":true}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
+}
+
+/// **The link kinds read each end through its own grammar.** A folder move's
+/// ends are folder paths, a link rewrite's are target texts and a wikilink
+/// rewrite's are resolution targets naming a document — one that need not
+/// stand — and never a place inside one.
+#[test]
+fn a_link_kind_reads_its_ends_through_their_own_grammars() {
+    let read: OperationKind = serde_json::from_str(
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"gone/never-was","new":"here"}}"#,
+    )
+    .expect("a wikilink rewrite of a document no vault need hold");
+    assert_eq!(
+        read,
+        OperationKind::rewrite_wikilink(target("gone/never-was"), target("here"))
+    );
+    let rewrite: OperationKind = serde_json::from_str(
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"markdown","from":"../a.md","to":"../archive/a.md"}}"#,
+    )
+    .expect("a Markdown link rewrite");
+    assert_eq!(
+        rewrite,
+        OperationKind::rewrite_link(
+            path("notes/c.md"),
+            LinkFamily::Markdown,
+            "../a.md",
+            "../archive/a.md"
+        )
+    );
+    for json in [
+        r#"{"kind":"move_folder","fields":{"from":"","to":"archive"}}"#,
+        r#"{"kind":"move_folder","fields":{"from":"notes","to":"/archive"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"","to":"b.md"}}"#,
+        r#"{"kind":"move_document","fields":{"from":"a.md","to":"/b.md"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","from":"a","to":"b"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"embed","from":"a","to":"b"}}"#,
+        r#"{"kind":"rewrite_link","fields":{"path":"notes/c.md","syntax":"wikilink","from":"a","to":"b","old":"a"}}"#,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"a#Notes","new":"b"}}"##,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"b#^a1"}}"##,
+        r##"{"kind":"rewrite_wikilink","fields":{"old":"#Notes","new":"b"}}"##,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a"}}"#,
+        r#"{"kind":"rewrite_wikilink","fields":{"old":"a","new":"b","path":"notes/c.md"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(json).is_err(),
+            "reading {json} produced an operation"
+        );
+    }
 }
 
 /// A file state is absent, or present with the hash of what it holds.
@@ -7063,9 +7161,9 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
         .expect("an authored plan as JSON");
     for pointer in [
         "",
-        "/operations/14",
-        "/operations/14/fields",
-        "/operations/14/conditions/0",
+        "/operations/17",
+        "/operations/17/fields",
+        "/operations/17/conditions/0",
     ] {
         let json = with_surprise(&authored, pointer);
         assert!(
@@ -8131,7 +8229,23 @@ fn applier_decision(operation: &Operation) -> String {
             new_str,
         } => format!("edit {path}: {old_str} to {new_str}"),
         OperationKind::MoveDocument { from, to } => format!("move {from} to {to}"),
-        OperationKind::DeleteDocument { path } => format!("delete {path}"),
+        OperationKind::DeleteDocument {
+            path,
+            rewrite_to,
+            allow_broken_links,
+        } => match (rewrite_to, allow_broken_links) {
+            (None, false) => format!("delete {path}"),
+            (Some(rewrite_to), _) => format!("delete {path}, its links to {rewrite_to}"),
+            (None, true) => format!("delete {path}, its links broken"),
+        },
+        OperationKind::MoveFolder { from, to } => format!("move folder {from} to {to}"),
+        OperationKind::RewriteLink {
+            path,
+            syntax,
+            from,
+            to,
+        } => format!("in {path}, {syntax:?} {from} to {to}"),
+        OperationKind::RewriteWikilink { old, new } => format!("wikilinks to {old} to {new}"),
         OperationKind::SetFrontmatter {
             target,
             field,
@@ -8335,7 +8449,15 @@ fn the_applier_decides_every_kind_state_and_condition_without_a_default() {
         )
     );
     assert_eq!(
-        decisions[4..8],
+        decisions[4..7],
+        [
+            "move folder notes to archive/notes as -, after [], noting -; ",
+            "in notes/c.md, Wikilink a to archive/a as -, after [], noting -; ",
+            "wikilinks to a to archive/a as -, after [], noting -; ",
+        ]
+    );
+    assert_eq!(
+        decisions[7..11],
         [
             "set status of notes/a.md to string done as -, after [], noting -; ",
             "remove due of 1 predicates' matches as -, after [], noting -; ",
