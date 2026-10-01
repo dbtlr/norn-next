@@ -203,7 +203,17 @@ pub(crate) fn class_parameters(class: &ClassKey, after: &After, limit: usize) ->
 /// The values [`links_sql`] binds over one page of a path key: the key,
 /// where the page resumes, and its bound.
 pub(crate) fn path_parameters(path: &PathKey, after: &After, limit: usize) -> Vec<Value> {
-    paged(Value::Text(path.as_str().to_string()), after, limit)
+    key_parameters(path.as_str(), after, limit)
+}
+
+/// The values [`links_sql`] binds over one page of the links held under
+/// exactly `key`, a path key or a suffix key alike, read in
+/// [`Selected::Path`]'s shape: the key, where the page resumes, and its
+/// bound. The shape is an equality seek of the link index at the key, which
+/// holds a suffix key as written beside a path, so the one statement reads
+/// either.
+pub(crate) fn key_parameters(key: &str, after: &After, limit: usize) -> Vec<Value> {
+    paged(Value::Text(key.to_string()), after, limit)
 }
 
 /// A paged shape's values: what it selects by, the three columns of the
@@ -307,10 +317,11 @@ pub(crate) fn occupied_sql(key: SuffixKey) -> String {
     )
 }
 
-/// The values [`occupied_sql`] binds: each class's bounds, and the path keys.
+/// The values [`occupied_sql`] binds: each class's bounds, and the keys its
+/// path arm seeks — path keys, or any key the link index holds as written.
 pub(crate) fn occupied_parameters(
     classes: &[&ClassKey],
-    paths: &[&PathKey],
+    paths: &[&str],
 ) -> Result<Vec<Value>, StoreError> {
     let bounds = canonical_json(&FrontmatterValue::Sequence(
         classes
@@ -324,8 +335,7 @@ pub(crate) fn occupied_parameters(
             })
             .collect(),
     ))?;
-    let paths: Vec<&str> = paths.iter().map(|path| path.as_str()).collect();
-    Ok(vec![Value::Text(bounds), path_list(&paths)?])
+    Ok(vec![Value::Text(bounds), path_list(paths)?])
 }
 
 /// [`crate::ExplainedStatement::LinkHealthDiscard`]: discard the findings

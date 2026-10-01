@@ -373,7 +373,7 @@ impl<'a> Request<'a> {
                 let path = PathKey::new(EXPLAINED_PAGE_CURSOR_LEAF)?;
                 database.emitted_plan(
                     &sql,
-                    params_from_iter(health::occupied_parameters(&[&class], &[&path])?),
+                    params_from_iter(health::occupied_parameters(&[&class], &[path.as_str()])?),
                 )
             }
         }?)

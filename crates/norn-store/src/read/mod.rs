@@ -146,6 +146,10 @@ pub enum ReadStatement {
     Search(SearchStatement),
     /// A statement [`GetStatement`] names.
     Get(GetStatement),
+    /// A statement [`crate::ResolutionStatement`] names: one the resolution
+    /// change set runs on a snapshot, shared with the changeset's link-health
+    /// re-decision.
+    Resolution(crate::ResolutionStatement),
 }
 
 impl From<SearchStatement> for ReadStatement {

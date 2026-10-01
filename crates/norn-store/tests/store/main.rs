@@ -31,6 +31,7 @@ mod links;
 mod pillars;
 mod readers;
 mod redecision;
+mod resolution;
 mod resolve;
 mod search;
 mod validate;
