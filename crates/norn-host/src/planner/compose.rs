@@ -8,9 +8,11 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_text::RewriteSkip;
 use norn_wire::{
-    ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation, OperationKind,
+    ContentHash, ControlFile, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation,
+    OperationKind,
 };
 
+use super::control::{control_path, unreadable_as_role};
 use super::edit;
 use super::links::{self, wire_family};
 use super::view::{Entry, VaultView, document_path, wire_hash};
@@ -251,6 +253,15 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 
     /// Where `path` leads, reading its before-state the first time the plan
     /// touches its identity.
+    ///
+    /// **A control file is no place a document operation leads to**, whatever
+    /// the vault holds there: the vault schema and config are written whole
+    /// by `write_control_file` alone ([`super::control`]), so an edit, a
+    /// create, a removal or a move naming either path, or a name beneath
+    /// either — which would make a control file's path a folder — does not
+    /// resolve. The schema path a registration names elsewhere in the vault
+    /// is a place the vault's walk does not enter, with every name beneath
+    /// it, which the view answers as blocked.
     fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
         let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
             Ok(identity) => identity,
@@ -260,6 +271,21 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 )));
             }
         };
+        if let Some((file, beneath)) = self.control_file_at(&identity) {
+            let role = match file {
+                ControlFile::Schema => "schema",
+                ControlFile::Config => "config",
+            };
+            return Ok(Place::NoFile(if beneath {
+                format!(
+                    "`{path}` lies beneath the vault {role}'s path, a control file's place no document operation reaches"
+                )
+            } else {
+                format!(
+                    "`{path}` is the vault {role}, a control file no document operation writes: `write_control_file` writes it whole"
+                )
+            }));
+        }
         if let Some(spelling) = self.spelled.get(&identity) {
             return Ok(Place::File(identity, spelling.clone()));
         }
@@ -284,6 +310,30 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         self.read_at.insert(identity.clone(), spelling.clone());
         self.spelled.insert(identity.clone(), spelling.clone());
         Ok(Place::File(identity, spelling))
+    }
+
+    /// The role of the control file `identity` names or lies beneath, and
+    /// whether it lies beneath, under the vault's identity rule, so no
+    /// spelling of a control file's path — or of a name beneath it, which
+    /// would make that path a folder — reaches it as a document.
+    fn control_file_at(&self, identity: &NormalizedPath) -> Option<(ControlFile, bool)> {
+        let normalizer = self.view.normalizer();
+        identity
+            .as_path()
+            .ancestors()
+            .filter(|at| !at.as_os_str().is_empty())
+            .enumerate()
+            .find_map(|(depth, at)| {
+                let at = normalizer.normalize(at).ok()?;
+                [ControlFile::Schema, ControlFile::Config]
+                    .into_iter()
+                    .find(|&file| {
+                        normalizer
+                            .normalize(Path::new(control_path(file).as_str()))
+                            .is_ok_and(|control| control == at)
+                    })
+                    .map(|file| (file, depth > 0))
+            })
     }
 
     /// The document standing so far at the file `path` leads to, or why none
@@ -466,7 +516,65 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             | OperationKind::DeleteSection { .. }
             | OperationKind::InsertBeforeHeading { .. }
             | OperationKind::InsertAfterHeading { .. } => self.edit_in_place(kind)?,
+            OperationKind::WriteControlFile { file, content } => {
+                self.write_control_file(*file, content)?
+            }
         })
+    }
+
+    /// Write the control file `file` whole, holding `content`: created where
+    /// it is absent, replaced where it stands.
+    ///
+    /// **A control file is read as one, never as a document**
+    /// ([`VaultView::control_entry`]), at the one path its role lives at
+    /// ([`control_path`]), and its content must read as its role's model
+    /// ([`unreadable_as_role`]): a write the next reload would refuse does
+    /// not resolve. No folder is counted for it, since no document of the
+    /// plan stands beside it.
+    fn write_control_file(
+        &mut self,
+        file: ControlFile,
+        content: &str,
+    ) -> Result<Result<(), Unresolved>, V::Error> {
+        if let Some(detail) = unreadable_as_role(file, content.as_bytes()) {
+            return Ok(Err(detail));
+        }
+        let path = control_path(file);
+        let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Ok(Err(format!(
+                    "`{path}` names no place in the vault: {error}"
+                )));
+            }
+        };
+        let spelling = match self.spelled.get(&identity) {
+            Some(spelling) => spelling.clone(),
+            None => {
+                let before = match self.view.control_entry(&identity)? {
+                    Entry::Document { bytes, hash, .. } => holding(&bytes, hash),
+                    Entry::Absent { .. } => FileState::absent(),
+                    Entry::Folder => {
+                        return Ok(Err(format!(
+                            "a folder stands at `{path}`, where the control file would be"
+                        )));
+                    }
+                    Entry::Blocked { detail, .. } => return Ok(Err(detail)),
+                };
+                self.targets.insert(
+                    path.clone(),
+                    ComposedTarget {
+                        before,
+                        after: None,
+                    },
+                );
+                self.read_at.insert(identity.clone(), path.clone());
+                self.spelled.insert(identity, path.clone());
+                path.clone()
+            }
+        };
+        self.target(&spelling).after = Some(Arc::from(content.as_bytes()));
+        Ok(Ok(()))
     }
 
     /// Edit the document a document-local `kind` names where it stands, as a
@@ -693,8 +801,9 @@ pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
 /// The files an operation touches: a move touches its source and its
 /// destination, a frontmatter kind with a `where` target none until planning
 /// expands it, a folder move, a wikilink rewrite and a creation by rule none —
-/// each names its documents only once planning expands it — and every other
-/// kind the one file it names.
+/// each names its documents only once planning expands it — a control-file
+/// write the path its role lives at, and every other kind the one file it
+/// names.
 pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
     let (first, second) = match kind {
         OperationKind::CreateDocument { path, .. }
@@ -712,6 +821,7 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         | OperationKind::PushFrontmatter { target, .. }
         | OperationKind::PopFrontmatter { target, .. } => (target.as_path(), None),
         OperationKind::MoveDocument { from, to } => (Some(from), Some(to)),
+        OperationKind::WriteControlFile { file, .. } => (Some(control_path(*file)), None),
         OperationKind::MoveFolder { .. }
         | OperationKind::RewriteWikilink { .. }
         | OperationKind::CreateByRule { .. } => (None, None),
@@ -964,6 +1074,61 @@ mod tests {
                 .with_cascade(vec![rewrite("gone.md", "a", "b")]),
         );
         assert!(detail.contains("gone.md"), "{detail}");
+    }
+
+    /// **A document operation never writes a control file**: an edit, a
+    /// body replaced, a create and a move naming the vault config or the
+    /// vault schema's path do not resolve, saying the file is a control file,
+    /// however the vault holds it — only a `write_control_file` writes one.
+    #[test]
+    fn a_document_operation_naming_a_control_file_does_not_resolve() {
+        let vault = MemoryVault::with(&[
+            (".norn/config.toml", "[engine.sample]\n"),
+            (".norn/schema.yaml", "version: 1\n"),
+            ("a.md", "A\n"),
+        ]);
+        for at in [".norn/config.toml", ".norn/schema.yaml"] {
+            for kind in [
+                OperationKind::str_replace(path(at), "1", "2"),
+                OperationKind::replace_body(path(at), "x\n"),
+                OperationKind::delete_document(path(at)),
+                OperationKind::create_document(path(at), "x\n"),
+                OperationKind::move_document(path("a.md"), path(at)),
+                OperationKind::move_document(path(at), path("b.md")),
+            ] {
+                let name = kind.name();
+                let detail = unresolvable_detail(&vault, Operation::new(kind));
+                assert!(detail.contains("control file"), "{name} at {at}: {detail}");
+            }
+        }
+    }
+
+    /// **No document operation reaches beneath a control file's path**
+    /// either: a create there, a move's destination there and a cascade's
+    /// holder there do not resolve, saying the place is a control file's,
+    /// so no document operation turns a control file's path into a folder.
+    #[test]
+    fn a_document_operation_beneath_a_control_file_s_path_does_not_resolve() {
+        let vault =
+            MemoryVault::with(&[("a.md", "A\n"), (".norn/schema.yaml/h.md", "see [[a]]\n")]);
+        for kind in [
+            OperationKind::create_document(path(".norn/config.toml/x.md"), "X\n"),
+            OperationKind::create_document(path(".norn/schema.yaml/x.md"), "X\n"),
+            OperationKind::move_document(path("a.md"), path(".norn/config.toml/a.md")),
+        ] {
+            let name = kind.name();
+            let detail = unresolvable_detail(&vault, Operation::new(kind));
+            assert!(detail.contains("control file"), "{name}: {detail}");
+        }
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite(".norn/schema.yaml/h.md", "a", "b")]),
+        );
+        assert!(
+            detail.contains("control file"),
+            "a cascade holder: {detail}"
+        );
     }
 
     #[test]

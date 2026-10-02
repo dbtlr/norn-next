@@ -450,6 +450,17 @@ pub enum PlanFault {
         /// an identifier or a requirement.
         positions: Vec<usize>,
     },
+    /// A plan writes a vault control file beside an operation on documents.
+    /// A plan that changes a control file changes nothing else: the schema
+    /// and the config are what every document is judged under, so a plan
+    /// changing both would judge its documents under one declaration and land
+    /// them under another. Split the plan: one writing the control files,
+    /// another changing the documents.
+    #[non_exhaustive]
+    ControlFileBesideDocuments {
+        /// The positions of the operations writing a control file.
+        positions: Vec<usize>,
+    },
 }
 
 impl PlanFault {
@@ -475,6 +486,12 @@ impl PlanFault {
     /// planning expands may not.
     pub const fn expanded_target_ordered(positions: Vec<usize>) -> Self {
         PlanFault::ExpandedTargetOrdered { positions }
+    }
+
+    /// The control-file writes at `positions` stand beside an operation on
+    /// documents, which a plan changing a control file may not carry.
+    pub const fn control_file_beside_documents(positions: Vec<usize>) -> Self {
+        PlanFault::ControlFileBesideDocuments { positions }
     }
 
     /// The operations at `positions` all carry `id`.

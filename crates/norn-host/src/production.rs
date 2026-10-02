@@ -1614,15 +1614,23 @@ impl EntryOps for ProductionEntryOps {
             .map(|detail| UntrustedReason::schema_unreadable(detail.to_string()))
     }
 
-    /// The shadow placement's advisory, where the fallback is in use, and one
-    /// advisory per link the last walk of the whole vault passed over, in
-    /// path order. Both are held on the attachment, read when its coverage
-    /// was installed and when a walk of the whole vault ran.
+    /// The absent schema's advisory, where the controls the attachment serves
+    /// under read the default schema as absent; the shadow placement's, where
+    /// the fallback is in use; and one advisory per link the last walk of the
+    /// whole vault passed over, in path order. All are held on the
+    /// attachment, read when its controls and coverage were installed and when
+    /// a walk of the whole vault ran.
     fn advisories(&self, attachment: &Self::Attachment) -> Vec<AttachmentAdvisory> {
-        attachment
-            .shadow_advisory
-            .iter()
-            .cloned()
+        let schema_absent =
+            attachment
+                .controls
+                .schema_absent()
+                .then(|| AttachmentAdvisory::SchemaAbsent {
+                    path: IN_VAULT_SCHEMA_PATH.to_string(),
+                });
+        schema_absent
+            .into_iter()
+            .chain(attachment.shadow_advisory.iter().cloned())
             .chain(attachment.skipped_links.links().map(|link| {
                 AttachmentAdvisory::SymlinkSkipped {
                     path: link.to_string_lossy().into_owned(),
@@ -6417,9 +6425,18 @@ mod tests {
             "the drift query parsed invalid TOML instead of comparing bytes"
         );
 
+        // An absent default schema reads as the empty schema, which is not
+        // the schema served: a reload is pending. A schema that cannot be
+        // read at all is unreadable.
         fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+        assert_eq!(
+            host.authored_drift(&name),
+            Ok(crate::AuthoredDrift::ReloadPending),
+            "a removed default schema did not read as the empty schema"
+        );
+        fs::create_dir(f.vault().join(".norn/schema.yaml")).unwrap();
         let Ok(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
-            panic!("a missing schema was not reported as unreadable");
+            panic!("a schema that cannot be read was not reported as unreadable");
         };
         assert_eq!(error.file(), crate::ReloadFile::Schema);
         assert_eq!(error.stage(), crate::ReloadStage::Read);
@@ -7852,14 +7869,81 @@ mod tests {
             );
 
             fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+            fs::create_dir(f.vault().join(".norn/schema.yaml")).unwrap();
             let norn_wire::Drift::Unreadable { failure, .. } = status_of(&host, &name).drift else {
-                panic!("a missing schema did not read as unreadable");
+                panic!("a schema that cannot be read did not read as unreadable");
             };
             assert_eq!(failure.file, norn_wire::ControlFile::Schema);
             assert_eq!(failure.stage, norn_wire::ReloadStage::Read);
             assert_eq!(
                 status_of(&host, &name).published,
                 norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+        }
+
+        /// **A vault that declares no schema is served, and says so**: its
+        /// status reports the default schema absent while the vault stands
+        /// `Ready` with its controls current, and the roll-up — which
+        /// `doctor`'s registry half reports — names the vault for it.
+        #[test]
+        fn a_status_and_doctor_report_a_vault_that_declares_no_schema() {
+            let f = Fixture::new("status-schema-absent");
+            fs::remove_dir_all(f.vault().join(".norn")).unwrap();
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+
+            let absent = norn_wire::Advisory::schema_absent(".norn/schema.yaml");
+            let status = status_of(&host, &name);
+            assert_eq!(status.advisories, std::slice::from_ref(&absent));
+            assert_eq!(status.drift, norn_wire::Drift::current());
+            assert_eq!(
+                status.published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+            let named = [norn_wire::Attention::advisory(name, absent)];
+            assert_eq!(rolled_up(&host).attention(), named);
+            assert_eq!(
+                host.doctor_registry(&norn_wire::DoctorRegistryParams::new())
+                    .roll_up
+                    .attention(),
+                named
+            );
+        }
+
+        /// **A served schema deleted reads as a reload pending until a reload
+        /// activates it, and then the vault declares nothing and says so**:
+        /// before the reload the status reports no absent schema and its
+        /// drift a reload pending, as an edit down to empty bytes would; once
+        /// the reload runs, the vault stands `Ready` under the empty
+        /// declaration, reporting the default schema absent, its controls
+        /// current.
+        #[test]
+        fn a_deleted_served_schema_is_a_reload_pending_until_a_reload_activates_it() {
+            let f = Fixture::new("status-schema-deleted");
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+            fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+
+            let status = status_of(&host, &name);
+            assert_eq!(status.drift, norn_wire::Drift::reload_pending());
+            assert!(status.advisories.is_empty(), "{:?}", status.advisories);
+
+            host.reload(&name)
+                .expect("the reload activates the deletion");
+            let status = status_of(&host, &name);
+            assert_eq!(
+                status.advisories,
+                [norn_wire::Advisory::schema_absent(".norn/schema.yaml")]
+            );
+            assert_eq!(status.drift, norn_wire::Drift::current());
+            assert_eq!(
+                status.published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+            assert_eq!(
+                host.inspect(&name)
+                    .unwrap()
+                    .active_fingerprints
+                    .map(|active| active.schema),
+                Some(norn_fs::ContentHash::of(b""))
             );
         }
 
@@ -13287,6 +13371,60 @@ mod tests {
         );
     }
 
+    /// **A vault with no default schema attaches under the empty declaration,
+    /// and says so.** No `schema_source` is configured and nothing stands at
+    /// `.norn/schema.yaml` — not even `.norn` — so the schema reads as the
+    /// empty file: the declaration that declares nothing, at the fingerprint
+    /// of no bytes, which every holder of an empty schema shares. The vault
+    /// derives its documents, and the attachment carries the advisory that
+    /// its schema is absent.
+    #[test]
+    fn a_vault_with_no_default_schema_attaches_under_the_empty_declaration() {
+        let f = Fixture::new("schema-absent");
+        fs::remove_dir_all(f.vault().join(".norn")).unwrap();
+        fs::write(f.vault().join("a.md"), "---\nstatus: draft\n---\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let mut attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("a vault with no schema attaches");
+
+        assert_eq!(stored_paths(&mut attachment.store), ["a.md"]);
+        assert_eq!(
+            ops.active_fingerprints(&attachment)
+                .map(|active| active.schema),
+            Some(norn_fs::ContentHash::of(b""))
+        );
+        assert_eq!(attachment.controls.undeclarable(), None);
+        assert!(
+            ops.advisories(&attachment)
+                .contains(&crate::AttachmentAdvisory::SchemaAbsent {
+                    path: IN_VAULT_SCHEMA_PATH.to_string()
+                }),
+            "{:?}",
+            ops.advisories(&attachment)
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A configured schema source that names nothing still refuses the
+    /// attach**: the operator named that file, so its absence is a schema
+    /// that cannot be read, never a vault that declares nothing.
+    #[test]
+    fn an_attach_whose_configured_schema_source_is_absent_refuses() {
+        let f = Fixture::new("schema-source-absent");
+        let mut registration = f.registration();
+        registration.schema_source =
+            Some(SchemaSource::new(f.root.join("absent-schema.yaml")).unwrap());
+        let (ops, _) = f.ops(2);
+        let Err(JobFailure::Reload(error)) =
+            ops.attach(&registration, &ProgressReporter::disconnected())
+        else {
+            panic!("an absent configured schema attached");
+        };
+        assert_eq!(error.file(), crate::ReloadFile::Schema);
+        assert_eq!(error.stage(), crate::ReloadStage::Read);
+    }
+
     /// **The bar on a link at a name norn appends.** The default schema is the
     /// vault root plus two names this crate chose, and both of those are read
     /// through the vault's own directories: a link at either is refused, and the
@@ -15261,6 +15399,147 @@ mod tests {
                 .map(|row| row.content_hash),
             Some(norn_fs::ContentHash::of(b"status draft\n").to_string()),
             "the apply committed a changeset after its maintainership was lost"
+        );
+    }
+
+    /// Production ops over which another writer writes the vault schema just
+    /// as an apply's leg begins: after `init` previewed its starter over an
+    /// absent schema and admitted the apply, and before the apply reads its
+    /// targets. Every leg but the apply is the production one, unchanged.
+    struct SchemaWrittenBeforeApply {
+        inner: ProductionEntryOps,
+        schema: PathBuf,
+        theirs: &'static str,
+    }
+
+    impl EntryOps for SchemaWrittenBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn reload(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.reload(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            fs::write(&self.schema, self.theirs).unwrap();
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+    }
+
+    /// **A schema another writer creates between init's preview and its apply
+    /// is never replaced: init answers the vault already set up.** `init` is
+    /// sent to apply over a vault that declares no schema; it previews its
+    /// starter over the absence, and the schema appears as the apply's leg
+    /// begins. The apply init sends is the resolved plan it previewed, whose
+    /// create the schema now standing refuses, and init answers that refusal
+    /// as the schema standing — never with the fresh plan that would replace
+    /// it, and never by planning its operations afresh over it.
+    #[cfg(unix)]
+    #[test]
+    fn an_init_whose_schema_another_writer_creates_mid_run_is_already_set_up() {
+        let f = Fixture::new("host-init-schema-mid-run");
+        fs::remove_dir_all(f.vault().join(".norn")).unwrap();
+        fs::write(f.vault().join("a.md"), "---\nstatus: draft\n---\nA\n").unwrap();
+        let schema = f.vault().join(".norn/schema.yaml");
+        let theirs = "version: 1\n# theirs\n";
+        fs::create_dir_all(f.vault().join(".norn")).unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            SchemaWrittenBeforeApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                schema: schema.clone(),
+                theirs,
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let answered = host.init(&norn_wire::InitParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ApplyMode::Apply,
+        ));
+
+        assert_eq!(
+            fs::read_to_string(&schema).unwrap(),
+            theirs,
+            "init replaced the schema another writer created: {answered:?}"
+        );
+        assert_eq!(
+            answered,
+            Ok(norn_wire::InitReport::already_set_up(
+                norn_wire::DocumentPath::new(".norn/schema.yaml").unwrap()
+            ))
         );
     }
 

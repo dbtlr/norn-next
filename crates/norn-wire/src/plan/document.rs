@@ -43,6 +43,11 @@
 //! unexpanded target is, by [`AuthoredPlan::misplaced_cascades`] and
 //! [`ResolvedPlan::misplaced_cascades`].
 //!
+//! **A control-file plan changes nothing else** (ADR 0032): a plan writing a
+//! vault control file beside an operation on documents is a fault in its
+//! shape, judged by [`AuthoredPlan::control_files_beside_documents`] and
+//! [`ResolvedPlan::control_files_beside_documents`].
+//!
 //! **Provenance is a dormant carrier for Layer 5 repair.** Repair plans cite
 //! the finding generation they read and the findings they skipped. No Layer 4
 //! planner emits provenance — every Layer 4 plan is authored by a write verb
@@ -551,6 +556,32 @@ impl AuthoredPlan {
             .collect();
         (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
     }
+
+    /// The fault of a plan writing a vault control file beside an operation
+    /// on documents, naming each control-file write by its position; `None`
+    /// where the plan writes only control files or only documents.
+    ///
+    /// **A plan that changes a vault control file changes nothing else** (ADR
+    /// 0032). A control file is what every document is judged under, so a
+    /// plan changing both would judge its documents under one declaration
+    /// and land them under another; it is split instead, one plan for each.
+    pub fn control_files_beside_documents(&self) -> Option<PlanFault> {
+        control_files_beside_documents(&self.operations)
+    }
+}
+
+/// The fault of `operations` writing a vault control file beside an operation
+/// on documents, naming each control-file write by its position: the one rule
+/// both plans are judged by.
+fn control_files_beside_documents(operations: &[Operation]) -> Option<PlanFault> {
+    let positions: Vec<usize> = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| operation.kind.writes_control_file())
+        .map(|(position, _)| position)
+        .collect();
+    let beside = operations.len() > positions.len();
+    (!positions.is_empty() && beside).then(|| PlanFault::control_file_beside_documents(positions))
 }
 
 /// A plan resolved against what the vault held: its operations, one transition
@@ -670,6 +701,13 @@ impl ResolvedPlan {
             .map(|(position, _)| position)
             .collect();
         (!positions.is_empty()).then(|| PlanFault::misplaced_cascade(positions))
+    }
+
+    /// The fault of a resolved plan writing a vault control file beside an
+    /// operation on documents, as an authored plan's is judged
+    /// ([`AuthoredPlan::control_files_beside_documents`]).
+    pub fn control_files_beside_documents(&self) -> Option<PlanFault> {
+        control_files_beside_documents(&self.operations)
     }
 
     /// The plan carrying `footnote`.

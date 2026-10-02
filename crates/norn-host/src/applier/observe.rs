@@ -10,6 +10,7 @@ use norn_wire::{ContentHash, DocumentPath, FileState, PlanCondition, ResolvedPla
 
 use crate::derivation::decodes;
 use crate::planner::compose::holding;
+use crate::planner::control::role_at;
 use crate::planner::lineage::Lineage;
 use crate::planner::view::{Barrier, Entry, VaultView};
 
@@ -175,12 +176,19 @@ pub(super) fn observe<V: VaultView>(
     Ok((states, sources))
 }
 
-/// What one transition's target holds.
+/// What one transition's target holds: a control file read as one
+/// ([`VaultView::control_entry`]) where the target is at the path a control
+/// file lives at, and a document otherwise.
 fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V::Error> {
     let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
         return Ok(TargetState::Unplaced);
     };
-    let (holds, bytes) = match view.entry(&identity)? {
+    let entry = if role_at(transition.path.as_str()).is_some() {
+        view.control_entry(&identity)?
+    } else {
+        view.entry(&identity)?
+    };
+    let (holds, bytes) = match entry {
         Entry::Document { at, bytes, hash } if at == transition.path => {
             (holding(&bytes, hash), Some(bytes))
         }

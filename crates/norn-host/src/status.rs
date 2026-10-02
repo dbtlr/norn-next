@@ -60,6 +60,10 @@ pub enum AttachmentAdvisory {
     /// The attachment's walk of the whole vault passed over the symbolic link
     /// at `path`, vault-relative.
     SymlinkSkipped { path: String },
+    /// The vault declares no schema: nothing stands at its default schema
+    /// path `path`, vault-relative, so it is served under the empty
+    /// declaration.
+    SchemaAbsent { path: String },
 }
 
 /// The advisories `met` are reported as, for the vault whose operational root
@@ -81,6 +85,7 @@ pub(crate) fn reported_advisories(met: &[AttachmentAdvisory], root: &Path) -> Ve
                 norn_fs::fallback_ignored(root, Path::new(home)).unwrap_or(false),
             ),
             AttachmentAdvisory::SymlinkSkipped { path } => Advisory::symlink_skipped(path.clone()),
+            AttachmentAdvisory::SchemaAbsent { path } => Advisory::schema_absent(path.clone()),
         })
         .collect()
 }

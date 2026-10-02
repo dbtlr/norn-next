@@ -288,6 +288,8 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<MoveParams>(),
         schema_of::<DeleteParams>(),
         schema_of::<RewriteWikilinkParams>(),
+        schema_of::<norn_wire::InitParams>(),
+        schema_of::<norn_wire::InitReport>(),
         schema_of::<LinkRewrite>(),
         schema_of::<LinkKey>(),
         schema_of::<Resolves>(),
@@ -2610,7 +2612,7 @@ fn the_status_readings_advertise_their_tags() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<Advisory>(), "kind")),
-        sorted(["tmp_fallback_in_use", "symlink_skipped"])
+        sorted(["tmp_fallback_in_use", "symlink_skipped", "schema_absent"])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<Attention>(), "attention")),
@@ -2890,6 +2892,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("delete_section", vec!["path", "heading"]),
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
+        ("write_control_file", vec!["file", "content"]),
     ];
     // A creation by rule names every part optionally: absent, the rule is the
     // inbox and the rest are empty.
@@ -3558,7 +3561,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "unexpanded_target",
             "unexpanded_rule",
             "expanded_target_ordered",
-            "misplaced_cascade"
+            "misplaced_cascade",
+            "control_file_beside_documents"
         ])
     );
     let schema = schema_of::<ErrorDetail>();

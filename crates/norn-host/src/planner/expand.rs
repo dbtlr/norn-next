@@ -135,6 +135,7 @@ where
     if let Some(fault) = authored
         .ordered_expanded_targets()
         .or_else(|| authored.misplaced_cascades())
+        .or_else(|| authored.control_files_beside_documents())
     {
         return Err(ExpandingFailure::Planning(PlanningFailure::Fault(fault)));
     }
@@ -738,6 +739,44 @@ mod tests {
                 vec![0]
             )))
         );
+        assert_eq!(matcher.asked.get(), 0);
+    }
+
+    /// **A control file is no document, so writing one reads no link**: a
+    /// control-file write creating the schema plans its one transition
+    /// without asking the link index or the matcher anything, though a file
+    /// appears where none stood, and a `[[link]]` its content holds is no
+    /// link the vault reads.
+    #[test]
+    fn a_control_file_write_reads_no_link() {
+        let matcher = Answering::paths(&[]);
+        let resolution = resolve_expanding(
+            authored(vec![Operation::new(OperationKind::write_control_file(
+                norn_wire::ControlFile::Schema,
+                "version: 1\n# see [[notes]]\n",
+            ))]),
+            root(),
+            &MemoryVault::with(&[("notes.md", draft())]),
+            &matcher,
+            &Untouched::new(),
+            &no_rules(),
+        )
+        .expect("a control-file write plans");
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution
+                .plan
+                .transitions
+                .iter()
+                .map(|transition| transition.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![".norn/schema.yaml"]
+        );
+        assert!(resolution.plan.conditions.is_empty());
         assert_eq!(matcher.asked.get(), 0);
     }
 

@@ -34,6 +34,18 @@ pub(crate) trait VaultView {
     /// What stands at `path`.
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
 
+    /// What stands at `path`, the in-vault path a control file lives at
+    /// ([`super::control`]), read as that control file rather than as a
+    /// document: a [`Entry::Document`] holding its bytes where it stands,
+    /// [`Entry::Absent`] at `path` where nothing does, and
+    /// [`Entry::Blocked`] where something that is no file stands there.
+    ///
+    /// **Its own read, because a control file is no document.** The vault's
+    /// walk does not enter the schema's path, so [`entry`](Self::entry)
+    /// answers it as a place no document can be at; the host reads both
+    /// control files directly beneath the root, and so does this.
+    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
+
     /// Whether a folder stands at `folder`.
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Self::Error>;
 
@@ -174,6 +186,9 @@ pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
 pub(crate) struct Remembered<'view, V> {
     view: &'view V,
     entries: RefCell<BTreeMap<NormalizedPath, Entry>>,
+    /// Each control file read, apart from [`Self::entries`]: one name read
+    /// as a document and as a control file is two readings.
+    controls: RefCell<BTreeMap<NormalizedPath, Entry>>,
 }
 
 impl<'view, V> Remembered<'view, V> {
@@ -181,6 +196,7 @@ impl<'view, V> Remembered<'view, V> {
         Remembered {
             view,
             entries: RefCell::new(BTreeMap::new()),
+            controls: RefCell::new(BTreeMap::new()),
         }
     }
 }
@@ -198,6 +214,17 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
         }
         let read = self.view.entry(path)?;
         self.entries.borrow_mut().insert(path.clone(), read.clone());
+        Ok(read)
+    }
+
+    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+        if let Some(read) = self.controls.borrow().get(path) {
+            return Ok(read.clone());
+        }
+        let read = self.view.control_entry(path)?;
+        self.controls
+            .borrow_mut()
+            .insert(path.clone(), read.clone());
         Ok(read)
     }
 
@@ -314,6 +341,24 @@ fn not_a_document_path(at: &Path) -> Entry {
     }
 }
 
+impl TreeView {
+    /// Whether `path` is the default schema's path, `.norn/schema.yaml`,
+    /// under the root's identity rule.
+    fn is_the_default_schema(&self, path: &NormalizedPath) -> bool {
+        let schema = super::control::control_path(norn_wire::ControlFile::Schema);
+        self.normalizer()
+            .normalize(Path::new(schema.as_str()))
+            .is_ok_and(|schema| schema == *path)
+    }
+
+    /// Whether the walk does not enter `path` because the host excluded it.
+    fn excludes_as_the_host(&self, path: &NormalizedPath) -> bool {
+        norn_fs::Exclusions::new(self.normalizer(), &self.exclusions).is_ok_and(|exclusions| {
+            matches!(exclusions.reason(path), Some(norn_fs::Excluded::Host))
+        })
+    }
+}
+
 impl VaultView for TreeView {
     type Error = TreeViewError;
 
@@ -381,6 +426,50 @@ impl VaultView for TreeView {
                 }
             }
         })
+    }
+
+    /// **Read as the host reads a control file**: `norn-fs`'s contained read
+    /// of an optional control file, which follows no link, answers a missing
+    /// name as absence and refuses anything at the name that is not a regular
+    /// file. That refusal — a link, a folder, a name the account cannot open
+    /// — is answered as a place no control file can be written, in its own
+    /// words, so a plan writing there does not resolve rather than failing
+    /// the read of the vault.
+    ///
+    /// **The schema is read where the vault reads it, or nowhere.** The walk
+    /// excludes the schema the vault reads, so the default schema path the
+    /// walk does not exclude is one whose registration reads its schema from
+    /// a `schema_source` instead: a write there would land a file the vault
+    /// never reads, so it is a place no control file is written.
+    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
+        let Some(at) = document_path(path.as_path()) else {
+            return Ok(not_a_document_path(path.as_path()));
+        };
+        if self.is_the_default_schema(path) && !self.excludes_as_the_host(path) {
+            return Ok(Entry::Blocked {
+                detail: format!(
+                    "the vault reads its schema from the `schema_source` its registration names, never from `{at}`"
+                ),
+                barrier: Barrier::Closed,
+            });
+        }
+        Ok(
+            match norn_fs::read_if_present_and_hash(&self.root, path.as_path()) {
+                Ok(Some(read)) => {
+                    let (bytes, hash) = read.into_parts();
+                    Entry::Document {
+                        at,
+                        bytes: Arc::from(bytes),
+                        hash: wire_hash(hash),
+                    }
+                }
+                Ok(None) => Entry::Absent { at },
+                Err(refusal) => Entry::Blocked {
+                    detail: format!("`{at}` cannot hold a control file: {refusal}"),
+                    barrier: Barrier::Occupied,
+                },
+            },
+        )
     }
 
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, TreeViewError> {
@@ -615,6 +704,12 @@ pub(crate) mod memory {
             })
         }
 
+        /// A memory vault excludes no place, so a control file is read
+        /// where a document would be.
+        fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, Infallible> {
+            self.entry(path)
+        }
+
         fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Infallible> {
             Ok(self.folder_spelling(folder).is_some())
         }
@@ -740,6 +835,56 @@ mod tests {
             panic!("nothing is read through a link");
         };
         assert!(detail.contains("symbolic link"), "{detail}");
+    }
+
+    /// **A control file is read at the path the host reads it at, though
+    /// the vault's walk does not enter it**: the schema's path, excluded as
+    /// the host excludes it, reads as a document nowhere and as the control
+    /// file it holds; an absent config reads as absent; and a folder at a
+    /// control file's path is a place no control file can be written.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn the_tree_view_reads_a_control_file_the_walk_does_not_enter() {
+        let scratch = Scratch::new("planner-view-control");
+        std::fs::create_dir_all(scratch.join(".norn")).expect("the control folder");
+        std::fs::write(scratch.join(".norn/schema.yaml"), "version: 1\n").expect("a schema");
+        let view =
+            TreeView::open(scratch.root(), &[PathBuf::from(".norn/schema.yaml")]).expect("a vault");
+        let schema = view
+            .normalizer()
+            .normalize(Path::new(".norn/schema.yaml"))
+            .expect("a vault path");
+        assert!(matches!(
+            view.entry(&schema).expect("a readable tree"),
+            Entry::Blocked {
+                barrier: Barrier::Closed,
+                ..
+            }
+        ));
+        let Entry::Document { at, bytes, hash } =
+            view.control_entry(&schema).expect("a readable tree")
+        else {
+            panic!("the schema reads as the control file it is");
+        };
+        assert_eq!(at.as_str(), ".norn/schema.yaml");
+        assert_eq!(&*bytes, b"version: 1\n");
+        assert_eq!(hash, wire_hash(norn_fs::ContentHash::of(b"version: 1\n")));
+        let config = view
+            .normalizer()
+            .normalize(Path::new(".norn/config.toml"))
+            .expect("a vault path");
+        assert!(matches!(
+            view.control_entry(&config).expect("a readable tree"),
+            Entry::Absent { at } if at.as_str() == ".norn/config.toml"
+        ));
+        std::fs::create_dir(scratch.join(".norn/config.toml")).expect("a folder in the way");
+        assert!(matches!(
+            view.control_entry(&config).expect("a readable tree"),
+            Entry::Blocked {
+                barrier: Barrier::Occupied,
+                ..
+            }
+        ));
     }
 
     #[test]

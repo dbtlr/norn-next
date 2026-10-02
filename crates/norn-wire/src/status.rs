@@ -308,6 +308,15 @@ pub enum Advisory {
         /// The link's path.
         path: String,
     },
+    /// The vault declares no schema: no `schema_source` is registered and
+    /// nothing stands at the vault's default schema path, so it is served
+    /// under the empty declaration, which declares nothing. `init` writes a
+    /// starter schema there.
+    #[non_exhaustive]
+    SchemaAbsent {
+        /// The default schema path, vault-relative.
+        path: String,
+    },
 }
 
 impl Advisory {
@@ -325,6 +334,7 @@ impl Advisory {
         match self {
             Advisory::TmpFallbackInUse { gitignored, .. } => !*gitignored,
             Advisory::SymlinkSkipped { .. } => true,
+            Advisory::SchemaAbsent { .. } => true,
         }
     }
 
@@ -340,6 +350,12 @@ impl Advisory {
     /// The symbolic link at `path` was not walked.
     pub fn symlink_skipped(path: impl Into<String>) -> Self {
         Advisory::SymlinkSkipped { path: path.into() }
+    }
+
+    /// Nothing stands at the default schema path `path`, so the vault is
+    /// served under the empty declaration.
+    pub fn schema_absent(path: impl Into<String>) -> Self {
+        Advisory::SchemaAbsent { path: path.into() }
     }
 }
 

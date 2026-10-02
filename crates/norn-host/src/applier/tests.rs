@@ -21,6 +21,7 @@ use crate::planner::view::{TreeView, VaultView};
 use crate::production::{heal_from_zero, shadow_exclusions};
 
 mod cascade;
+mod control;
 mod delete;
 mod differential;
 mod folder;

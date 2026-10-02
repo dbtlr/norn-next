@@ -97,8 +97,13 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     // Planning writes every cascade from the links the vault holds now, so
     // an operation arriving with one is no operation its caller authored: a
     // refusal's refresh hands planning its operations without the cascades
-    // they carried, and nothing else may hand planning one.
-    if let Some(fault) = authored.misplaced_cascades() {
+    // they carried, and nothing else may hand planning one. A plan that
+    // writes a control file changes nothing else (ADR 0032), so one beside a
+    // document operation is refused before anything is read.
+    if let Some(fault) = authored
+        .misplaced_cascades()
+        .or_else(|| authored.control_files_beside_documents())
+    {
         return Err(PlanningFailure::Fault(fault));
     }
     let AuthoredPlan {
@@ -793,6 +798,100 @@ mod tests {
         assert_eq!(
             resolve(authored(operations), root(), &BTreeSet::new(), &vault).map(|_| ()),
             Err(PlanningFailure::Fault(PlanFault::content_cycle(vec![0, 1])))
+        );
+    }
+
+    fn writing_control_file(file: norn_wire::ControlFile, content: &str) -> Operation {
+        Operation::new(OperationKind::write_control_file(file, content))
+    }
+
+    /// **A control-file write resolves to one transition at the path its
+    /// role names**: the schema's `.norn/schema.yaml`, created where nothing
+    /// stands, and the config's `.norn/config.toml`, replaced where it
+    /// stands, each guarded by the state it held.
+    #[test]
+    fn a_control_file_write_resolves_to_one_transition_at_its_role_s_path() {
+        let vault = MemoryVault::with(&[(".norn/config.toml", "[engine.old]\n")]);
+        let resolution = planned(
+            &vault,
+            vec![
+                writing_control_file(norn_wire::ControlFile::Schema, "version: 1\n"),
+                writing_control_file(norn_wire::ControlFile::Config, "[engine.new]\n"),
+            ],
+        );
+        assert!(
+            resolution.unresolved.is_empty(),
+            "{:?}",
+            resolution.unresolved
+        );
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                transition(
+                    ".norn/config.toml",
+                    present("[engine.old]\n"),
+                    present("[engine.new]\n")
+                ),
+                transition(
+                    ".norn/schema.yaml",
+                    FileState::absent(),
+                    present("version: 1\n")
+                ),
+            ]
+        );
+    }
+
+    /// **A control-file write whose content does not read as its role's
+    /// model does not resolve**, saying why: a schema this build cannot read
+    /// and a config that is not TOML are left unresolved, and nothing of
+    /// either is planned.
+    #[test]
+    fn a_control_file_write_whose_content_does_not_read_as_its_role_does_not_resolve() {
+        let vault = MemoryVault::default();
+        for (file, content, role) in [
+            (
+                norn_wire::ControlFile::Schema,
+                "version: 99\n",
+                "vault schema",
+            ),
+            (
+                norn_wire::ControlFile::Schema,
+                "version: [\n",
+                "vault schema",
+            ),
+            (norn_wire::ControlFile::Config, "[engine\n", "vault config"),
+        ] {
+            let operations = vec![writing_control_file(file, content)];
+            let resolution = planned(&vault, operations.clone());
+            assert_eq!(unresolved_positions(&resolution, &operations), vec![0]);
+            let UnresolvedReason::NoLongerResolves { detail, .. } =
+                &resolution.unresolved[0].reason
+            else {
+                panic!(
+                    "{content:?} unresolved as {:?}",
+                    resolution.unresolved[0].reason
+                );
+            };
+            assert!(detail.contains(role), "{content:?}: {detail}");
+            assert!(resolution.plan.transitions.is_empty());
+        }
+    }
+
+    /// **A plan that changes a vault control file changes nothing else**
+    /// (ADR 0032): a control-file write beside a document operation refuses
+    /// the plan as a fault in its shape, naming the control-file write.
+    #[test]
+    fn a_control_file_write_beside_a_document_operation_refuses_the_plan() {
+        let vault = MemoryVault::with(&[("a.md", "A")]);
+        let operations = vec![
+            Operation::new(OperationKind::delete_document(path("a.md"))),
+            writing_control_file(norn_wire::ControlFile::Schema, "version: 1\n"),
+        ];
+        assert_eq!(
+            resolve(authored(operations), root(), &BTreeSet::new(), &vault).map(|_| ()),
+            Err(PlanningFailure::Fault(
+                PlanFault::control_file_beside_documents(vec![1])
+            ))
         );
     }
 

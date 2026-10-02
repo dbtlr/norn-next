@@ -130,6 +130,15 @@ impl ContainerKind {
         ContainerKind::Map,
     ];
 
+    /// The container as the string it is on the wire.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContainerKind::Scalar => "scalar",
+            ContainerKind::Sequence => "sequence",
+            ContainerKind::Map => "map",
+        }
+    }
+
     /// Where this container stands in [`ContainerKind::ALL`].
     const fn position(self) -> usize {
         match self {

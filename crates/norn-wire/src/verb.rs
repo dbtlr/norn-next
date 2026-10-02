@@ -224,6 +224,8 @@ pub enum Verb {
     /// its own form, and
     /// saying of each wikilink left as written why.
     RewriteWikilink,
+    /// Write a starter schema for a registered vault that declares none.
+    Init,
     /// Register a vault under a name.
     VaultRegister,
     /// Stop serving a registered name and remove its registration.
@@ -249,7 +251,7 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 21] = [
+    pub const ALL: [Verb; 22] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
@@ -263,6 +265,7 @@ impl Verb {
         Verb::Move,
         Verb::Delete,
         Verb::RewriteWikilink,
+        Verb::Init,
         Verb::VaultRegister,
         Verb::VaultUnregister,
         Verb::VaultList,
@@ -289,6 +292,7 @@ impl Verb {
             Verb::Move => "move",
             Verb::Delete => "delete",
             Verb::RewriteWikilink => "rewrite_wikilink",
+            Verb::Init => "init",
             Verb::VaultRegister => "vault_register",
             Verb::VaultUnregister => "vault_unregister",
             Verb::VaultList => "vault_list",
@@ -325,6 +329,7 @@ impl Verb {
             | Verb::Move
             | Verb::Delete
             | Verb::RewriteWikilink
+            | Verb::Init
             | Verb::VaultReload => Addressing::Required,
             // No vault address is carried; the request is answered from the
             // serving set and the registry, naming no entry to be held.

@@ -195,6 +195,15 @@ impl Lineage {
                         lineage.at_end.insert(file, None);
                     }
                 }
+                // A control-file write carries the whole of what it writes,
+                // drawing on no file, as a create does.
+                OperationKind::WriteControlFile { .. } => {
+                    if let Some(path) = touches(kind).next()
+                        && let Some(file) = identity(path.as_str())
+                    {
+                        lineage.at_end.insert(file, None);
+                    }
+                }
                 // Planning expands a creation by rule, one for one, into a
                 // `create_document` before anything is ordered
                 // (`super::rule`), which this follows as any create. One

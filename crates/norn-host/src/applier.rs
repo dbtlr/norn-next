@@ -31,7 +31,9 @@
 //! - the changeset — what publication left, committed as one changeset marked
 //!   composed through the heal's own derivation
 //!   ([`crate::production::commit_plan_changeset`]); exactly the landed
-//!   subset when publication stopped part-way.
+//!   subset when publication stopped part-way. A control file a plan writes
+//!   is no document, so the changeset derives nothing for it: the vault takes
+//!   a control file into service by a reload, never through the store.
 //!
 //! **Landed is judged by content, not by author.** A target whose content
 //! already matches its after-state is landed whoever put it there, a
@@ -89,9 +91,10 @@ use norn_wire::{
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
 use crate::derivation::Declared;
+use crate::planner::control::role_at;
 use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
-use crate::production::{commit_plan_changeset, pinned_declaration};
+use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
 use publish::{Progress, Publisher, Stopped};
 pub(crate) use stage::Links;
 use stage::{Stop, Unfit};
@@ -219,7 +222,16 @@ impl Applier<'_> {
         declared: &Declared,
         store: &RefCell<&mut Store>,
     ) -> ApplyOutcome {
-        let changeset = if progress.effects.is_empty() {
+        // A control file is no document, so what a plan writing one left is
+        // no document the changeset derives: the reload that takes it into
+        // service is the host's, never a row of the store.
+        let effects: Vec<PlanEffect> = progress
+            .effects
+            .iter()
+            .filter(|effect| role_at(effect.path.as_str()).is_none())
+            .cloned()
+            .collect();
+        let changeset = if effects.is_empty() {
             ChangesetOutcome::Committed
         } else {
             // Nothing reads the plan's links once a target landed, so the
@@ -230,7 +242,7 @@ impl Applier<'_> {
                 &mut store.borrow_mut(),
                 self.anchor,
                 self.exclusions,
-                &progress.effects,
+                &effects,
                 IncrementProvenance::Composed,
             ) {
                 Ok(_) => ChangesetOutcome::Committed,

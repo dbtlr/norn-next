@@ -25,13 +25,13 @@ use norn_wire::{
     ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath,
     FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath,
     Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
-    IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
-    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
-    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    IllegalOperationId, InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration,
+    LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved,
+    NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
+    Operation, OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem,
+    PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance,
+    Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
     ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
     ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
@@ -1502,6 +1502,13 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
         advertised::<ContainerKind>(None),
         "the containers built here are not the containers the vocabulary holds"
     );
+    for container in container_kinds() {
+        assert_eq!(
+            container.as_str(),
+            flat_string(&container),
+            "a container names itself otherwise than the wire writes it"
+        );
+    }
     assert_eq!(
         path_rule_kinds()
             .iter()
@@ -2493,7 +2500,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds twenty-one verbs, and every one of them is the flat
+/// The registry holds twenty-two verbs, and every one of them is the flat
 /// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2511,6 +2518,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "move",
         "delete",
         "rewrite_wikilink",
+        "init",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2520,7 +2528,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 21);
+    assert_eq!(Verb::ALL.len(), 22);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2608,7 +2616,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 21);
+    assert_eq!(Verb::ALL.len(), 22);
     assert_eq!(
         addressed(Addressing::Required),
         [
@@ -2619,6 +2627,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
             "edit",
             "find",
             "get",
+            "init",
             "move",
             "new",
             "rewrite_wikilink",
@@ -5596,6 +5605,7 @@ fn advisories() -> Vec<Advisory> {
         Advisory::tmp_fallback_in_use("/home/person/notes/.norn/tmp", true),
         Advisory::tmp_fallback_in_use("/home/person/notes/.norn/tmp", false),
         Advisory::symlink_skipped("/home/person/notes/elsewhere"),
+        Advisory::schema_absent(".norn/schema.yaml"),
     ]
 }
 
@@ -5968,6 +5978,14 @@ fn an_advisory_is_an_object_tagged_kind() {
     assert_eq!(
         wire(&Advisory::symlink_skipped("/home/person/notes/elsewhere")),
         r#"{"kind":"symlink_skipped","path":"/home/person/notes/elsewhere"}"#
+    );
+    assert_eq!(
+        wire(&Advisory::schema_absent(".norn/schema.yaml")),
+        r#"{"kind":"schema_absent","path":".norn/schema.yaml"}"#
+    );
+    assert!(
+        Advisory::schema_absent(".norn/schema.yaml").wants_attention(),
+        "a vault declaring no schema is one an operator acts on"
     );
 }
 
@@ -6849,6 +6867,7 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::delete_section(path("notes/a.md"), "Scratch"),
         OperationKind::insert_before_heading(path("notes/a.md"), "Notes", "Intro.\n"),
         OperationKind::insert_after_heading(path("notes/a.md"), "Notes", "First.\n"),
+        OperationKind::write_control_file(ControlFile::Schema, "version: 1\n"),
     ]
 }
 
@@ -7097,6 +7116,7 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"delete_section","fields":{"path":"notes/a.md","heading":"Scratch"}}"#,
         r#"{"kind":"insert_before_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"Intro.\n"}}"#,
         r#"{"kind":"insert_after_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"First.\n"}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema","content":"version: 1\n"}}"#,
     ];
     assert_eq!(operation_kinds().len(), pinned.len());
     for (kind, json) in operation_kinds().into_iter().zip(pinned) {
@@ -7560,13 +7580,17 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
 
     let authored = serde_json::to_value(PlanDocument::operations(an_authored_plan()))
         .expect("an authored plan as JSON");
+    // The authored plan holds one operation of every kind, then a cascading
+    // move, then an operation carrying conditions.
+    let (cascading, conditioned) = (operation_kinds().len(), operation_kinds().len() + 1);
     for pointer in [
-        "",
-        "/operations/18/cascade/0",
-        "/operations/19",
-        "/operations/19/fields",
-        "/operations/19/conditions/0",
+        String::new(),
+        format!("/operations/{cascading}/cascade/0"),
+        format!("/operations/{conditioned}"),
+        format!("/operations/{conditioned}/fields"),
+        format!("/operations/{conditioned}/conditions/0"),
     ] {
+        let pointer = pointer.as_str();
         let json = with_surprise(&authored, pointer);
         assert!(
             serde_json::from_str::<PlanDocument>(&json).is_err(),
@@ -7992,6 +8016,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::unexpanded_rule(vec![3]),
         PlanFault::expanded_target_ordered(vec![2]),
         PlanFault::misplaced_cascade(vec![0]),
+        PlanFault::control_file_beside_documents(vec![1]),
     ]
 }
 
@@ -8814,6 +8839,10 @@ fn applier_decision(operation: &Operation) -> String {
             heading,
             content,
         } => format!("insert {} bytes after {heading} of {path}", content.len()),
+        OperationKind::WriteControlFile { file, content } => match file {
+            ControlFile::Schema => format!("write the schema, {} bytes", content.len()),
+            ControlFile::Config => format!("write the config, {} bytes", content.len()),
+        },
     };
     let observed: Vec<String> = conditions
         .iter()
@@ -9594,6 +9623,48 @@ fn a_cascade_where_planning_writes_none_is_a_fault() {
     );
 }
 
+/// **A plan that changes a vault control file changes nothing else** (ADR
+/// 0032). An authored plan and a resolved plan alike name each control-file
+/// write that stands beside an operation on documents; a plan of control-file
+/// writes alone, and a plan of document operations alone, carry no fault.
+#[test]
+fn a_control_file_write_beside_a_document_operation_is_a_fault() {
+    let schema = || {
+        Operation::new(OperationKind::write_control_file(
+            ControlFile::Schema,
+            "version: 1\n",
+        ))
+    };
+    let config = || Operation::new(OperationKind::write_control_file(ControlFile::Config, ""));
+    let document = || Operation::new(OperationKind::delete_document(path("notes/a.md")));
+    let authored = |operations| AuthoredPlan::new(VaultAddress::name(name("notes")), operations);
+    assert_eq!(
+        authored(vec![schema(), config()]).control_files_beside_documents(),
+        None
+    );
+    assert_eq!(
+        authored(vec![document(), document()]).control_files_beside_documents(),
+        None
+    );
+    assert_eq!(
+        authored(vec![document(), schema(), config()]).control_files_beside_documents(),
+        Some(PlanFault::control_file_beside_documents(vec![1, 2]))
+    );
+
+    let mut resolved = a_bare_resolved_plan();
+    resolved.operations = vec![config()];
+    assert_eq!(resolved.control_files_beside_documents(), None);
+    resolved.operations.insert(0, document());
+    assert_eq!(
+        resolved.control_files_beside_documents(),
+        Some(PlanFault::control_file_beside_documents(vec![1]))
+    );
+    assert_eq!(
+        wire(&PlanFault::control_file_beside_documents(vec![1])),
+        r#"{"kind":"control_file_beside_documents","positions":[1]}"#
+    );
+}
+
 /// **A resolved plan carries no folder move.** Planning expands one into a
 /// document move per document the folder holds, as it expands a `where`
 /// target, so a resolved plan still carrying one names it in the same fault.
@@ -10092,6 +10163,112 @@ fn a_create_by_rule_reads_with_and_without_a_rule() {
             "reading {refused} produced an operation"
         );
     }
+}
+
+/// **A `write_control_file` names its file by role**, `schema` or `config`,
+/// and carries the file's whole content; it names no path, since where each
+/// role lives is the planner's to say, and it reads back exactly the kind that
+/// wrote it. A role the vocabulary does not name, a missing part and a key of
+/// another kind are refused at the read.
+#[test]
+fn a_write_control_file_names_its_file_by_role_and_carries_its_content() {
+    for (file, role) in [
+        (ControlFile::Schema, "schema"),
+        (ControlFile::Config, "config"),
+    ] {
+        let json = format!(
+            r#"{{"kind":"write_control_file","fields":{{"file":"{role}","content":"x = 1\n"}}}}"#
+        );
+        let read: OperationKind = serde_json::from_str(&json).expect("a control-file write");
+        assert_eq!(read, OperationKind::write_control_file(file, "x = 1\n"));
+        assert_eq!(wire(&read), json);
+    }
+    for refused in [
+        r#"{"kind":"write_control_file","fields":{"file":"gitignore","content":""}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema"}}"#,
+        r#"{"kind":"write_control_file","fields":{"content":"version: 1\n"}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":null,"content":""}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema","content":"","path":".norn/schema.yaml"}}"#,
+        r#"{"kind":"create_document","fields":{"path":"a.md","content":"","file":"schema"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(refused).is_err(),
+            "reading {refused} produced an operation"
+        );
+    }
+}
+
+/// **An `init` request names its vault and states its mode**, and nothing
+/// else: there is no default mode, and a key it does not name is refused.
+#[test]
+fn an_init_request_names_its_vault_and_states_its_mode() {
+    let request: InitParams =
+        serde_json::from_str(r#"{"vault":{"by":"name","name":"notes"},"mode":"preview"}"#)
+            .expect("an init request");
+    assert_eq!(
+        request,
+        InitParams::new(VaultAddress::name(name("notes")), ApplyMode::Preview)
+    );
+    round_trip(&request);
+    for refused in [
+        r#"{"vault":{"by":"name","name":"notes"}}"#,
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","force":true}"#,
+        r#"{"mode":"apply"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<InitParams>(refused).is_err(),
+            "{refused} read as an init request"
+        );
+    }
+}
+
+/// **An `init` answers one of three outcomes, each an object tagged
+/// `outcome`**: the starter schema scaffolded — the apply's own report, a
+/// preview's plan or an apply's landing, with the refusal of the reload after
+/// a landing beside it, or `null` — the vault already set up, naming
+/// the schema that stands, or the schema living elsewhere, naming the source
+/// the registration reads it from. Each reads back as itself.
+#[test]
+fn an_init_report_is_one_of_three_outcomes() {
+    let schema = path(".norn/schema.yaml");
+    let source = SchemaSource::new("/home/person/shared/schema.yaml").expect("a schema source");
+    let reports = [
+        InitReport::scaffolded(ApplyReport::previewed(a_bare_resolved_plan(), a_forecast())),
+        InitReport::already_set_up(schema.clone()),
+        InitReport::schema_elsewhere(source.clone()),
+        InitReport::scaffolded_reload_refused(
+            ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()),
+            ErrorEnvelope::new(
+                "the vault config cannot be read",
+                ErrorDetail::reload_failed(ReloadFailure::unsupported()),
+            ),
+        ),
+    ];
+    for report in &reports {
+        round_trip(report);
+    }
+    assert!(
+        wire(&reports[0])
+            .starts_with(r#"{"outcome":"scaffolded","report":{"outcome":"previewed","#)
+    );
+    assert!(
+        wire(&reports[0]).ends_with(r#","reload_refused":null}"#),
+        "{}",
+        wire(&reports[0])
+    );
+    assert!(
+        wire(&reports[3]).contains(r#","reload_refused":{"code":"vault/reload-failed","#),
+        "{}",
+        wire(&reports[3])
+    );
+    assert_eq!(
+        wire(&reports[1]),
+        r#"{"outcome":"already_set_up","schema":".norn/schema.yaml"}"#
+    );
+    assert_eq!(
+        wire(&reports[2]),
+        r#"{"outcome":"schema_elsewhere","source":"/home/person/shared/schema.yaml"}"#
+    );
 }
 
 /// **A `create_by_rule` takes the generic envelope.** It expands one for one

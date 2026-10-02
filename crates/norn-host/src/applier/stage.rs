@@ -22,6 +22,7 @@ use super::schema;
 use super::shape::shape_disagrees;
 use crate::derivation::Declared;
 use crate::planner::compose::Composition;
+use crate::planner::control::role_at;
 use crate::planner::lineage::Lineage;
 use crate::planner::links::{LinkIndex, Target, change_set, entry_key};
 use crate::planner::view::{TreeView, VaultView, wire_hash};
@@ -204,7 +205,9 @@ pub(super) struct Checked {
 /// or a folder move planning did not expand, which stops as
 /// [`PlanFault::UnexpandedTarget`], nor a creation by rule it did not
 /// expand, which stops as [`PlanFault::UnexpandedRule`], nor a cascade on a
-/// kind that does not cascade, which stops as [`PlanFault::MisplacedCascade`];
+/// kind that does not cascade, which stops as [`PlanFault::MisplacedCascade`],
+/// nor does a control-file write stand beside a document operation, which
+/// stops as [`PlanFault::ControlFileBesideDocuments`];
 /// before any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
 /// the vault gives it, at a place the vault reads documents at; the plan
@@ -235,12 +238,14 @@ pub(super) fn check(
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
     // before it could pass unread; so is a creation by rule, which names no
-    // path until planning expands it, and a cascade on a kind that does not
-    // cascade, which no planning wrote.
+    // path until planning expands it, a cascade on a kind that does not
+    // cascade, which no planning wrote, and a control-file write beside a
+    // document operation, which no planning resolves.
     if let Some(fault) = plan
         .unexpanded_targets()
         .or_else(|| plan.unexpanded_rules())
         .or_else(|| plan.misplaced_cascades())
+        .or_else(|| plan.control_files_beside_documents())
     {
         return Err(Unfit::Invalid(fault));
     }
@@ -584,6 +589,12 @@ impl Judging<'_> {
     /// The schema violations any composed result a target at its
     /// before-state would publish introduces.
     ///
+    /// **A control file is not judged under the schema** it may itself be:
+    /// it is no document, and what its content must be — what its role's
+    /// parser reads — is composition's to hold it to
+    /// ([`crate::planner::control::unreadable_as_role`]), at planning and when
+    /// the applier recomposes it.
+    ///
     /// **Each result is judged against the document its content came from**:
     /// its own before-state where it is edited in place, the moved document's
     /// where a move carried it, and nothing where an operation wrote it.
@@ -607,6 +618,9 @@ impl Judging<'_> {
                 continue;
             }
             let path = &self.plan.transitions[written].path;
+            if role_at(path.as_str()).is_some() {
+                continue;
+            }
             let file = identity(self.normalizer, path.as_str());
             let source = file
                 .as_ref()
