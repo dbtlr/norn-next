@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use norn_config::ConfigDirs;
-use norn_config::registry::{Entry, VaultRoot};
+use norn_config::registry::{Entry, SchemaSource, VaultRoot};
 use norn_fixtures::Profile;
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
@@ -285,14 +285,20 @@ impl Vault {
     /// real-watcher lease for as long as it serves. More than one name over the
     /// one root is a registry in conflict, which the host parks.
     pub fn host_under(&self, names: impl IntoIterator<Item = VaultName>) -> ServingHost {
-        self.serve(names, |ops| ops)
+        self.serve(names, None, |ops| ops)
+    }
+
+    /// A host serving this vault under a registration that reads its schema
+    /// from `source` rather than the vault's default.
+    pub fn host_reading_schema_from(&self, source: SchemaSource) -> ServingHost {
+        self.serve([self.name.clone()], Some(source), |ops| ops)
     }
 
     /// A host serving this vault that composes the semantic engines, and the
     /// engines it composes.
     pub fn host_with_semantic(&self) -> (ServingHost, Arc<SemanticEngines>) {
         let engines = SemanticEngines::new(self.dirs());
-        let host = self.serve([self.name.clone()], |ops| {
+        let host = self.serve([self.name.clone()], None, |ops| {
             ops.with_semantic(Arc::clone(&engines))
         });
         (host, engines)
@@ -303,17 +309,21 @@ impl Vault {
         self.dirs().derived_dir(&self.name).join("semantic.sqlite3")
     }
 
-    /// A host serving this vault's root under each of `names`, over the
-    /// production ops `compose` makes of the plain ones.
+    /// A host serving this vault's root under each of `names`, reading its
+    /// schema from `schema_source` where one is given, over the production
+    /// ops `compose` makes of the plain ones.
     fn serve(
         &self,
         names: impl IntoIterator<Item = VaultName>,
+        schema_source: Option<SchemaSource>,
         compose: impl FnOnce(ProductionEntryOps) -> ProductionEntryOps,
     ) -> ServingHost {
         let root = VaultRoot::new(&self.vault).expect("vault root");
-        let registry = RegistryRead::from_entries(
-            names.into_iter().map(|name| Entry::new(name, root.clone())),
-        );
+        let registry = RegistryRead::from_entries(names.into_iter().map(|name| {
+            let mut entry = Entry::new(name, root.clone());
+            entry.schema_source = schema_source.clone();
+            entry
+        }));
         let policy = ProductionPolicy::new(128, 128).expect("production policy");
         // Taken before the host exists, because the watcher is installed by
         // the attach the host runs and there is no later moment that is still

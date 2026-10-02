@@ -2406,6 +2406,17 @@ rewritten or left broken) and `Host::rewrite_wikilink` (every wikilink naming on
 document, or every broken one naming one place, retargeted to another) each compile
 their request to an authored plan and answer through `Host::apply`, with the same `PendingApply`
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
+`Host::init` writes a starter schema for a registered vault that declares none, through
+the same seam: a registration naming a `schema_source`, inside the vault or out, is answered
+`schema_elsewhere` with the source and nothing planned; otherwise the starter — `version: 1`
+and one comment per field the vault's documents carry, with how many carry it and the
+shapes its values take, read through the describe and count builders in process on one
+snapshot, so two previews write the same bytes — is previewed as one `write_control_file`,
+and a plan that would replace a schema standing there is answered `already_set_up` instead.
+An apply sends the previewed resolved plan, so a schema another writer created since refuses
+it by create exclusivity, and once it lands `init` reloads the vault as `vault reload`
+does, since the watcher's control-file facts are discarded and init is the caller's explicit
+act on the schema. The starter declares nothing, so no finding moves.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they

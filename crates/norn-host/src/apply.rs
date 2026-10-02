@@ -631,7 +631,7 @@ where
     /// The ground is the one the entry's coverage recorded, read under the
     /// gate; whether its root still stands there is asked of the filesystem
     /// after the gate is given back, as an apply's planning asks it.
-    fn preview(&self, name: &VaultName, plan: PlanDocument) -> ApplyAnswer {
+    pub(crate) fn preview(&self, name: &VaultName, plan: PlanDocument) -> ApplyAnswer {
         let hold = self
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
