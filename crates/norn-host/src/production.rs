@@ -7909,6 +7909,44 @@ mod tests {
             );
         }
 
+        /// **A served schema deleted reads as a reload pending until a reload
+        /// activates it, and then the vault declares nothing and says so**:
+        /// before the reload the status reports no absent schema and its
+        /// drift a reload pending, as an edit down to empty bytes would; once
+        /// the reload runs, the vault stands `Ready` under the empty
+        /// declaration, reporting the default schema absent, its controls
+        /// current.
+        #[test]
+        fn a_deleted_served_schema_is_a_reload_pending_until_a_reload_activates_it() {
+            let f = Fixture::new("status-schema-deleted");
+            let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+            fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+
+            let status = status_of(&host, &name);
+            assert_eq!(status.drift, norn_wire::Drift::reload_pending());
+            assert!(status.advisories.is_empty(), "{:?}", status.advisories);
+
+            host.reload(&name)
+                .expect("the reload activates the deletion");
+            let status = status_of(&host, &name);
+            assert_eq!(
+                status.advisories,
+                [norn_wire::Advisory::schema_absent(".norn/schema.yaml")]
+            );
+            assert_eq!(status.drift, norn_wire::Drift::current());
+            assert_eq!(
+                status.published,
+                norn_wire::Published::state(norn_wire::TrustState::Ready)
+            );
+            assert_eq!(
+                host.inspect(&name)
+                    .unwrap()
+                    .active_fingerprints
+                    .map(|active| active.schema),
+                Some(norn_fs::ContentHash::of(b""))
+            );
+        }
+
         /// **A vault holding links reports each one its attach's walk passed
         /// over**, and a roll-up names the vault for them.
         #[cfg(unix)]

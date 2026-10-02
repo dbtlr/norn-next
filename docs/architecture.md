@@ -2217,14 +2217,24 @@ shares with every empty schema file, since the model is a pure function of the b
 holders of one fingerprint hold one model. The vault attaches, derives and serves under it,
 and the entry carries a `schema_absent` advisory naming the default path, which `vault
 status` reports and a roll-up — `doctor`'s registry half included — names the vault for.
-`init` is what writes a starter schema there. A registered `schema_source` that names
-nothing is a read refusal like any unreadable schema: the operator named that file. The
-watcher covers an in-vault schema whose folder does not stand yet at its place below the
+`init` is what writes a starter schema there. **A served default schema deleted while
+attached is the same case once it is activated.** Until a reload, a recovery or a re-attach
+reads it, the deletion reads as a reload pending, as an edit of the schema down to empty
+bytes does: the authored schema is the empty file, which is not the declaration served. The
+leg that next reads it pins the empty declaration, the deleted schema's findings go, and the
+`schema_absent` advisory is reported. Whether the store ever pinned a schema does not enter
+into it, since a store must equal one derived from zero over the same files ([ADR
+0026](decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md)). A registered
+`schema_source` that names nothing is a read refusal like any unreadable schema: the
+operator named that file. The watcher covers an in-vault schema whose folder does not stand yet at its place below the
 root, so a schema written there later is a control-file fact like any other.
 
 Attach and explicit per-vault reload are the two activation boundaries. A reload reads and
 validates both files before it changes Lane 1 state. A read or parse error refuses the reload,
-retains a typed file-and-stage error, and leaves a `Ready` vault `Ready`. A schema whose
+retains a typed file-and-stage error, and leaves a `Ready` vault `Ready`. An absent default
+schema is no read error: it reads as the empty schema, so a reload after the default schema
+is deleted pins the empty declaration, while a missing explicit `schema_source` stays a read
+error. A schema whose
 declaration this build cannot read — a later grammar version, a key the grammar does not
 hold — is one of those errors: the vault is already serving a declaration it can read, and
 replacing it with one nothing reads would take that away. A successful candidate clears that
@@ -2245,7 +2255,10 @@ untrusted reading the unwind publishes. A turn that unwinds after handing the re
 leaves the answer to the turn it handed on to. A reload is answered with no code only by a
 host shutting down or whose job channel is gone.
 
-**An attach has no such declaration to fall back on, and does not refuse.** It acquires
+**An attach has no such declaration to fall back on, and does not refuse.** This concerns a
+declaration the build cannot read — a schema that is unreadable or does not parse as one.
+An absent default schema is no such declaration: it is the empty declaration, which an
+attach derives under, as the paragraph on a vault that declares no schema says. It acquires
 the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and
 the entry publishes `Untrusted` naming the cause — so the vault is observable and the
 status seam can explain it, where a refused attach would hide it and a derivation under an
@@ -2421,12 +2434,15 @@ answers `already_set_up` rather than a fresh plan that would replace that schema
 write lands, `init` reloads the vault as `vault reload` does, since the watcher's
 control-file facts are discarded and init is the caller's explicit act on the schema; a
 reload that refuses is answered beside the landing, so the caller still learns the write
-landed. The starter declares nothing, so no finding moves. Init costs every page of the
-describe builder's observed-field facets plus one count per observed key, on one held
-snapshot, and then the reload's re-pin: the starter's fingerprint is not the empty schema's,
-so the schema-keyed rows are discarded and the whole vault is walked again. Unlike the other
-write verbs, `Host::init` answers synchronously rather than with a `PendingApply`, and a vault
-whose standing schema cannot be read answers the entry's untrusted refusal.
+landed. The starter declares nothing, so the findings after the reload are those the vault
+holds under the empty declaration; where a served schema was deleted while attached, init's
+reload is what activates that deletion, and the deleted schema's findings go. Init costs
+every page of the describe builder's observed-field facets plus one count per observed key,
+on one held snapshot, and then the reload's re-pin: the starter's fingerprint is not the
+empty schema's, so the schema-keyed rows are discarded and the whole vault is walked again.
+Unlike the other write verbs, `Host::init` answers synchronously rather than with a
+`PendingApply`, and a vault whose standing schema cannot be read answers the entry's
+untrusted refusal.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they

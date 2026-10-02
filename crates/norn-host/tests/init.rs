@@ -397,3 +397,49 @@ fn an_init_whose_reload_refuses_answers_the_landed_write_beside_the_refusal() {
         "the starter did not land"
     );
 }
+
+/// **Where a served schema was deleted while attached, init's reload
+/// activates the deletion**: the vault served a schema reporting an
+/// undeclared tag, the schema is deleted, and once init lands its starter
+/// and reloads, the vault's findings are exactly those a vault of the same
+/// documents attached from zero under the empty declaration holds — the
+/// deleted schema's finding gone, the broken link's standing.
+#[test]
+fn an_init_after_a_served_schema_was_deleted_leaves_the_findings_of_the_empty_declaration() {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        ("a.md", "---\ntags: [nope]\n---\nA\n"),
+        ("e.md", "links [[missing]]\n"),
+    ];
+    let declaring = "version: 1\ntags:\n  declared: [ok]\n  undeclared: report\n";
+    let mut files = vec![(SCHEMA, declaring)];
+    files.extend_from_slice(DOCUMENTS);
+    let after = {
+        let (_sandbox, vault) = a_vault("host-init-schema-deleted", &files);
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        assert!(
+            findings(&host, &vault).contains(&(FindingKind::UndeclaredTag, "a.md".to_string())),
+            "the declaring schema reported no undeclared tag"
+        );
+        std::fs::remove_file(vault.path().join(SCHEMA)).expect("the schema is deleted");
+        let InitReport::Scaffolded { reload_refused, .. } = host
+            .init(&params(&vault, ApplyMode::Apply))
+            .expect("an init applies")
+        else {
+            panic!("an init over a deleted schema answered another outcome");
+        };
+        assert_eq!(reload_refused, None);
+        findings(&host, &vault)
+    };
+    let from_zero = {
+        let (_sandbox, vault) = a_vault("host-init-schema-deleted-from-zero", DOCUMENTS);
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        findings(&host, &vault)
+    };
+    assert_eq!(after, from_zero);
+    assert!(
+        after.contains(&(FindingKind::Broken, "e.md".to_string())),
+        "{after:?}"
+    );
+}

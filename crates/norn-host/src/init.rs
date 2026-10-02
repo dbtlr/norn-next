@@ -28,7 +28,10 @@
 //! two activation boundaries (`docs/architecture.md`). Init is the caller's
 //! explicit act on the schema, so once its apply lands it takes the boundary
 //! `vault reload` takes, in the same call, and answers once the vault serves
-//! under the starter. The starter declares nothing, so no finding moves.
+//! under the starter. The starter declares nothing, so the findings after it
+//! are those the vault holds under the empty declaration. Where a served
+//! schema was deleted while attached, init's reload is what activates that
+//! deletion, and the deleted schema's findings go.
 //!
 //! **The starter is a pure function of the vault's observed field universe**
 //! ([`starter_schema`]), read through the Layer 3 builders in process on one
