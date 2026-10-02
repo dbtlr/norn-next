@@ -79,42 +79,34 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::address::IllegalPath;
 use crate::finding_row::{CandidateHead, FindingRow};
 use crate::target::Anchor;
+use crate::vault_path::{PathProblem, leaf_extension};
 
 /// What a document path is called in a refusal that names one.
 const DOCUMENT_PATH: &str = "document path";
 
-/// What the grammar here wants: something rather than nothing.
-const EMPTY: &str = "a document path names something rather than nothing";
-
-/// What the grammar here wants: a path under the vault root rather than one
-/// that starts at a filesystem root.
-const ROOTED: &str = "a document path is relative to the vault root";
-
 /// Where a document stands in its vault, as the store spells it.
 ///
-/// On the wire a path is the string itself: `"notes/a.md"`. It is relative to
-/// the vault root and it is not empty; what else a path may hold is the
-/// store's own grammar, checked where documents are derived rather than here.
+/// On the wire a path is the string itself: `"notes/a.md"`. It is a path the
+/// store can hold a document at, by the one grammar [`PathProblem::of_document`]
+/// writes, so a path that crossed the seam is a path every reader of one
+/// admits: relative to the vault root and not empty, segments separated by
+/// `/` and none empty, `.` or `..`, no backslash or control character, and a
+/// file name that is not `.` or `..` once its extension is dropped. A
+/// spelling that only names a document after it is tidied — `./a.md`,
+/// `a//b.md` — is refused rather than tidied, so the path a caller sends is
+/// the path that is written.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct DocumentPath(String);
 
 impl DocumentPath {
     /// The path `text` spells, or the reason it spells none.
-    ///
-    /// Two rules, and they are the two the schema advertises: a path names
-    /// something, and it is relative to the vault root. A path starting at a
-    /// filesystem root names a place no vault holds a document at, so the
-    /// sentence the schema publishes is true of what this reader accepts.
     pub fn new(text: impl AsRef<str>) -> Result<Self, IllegalPath> {
         let text = text.as_ref();
-        if text.is_empty() {
-            return Err(IllegalPath::new(text, DOCUMENT_PATH, EMPTY));
+        match PathProblem::of_document(text) {
+            Some(problem) => Err(IllegalPath::new(text, DOCUMENT_PATH, problem.message())),
+            None => Ok(DocumentPath(text.to_string())),
         }
-        if text.starts_with('/') {
-            return Err(IllegalPath::new(text, DOCUMENT_PATH, ROOTED));
-        }
-        Ok(DocumentPath(text.to_string()))
     }
 
     /// The path as the string it is.
@@ -158,14 +150,13 @@ impl JsonSchema for DocumentPath {
         Cow::Borrowed("norn_wire::DocumentPath")
     }
 
-    /// A string with a floor of one character. There is no `pattern`: the two
-    /// rules this reader keeps are stated in the description, and the rest of
-    /// what a document path may hold is the store's grammar, which a regular
-    /// expression here would make a second definition of.
+    /// A string with a floor of one character. There is no `pattern`: the
+    /// grammar is stated in the description, and a regular expression here
+    /// would make a second definition of it.
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "string",
-            "description": "Where a document stands in its vault, relative to the vault root. Not empty, and never starting with a slash.",
+            "description": "Where a document stands in its vault, relative to the vault root. Not empty, and never starting with a slash. Segments are separated by `/`, and none is empty, `.` or `..`; no backslash or control character; and the file name is not `.` or `..` once its extension is dropped.",
             "minLength": 1,
         })
     }
@@ -584,19 +575,6 @@ impl LinkAddressKind {
             LinkAddressKind::Attachment => "attachment",
             LinkAddressKind::Document => "document",
         }
-    }
-}
-
-/// The extension the last segment of `path` carries: what follows the last
-/// dot inside that segment. A dot leading the segment starts a name rather
-/// than an extension, so `.md` carries none. The one reading of a leaf's
-/// extension that a link's address and a `move` request's ends are judged
-/// by.
-pub(crate) fn leaf_extension(path: &str) -> Option<&str> {
-    let leaf = path.rsplit(SEPARATOR).next().unwrap_or(path);
-    match leaf.rfind('.') {
-        Some(dot) if dot > 0 => Some(&leaf[dot + 1..]),
-        _ => None,
     }
 }
 

@@ -318,10 +318,13 @@ fn folder_moves<V: VaultView>(
                 "`{to}` names no folder a document can be moved to"
             )));
         };
-        let Ok(destination) = DocumentPath::new(destination) else {
-            return Ok(Err(format!(
-                "`{to}` names no folder a document can be moved to"
-            )));
+        let destination = match DocumentPath::new(destination) {
+            Ok(destination) => destination,
+            Err(refusal) => {
+                return Ok(Err(format!(
+                    "`{to}` names no folder a document can be moved to: {refusal}"
+                )));
+            }
         };
         let mut moved = operation.clone();
         moved.kind = OperationKind::move_document(document, destination);
@@ -995,6 +998,32 @@ mod tests {
                 vec![moving("notes/a.md", &format!("{to}/a.md"))],
                 "{to}"
             );
+        }
+    }
+
+    /// **A folder path keeps only its floor, so a destination can name a
+    /// folder no document path stands beneath**: a backslash or a control
+    /// character in it is refused by the document-path grammar each document
+    /// would land at, and the move is left unresolved saying why.
+    #[test]
+    fn a_folder_move_to_a_folder_no_document_can_stand_in_is_unresolved() {
+        let vault = MemoryVault::with(&[("notes/a.md", "a\n")]);
+        for (to, words) in [
+            ("a\\b", "carries a backslash"),
+            ("a\u{1}b", "control character"),
+        ] {
+            let resolution = planned(
+                &vault,
+                vec![moving_folder("notes", to)],
+                &Answering::paths(&[]),
+            );
+            let detail = left_in_words(&resolution);
+            assert!(
+                detail.contains("names no folder a document can be moved to")
+                    && detail.contains(words),
+                "{to:?}: {detail}"
+            );
+            assert!(resolution.plan.transitions.is_empty(), "{to:?}");
         }
     }
 

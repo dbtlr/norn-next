@@ -57,10 +57,14 @@ use crate::address::IllegalPath;
 use crate::document::DocumentPath;
 use crate::plan::document::LinkKey;
 use crate::plan::outcome::SchemaViolation;
+use crate::vault_path::PathProblem;
 
 /// A path relative to the vault root under a name and a description of its
-/// own: the two rules a document path keeps — it names something, and it
-/// does not start at a filesystem root — read through on every door.
+/// own, read through on every door by the floor every vault-relative path
+/// keeps ([`PathProblem::of_place`]): it names something, and it does not
+/// start at a filesystem root. A folder or file path names a place on disk at
+/// the spelling the tree lists it, which the document grammar does not
+/// govern, so it keeps the floor alone.
 macro_rules! vault_relative_path {
     (
         $(#[$doc:meta])*
@@ -75,21 +79,10 @@ macro_rules! vault_relative_path {
             /// The path `text` spells, or the reason it spells none.
             pub fn new(text: impl AsRef<str>) -> Result<Self, IllegalPath> {
                 let text = text.as_ref();
-                if text.is_empty() {
-                    return Err(IllegalPath::new(
-                        text,
-                        $what,
-                        concat!("a ", $what, " names something rather than nothing"),
-                    ));
+                match PathProblem::of_place(text) {
+                    Some(problem) => Err(IllegalPath::new(text, $what, problem.message())),
+                    None => Ok($name(text.to_string())),
                 }
-                if text.starts_with('/') {
-                    return Err(IllegalPath::new(
-                        text,
-                        $what,
-                        concat!("a ", $what, " is relative to the vault root"),
-                    ));
-                }
-                Ok($name(text.to_string()))
             }
 
             /// The path as the string it is.

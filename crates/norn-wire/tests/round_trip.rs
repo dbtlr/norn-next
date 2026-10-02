@@ -29,21 +29,22 @@ use norn_wire::{
     LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
     NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
-    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
-    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
-    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
-    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause, WriteTarget,
+    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
+    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress,
+    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
+    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
+    is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -3833,51 +3834,134 @@ fn every_document_shape_survives_the_round_trip() {
     round_trip(&DocumentRow::new(path("notes/a.md")));
 }
 
-/// A path is the string itself, and the read path is the grammar: the one
-/// string that names nothing has no representation on either side of the seam.
-/// What else a path may hold is the store's grammar and is not re-checked
-/// here, so a path a vault could not have is carried rather than refused.
+/// A path is the string itself, and the read path is the grammar.
 #[test]
-fn a_document_path_is_the_string_it_renders_as_and_is_not_empty() {
+fn a_document_path_is_the_string_it_renders_as() {
     assert_eq!(wire(&path("notes/a.md")), r#""notes/a.md""#);
     assert_eq!(path("notes/a.md").as_str(), "notes/a.md");
     assert_eq!(path("notes/a.md").to_string(), "notes/a.md");
-    assert!(
-        serde_json::from_str::<DocumentPath>(r#""""#).is_err(),
-        "the empty string was read as a document path"
-    );
-    let refusal = DocumentPath::new("").expect_err("an empty document path");
-    assert_eq!(refusal.what(), "document path");
-    for text in ["../a.md", "a b.md"] {
-        let json = format!("\"{text}\"");
+    for text in [
+        "a b.md",
+        "été.md",
+        ".gitignore",
+        "notes/.hidden.md",
+        "v1.2.md",
+        "a/..b/c.md",
+    ] {
+        assert_eq!(path(text).as_str(), text);
+        round_trip(&path(text));
+    }
+}
+
+/// **A document path is one the store can hold, and nothing else.** Each
+/// spelling the grammar refuses is refused where a path is built and where
+/// one is read alike, with the grammar's own reason, so a request cannot
+/// carry a path the vault could not hold a document at.
+#[test]
+fn a_document_path_refuses_what_no_vault_holds_a_document_at() {
+    for (text, problem) in [
+        ("", PathProblem::Empty),
+        ("/notes/a.md", PathProblem::Absolute),
+        ("/", PathProblem::Absolute),
+        ("notes\\a.md", PathProblem::Backslash),
+        ("a\u{1}.md", PathProblem::ControlCharacter),
+        ("a\0.md", PathProblem::ControlCharacter),
+        ("a\u{7f}.md", PathProblem::ControlCharacter),
+        ("a//b.md", PathProblem::EmptySegment),
+        ("a/", PathProblem::EmptySegment),
+        ("./a.md", PathProblem::DotSegment),
+        ("a/../b.md", PathProblem::DotSegment),
+        ("..", PathProblem::DotSegment),
+        ("..md", PathProblem::DotStem),
+        ("notes/...md", PathProblem::DotStem),
+    ] {
+        assert_eq!(PathProblem::of_document(text), Some(problem), "{text:?}");
+        let refusal = DocumentPath::new(text).expect_err(text);
+        assert_eq!(refusal.what(), "document path");
+        assert_eq!(refusal.problem(), problem.message(), "{text:?}");
         assert!(
-            serde_json::from_str::<DocumentPath>(&json).is_ok(),
-            "`{text}` was refused by a grammar this type does not keep"
+            serde_json::from_str::<DocumentPath>(&wire(&text)).is_err(),
+            "{text:?} was read back as a document path"
+        );
+    }
+    // A request and a resolved plan read their paths through the same
+    // grammar, so neither carries one the store would refuse.
+    let request = wire(&DeleteParams::new(
+        notes(),
+        ApplyMode::Apply,
+        path("notes/b.md"),
+    ));
+    let plan = wire(&a_bare_resolved_plan());
+    for text in ["./notes/b.md", "notes//b.md", "notes\\b.md", "notes/..md"] {
+        let refused = request.replace(r#""notes/b.md""#, &wire(&text));
+        assert!(
+            serde_json::from_str::<DeleteParams>(&refused).is_err(),
+            "{refused} read as a delete request"
+        );
+        let refused = plan.replace(r#""notes/b.md""#, &wire(&text));
+        assert_ne!(refused, plan, "the plan names `notes/b.md`");
+        assert!(
+            serde_json::from_str::<ResolvedPlan>(&refused).is_err(),
+            "{refused} read as a resolved plan"
         );
     }
 }
 
-/// A document path is relative to the vault root, which is what the schema
-/// publishes, so a path that starts at a filesystem root is refused where one
-/// is built and where one is read alike.
+/// A folder holds no leaf, so a folder name is judged by the segment rules
+/// alone: a name a document could not take is still a folder's.
 #[test]
-fn a_rooted_document_path_is_no_document_path() {
-    let refusal = DocumentPath::new("/etc/passwd").expect_err("a rooted document path");
-    assert_eq!(refusal.what(), "document path");
-    assert_eq!(
-        refusal.problem(),
-        "a document path is relative to the vault root"
-    );
-    for text in ["/etc/passwd", "/", "/notes/a.md"] {
-        assert!(
-            DocumentPath::new(text).is_err(),
-            "`{text}` was built as a document path"
+fn a_folder_name_is_judged_by_its_segments_alone() {
+    for text in ["..b", "notes/...md", "a/..md"] {
+        assert_eq!(PathProblem::of_segments(text), None, "{text:?}");
+        assert_eq!(
+            PathProblem::of_document(text),
+            Some(PathProblem::DotStem),
+            "{text:?}"
         );
-        let json = format!("\"{text}\"");
-        assert!(
-            serde_json::from_str::<DocumentPath>(&json).is_err(),
-            "`{text}` was read back as a document path"
-        );
+    }
+    for (text, problem) in [
+        ("", PathProblem::Empty),
+        ("/a", PathProblem::Absolute),
+        ("a\\b", PathProblem::Backslash),
+        ("a//b", PathProblem::EmptySegment),
+        ("a/./b", PathProblem::DotSegment),
+    ] {
+        assert_eq!(PathProblem::of_segments(text), Some(problem), "{text:?}");
+    }
+}
+
+/// A leaf's extension is what follows its last dot inside the name: a dot
+/// leading the name opens it rather than an extension.
+#[test]
+fn a_leaf_stem_drops_the_extension_a_leading_dot_does_not_open() {
+    for (leaf, stem) in [
+        ("a.md", "a"),
+        ("a.tar.gz", "a.tar"),
+        ("a", "a"),
+        (".gitignore", ".gitignore"),
+        ("..md", "."),
+        ("...md", ".."),
+        ("a.", "a"),
+    ] {
+        assert_eq!(leaf_stem(leaf), stem, "{leaf:?}");
+    }
+}
+
+/// A character the grammar refuses and a segment it refuses are the two
+/// halves a refused spelling is made of, which is what renders one.
+#[test]
+fn a_refused_character_and_segment_are_the_grammars_own() {
+    for character in ['\\', '\0', '\u{1}', '\n', '\u{7f}', '\u{85}'] {
+        assert!(is_refused_character(character), "{character:?}");
+    }
+    for character in ['a', '/', '.', ' ', 'é', '\u{fffd}'] {
+        assert!(!is_refused_character(character), "{character:?}");
+    }
+    for segment in ["", ".", ".."] {
+        assert!(is_refused_segment(segment), "{segment:?}");
+    }
+    for segment in ["...", ".a", "a"] {
+        assert!(!is_refused_segment(segment), "{segment:?}");
     }
 }
 
@@ -8137,6 +8221,11 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
             .what(),
         "folder path"
     );
+    // A folder path names a place on disk, which the document grammar does
+    // not govern: a trailing slash, or a name a document could not take.
+    for text in ["notes/", "a\\b", "..b"] {
+        assert_eq!(folder(text).as_str(), text);
+    }
 }
 
 /// **A forecast carries only what the plan beside it does not.** Each
@@ -8217,6 +8306,11 @@ fn a_forecast_advises_on_links_by_their_key_and_names_files_left_behind() {
         );
     }
     assert_eq!(FilePath::new("/a").expect_err("rooted").what(), "file path");
+    // A file path names a file the vault does not read as a document, at the
+    // spelling the tree lists it, which the document grammar does not govern.
+    for text in ["a\\b.png", "a\u{1}.png", "..md"] {
+        assert_eq!(file(text).as_str(), text);
+    }
 }
 
 /// A forecast is an answer, so it drops a field it does not know where a plan

@@ -355,15 +355,8 @@ fn made<V: VaultView>(
 
 /// The document path `target` fills to under `values`, or why it fills to
 /// none, in words.
-///
-/// The fill judges the path by the store's document-path rules, which admit
-/// only a relative, non-empty path, and the wire's grammar refuses nothing
-/// else, so the wire never refuses what the fill answers: its refusal arm is
-/// a backstop no target reaches, kept so a grammar that drifts apart leaves
-/// the creation unresolved in words rather than panicking.
 fn filled_path(target: &Target, values: &TemplateValues) -> Result<DocumentPath, String> {
-    let filled = target.fill(values).map_err(|error| error.to_string())?;
-    DocumentPath::new(filled.as_str()).map_err(|refusal| format!("{filled:?} {refusal}"))
+    target.fill(values).map_err(|error| error.to_string())
 }
 
 /// The text of the document `rule` — the inbox where it is `None` — makes for

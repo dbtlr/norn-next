@@ -85,6 +85,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use norn_wire::{PathProblem, is_refused_character, is_refused_segment, leaf_stem};
+
 use crate::error::StoreError;
 use crate::facts::StoredPathOrder;
 
@@ -114,35 +116,38 @@ pub struct DocumentPath {
     depth: usize,
 }
 
+impl From<&norn_wire::DocumentPath> for DocumentPath {
+    /// A wire document path as the store names it. Infallible: the wire reads
+    /// a document path through the grammar [`DocumentPath::new`] refuses by,
+    /// so a path that crossed the seam is one the store holds.
+    fn from(path: &norn_wire::DocumentPath) -> Self {
+        DocumentPath::new(path.as_str())
+            .expect("the wire and the store read one document-path grammar")
+    }
+}
+
 impl DocumentPath {
     /// Read `path` as a vault-root-relative document path.
     ///
-    /// The refusals are `segment_problem`'s, plus the one a document has that
-    /// a bare directory does not: a leaf whose extension-stripped stem is `.` or
-    /// `..`, which names no ambiguity class. Each of them would produce a suffix
-    /// key that addresses the wrong documents — or, for a control byte, a key
-    /// whose bytes no reader can print back — so refusing is what keeps the
-    /// index honest about what it holds.
+    /// The refusals are the wire's document-path grammar
+    /// ([`PathProblem::of_document`]), the one every reader of a document
+    /// path keeps. Each of them would produce a suffix key that addresses the
+    /// wrong documents — or, for a control character, a key whose bytes no
+    /// reader can print back — so refusing is what keeps the index honest
+    /// about what it holds.
     pub fn new(path: &str) -> Result<Self, StoreError> {
-        let refuse = |problem| {
-            Err(StoreError::Path {
+        if let Some(problem) = PathProblem::of_document(path) {
+            return Err(StoreError::Path {
                 path: path.to_string(),
-                problem,
-            })
-        };
-        if let Some(problem) = segment_problem(path) {
-            return refuse(problem);
+                problem: problem.message(),
+            });
         }
         let segments: Vec<&str> = path.split(SEPARATOR).collect();
 
         let (leaf, ancestors) = segments
             .split_last()
             .expect("a non-empty path splits into at least one segment");
-        let stem = leaf_stem(leaf);
-        if stem == "." || stem == ".." {
-            return refuse("its leaf reduces to a `.` or `..` stem, which names no class");
-        }
-        let stem = stem.to_string();
+        let stem = leaf_stem(leaf).to_string();
 
         let mut suffix_key = String::with_capacity(path.len() + 1);
         suffix_key.push_str(&stem);
@@ -404,8 +409,9 @@ pub(crate) fn spell_path_key(path: &str, key: SuffixKey) -> String {
 /// same segment-aligned prefix range `DocumentPath::descendant_bounds` opens,
 /// taken from a spelling that is a directory and nothing more.
 ///
-/// The refusals are `segment_problem`'s and stop there, because a stem is a
-/// document's property and a directory has none. A spelling those refusals
+/// The refusals are the wire's segment rules ([`PathProblem::of_segments`])
+/// and stop there, because a stem is a document's property and a directory
+/// has none. A spelling those refusals
 /// reject poisons every path beneath it — no descendant of a segment carrying a
 /// backslash or a control byte is storable either — so refusing here is
 /// refusing an address that would range over nothing.
@@ -417,10 +423,10 @@ pub struct DirectoryPrefix {
 impl DirectoryPrefix {
     /// Read `path` as a vault-root-relative directory.
     pub fn new(path: &str) -> Result<Self, StoreError> {
-        match segment_problem(path) {
+        match PathProblem::of_segments(path) {
             Some(problem) => Err(StoreError::Path {
                 path: path.to_string(),
-                problem,
+                problem: problem.message(),
             }),
             None => Ok(DirectoryPrefix {
                 path: path.to_string(),
@@ -879,49 +885,6 @@ pub(crate) fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
-/// The refusals every vault-root-relative path shares, whatever its leaf names.
-///
-/// An empty path, an absolute one, a Windows separator, an empty segment (which
-/// is a doubled or trailing separator), a `.` or `..` segment, and a NUL or
-/// control byte. A document path adds its leaf's reduction to these; a
-/// directory prefix has no leaf to reduce, so these are all of them.
-fn segment_problem(path: &str) -> Option<&'static str> {
-    if path.is_empty() {
-        return Some("it is empty");
-    }
-    if path.starts_with(SEPARATOR) {
-        return Some("it is absolute, and a vault path is vault-root-relative");
-    }
-    if path.contains('\\') {
-        return Some("it carries a backslash; segments are separated by `/`");
-    }
-    if let Some(problem) = control_byte_problem(path) {
-        return Some(problem);
-    }
-    path.split(SEPARATOR).find_map(|segment| match segment {
-        "" => Some("it carries an empty segment"),
-        "." | ".." => Some("it carries a `.` or `..` segment"),
-        _ => None,
-    })
-}
-
-/// A leaf segment with its final extension removed.
-///
-/// The dot has to be inside the name for the extension to be one: `.gitignore`
-/// is a name, not an empty stem with an extension, and reducing it to nothing
-/// would put every dotfile in the same ambiguity class.
-///
-/// This is the one rule for what a leaf's extension is — [`suffix_probe`] and
-/// [`DocumentPath::new`] apply it to key a document by its stem, and the
-/// store's `link` module applies the same rule to a rooted wikilink's leaf,
-/// so a dotted name reduces the same way whichever reads it.
-pub(crate) fn leaf_stem(leaf: &str) -> &str {
-    match leaf.rfind('.') {
-        Some(dot) if dot > 0 => &leaf[..dot],
-        _ => leaf,
-    }
-}
-
 /// One segment as a document-path segment: every character the grammar refuses
 /// replaced, and a segment the grammar refuses whole marked ahead of.
 ///
@@ -933,14 +896,14 @@ fn rendered_segment(segment: &str) -> String {
     let mut rendered: String = segment
         .chars()
         .map(|character| {
-            if character == '\\' || character.is_control() {
+            if is_refused_character(character) {
                 RENDERED_MARKER
             } else {
                 character
             }
         })
         .collect();
-    if rendered.is_empty() || rendered == "." || rendered == ".." {
+    if is_refused_segment(&rendered) {
         rendered.insert(0, RENDERED_MARKER);
     }
     rendered

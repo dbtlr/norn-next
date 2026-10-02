@@ -380,8 +380,7 @@ pub enum PlanFault {
     },
     /// A resolved plan's transitions are not what its operations do from its
     /// before-states: a transition is missing, added, repeated or changed, a
-    /// target is at a place the vault reads no documents at or the store
-    /// cannot name, an operation does not act or is recorded out of the order
+    /// target is at a place the vault reads no documents at, an operation does not act or is recorded out of the order
     /// its requirements allow, an author condition its operations carry is
     /// not one the plan checks, or a delete is recorded acting where its link
     /// choice leaves it unresolved — forbidding the links naming its document

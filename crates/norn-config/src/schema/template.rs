@@ -41,7 +41,7 @@ use std::fmt;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
-use super::creation::CreationProblem;
+use norn_wire::PathProblem;
 
 /// A template's text, read into the literal runs and tokens it is made of.
 ///
@@ -422,8 +422,8 @@ pub enum FillError {
         /// The path the target fills to, with `{{seq}}` as written where the
         /// target is numbered.
         path: String,
-        /// What the path breaks.
-        problem: CreationProblem,
+        /// What the document-path grammar refuses in it.
+        problem: PathProblem,
     },
 }
 
@@ -468,7 +468,10 @@ impl fmt::Display for FillError {
                 )
             }
             FillError::NotADocumentPath { path, problem } => {
-                write!(formatter, "the target fills to {path:?}, which {problem}")
+                write!(
+                    formatter,
+                    "the target fills to {path:?}, which is no document path: {problem}"
+                )
             }
         }
     }

@@ -6,10 +6,10 @@
 use std::collections::BTreeMap;
 
 use norn_config::schema::{
-    CreationProblem, FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateValues,
-    UnsafeValue, VaultSchema,
+    FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateValues, UnsafeValue,
+    VaultSchema,
 };
-use norn_wire::{AuthoredValue, ValueMap};
+use norn_wire::{AuthoredValue, DocumentPath, PathProblem, ValueMap};
 
 /// 2026-10-01 19:00:05, two hours east of UTC.
 fn evening() -> LocalTimestamp {
@@ -204,6 +204,7 @@ fn filled_target(target: &str, values: &TemplateValues) -> Result<String, FillEr
         .expect("the task rule")
         .target()
         .fill(values)
+        .map(|path| path.as_str().to_string())
 }
 
 #[test]
@@ -309,7 +310,7 @@ fn a_target_that_fills_to_no_document_path_is_refused() {
             refused,
             FillError::NotADocumentPath {
                 path: path.to_string(),
-                problem: CreationProblem::ControlCharacter,
+                problem: PathProblem::ControlCharacter,
             },
             "{target}"
         );
@@ -365,7 +366,10 @@ fn a_numbered_target_names_the_slot_its_numbers_fill() {
     assert_eq!(slot.suffix(), "-x.md");
     assert_eq!(slot.path(7), "tasks/norn/2026-10-01-7-x.md");
     assert_eq!(
-        target.fill(&values.clone().with_seq(7)).as_deref(),
+        target
+            .fill(&values.clone().with_seq(7))
+            .as_ref()
+            .map(DocumentPath::as_str),
         Ok(slot.path(7).as_str())
     );
 }
@@ -527,7 +531,10 @@ fn one_set_of_values_fills_to_one_instant_every_time() {
     let first = fill();
     assert_eq!(first, fill());
     let (target, defaults, body) = first;
-    assert_eq!(target.as_deref(), Ok("t/2026-10-01t19-00-05-02-00-1.md"));
+    assert_eq!(
+        target.as_ref().map(DocumentPath::as_str),
+        Ok("t/2026-10-01t19-00-05-02-00-1.md")
+    );
     assert_eq!(
         defaults.expect("the defaults fill").entries(),
         [(

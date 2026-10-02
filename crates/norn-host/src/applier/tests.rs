@@ -794,45 +794,6 @@ fn a_target_drawing_on_another_publishes_before_its_source_is_replaced() {
     assert_eq!(fixture.read("a.md").as_deref(), Some("N\n"));
 }
 
-/// The kernel keeps a staged path as it was given, a leading `./` included,
-/// and a document path's grammar admits one: a plan naming a target so, as a
-/// hand-edited plan can, is invalid as a plan that does not describe its
-/// operations, never drift, and names the target as spelled. So nothing is
-/// published, recorded or derived at a second spelling of one file.
-#[test]
-#[allow(clippy::disallowed_methods)] // The kernel itself: the case pins how it keeps a staged path's spelling.
-fn a_target_spelled_with_a_dot_component_is_invalid() {
-    let mut fixture = Fixture::new(&[("a.md", "a\n")]);
-    let staged = norn_fs::stage(
-        &fixture.vault,
-        fixture.root,
-        Path::new("./a.md"),
-        norn_fs::Transition::Remove {
-            before: norn_fs::ContentHash::of(b"a\n"),
-        },
-        &fixture.shadows,
-    )
-    .expect("the removal stages");
-    let norn_fs::Staging::Staged(staged) = staged else {
-        panic!("the removal is waiting");
-    };
-    assert_eq!(staged.path(), Path::new("./a.md"));
-    norn_fs::discard(&fixture.vault, staged, &fixture.shadows);
-
-    let mut plan = fixture.plan(vec![creating("new.md", "n\n")]);
-    plan.transitions[0].path = path("./new.md");
-    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("./new.md")]);
-    assert_eq!(fixture.tree(), vec!["a.md"]);
-
-    // A removal spelled so is refused the same way, and not as drift: the
-    // document stands, holding its before-state.
-    let mut plan = fixture.plan(vec![deleting("a.md")]);
-    plan.transitions[0].path = path("./a.md");
-    plan.operations[0] = deleting("./a.md");
-    assert_eq!(fixture.refuses_disagreeing(plan), vec![path("./a.md")]);
-    assert_eq!(fixture.read("a.md").as_deref(), Some("a\n"));
-}
-
 /// **Mark invariance.** The same changes committed marked composed and marked
 /// derived read the same derivation counters: the mark changes no statement
 /// the store runs.
@@ -1610,28 +1571,6 @@ fn a_plan_recorded_out_of_its_requirements_order_is_refused() {
         fixture.refuses_disagreeing(plan),
         vec![path("a.md"), path("b.md"), path("c.md")]
     );
-}
-
-/// A target at a path the store cannot name — a leaf whose stem is `.`, a
-/// name carrying a backslash — is refused before anything is staged. A
-/// removal there was published and then, with no path to record it at,
-/// panicked the apply.
-#[test]
-fn a_target_the_store_cannot_name_is_refused() {
-    for at in ["..md", "x\\y.md"] {
-        let mut fixture = Fixture::new(&[("a.md", "a\n")]);
-        fixture.write(at, "gone\n");
-        let plan = fixture.by_hand(
-            vec![deleting(at)],
-            vec![norn_wire::Transition::new(
-                path(at),
-                present("gone\n"),
-                norn_wire::FileState::absent(),
-            )],
-        );
-        assert_eq!(fixture.refuses_disagreeing(plan), vec![path(at)], "{at}");
-        assert_eq!(fixture.read(at).as_deref(), Some("gone\n"), "{at}");
-    }
 }
 
 /// A written document's schema is judged against the document its content
@@ -2476,41 +2415,6 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         fixture.shadows_left()
     );
     assert!(fixture.recorded.calls.borrow().is_empty());
-}
-
-/// **A heal owed over a path the vault's spelling refuses heals the vault
-/// whole.** A plan's paths are wire paths, and one no vault path normalizes
-/// to names nothing the heal could read again; leaving it out would leave
-/// the store believing whatever it held there, so the heal widens to the
-/// whole vault, as it does where the root cannot be walked.
-#[test]
-fn a_heal_over_a_path_no_vault_path_normalizes_to_heals_the_vault_whole() {
-    let path = DocumentPath::new("../outside.md").expect("a wire path");
-    let plan = ResolvedPlan::new(
-        VaultAddress::name(VaultName::new("notes").expect("a legal vault name")),
-        RootIdentity::from_device_and_inode(1, 1),
-        Vec::new(),
-        vec![norn_wire::Transition::new(
-            path,
-            norn_wire::FileState::absent(),
-            norn_wire::FileState::present(norn_wire::ContentHash::from_sha256([7; 32])),
-        )],
-        Vec::new(),
-    );
-    let outcome = ApplyOutcome::Applied(super::Applied {
-        plan,
-        changeset: norn_wire::ChangesetOutcome::Healing,
-        targets: Vec::new(),
-        folders_made: Vec::new(),
-        folders_removed: Vec::new(),
-        forced: Vec::new(),
-    });
-    let normalizer = norn_fs::PathNormalizer::for_sensitivity(norn_fs::CaseSensitivity::Sensitive);
-
-    assert_eq!(
-        outcome.heal(&normalizer),
-        norn_fs::Batch::rescan(norn_fs::RescanScope::Vault)
-    );
 }
 
 impl Fixture {
