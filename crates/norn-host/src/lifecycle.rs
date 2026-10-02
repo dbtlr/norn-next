@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2493,14 +2493,79 @@ fn schedule_queued_apply<A: SnapshotSource>(
     )
 }
 
+/// What one hold made of the damage a read's store met: the refusal the read
+/// is answered with, and whether the hold scheduled the rebuild.
+struct DamageVerdict {
+    refusal: ReadRefusal,
+    scheduled: bool,
+}
+
+/// Judge the damage a read that ran on `ran_on` met, under one hold of its
+/// entry's gate, and publish it where the verdict is the entry's.
+///
+/// **The verdict is the entry's where the entry still reads the store the
+/// read ran on**: its reader is `ran_on`, it owes no rebuild already, and no
+/// park stands over it. The read and the hold that judges can be apart: a read
+/// that found the gate held leaves this for the next hold, and that hold
+/// judges the entry as it finds it, so an entry that has moved to another
+/// handle, or rebuilt, or parked since the read ran publishes nothing. The
+/// refusal is the read's answer only where the read took this hold itself.
+fn judge_damage_a_read_met<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+    ran_on: &Weak<A::Reader>,
+    detail: String,
+) -> DamageVerdict {
+    let refused = |refusal| DamageVerdict {
+        refusal,
+        scheduled: false,
+    };
+    let published = state.published_demand();
+    let on_that_handle = state
+        .reader
+        .as_ref()
+        .is_some_and(|standing| std::ptr::eq(Arc::as_ptr(standing), ran_on.as_ptr()));
+    let serving = published == Demand::State(TrustState::Ready);
+    if !on_that_handle {
+        return refused(if serving {
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this entry's reads moved to another handle while this read ran",
+            ))
+        } else {
+            ReadRefusal::NotServing(published)
+        });
+    }
+    if state.rebuild_required || state.stands_parked() {
+        return refused(ReadRefusal::NotServing(published));
+    }
+    if state.damage_met_under_a_claim.is_none() {
+        state.damage_met_under_a_claim = Some(detail);
+    }
+    if publish_damage_a_read_met(state, name).is_none() {
+        return refused(if serving {
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while other work held this entry; the \
+                 entry rebuilds it when that work ends",
+            ))
+        } else {
+            ReadRefusal::NotServing(published)
+        });
+    }
+    DamageVerdict {
+        refusal: ReadRefusal::NotServing(state.published_demand()),
+        scheduled: true,
+    }
+}
+
 /// Publish the damage a read's store met, and schedule the rebuild that
 /// resolves it, where nothing holds the entry: no claim, no scheduled job and
 /// no release in flight, over coverage the entry holds, in service and
 /// unparked.
 ///
 /// **This is where read-met damage is published over a free entry.** A read
-/// over a free entry reaches it at once through
-/// [`Host::withdraw_for_read_damage`]; a read under a held claim leaves the
+/// over a free entry reaches it through [`judge_damage_a_read_met`], under
+/// the hold [`Host::withdraw_for_read_damage`] takes or the next one where
+/// that read found the gate held; a read under a held claim leaves the
 /// verdict in [`EntryState::damage_met_under_a_claim`], and the end of that
 /// claim reaches it here, unless a hand-on published it first through
 /// [`hand_on_carried_damage`]. Where something still holds the entry the verdict stays for the
@@ -5668,6 +5733,16 @@ impl<O: EntryOps> Host<O> {
     /// gate it takes. The publication and the refusal come out of that one
     /// hold, so the read answers the demand it published.
     ///
+    /// **It never waits for the gate.** It runs after the read's query, outside
+    /// the read's bound, so it tries the gate once. Where another holder has
+    /// it, the verdict is left for the next hold, which judges it afresh
+    /// against the entry as that hold finds it — the handle, an owed rebuild, a
+    /// park and a claim all re-read — and publishes it there; a rebuild that
+    /// hold schedules is sent by the dispatcher tick's retry. The read is then
+    /// refused as reader-unavailable, because it read nothing under the gate
+    /// that could answer it otherwise. Its dispatch of a rebuild it scheduled
+    /// tries the gate once in the same way.
+    ///
     /// **The verdict is the entry's where the entry still reads the store the
     /// read ran on**: its reader is the handle this read ran on, it owes no
     /// rebuild already, and no park stands over it. Every other entry
@@ -5695,46 +5770,29 @@ impl<O: EntryOps> Host<O> {
         detail: String,
     ) -> ReadRefusal {
         let entry = &hold.entry;
-        let name = entry.name();
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let published = state.published_demand();
-        let on_this_handle = state
-            .reader
-            .as_ref()
-            .is_some_and(|standing| Arc::ptr_eq(standing, &hold.reader));
-        let serving = published == Demand::State(TrustState::Ready);
-        if !on_this_handle {
-            return if serving {
-                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                    "this entry's reads moved to another handle while this read ran",
-                ))
-            } else {
-                ReadRefusal::NotServing(published)
-            };
-        }
-        if state.rebuild_required || state.stands_parked() {
-            return ReadRefusal::NotServing(published);
-        }
-        if state.damage_met_under_a_claim.is_none() {
-            state.damage_met_under_a_claim = Some(detail);
-        }
-        if publish_damage_a_read_met(&mut state, name).is_none() {
-            return if serving {
-                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                    "the store found its derived data damaged while other work held this \
-                     entry; the entry rebuilds it when that work ends",
-                ))
-            } else {
-                ReadRefusal::NotServing(published)
-            };
-        }
-        let published = state.published_demand();
+        // The handle the read ran on, held weakly: a verdict left for a later
+        // hold names the handle without keeping it open.
+        let ran_on = Arc::downgrade(&hold.reader);
+        let Some(state) = entry.gate.lock_until(Instant::now()) else {
+            let name = entry.name().clone();
+            entry.gate.run_under_the_next_hold(move |state| {
+                judge_damage_a_read_met(state, &name, &ran_on, detail);
+            });
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while another hold had this entry; \
+                 the entry judges it under its next hold",
+            ));
+        };
+        let mut state = state.expect("entry gate poisoned");
+        let verdict = judge_damage_a_read_met(&mut state, entry.name(), &ran_on, detail);
         drop(state);
-        // The dispatch's one failure is the worker pool being gone, which is
-        // the host coming down; the published demand answers the read either
-        // way.
-        let _ = dispatch_pending(&self.shared, entry);
-        ReadRefusal::NotServing(published)
+        if verdict.scheduled {
+            // The dispatch's one failure is the worker pool being gone, which
+            // is the host coming down; the published demand answers the read
+            // either way.
+            let _ = dispatch_pending_where_free(&self.shared, entry);
+        }
+        verdict.refusal
     }
 
     /// What this host's reads have cost: how many were served, what they ran
@@ -22299,6 +22357,62 @@ mod tests {
         );
 
         retry_pending_dispatches(&host.shared);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read that meets damage while its gate is held leaves the verdict
+    /// to the next hold.** Another holder keeps the gate far past the read's
+    /// bound. The read is refused as reader-unavailable at once rather than
+    /// once the holder lets go, since it read nothing under the gate; the next
+    /// hold publishes the damage and schedules the rebuild, and the
+    /// dispatcher's retry sends it.
+    #[test]
+    fn a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::from_millis(300));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let held = GateHeldElsewhere::take(&entry);
+        let started = Instant::now();
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        let waited = started.elapsed();
+        drop(held);
+        drop(hold);
+        assert!(
+            waited < WITHIN_A_READS_BOUND,
+            "a read that met damage waited {waited:?} for a held gate"
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read that met damage under a held gate was refused as {refusal:?}"
+        );
+
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the store is damaged")
+            )),
+            "the next hold published another state than the damage the read met"
+        );
+        assert!(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .is_held(),
+            "the next hold scheduled no rebuild"
+        );
+        retry_pending_dispatches(&host.shared);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
