@@ -72,6 +72,14 @@ pub enum RegistryProblem {
         /// ascending and each named once.
         aliases: NameSet,
     },
+    /// More than one registration uses one schema file, so a schema write for
+    /// one of them rewrites the others'.
+    #[non_exhaustive]
+    SharedSchema {
+        /// Every registered name that uses the file, at least two of them,
+        /// ascending and each named once.
+        aliases: NameSet,
+    },
     /// A registration's root is there and could not be read.
     #[non_exhaustive]
     RootUnreadable {
@@ -96,6 +104,12 @@ impl RegistryProblem {
     /// root can be spelled with, so there is nothing left for this to refuse.
     pub fn duplicate_root(aliases: NameSet) -> Self {
         RegistryProblem::DuplicateRoot { aliases }
+    }
+
+    /// The registrations `aliases` all use one schema file. The floor is the
+    /// set's.
+    pub fn shared_schema(aliases: NameSet) -> Self {
+        RegistryProblem::SharedSchema { aliases }
     }
 
     /// The root of `name` could not be read, for `detail`.
@@ -178,6 +192,8 @@ impl RegistrySanity {
             return false;
         };
         problems.iter().any(|problem| match problem {
+            // A shared schema parks nothing, so no attention reason is its.
+            RegistryProblem::SharedSchema { .. } => false,
             RegistryProblem::DuplicateRoot { aliases } => {
                 *code == ReasonCode::HostDuplicateRoot && aliases.names().contains(name)
             }
