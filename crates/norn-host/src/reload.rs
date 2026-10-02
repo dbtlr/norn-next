@@ -289,12 +289,59 @@ impl From<AuthoredDrift> for norn_wire::Drift {
 /// declaration it already has, while an attach has no such declaration to fall
 /// back on and publishes the cause over live coverage rather than hiding the
 /// vault behind a refusal.
+///
+/// **An absent default schema is the empty schema.** A registration naming no
+/// `schema_source` reads the vault's own `.norn/schema.yaml`, and where nothing
+/// stands there the candidate's schema is the empty file: the declaration that
+/// declares nothing, at the fingerprint of no bytes, which every holder of an
+/// empty schema shares, since the model is a function of the bytes alone. That
+/// the file is absent is carried beside it ([`ReloadCandidate::schema_absent`]),
+/// for a status and `doctor` to report. A configured `schema_source` that names
+/// nothing stays a read refusal: the operator named that file.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ReloadCandidate {
     schema_bytes: Vec<u8>,
     config: VaultConfig,
     fingerprints: ActiveFingerprints,
     undeclarable: Option<String>,
+    schema_absent: bool,
+}
+
+/// The schema a candidate is read from: its bytes and their fingerprint, and
+/// whether they are the empty file an absent default schema reads as.
+struct SchemaRead {
+    bytes: Vec<u8>,
+    fingerprint: ContentHash,
+    absent: bool,
+}
+
+impl SchemaRead {
+    /// Read the schema `registration` names, from the root `covered_root`
+    /// covers: the configured source, which must stand, or the vault's own
+    /// default, which reads as the empty file where nothing stands.
+    fn of(registration: &Registration, covered_root: &Path) -> Result<Self, ReloadError> {
+        let (anchor, name) = schema_anchor_at(registration, covered_root)?;
+        let read = if registration.schema_source.is_some() {
+            Some(norn_fs::read_and_hash(&anchor, &name).map_err(ReloadError::SchemaRead)?)
+        } else {
+            norn_fs::read_if_present_and_hash(&anchor, &name).map_err(ReloadError::SchemaRead)?
+        };
+        Ok(match read {
+            Some(read) => {
+                let (bytes, fingerprint) = read.into_parts();
+                SchemaRead {
+                    bytes,
+                    fingerprint,
+                    absent: false,
+                }
+            }
+            None => SchemaRead {
+                bytes: Vec::new(),
+                fingerprint: ContentHash::of(b""),
+                absent: true,
+            },
+        })
+    }
 }
 
 impl ReloadCandidate {
@@ -302,13 +349,11 @@ impl ReloadCandidate {
         registration: &Registration,
         covered_root: &Path,
     ) -> Result<ActiveFingerprints, ReloadError> {
-        let (schema_anchor, schema_name) = schema_anchor_at(registration, covered_root)?;
-        let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
-            .map_err(ReloadError::SchemaRead)?;
+        let schema = SchemaRead::of(registration, covered_root)?;
         let config =
             norn_fs::read_if_present_and_hash(covered_root, Path::new(IN_VAULT_CONFIG_PATH))
                 .map_err(ReloadError::ConfigRead)?;
-        Ok(fingerprints(&schema, config.as_ref()))
+        Ok(fingerprints(schema.fingerprint, config.as_ref()))
     }
 
     #[cfg(test)]
@@ -321,14 +366,12 @@ impl ReloadCandidate {
         registration: &Registration,
         covered_root: &Path,
     ) -> Result<Self, ReloadError> {
-        let (schema_anchor, schema_name) = schema_anchor_at(registration, covered_root)?;
-        let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
-            .map_err(ReloadError::SchemaRead)?;
+        let schema = SchemaRead::of(registration, covered_root)?;
         // The schema is read into its content model here and nowhere else on
         // this path, so every caller reads one declaration out of one set of
         // bytes. What it means for that reading to fail is the caller's to
         // decide, which is why it is carried rather than raised.
-        let undeclarable = VaultSchema::parse(schema.bytes())
+        let undeclarable = VaultSchema::parse(&schema.bytes)
             .err()
             .map(|error| error.to_string());
 
@@ -337,14 +380,20 @@ impl ReloadCandidate {
                 .map_err(ReloadError::ConfigRead)?;
         let parsed = VaultConfig::parse(config.as_ref().map(norn_fs::ReadAndHash::bytes))
             .map_err(ReloadError::ConfigParse)?;
-        let fingerprints = fingerprints(&schema, config.as_ref());
-        let (schema_bytes, _) = schema.into_parts();
+        let fingerprints = fingerprints(schema.fingerprint, config.as_ref());
         Ok(Self {
-            schema_bytes,
+            schema_bytes: schema.bytes,
             config: parsed,
             fingerprints,
             undeclarable,
+            schema_absent: schema.absent,
         })
+    }
+
+    /// Whether the candidate's schema is the empty file the vault's absent
+    /// default schema reads as.
+    pub(crate) fn schema_absent(&self) -> bool {
+        self.schema_absent
     }
 
     /// Why this build cannot act on the candidate's declaration, in words, and
@@ -380,12 +429,9 @@ fn schema_anchor_at(
     schema_anchor_from_source(source.as_path())
 }
 
-fn fingerprints(
-    schema: &norn_fs::ReadAndHash,
-    config: Option<&norn_fs::ReadAndHash>,
-) -> ActiveFingerprints {
+fn fingerprints(schema: ContentHash, config: Option<&norn_fs::ReadAndHash>) -> ActiveFingerprints {
     ActiveFingerprints {
-        schema: schema.content_hash(),
+        schema,
         config: config.map_or(ConfigFingerprint::Missing, |read| {
             ConfigFingerprint::File(read.content_hash())
         }),

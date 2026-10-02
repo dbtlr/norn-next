@@ -2610,7 +2610,7 @@ fn the_status_readings_advertise_their_tags() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<Advisory>(), "kind")),
-        sorted(["tmp_fallback_in_use", "symlink_skipped"])
+        sorted(["tmp_fallback_in_use", "symlink_skipped", "schema_absent"])
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<Attention>(), "attention")),

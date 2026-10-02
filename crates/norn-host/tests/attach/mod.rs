@@ -11,8 +11,11 @@
 //! reading differs between two runs by the subject and never by the corpus.
 //!
 //! A generated tree carries no vault schema, because a schema is a vault's own
-//! declaration rather than part of the corpus a generator draws. Attachment
-//! pins one, so [`Vault::generate`] writes the minimal schema beside the tree.
+//! declaration rather than part of the corpus a generator draws. A vault with
+//! none attaches under the empty declaration and carries an advisory that it
+//! declares nothing, so [`Vault::generate`] writes the minimal schema beside
+//! the tree: every suite here then attaches a vault that declares one, and
+//! reads no advisory it did not arrange.
 //!
 //! Each binary that compiles this module uses part of it — the child harnesses
 //! adopt a tree the parent generated rather than generating one — so an unused

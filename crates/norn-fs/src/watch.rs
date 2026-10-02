@@ -970,7 +970,7 @@ fn establish(
     let root_identity = path_identity(&root)
         .map_err(|refusal| WatchError::Backend(refusal.to_string()))?
         .ok_or_else(|| WatchError::CoverageLost(root.clone()))?;
-    let schema_source = canonical_parent_path(schema_source)?;
+    let schema_source = canonical_schema_path(&registered_root, &root, schema_source)?;
     let normalizer =
         PathNormalizer::detect(&root).map_err(|error| WatchError::Backend(error.to_string()))?;
     let schema = schema_location(&root, &schema_source, &normalizer)?;
@@ -1394,6 +1394,27 @@ fn canonical_parent_path(path: &Path) -> Result<PathBuf, WatchError> {
         WatchError::Backend(format!("cannot resolve schema source parent: {error}"))
     })?;
     Ok(parent.join(name))
+}
+
+/// The schema source in the canonical spelling the watcher classifies by.
+///
+/// **An in-vault schema need not stand yet.** A vault that declares no schema
+/// is watched over its default schema's path, whose folder may not exist
+/// until the schema is written; its parent then cannot be resolved, and the
+/// path is spelled under the canonical root by its place below the registered
+/// one, which is all an in-vault schema's classification reads. A schema
+/// outside the vault is resolved as before: its parent must stand.
+fn canonical_schema_path(
+    registered_root: &Path,
+    root: &Path,
+    schema_source: &Path,
+) -> Result<PathBuf, WatchError> {
+    canonical_parent_path(schema_source).or_else(|refused| {
+        schema_source
+            .strip_prefix(registered_root)
+            .map(|relative| root.join(relative))
+            .map_err(|_| refused)
+    })
 }
 
 fn backend(error: notify::Error) -> WatchError {

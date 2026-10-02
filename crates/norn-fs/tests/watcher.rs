@@ -376,6 +376,26 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
     );
 }
 
+/// **An in-vault schema whose folder does not stand yet is covered**: a vault
+/// that declares no schema is watched over its default schema's path, and the
+/// schema written there later is reported as a change to that schema.
+#[test]
+fn an_in_vault_schema_whose_folder_does_not_stand_yet_is_covered_once_written() {
+    let scratch = Scratch::new("absent-schema-folder");
+    let schema = scratch.vault().join(".norn/schema.yaml");
+    let mut collector = Collector::start(&scratch.vault(), &schema);
+
+    std::fs::create_dir_all(schema.parent().expect("a parent")).expect("the schema folder");
+    std::fs::write(&schema, b"version: 1\n").expect("the schema");
+    collector.wait_for("the written schema to be reported", |seen| {
+        if seen.schema_dirty || seen.covers(Path::new(".norn/schema.yaml")) {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
+}
+
 /// A registered root can be a symbolic-link spelling of the directory the
 /// watcher covers. Retargeting that spelling ends the coverage even though the
 /// original target and its watcher still stand.

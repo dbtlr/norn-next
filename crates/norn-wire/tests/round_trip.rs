@@ -5596,6 +5596,7 @@ fn advisories() -> Vec<Advisory> {
         Advisory::tmp_fallback_in_use("/home/person/notes/.norn/tmp", true),
         Advisory::tmp_fallback_in_use("/home/person/notes/.norn/tmp", false),
         Advisory::symlink_skipped("/home/person/notes/elsewhere"),
+        Advisory::schema_absent(".norn/schema.yaml"),
     ]
 }
 
@@ -5968,6 +5969,14 @@ fn an_advisory_is_an_object_tagged_kind() {
     assert_eq!(
         wire(&Advisory::symlink_skipped("/home/person/notes/elsewhere")),
         r#"{"kind":"symlink_skipped","path":"/home/person/notes/elsewhere"}"#
+    );
+    assert_eq!(
+        wire(&Advisory::schema_absent(".norn/schema.yaml")),
+        r#"{"kind":"schema_absent","path":".norn/schema.yaml"}"#
+    );
+    assert!(
+        Advisory::schema_absent(".norn/schema.yaml").wants_attention(),
+        "a vault declaring no schema is one an operator acts on"
     );
 }
 
