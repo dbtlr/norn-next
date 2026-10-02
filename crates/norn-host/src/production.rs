@@ -15364,6 +15364,147 @@ mod tests {
         );
     }
 
+    /// Production ops over which another writer writes the vault schema just
+    /// as an apply's leg begins: after `init` previewed its starter over an
+    /// absent schema and admitted the apply, and before the apply reads its
+    /// targets. Every leg but the apply is the production one, unchanged.
+    struct SchemaWrittenBeforeApply {
+        inner: ProductionEntryOps,
+        schema: PathBuf,
+        theirs: &'static str,
+    }
+
+    impl EntryOps for SchemaWrittenBeforeApply {
+        type Attachment = ProductionAttachment;
+        fn attach(
+            &self,
+            registration: &Registration,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(registration, progress)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+        fn reload(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ReloadJudgment, crate::EntryReloadFailure> {
+            self.inner.reload(name, attachment, progress)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment)
+        }
+        fn count_leg_mint(&self, statements: u64) {
+            self.inner.count_leg_mint(statements);
+        }
+        fn active_content_model(&self, attachment: &Self::Attachment) -> Arc<ContentModel> {
+            self.inner.active_content_model(attachment)
+        }
+        fn plan_ground(&self, attachment: &Self::Attachment) -> Option<PlanGround> {
+            self.inner.plan_ground(attachment)
+        }
+        fn apply(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            plan: PlanDocument,
+            progress: &ApplyProgress,
+            reporter: &ProgressReporter<Self::Attachment>,
+        ) -> Result<ApplyEnd, JobFailure> {
+            fs::write(&self.schema, self.theirs).unwrap();
+            self.inner.apply(name, attachment, plan, progress, reporter)
+        }
+    }
+
+    /// **A schema another writer creates between init's preview and its apply
+    /// is never replaced: init answers the vault already set up.** `init` is
+    /// sent to apply over a vault that declares no schema; it previews its
+    /// starter over the absence, and the schema appears as the apply's leg
+    /// begins. The apply init sends is the resolved plan it previewed, whose
+    /// create the schema now standing refuses, and init answers that refusal
+    /// as the schema standing — never with the fresh plan that would replace
+    /// it, and never by planning its operations afresh over it.
+    #[cfg(unix)]
+    #[test]
+    fn an_init_whose_schema_another_writer_creates_mid_run_is_already_set_up() {
+        let f = Fixture::new("host-init-schema-mid-run");
+        fs::remove_dir_all(f.vault().join(".norn")).unwrap();
+        fs::write(f.vault().join("a.md"), "---\nstatus: draft\n---\nA\n").unwrap();
+        let schema = f.vault().join(".norn/schema.yaml");
+        let theirs = "version: 1\n# theirs\n";
+        fs::create_dir_all(f.vault().join(".norn")).unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            SchemaWrittenBeforeApply {
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+                schema: schema.clone(),
+                theirs,
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+                read_settle_bound: crate::READ_SETTLE_BOUND,
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let answered = host.init(&norn_wire::InitParams::new(
+            norn_wire::VaultAddress::name(name.clone()),
+            norn_wire::ApplyMode::Apply,
+        ));
+
+        assert_eq!(
+            fs::read_to_string(&schema).unwrap(),
+            theirs,
+            "init replaced the schema another writer created: {answered:?}"
+        );
+        assert_eq!(
+            answered,
+            Ok(norn_wire::InitReport::already_set_up(
+                norn_wire::DocumentPath::new(".norn/schema.yaml").unwrap()
+            ))
+        );
+    }
+
     /// **An apply that outlasts the own-write ledger, with another writer's
     /// edit landing during it, ends in a correct store with that edit
     /// derived.** The apply does not extend the ledger's lifetime: its

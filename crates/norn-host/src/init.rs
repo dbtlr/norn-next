@@ -13,12 +13,15 @@
 //! neither rests on the starter building and a re-run pays no describe or
 //! count.
 //!
-//! **An apply writes what its preview planned, or nothing.** An init sent to
-//! apply plans the starter as its preview does, then sends the resolved plan,
-//! not its operations, to the applier: the plan's before-state is the absence
-//! planning read, so a schema another writer creates in between refuses the
-//! apply by create exclusivity — answered with a fresh plan, as any drift is —
-//! rather than being replaced.
+//! **An apply plans the starter afresh and sends its own resolved plan.** An
+//! init sent to apply takes no preview from its caller: within the one call it
+//! plans the starter as a preview does, then sends that resolved plan, not its
+//! operations, to the applier. The plan's before-state is the absence planning
+//! read, so a schema another writer creates in between refuses the apply by
+//! create exclusivity, and init answers the vault already set up — never the
+//! refusal's fresh plan, which would replace that schema. A writer that left
+//! exactly the starter's bytes leaves the create landed, reported found, as
+//! any target already at its after-state is.
 //!
 //! **The vault is reloaded under what landed.** The watcher's control-file
 //! facts are discarded by design, and attach and an explicit reload are the
@@ -40,8 +43,9 @@ use std::path::Path;
 use norn_store::{ContentModel, PageRefusal, Snapshot};
 use norn_wire::{
     ApplyMode, ApplyReport, AuthoredPlan, ContainerKind, ControlFile, CountParams, DescribeParams,
-    DocumentPath, ErrorEnvelope, Facet, FacetKind, FileState, Forecast, InitParams, InitReport,
-    Operation, OperationKind, PlanDocument, Predicate, ResolvedPlan, VaultAddress, VaultName,
+    DocumentPath, ErrorDetail, ErrorEnvelope, Facet, FacetKind, FileState, Forecast, InitParams,
+    InitReport, Operation, OperationKind, PlanDocument, Predicate, ResolvedPlan, VaultAddress,
+    VaultName,
 };
 
 use crate::address::registered_name;
@@ -189,6 +193,24 @@ pub(crate) fn observed_fields(
     }
 }
 
+/// The schema another writer made after init previewed its starter, where
+/// `refused` is the starter's apply refused for it: the fresh plan the
+/// refusal carries would replace a file standing at the starter's path.
+///
+/// **Init answers that as the vault already set up, never with the fresh
+/// plan**, which a caller sending it on would replace the other writer's
+/// schema with.
+fn schema_written_since(refused: &ErrorEnvelope) -> Option<DocumentPath> {
+    let ErrorDetail::PlanRefused { plan, .. } = refused.detail() else {
+        return None;
+    };
+    let schema = control_path(ControlFile::Schema);
+    plan.transitions
+        .iter()
+        .find(|transition| transition.path == *schema && transition.before != FileState::absent())
+        .map(|transition| transition.path.clone())
+}
+
 /// What planning the starter came to: its preview — the resolved plan and its
 /// forecast — or a schema already standing where it would be written.
 enum Starter {
@@ -206,8 +228,9 @@ where
     /// vault reads its schema from a registered source, or a schema already
     /// stands at the default path.
     ///
-    /// An apply lands the plan its preview would answer, sent as a resolved
-    /// plan so a schema created since refuses it, and then reloads the vault
+    /// An apply plans the starter afresh, as a preview does, and sends that
+    /// resolved plan, so a schema created since refuses it and is answered
+    /// already set up rather than replaced; then it reloads the vault
     /// under the schema it wrote, as `vault reload` does; a reload that
     /// refuses answers with its refusal, the schema on disk and reported as
     /// a reload pending, and a host gone before the reload ran answers what
@@ -231,9 +254,18 @@ where
                 plan, forecast,
             ))),
             ApplyMode::Apply => {
-                let applied = self
+                let applied = match self
                     .admit_apply(&name, PlanDocument::resolved(plan))?
-                    .wait()?;
+                    .wait()
+                {
+                    Ok(applied) => applied,
+                    Err(refused) => {
+                        return match schema_written_since(&refused) {
+                            Some(schema) => Ok(InitReport::already_set_up(schema)),
+                            None => Err(refused),
+                        };
+                    }
+                };
                 // A host gone before its reload ran answers what landed: the
                 // next attach reads the schema the apply wrote.
                 if let Err(refusal) = self.reload(&name)
