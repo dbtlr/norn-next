@@ -6,9 +6,12 @@
 //! write, so init answers that the schema lives elsewhere, naming the source,
 //! and plans nothing. Otherwise the vault reads its schema from the default
 //! `.norn/schema.yaml`, and init plans one `write_control_file` of the starter
-//! there. A plan finding a schema already standing there would replace it,
-//! which init never does: it answers that the vault is already set up and
-//! writes nothing. Rewriting a schema that stands is `vault migrate`'s.
+//! there. A schema already standing there would be replaced, which init never
+//! does: it answers that the vault is already set up and writes nothing.
+//! Rewriting a schema that stands is `vault migrate`'s. Both answers are
+//! reached before the vault's field universe is read or the starter built, so
+//! neither rests on the starter building and a re-run pays no describe or
+//! count.
 //!
 //! **An apply writes what its preview planned, or nothing.** An init sent to
 //! apply plans the starter as its preview does, then sends the resolved plan,
@@ -32,6 +35,7 @@
 //! is a comment the user's agent turns into a declaration.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use norn_store::{ContentModel, PageRefusal, Snapshot};
 use norn_wire::{
@@ -41,8 +45,11 @@ use norn_wire::{
 };
 
 use crate::address::registered_name;
+use crate::apply::unreadable;
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
-use crate::read::Built;
+use crate::planner::control::control_path;
+use crate::planner::view::{Entry, TreeView, VaultView};
+use crate::read::{BuildRefused, Built};
 
 /// One frontmatter key the vault's documents carry: how many carry it, and
 /// every container its values sit in, in the vocabulary's order.
@@ -239,25 +246,39 @@ where
         }
     }
 
-    /// Plan the starter schema of `name`, addressed as `vault`: its observed
-    /// fields read on one hold, then one `write_control_file` previewed
-    /// through the one `apply` seam, as an apply would plan and judge it.
+    /// Plan the starter schema of `name`, addressed as `vault`: on one hold,
+    /// whether a schema already stands where the starter would be written,
+    /// and only where none does its observed fields; then one
+    /// `write_control_file` previewed through the one `apply` seam, as an
+    /// apply would plan and judge it.
+    ///
+    /// **Whether a schema stands is asked first**, so a vault already set up
+    /// is answered without a describe or a count, whatever keys its documents
+    /// carry, and that answer never rests on the starter building.
     fn plan_starter(
         &self,
         name: &VaultName,
         vault: &VaultAddress,
     ) -> Result<Starter, ErrorEnvelope> {
         let observed = self
-            .answer_read(vault, |_, snapshot, declared| {
+            .answer_read(vault, |name, snapshot, declared| {
+                let report = match self.schema_standing(name).map_err(BuildRefused::Answered)? {
+                    Some(schema) => Err(schema),
+                    None => Ok(observed_fields(vault, snapshot, declared)?),
+                };
                 Ok(Built {
                     unsatisfied: Vec::new(),
                     advisories: Vec::new(),
-                    report: observed_fields(vault, snapshot, declared)?,
+                    report,
                     work: (),
                 })
             })?
             .answer
             .report;
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(schema) => return Ok(Starter::AlreadySetUp(schema)),
+        };
         let authored = AuthoredPlan::new(
             vault.clone(),
             vec![Operation::new(OperationKind::write_control_file(
@@ -271,14 +292,46 @@ where
         else {
             unreachable!("a preview answers a previewed plan or a refusal");
         };
-        // A schema standing where the starter would be written makes the
-        // write a replacement, which init never plans.
+        // A schema written there since it was asked makes the write a
+        // replacement, which init never plans.
         if let [transition] = plan.transitions.as_slice()
             && transition.before != FileState::absent()
         {
             return Ok(Starter::AlreadySetUp(transition.path.clone()));
         }
         Ok(Starter::Planned(Box::new(plan), forecast))
+    }
+
+    /// Where a schema stands at the default path the vault `name` reads it
+    /// at, or `None` where nothing that reads as one does: read as the
+    /// planner reads a control target ([`VaultView::control_entry`]), on the
+    /// ground the entry's coverage stands on.
+    ///
+    /// Something there that is no file — a folder, a link — is no schema
+    /// standing, and is left to the starter's own planning, which refuses to
+    /// write there naming it.
+    fn schema_standing(&self, name: &VaultName) -> Result<Option<DocumentPath>, ErrorEnvelope> {
+        // An entry recording no ground is left to the preview, which answers
+        // that as the host defect it is.
+        let Some(ground) = self.plan_ground(name) else {
+            return Ok(None);
+        };
+        ground.standing(name)?;
+        let view = TreeView::open(&ground.root, &ground.exclusions)
+            .map_err(|error| unreadable(name, error))?;
+        let schema = control_path(ControlFile::Schema);
+        let Ok(identity) = view.normalizer().normalize(Path::new(schema.as_str())) else {
+            return Ok(None);
+        };
+        Ok(
+            match view
+                .control_entry(&identity)
+                .map_err(|error| unreadable(name, error))?
+            {
+                Entry::Document { at, .. } => Some(at),
+                Entry::Absent { .. } | Entry::Folder | Entry::Blocked { .. } => None,
+            },
+        )
     }
 }
 

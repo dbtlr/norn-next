@@ -320,3 +320,43 @@ fn a_schema_created_after_the_preview_refuses_the_previewed_apply() {
         InitReport::already_set_up(schema())
     );
 }
+
+/// **Over a schema that stands, init reads no field universe**: it learns the
+/// schema stands before any describe or count, so it answers `already_set_up`
+/// whatever keys the documents carry — one holding U+FFFF, which once made
+/// the starter unreadable, included — and what it runs on its snapshot does
+/// not grow with how many keys they carry.
+#[test]
+fn an_init_over_a_standing_schema_answers_before_reading_the_field_universe() {
+    let statements = |label: &str, keys: usize| {
+        let mut files = vec![
+            (SCHEMA.to_string(), "version: 1\n".to_string()),
+            (
+                "odd.md".to_string(),
+                "---\n\"x\\uFFFFy\": 1\n---\nA\n".to_string(),
+            ),
+        ];
+        files.extend((0..keys).map(|key| (format!("k{key}.md"), format!("---\nk{key}: 1\n---\n"))));
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(at, content)| (at.as_str(), content.as_str()))
+            .collect();
+        let (_sandbox, vault) = a_vault(label, &files);
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let run = norn_store::SnapshotReader::statements_run_on_this_thread;
+        let before = run();
+        for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+            assert_eq!(
+                host.init(&params(&vault, mode)).expect("an init answers"),
+                InitReport::already_set_up(schema())
+            );
+        }
+        run() - before
+    };
+    assert_eq!(
+        statements("host-init-standing-few", 1),
+        statements("host-init-standing-many", 20),
+        "an init over a standing schema read every key"
+    );
+}
