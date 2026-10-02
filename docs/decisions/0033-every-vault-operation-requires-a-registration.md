@@ -31,4 +31,7 @@ as dormant carriers for Layer 6, so both may be removed. The store's throwaway m
 an ephemeral store for tests and loses its unregistered-root rationale. Earlier ADRs that
 name a throwaway teardown among the paths that close a store, the prices of [ADR
 0030](0030-a-read-does-not-restart-a-recovery-only-a-change-can-answer.md) among them,
-describe a path that will not exist; their rules hold over the paths that remain.
+describe a path that will not exist; their rules hold over the paths that remain. Until the
+carriers are removed, the wire still carries a root address and the host refuses every
+request that names one; until `init` lands, `vault register` is the command that registers a
+directory.
