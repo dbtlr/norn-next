@@ -360,3 +360,40 @@ fn an_init_over_a_standing_schema_answers_before_reading_the_field_universe() {
         "an init over a standing schema read every key"
     );
 }
+
+/// **An init whose write lands and whose reload refuses still says it
+/// landed**: the starter is written, and init answers the apply's landing
+/// with the reload's refusal beside it — here a vault config the reload
+/// cannot read — so the caller learns the schema stands on disk, not yet in
+/// service.
+#[test]
+fn an_init_whose_reload_refuses_answers_the_landed_write_beside_the_refusal() {
+    let (_sandbox, vault) = a_vault("host-init-reload-refused", FILES);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    std::fs::create_dir_all(vault.path().join(".norn/config.toml")).expect("a folder in the way");
+
+    let InitReport::Scaffolded {
+        report,
+        reload_refused,
+        ..
+    } = host
+        .init(&params(&vault, ApplyMode::Apply))
+        .expect("an init whose write landed answers")
+    else {
+        panic!("an init apply answered another outcome");
+    };
+    let ApplyReport::Applied { targets, .. } = *report else {
+        panic!("an init apply answered {report:?}");
+    };
+    assert_eq!(
+        targets,
+        vec![AppliedTarget::new(schema(), TargetResult::Wrote)]
+    );
+    let refused = reload_refused.expect("the reload's refusal is answered beside the landing");
+    assert_eq!(refused.code(), &ReasonCode::VaultReloadFailed);
+    assert!(
+        vault.path().join(SCHEMA).is_file(),
+        "the starter did not land"
+    );
+}

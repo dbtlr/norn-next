@@ -17,7 +17,9 @@
 //! elsewhere" are answers rather than refusals, and the second names the
 //! source a caller is sent to. The scaffolded outcome carries the apply's own
 //! report whole, so a caller reads a planned or landed starter exactly as it
-//! reads any write.
+//! reads any write, and beside a landing the refusal of the reload that
+//! followed it, where that reload refused: a write that landed is reported as
+//! landed whatever the reload answered.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::address::{SchemaSource, VaultAddress};
 use crate::apply::{ApplyMode, ApplyReport};
 use crate::document::DocumentPath;
+use crate::error::ErrorEnvelope;
 
 /// What an `init` request carries.
 ///
@@ -50,7 +53,7 @@ impl InitParams {
 /// What an `init` answers with.
 ///
 /// On the wire a report is an object tagged `outcome`:
-/// `{"outcome":"scaffolded","report":{"outcome":"previewed",…}}`,
+/// `{"outcome":"scaffolded","report":{"outcome":"previewed",…},"reload_refused":null}`,
 /// `{"outcome":"already_set_up","schema":".norn/schema.yaml"}`,
 /// `{"outcome":"schema_elsewhere","source":"/shared/schema.yaml"}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -65,6 +68,11 @@ pub enum InitReport {
         /// The apply's own report, boxed since a plan it carries is far larger
         /// than either other outcome.
         report: Box<ApplyReport>,
+        /// The refusal of the reload that followed a landing, where that
+        /// reload refused: the starter stands on disk and the vault goes on
+        /// serving the declaration it served, reporting a reload pending.
+        /// `null` where nothing landed or the vault reloaded under it.
+        reload_refused: Option<ErrorEnvelope>,
     },
     /// A schema already stands where the vault reads it: nothing was planned
     /// and nothing written.
@@ -87,6 +95,16 @@ impl InitReport {
     pub fn scaffolded(report: ApplyReport) -> Self {
         InitReport::Scaffolded {
             report: Box::new(report),
+            reload_refused: None,
+        }
+    }
+
+    /// The starter schema written, as `report` says, and the reload after it
+    /// refused with `refusal`.
+    pub fn scaffolded_reload_refused(report: ApplyReport, refusal: ErrorEnvelope) -> Self {
+        InitReport::Scaffolded {
+            report: Box::new(report),
+            reload_refused: Some(refusal),
         }
     }
 

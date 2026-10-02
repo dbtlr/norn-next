@@ -10224,7 +10224,8 @@ fn an_init_request_names_its_vault_and_states_its_mode() {
 
 /// **An `init` answers one of three outcomes, each an object tagged
 /// `outcome`**: the starter schema scaffolded — the apply's own report, a
-/// preview's plan or an apply's landing — the vault already set up, naming
+/// preview's plan or an apply's landing, with the refusal of the reload after
+/// a landing beside it, or `null` — the vault already set up, naming
 /// the schema that stands, or the schema living elsewhere, naming the source
 /// the registration reads it from. Each reads back as itself.
 #[test]
@@ -10235,6 +10236,13 @@ fn an_init_report_is_one_of_three_outcomes() {
         InitReport::scaffolded(ApplyReport::previewed(a_bare_resolved_plan(), a_forecast())),
         InitReport::already_set_up(schema.clone()),
         InitReport::schema_elsewhere(source.clone()),
+        InitReport::scaffolded_reload_refused(
+            ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()),
+            ErrorEnvelope::new(
+                "the vault config cannot be read",
+                ErrorDetail::reload_failed(ReloadFailure::unsupported()),
+            ),
+        ),
     ];
     for report in &reports {
         round_trip(report);
@@ -10242,6 +10250,16 @@ fn an_init_report_is_one_of_three_outcomes() {
     assert!(
         wire(&reports[0])
             .starts_with(r#"{"outcome":"scaffolded","report":{"outcome":"previewed","#)
+    );
+    assert!(
+        wire(&reports[0]).ends_with(r#","reload_refused":null}"#),
+        "{}",
+        wire(&reports[0])
+    );
+    assert!(
+        wire(&reports[3]).contains(r#","reload_refused":{"code":"vault/reload-failed","#),
+        "{}",
+        wire(&reports[3])
     );
     assert_eq!(
         wire(&reports[1]),

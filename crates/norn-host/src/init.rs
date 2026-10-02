@@ -231,10 +231,10 @@ where
     /// An apply plans the starter afresh, as a preview does, and sends that
     /// resolved plan, so a schema created since refuses it and is answered
     /// already set up rather than replaced; then it reloads the vault
-    /// under the schema it wrote, as `vault reload` does; a reload that
-    /// refuses answers with its refusal, the schema on disk and reported as
-    /// a reload pending, and a host gone before the reload ran answers what
-    /// landed, since the next attach reads it.
+    /// under the schema it wrote, as `vault reload` does. A reload that
+    /// refuses is answered beside the landing, the schema on disk and
+    /// reported as a reload pending, and a host gone before the reload ran
+    /// answers the landing alone, since the next attach reads it.
     pub fn init(&self, params: &InitParams) -> Result<InitReport, ErrorEnvelope> {
         let name = registered_name(&params.vault)?.clone();
         if let Some(source) = self
@@ -266,12 +266,17 @@ where
                         };
                     }
                 };
-                // A host gone before its reload ran answers what landed: the
-                // next attach reads the schema the apply wrote.
+                // The schema landed whatever the reload answers, so a refused
+                // reload is answered beside the landing; a host gone before
+                // its reload ran answers the landing alone, since the next
+                // attach reads the schema the apply wrote.
                 if let Err(refusal) = self.reload(&name)
                     && let Ok(refused) = refusal.answer(&name)
                 {
-                    return Err(refused);
+                    return Ok(InitReport::scaffolded_reload_refused(
+                        applied.report,
+                        refused,
+                    ));
                 }
                 Ok(InitReport::scaffolded(applied.report))
             }
