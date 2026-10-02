@@ -34,6 +34,7 @@ use crate::target::ResolutionTarget;
 
 pub(crate) mod delete;
 pub(crate) mod edit;
+pub(crate) mod init;
 pub(crate) mod moves;
 pub(crate) mod new;
 pub(crate) mod rewrite_wikilink;

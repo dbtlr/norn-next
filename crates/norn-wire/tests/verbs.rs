@@ -8,7 +8,7 @@
 //! that spells it, and that the vault a request carries is the one vault
 //! address the vocabulary has.
 //!
-//! The table holds all twenty-one verbs the registry declares, and the suite
+//! The table holds all twenty-two verbs the registry declares, and the suite
 //! holds the table equal to [`Verb::ALL`]: a verb minted without a row here is
 //! a verb no surface can render, and a row here naming a verb the registry
 //! does not hold spells a request nobody can make. The six write verbs answer
@@ -22,8 +22,8 @@
 use norn_wire::{
     Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DeleteParams, DescribeParams,
     DescribeReport, DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport,
-    GetParams, GetReport, ListParams, ListReport, MoveParams, NewParams, RegisterParams,
-    RegisterReport, ReloadParams, ReloadReport, ResolveParams, ResolveReport,
+    GetParams, GetReport, InitParams, InitReport, ListParams, ListReport, MoveParams, NewParams,
+    RegisterParams, RegisterReport, ReloadParams, ReloadReport, ResolveParams, ResolveReport,
     RewriteWikilinkParams, SearchParams, SearchReport, SetParams, StatusParams, StatusReport,
     UnregisterParams, UnregisterReport, ValidateParams, ValidateReport, VaultSetParams,
     VaultSetReport, Verb,
@@ -191,6 +191,15 @@ fn verb_table() -> Vec<Spelling> {
             report_rows: None,
             params: schema_of::<RewriteWikilinkParams>(),
             report: schema_of::<ApplyReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::Init,
+            params_type: "InitParams",
+            report_type: "InitReport",
+            report_rows: None,
+            params: schema_of::<InitParams>(),
+            report: schema_of::<InitReport>(),
         },
         Spelling {
             vault_at: VaultAt::Params,

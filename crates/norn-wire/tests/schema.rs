@@ -288,6 +288,8 @@ fn every_wire_schema() -> Vec<Value> {
         schema_of::<MoveParams>(),
         schema_of::<DeleteParams>(),
         schema_of::<RewriteWikilinkParams>(),
+        schema_of::<norn_wire::InitParams>(),
+        schema_of::<norn_wire::InitReport>(),
         schema_of::<LinkRewrite>(),
         schema_of::<LinkKey>(),
         schema_of::<Resolves>(),

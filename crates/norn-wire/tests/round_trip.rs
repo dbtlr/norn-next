@@ -25,13 +25,13 @@ use norn_wire::{
     ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath,
     FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath,
     Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
-    IllegalOperationId, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
-    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
-    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
-    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
-    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    IllegalOperationId, InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration,
+    LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams,
+    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved,
+    NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
+    Operation, OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem,
+    PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance,
+    Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
     RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
     ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
     ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
@@ -1502,6 +1502,13 @@ fn every_vector_here_holds_the_members_the_schema_advertises() {
         advertised::<ContainerKind>(None),
         "the containers built here are not the containers the vocabulary holds"
     );
+    for container in container_kinds() {
+        assert_eq!(
+            container.as_str(),
+            flat_string(&container),
+            "a container names itself otherwise than the wire writes it"
+        );
+    }
     assert_eq!(
         path_rule_kinds()
             .iter()
@@ -2493,7 +2500,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds twenty-one verbs, and every one of them is the flat
+/// The registry holds twenty-two verbs, and every one of them is the flat
 /// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2511,6 +2518,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "move",
         "delete",
         "rewrite_wikilink",
+        "init",
         "vault_register",
         "vault_unregister",
         "vault_list",
@@ -2520,7 +2528,7 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_reload",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 21);
+    assert_eq!(Verb::ALL.len(), 22);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2608,7 +2616,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 21);
+    assert_eq!(Verb::ALL.len(), 22);
     assert_eq!(
         addressed(Addressing::Required),
         [
@@ -2619,6 +2627,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
             "edit",
             "find",
             "get",
+            "init",
             "move",
             "new",
             "rewrite_wikilink",
@@ -10187,6 +10196,61 @@ fn a_write_control_file_names_its_file_by_role_and_carries_its_content() {
             "reading {refused} produced an operation"
         );
     }
+}
+
+/// **An `init` request names its vault and states its mode**, and nothing
+/// else: there is no default mode, and a key it does not name is refused.
+#[test]
+fn an_init_request_names_its_vault_and_states_its_mode() {
+    let request: InitParams =
+        serde_json::from_str(r#"{"vault":{"by":"name","name":"notes"},"mode":"preview"}"#)
+            .expect("an init request");
+    assert_eq!(
+        request,
+        InitParams::new(VaultAddress::name(name("notes")), ApplyMode::Preview)
+    );
+    round_trip(&request);
+    for refused in [
+        r#"{"vault":{"by":"name","name":"notes"}}"#,
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"apply","force":true}"#,
+        r#"{"mode":"apply"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<InitParams>(refused).is_err(),
+            "{refused} read as an init request"
+        );
+    }
+}
+
+/// **An `init` answers one of three outcomes, each an object tagged
+/// `outcome`**: the starter schema scaffolded — the apply's own report, a
+/// preview's plan or an apply's landing — the vault already set up, naming
+/// the schema that stands, or the schema living elsewhere, naming the source
+/// the registration reads it from. Each reads back as itself.
+#[test]
+fn an_init_report_is_one_of_three_outcomes() {
+    let schema = path(".norn/schema.yaml");
+    let source = SchemaSource::new("/home/person/shared/schema.yaml").expect("a schema source");
+    let reports = [
+        InitReport::scaffolded(ApplyReport::previewed(a_bare_resolved_plan(), a_forecast())),
+        InitReport::already_set_up(schema.clone()),
+        InitReport::schema_elsewhere(source.clone()),
+    ];
+    for report in &reports {
+        round_trip(report);
+    }
+    assert!(
+        wire(&reports[0])
+            .starts_with(r#"{"outcome":"scaffolded","report":{"outcome":"previewed","#)
+    );
+    assert_eq!(
+        wire(&reports[1]),
+        r#"{"outcome":"already_set_up","schema":".norn/schema.yaml"}"#
+    );
+    assert_eq!(
+        wire(&reports[2]),
+        r#"{"outcome":"schema_elsewhere","source":"/home/person/shared/schema.yaml"}"#
+    );
 }
 
 /// **A `create_by_rule` takes the generic envelope.** It expands one for one

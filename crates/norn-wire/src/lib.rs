@@ -115,6 +115,9 @@
 //! [`MoveParams`] of a [`MoveSubject`] — a document or a folder, read from
 //! the source, or the [`IllegalMove`] two ends name — `delete` from
 //! [`DeleteParams`], and `rewrite_wikilink` from [`RewriteWikilinkParams`].
+//! `init` ([`InitParams`]) plans a starter schema as one `write_control_file`
+//! and answers an [`InitReport`]: the apply's own report, or that the vault
+//! is already set up or reads its schema elsewhere.
 //! A preview answers with
 //! the resolved plan and a [`Forecast`] of what the plan does not carry — the
 //! targets that drifted, the [`FolderPath`]s a plan makes and removes, each
@@ -652,6 +655,7 @@ pub use verb::{
 };
 pub use write::delete::DeleteParams;
 pub use write::edit::{DocumentEdit, EditParams};
+pub use write::init::{InitParams, InitReport};
 pub use write::moves::{IllegalMove, MoveParams, MoveSubject};
 pub use write::new::{NewParams, NewSubject};
 pub use write::rewrite_wikilink::RewriteWikilinkParams;
