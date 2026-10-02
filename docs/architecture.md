@@ -2515,7 +2515,9 @@ document's write. Content its role's parser does not read leaves the operation u
 planning, and a resolved plan carrying such content is `request/plan-invalid`, so a plan
 never lands a control file the next reload would refuse. A control file is no document: it
 is not judged under the schema, it is no link's candidate and holds no link the vault reads,
-and the changeset records no row for it. A plan writing a control file beside a document
+and the changeset records no row for it. No document operation resolves at a control file's
+path or at a name beneath it, so none writes a control file or makes its path a folder. A
+plan writing a control file beside a document
 operation is `request/plan-invalid` (`control_file_beside_documents`), which is ADR 0032's
 "a plan that changes a vault control file changes nothing else". Landing one takes nothing
 into service: the watcher's control-file facts are discarded, so the vault keeps serving the

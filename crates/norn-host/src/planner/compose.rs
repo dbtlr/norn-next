@@ -257,9 +257,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// **A control file is no place a document operation leads to**, whatever
     /// the vault holds there: the vault schema and config are written whole
     /// by `write_control_file` alone ([`super::control`]), so an edit, a
-    /// create, a removal or a move naming either path does not resolve. The
-    /// schema path a registration names elsewhere in the vault is a place
-    /// the vault's walk does not enter, which the view answers as blocked.
+    /// create, a removal or a move naming either path, or a name beneath
+    /// either — which would make a control file's path a folder — does not
+    /// resolve. The schema path a registration names elsewhere in the vault
+    /// is a place the vault's walk does not enter, with every name beneath
+    /// it, which the view answers as blocked.
     fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
         let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
             Ok(identity) => identity,
@@ -269,14 +271,20 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 )));
             }
         };
-        if let Some(file) = self.control_file_at(&identity) {
-            return Ok(Place::NoFile(format!(
-                "`{path}` is the vault {}, a control file no document operation writes: `write_control_file` writes it whole",
-                match file {
-                    ControlFile::Schema => "schema",
-                    ControlFile::Config => "config",
-                }
-            )));
+        if let Some((file, beneath)) = self.control_file_at(&identity) {
+            let role = match file {
+                ControlFile::Schema => "schema",
+                ControlFile::Config => "config",
+            };
+            return Ok(Place::NoFile(if beneath {
+                format!(
+                    "`{path}` lies beneath the vault {role}'s path, a control file's place no document operation reaches"
+                )
+            } else {
+                format!(
+                    "`{path}` is the vault {role}, a control file no document operation writes: `write_control_file` writes it whole"
+                )
+            }));
         }
         if let Some(spelling) = self.spelled.get(&identity) {
             return Ok(Place::File(identity, spelling.clone()));
@@ -304,17 +312,27 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         Ok(Place::File(identity, spelling))
     }
 
-    /// The role of the control file `identity` names, under the vault's
-    /// identity rule, so no spelling of a control file's path reaches it as a
-    /// document.
-    fn control_file_at(&self, identity: &NormalizedPath) -> Option<ControlFile> {
-        [ControlFile::Schema, ControlFile::Config]
-            .into_iter()
-            .find(|&file| {
-                self.view
-                    .normalizer()
-                    .normalize(Path::new(control_path(file).as_str()))
-                    .is_ok_and(|control| control == *identity)
+    /// The role of the control file `identity` names or lies beneath, and
+    /// whether it lies beneath, under the vault's identity rule, so no
+    /// spelling of a control file's path — or of a name beneath it, which
+    /// would make that path a folder — reaches it as a document.
+    fn control_file_at(&self, identity: &NormalizedPath) -> Option<(ControlFile, bool)> {
+        let normalizer = self.view.normalizer();
+        identity
+            .as_path()
+            .ancestors()
+            .filter(|at| !at.as_os_str().is_empty())
+            .enumerate()
+            .find_map(|(depth, at)| {
+                let at = normalizer.normalize(at).ok()?;
+                [ControlFile::Schema, ControlFile::Config]
+                    .into_iter()
+                    .find(|&file| {
+                        normalizer
+                            .normalize(Path::new(control_path(file).as_str()))
+                            .is_ok_and(|control| control == at)
+                    })
+                    .map(|file| (file, depth > 0))
             })
     }
 
@@ -1083,6 +1101,34 @@ mod tests {
                 assert!(detail.contains("control file"), "{name} at {at}: {detail}");
             }
         }
+    }
+
+    /// **No document operation reaches beneath a control file's path**
+    /// either: a create there, a move's destination there and a cascade's
+    /// holder there do not resolve, saying the place is a control file's,
+    /// so no document operation turns a control file's path into a folder.
+    #[test]
+    fn a_document_operation_beneath_a_control_file_s_path_does_not_resolve() {
+        let vault =
+            MemoryVault::with(&[("a.md", "A\n"), (".norn/schema.yaml/h.md", "see [[a]]\n")]);
+        for kind in [
+            OperationKind::create_document(path(".norn/config.toml/x.md"), "X\n"),
+            OperationKind::create_document(path(".norn/schema.yaml/x.md"), "X\n"),
+            OperationKind::move_document(path("a.md"), path(".norn/config.toml/a.md")),
+        ] {
+            let name = kind.name();
+            let detail = unresolvable_detail(&vault, Operation::new(kind));
+            assert!(detail.contains("control file"), "{name}: {detail}");
+        }
+        let detail = unresolvable_detail(
+            &vault,
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite(".norn/schema.yaml/h.md", "a", "b")]),
+        );
+        assert!(
+            detail.contains("control file"),
+            "a cascade holder: {detail}"
+        );
     }
 
     #[test]
