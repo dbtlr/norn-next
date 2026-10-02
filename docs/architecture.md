@@ -2408,15 +2408,25 @@ their request to an authored plan and answer through `Host::apply`, with the sam
 and report, so a verb previews and applies exactly as its operations sent as a plan do.
 `Host::init` writes a starter schema for a registered vault that declares none, through
 the same seam: a registration naming a `schema_source`, inside the vault or out, is answered
-`schema_elsewhere` with the source and nothing planned; otherwise the starter — `version: 1`
-and one comment per field the vault's documents carry, with how many carry it and the
-shapes its values take, read through the describe and count builders in process on one
-snapshot, so two previews write the same bytes — is previewed as one `write_control_file`,
-and a plan that would replace a schema standing there is answered `already_set_up` instead.
-An apply sends the previewed resolved plan, so a schema another writer created since refuses
-it by create exclusivity, and once it lands `init` reloads the vault as `vault reload`
-does, since the watcher's control-file facts are discarded and init is the caller's explicit
-act on the schema. The starter declares nothing, so no finding moves.
+`schema_elsewhere` with the source and nothing planned, and a schema standing at
+`.norn/schema.yaml` is answered `already_set_up`, both before the vault's fields are read.
+Otherwise the starter — `version: 1` and one comment per field the vault's documents carry,
+with how many carry it and the shapes its values take, read through the describe and count
+builders in process on one held snapshot — is previewed as one `write_control_file`. The
+starter is a pure function of the observed keys, so two previews of an unchanged vault write
+the same bytes. An apply takes no preview from its caller: within the one call it plans the
+starter afresh and sends its own resolved plan to the applier, so a schema another writer
+creates between that planning and the apply refuses it by create exclusivity, and `init`
+answers `already_set_up` rather than a fresh plan that would replace that schema. Once the
+write lands, `init` reloads the vault as `vault reload` does, since the watcher's
+control-file facts are discarded and init is the caller's explicit act on the schema; a
+reload that refuses is answered beside the landing, so the caller still learns the write
+landed. The starter declares nothing, so no finding moves. Init costs every page of the
+describe builder's observed-field facets plus one count per observed key, on one held
+snapshot, and then the reload's re-pin: the starter's fingerprint is not the empty schema's,
+so the schema-keyed rows are discarded and the whole vault is walked again. Unlike the other
+write verbs, `Host::init` answers synchronously rather than with a `PendingApply`, and a vault
+whose standing schema cannot be read answers the entry's untrusted refusal.
 `apply` is the same flow entered with an externally supplied plan, either operations or a
 resolved plan from a preview. Repair is a planner over
 the findings table feeding the identical applier; its plans cite the finding generation they

@@ -35,7 +35,19 @@
 //! snapshot ([`observed_fields`]): the describe builder's observed-field
 //! facets, and for each key the count builder's tally of the documents
 //! carrying it. It declares nothing beyond `version: 1`; every observed field
-//! is a comment the user's agent turns into a declaration.
+//! is a comment the user's agent turns into a declaration. Two previews of an
+//! unchanged vault write the same bytes because the starter is a function of
+//! the keys alone, not because they read one snapshot: each reads its own.
+//!
+//! **What init costs.** A vault already set up costs one read of its schema.
+//! Otherwise a preview, and the planning an apply runs, holds one snapshot
+//! across every page of the describe builder's observed-field facets and one
+//! count per observed key — a pass that grows with the keys the documents
+//! carry, the snapshot held throughout — and then plans and judges the one
+//! write. An apply that lands then pays the reload's re-pin: the starter's
+//! fingerprint is not the empty schema's, so the schema-keyed rows are
+//! discarded and the whole vault is walked again, though the starter declares
+//! nothing.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -235,6 +247,13 @@ where
     /// refuses is answered beside the landing, the schema on disk and
     /// reported as a reload pending, and a host gone before the reload ran
     /// answers the landing alone, since the next attach reads it.
+    ///
+    /// **Answered synchronously.** The other write verbs answer a
+    /// [`PendingApply`](crate::PendingApply) a caller can stop waiting on;
+    /// init waits inside the call for its apply and its reload, and answers
+    /// once both have. A vault reading its schema from the default path whose
+    /// standing schema cannot be read is untrusted, so init answers the
+    /// entry's untrusted refusal, as a read of it does, not `already_set_up`.
     pub fn init(&self, params: &InitParams) -> Result<InitReport, ErrorEnvelope> {
         let name = registered_name(&params.vault)?.clone();
         if let Some(source) = self
