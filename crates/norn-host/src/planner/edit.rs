@@ -58,8 +58,10 @@ pub(crate) fn local_target(kind: &OperationKind) -> Option<Result<&DocumentPath,
         //
         // A creation by rule is expanded into a `create_document` before
         // composition (`super::rule`), as a folder move is expanded
-        // (`super::expand`), and neither is document-local.
+        // (`super::expand`), and neither is document-local. A control-file
+        // write writes no document (`super::control`).
         OperationKind::CreateDocument { .. }
+        | OperationKind::WriteControlFile { .. }
         | OperationKind::CreateByRule { .. }
         | OperationKind::StrReplace { .. }
         | OperationKind::MoveDocument { .. }
@@ -146,7 +148,8 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
         | OperationKind::DeleteDocument { .. }
         | OperationKind::MoveFolder { .. }
         | OperationKind::RewriteLink { .. }
-        | OperationKind::RewriteWikilink { .. } => {
+        | OperationKind::RewriteWikilink { .. }
+        | OperationKind::WriteControlFile { .. } => {
             unreachable!("only a document-local kind is edited here")
         }
     };

@@ -25,12 +25,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MaintainerIdentity;
 
-/// Which of a vault's control files a reload was reading.
+/// Which of a vault's control files is meant, by its role: the one a reload
+/// was reading, or the one a `write_control_file` operation writes.
 ///
 /// On the wire a file is the flat string itself: `"schema"`, `"config"`.
+///
+/// **Closed, so every reader decides each role.** The planner maps a role to
+/// where the file lives and the applier reads the content as the role's model,
+/// so a role minted without a decision in either fails to compile rather than
+/// falling into a default.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ControlFile {
     /// The vault schema.
     Schema,

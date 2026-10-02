@@ -347,17 +347,11 @@ impl<'a, V: VaultView> BeforeStates<'a, V> {
     }
 }
 
-impl<V: VaultView> VaultView for BeforeStates<'_, V> {
-    type Error = V::Error;
-
-    fn normalizer(&self) -> &PathNormalizer {
-        self.view.normalizer()
-    }
-
-    fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
-        let Some(indices) = self.by_identity.get(path) else {
-            return self.view.entry(path);
-        };
+impl<V: VaultView> BeforeStates<'_, V> {
+    /// What the target at `path` held at its recorded before-state, or
+    /// `None` where no transition of the plan is at `path`.
+    fn recorded(&self, path: &NormalizedPath) -> Option<Entry> {
+        let indices = self.by_identity.get(path)?;
         // A case-only rename's identity has two transitions: the document
         // stood at the one whose before-state is present.
         let index = indices
@@ -367,7 +361,7 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
             .unwrap_or(indices[0]);
         let transition = &self.plan.transitions[index];
         let FileState::Present { hash, quarantined } = &transition.before else {
-            return Ok(Entry::Absent {
+            return Some(Entry::Absent {
                 at: transition.path.clone(),
             });
         };
@@ -380,11 +374,35 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
             }
             _ => stand_in(*quarantined),
         };
-        Ok(Entry::Document {
+        Some(Entry::Document {
             at: transition.path.clone(),
             bytes,
             hash: hash.clone(),
         })
+    }
+}
+
+impl<V: VaultView> VaultView for BeforeStates<'_, V> {
+    type Error = V::Error;
+
+    fn normalizer(&self) -> &PathNormalizer {
+        self.view.normalizer()
+    }
+
+    fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+        match self.recorded(path) {
+            Some(entry) => Ok(entry),
+            None => self.view.entry(path),
+        }
+    }
+
+    /// A control target reads as its recorded before-state, as a document
+    /// target does; any other control file as the vault holds it.
+    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+        match self.recorded(path) {
+            Some(entry) => Ok(entry),
+            None => self.view.control_entry(path),
+        }
     }
 
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, V::Error> {

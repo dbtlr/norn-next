@@ -947,3 +947,83 @@ fn moving_a_quarantined_document_records_no_link_change() {
     assert!(advised.is_empty(), "{advised:?}");
     assert!(vault.path().join("elsewhere/apply-quarantined.md").exists());
 }
+
+/// A plan writing the vault schema whole, guarded by the content its author
+/// observed there.
+fn rewriting_the_schema(vault: &attach::Vault, observed: &[u8], content: &str) -> PlanDocument {
+    let schema = DocumentPath::new(".norn/schema.yaml").expect("a vault path");
+    let hash = norn_wire::ContentHash::new(format!(
+        "sha256:{}",
+        norn_fs::ContentHash::of(observed).to_hex()
+    ))
+    .expect("a content hash");
+    PlanDocument::operations(AuthoredPlan::new(
+        VaultAddress::name(vault.name().clone()),
+        vec![
+            Operation::new(OperationKind::write_control_file(
+                norn_wire::ControlFile::Schema,
+                content,
+            ))
+            .with_conditions(vec![norn_wire::AuthorCondition::content_hash(schema, hash)]),
+        ],
+    ))
+}
+
+/// **A control-file write replacing the schema its author observed lands on
+/// a served vault; one guarded by content the schema no longer holds is
+/// refused.** The schema's path is one the entry's walk does not enter, yet
+/// the write plans, applies and lands there, its changeset committed with no
+/// document derived for it; the same write sent again, guarded by the bytes
+/// it replaced, is left unresolved and writes nothing.
+#[test]
+fn a_schema_replace_guarded_by_its_before_state_lands_and_a_stale_guard_refuses() {
+    let (_sandbox, vault) = a_vault("host-applies-control-file");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let migrated = "version: 1\n# migrated\n";
+
+    let applied = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            rewriting_the_schema(&vault, attach::SCHEMA, migrated),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect("the schema write applies");
+    let ApplyReport::Applied {
+        changeset, targets, ..
+    } = applied.report
+    else {
+        panic!("an apply answered {:?}", applied.report);
+    };
+    assert_eq!(changeset, ChangesetOutcome::Committed);
+    assert_eq!(
+        targets,
+        vec![AppliedTarget::new(
+            DocumentPath::new(".norn/schema.yaml").unwrap(),
+            TargetResult::Wrote
+        )]
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(".norn/schema.yaml")).unwrap(),
+        migrated
+    );
+
+    let refused = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            rewriting_the_schema(&vault, attach::SCHEMA, "version: 1\n# again\n"),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect_err("a stale guard is refused");
+    assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused { unresolved, .. } = refused.detail() else {
+        panic!("refused with {:?}", refused.detail());
+    };
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(".norn/schema.yaml")).unwrap(),
+        migrated
+    );
+}

@@ -2890,6 +2890,7 @@ fn an_operation_advertises_each_kind_with_its_fields() {
         ("delete_section", vec!["path", "heading"]),
         ("insert_before_heading", vec!["path", "heading", "content"]),
         ("insert_after_heading", vec!["path", "heading", "content"]),
+        ("write_control_file", vec!["file", "content"]),
     ];
     // A creation by rule names every part optionally: absent, the rule is the
     // inbox and the rest are empty.
@@ -3558,7 +3559,8 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "unexpanded_target",
             "unexpanded_rule",
             "expanded_target_ordered",
-            "misplaced_cascade"
+            "misplaced_cascade",
+            "control_file_beside_documents"
         ])
     );
     let schema = schema_of::<ErrorDetail>();

@@ -81,6 +81,20 @@
 //! each transition; the applier recomposes with [`compose::compose`] and
 //! refuses unless the result hashes to the after-state the plan carries.
 //!
+//! **A control file is planned, never as a document.** A
+//! `write_control_file` names the vault schema or the vault config by role,
+//! and [`control`] maps the role to the in-vault path the host reads it at.
+//! The target is read through
+//! [`VaultView::control_entry`](view::VaultView::control_entry) — the vault's
+//! walk does not enter the schema's path, so reading it as a document would
+//! find a place no document can be — and composed as the whole content the
+//! operation carries, created where it is absent and replaced where it
+//! stands, under the before-state it held. Content its role's parser refuses
+//! does not resolve. A control file is no link's candidate and holds no link
+//! the vault reads, and a plan writing one beside a document operation is a
+//! fault in its shape (ADR 0032: a plan that changes a vault control file
+//! changes nothing else).
+//!
 //! **A file is its identity.** Every name an operation carries is read
 //! through `norn-fs`'s one path-spelling normalization point, which the
 //! [`view::VaultView`] exposes under the case behavior the root proved: two
@@ -136,6 +150,7 @@
 
 pub(crate) mod cascade;
 pub(crate) mod compose;
+pub(crate) mod control;
 pub(crate) mod edit;
 pub(crate) mod expand;
 pub(crate) mod forecast;

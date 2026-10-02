@@ -41,6 +41,19 @@
 //! absent is `set_frontmatter` under an expected-value condition of absent,
 //! and appending is `push_frontmatter`.
 //!
+//! **One kind writes a vault control file, and it is no document kind.**
+//! `write_control_file` names a control file by its role — the vault schema
+//! or the vault config — and carries the file's whole content, creating it
+//! where it is absent and replacing it where it stands. It names no path:
+//! where each role lives is the planner's to say, so a plan cannot aim a
+//! control-file write at a document or a document kind at a control file.
+//! A plan carrying one changes no document (ADR 0032), which
+//! [`AuthoredPlan::control_files_beside_documents`] and
+//! [`ResolvedPlan::control_files_beside_documents`] judge.
+//!
+//! [`AuthoredPlan::control_files_beside_documents`]: crate::AuthoredPlan::control_files_beside_documents
+//! [`ResolvedPlan::control_files_beside_documents`]: crate::ResolvedPlan::control_files_beside_documents
+//!
 //! **Three kinds carry a link cascade, and three are minted for it.** A
 //! `move_document`, a `delete_document` and a `rewrite_wikilink` change what
 //! links elsewhere in the vault resolve to. `rewrite_link` is what such a
@@ -124,6 +137,7 @@ use crate::plan::hash::ContentHash;
 use crate::plan::value::{AuthoredValue, ValueMap, Variables};
 use crate::plan::write_target::{WriteTarget, settle_flattened_target};
 use crate::predicate::Predicate;
+use crate::reload::ControlFile;
 use crate::target::{ResolutionTarget, whole_document_schema};
 
 /// The identifier an operation is required by: a string naming something
@@ -418,6 +432,15 @@ pub enum OperationKind {
         /// The text inserted.
         content: String,
     },
+    /// Write a vault control file whole: create it where it is absent, and
+    /// replace it where it stands. Its content must read as the model its
+    /// role names.
+    WriteControlFile {
+        /// Which control file is written, by its role.
+        file: ControlFile,
+        /// The file's whole content.
+        content: String,
+    },
 }
 
 impl OperationKind {
@@ -640,6 +663,19 @@ impl OperationKind {
         }
     }
 
+    /// Write the control file `file` whole, holding `content`.
+    pub fn write_control_file(file: ControlFile, content: impl Into<String>) -> Self {
+        OperationKind::WriteControlFile {
+            file,
+            content: content.into(),
+        }
+    }
+
+    /// Whether the kind writes a vault control file rather than a document.
+    pub const fn writes_control_file(&self) -> bool {
+        matches!(self, OperationKind::WriteControlFile { .. })
+    }
+
     /// Whether the kind rewrites the links elsewhere in the vault that name
     /// what it changes, so that a resolved plan may carry its link cascade: a
     /// document move, a document removal rewriting the links naming its
@@ -673,7 +709,8 @@ impl OperationKind {
             | OperationKind::AppendToSection { .. }
             | OperationKind::DeleteSection { .. }
             | OperationKind::InsertBeforeHeading { .. }
-            | OperationKind::InsertAfterHeading { .. } => false,
+            | OperationKind::InsertAfterHeading { .. }
+            | OperationKind::WriteControlFile { .. } => false,
         }
     }
 
@@ -703,6 +740,7 @@ impl OperationKind {
             OperationKind::DeleteSection { .. } => KindName::DeleteSection,
             OperationKind::InsertBeforeHeading { .. } => KindName::InsertBeforeHeading,
             OperationKind::InsertAfterHeading { .. } => KindName::InsertAfterHeading,
+            OperationKind::WriteControlFile { .. } => KindName::WriteControlFile,
         }
     }
 
@@ -727,7 +765,8 @@ impl OperationKind {
             | OperationKind::AppendToSection { .. }
             | OperationKind::DeleteSection { .. }
             | OperationKind::InsertBeforeHeading { .. }
-            | OperationKind::InsertAfterHeading { .. } => None,
+            | OperationKind::InsertAfterHeading { .. }
+            | OperationKind::WriteControlFile { .. } => None,
         }
     }
 }
@@ -1059,6 +1098,7 @@ enum KindName {
     DeleteSection,
     InsertBeforeHeading,
     InsertAfterHeading,
+    WriteControlFile,
 }
 
 impl KindName {
@@ -1083,6 +1123,7 @@ impl KindName {
             KindName::DeleteSection => "delete_section",
             KindName::InsertBeforeHeading => "insert_before_heading",
             KindName::InsertAfterHeading => "insert_after_heading",
+            KindName::WriteControlFile => "write_control_file",
         }
     }
 
@@ -1108,6 +1149,7 @@ impl KindName {
             | KindName::InsertBeforeHeading
             | KindName::InsertAfterHeading => &["path", "heading", "content"],
             KindName::DeleteSection => &["path", "heading"],
+            KindName::WriteControlFile => &["file", "content"],
         }
     }
 }
@@ -1161,6 +1203,8 @@ struct KindFields {
     fields: Option<ValueMap>,
     #[serde(default, deserialize_with = "written")]
     body: Option<String>,
+    #[serde(default, deserialize_with = "written")]
+    file: Option<ControlFile>,
 }
 
 /// A field that was written, read as its own type: `null` is a value the
@@ -1291,7 +1335,7 @@ fn target<E: serde::de::Error>(
 
 impl KindFields {
     /// Each field any kind names, and whether it was written.
-    const fn written_names(&self) -> [(&'static str, bool); 19] {
+    const fn written_names(&self) -> [(&'static str, bool); 20] {
         [
             ("path", self.path.is_some()),
             ("where", self.predicates.is_some()),
@@ -1312,6 +1356,7 @@ impl KindFields {
             ("variables", self.variables.is_some()),
             ("fields", self.fields.is_some()),
             ("body", self.body.is_some()),
+            ("file", self.file.is_some()),
         ]
     }
 
@@ -1346,6 +1391,7 @@ impl KindFields {
             variables,
             fields,
             body,
+            file,
         } = self;
         Ok(match kind {
             KindName::CreateDocument => OperationKind::CreateDocument {
@@ -1456,6 +1502,10 @@ impl KindFields {
             KindName::InsertAfterHeading => OperationKind::InsertAfterHeading {
                 path: required(kind, "path", path)?,
                 heading: required(kind, "heading", heading)?,
+                content: required(kind, "content", content)?,
+            },
+            KindName::WriteControlFile => OperationKind::WriteControlFile {
+                file: required(kind, "file", file)?,
                 content: required(kind, "content", content)?,
             },
         })

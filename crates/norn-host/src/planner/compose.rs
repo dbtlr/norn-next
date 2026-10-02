@@ -8,9 +8,11 @@ use std::sync::Arc;
 use norn_fs::NormalizedPath;
 use norn_text::RewriteSkip;
 use norn_wire::{
-    ContentHash, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation, OperationKind,
+    ContentHash, ControlFile, DocumentPath, FileState, LinkFamily, LinkRewrite, Operation,
+    OperationKind,
 };
 
+use super::control::{control_path, unreadable_as_role};
 use super::edit;
 use super::links::{self, wire_family};
 use super::view::{Entry, VaultView, document_path, wire_hash};
@@ -466,7 +468,65 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             | OperationKind::DeleteSection { .. }
             | OperationKind::InsertBeforeHeading { .. }
             | OperationKind::InsertAfterHeading { .. } => self.edit_in_place(kind)?,
+            OperationKind::WriteControlFile { file, content } => {
+                self.write_control_file(*file, content)?
+            }
         })
+    }
+
+    /// Write the control file `file` whole, holding `content`: created where
+    /// it is absent, replaced where it stands.
+    ///
+    /// **A control file is read as one, never as a document**
+    /// ([`VaultView::control_entry`]), at the one path its role lives at
+    /// ([`control_path`]), and its content must read as its role's model
+    /// ([`unreadable_as_role`]): a write the next reload would refuse does
+    /// not resolve. No folder is counted for it, since no document of the
+    /// plan stands beside it.
+    fn write_control_file(
+        &mut self,
+        file: ControlFile,
+        content: &str,
+    ) -> Result<Result<(), Unresolved>, V::Error> {
+        if let Some(detail) = unreadable_as_role(file, content.as_bytes()) {
+            return Ok(Err(detail));
+        }
+        let path = control_path(file);
+        let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Ok(Err(format!(
+                    "`{path}` names no place in the vault: {error}"
+                )));
+            }
+        };
+        let spelling = match self.spelled.get(&identity) {
+            Some(spelling) => spelling.clone(),
+            None => {
+                let before = match self.view.control_entry(&identity)? {
+                    Entry::Document { bytes, hash, .. } => holding(&bytes, hash),
+                    Entry::Absent { .. } => FileState::absent(),
+                    Entry::Folder => {
+                        return Ok(Err(format!(
+                            "a folder stands at `{path}`, where the control file would be"
+                        )));
+                    }
+                    Entry::Blocked { detail, .. } => return Ok(Err(detail)),
+                };
+                self.targets.insert(
+                    path.clone(),
+                    ComposedTarget {
+                        before,
+                        after: None,
+                    },
+                );
+                self.read_at.insert(identity.clone(), path.clone());
+                self.spelled.insert(identity, path.clone());
+                path.clone()
+            }
+        };
+        self.target(&spelling).after = Some(Arc::from(content.as_bytes()));
+        Ok(Ok(()))
     }
 
     /// Edit the document a document-local `kind` names where it stands, as a
@@ -693,8 +753,9 @@ pub(crate) fn edits_in_place(kind: &OperationKind) -> bool {
 /// The files an operation touches: a move touches its source and its
 /// destination, a frontmatter kind with a `where` target none until planning
 /// expands it, a folder move, a wikilink rewrite and a creation by rule none —
-/// each names its documents only once planning expands it — and every other
-/// kind the one file it names.
+/// each names its documents only once planning expands it — a control-file
+/// write the path its role lives at, and every other kind the one file it
+/// names.
 pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPath> {
     let (first, second) = match kind {
         OperationKind::CreateDocument { path, .. }
@@ -712,6 +773,7 @@ pub(crate) fn touches(kind: &OperationKind) -> impl Iterator<Item = &DocumentPat
         | OperationKind::PushFrontmatter { target, .. }
         | OperationKind::PopFrontmatter { target, .. } => (target.as_path(), None),
         OperationKind::MoveDocument { from, to } => (Some(from), Some(to)),
+        OperationKind::WriteControlFile { file, .. } => (Some(control_path(*file)), None),
         OperationKind::MoveFolder { .. }
         | OperationKind::RewriteWikilink { .. }
         | OperationKind::CreateByRule { .. } => (None, None),

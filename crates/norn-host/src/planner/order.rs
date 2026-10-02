@@ -232,6 +232,10 @@ fn arrives_at(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { to, .. } => Some(to),
         OperationKind::CreateDocument { path, .. } => Some(path),
         OperationKind::StrReplace { .. } | OperationKind::DeleteDocument { .. } => None,
+        // A control-file write puts no document anywhere: it writes its
+        // role's file where it is absent and where it stands alike, so it
+        // waits for nothing to vacate a name.
+        OperationKind::WriteControlFile { .. } => None,
         // A folder move and a creation by rule name their documents only
         // once planning expands them, before ordering (`super::expand`,
         // `super::rule`), so the expanded moves and create carry the paths;
@@ -263,6 +267,8 @@ fn vacates(kind: &OperationKind) -> Option<&DocumentPath> {
         OperationKind::MoveDocument { from, .. } => Some(from),
         OperationKind::DeleteDocument { path, .. } => Some(path),
         OperationKind::CreateDocument { .. } | OperationKind::StrReplace { .. } => None,
+        // A control-file write never takes its file away.
+        OperationKind::WriteControlFile { .. } => None,
         // A folder move and a creation by rule name their documents only
         // once planning expands them, before ordering (`super::expand`,
         // `super::rule`); one met here unexpanded vacates nothing. A

@@ -6849,6 +6849,7 @@ fn operation_kinds() -> Vec<OperationKind> {
         OperationKind::delete_section(path("notes/a.md"), "Scratch"),
         OperationKind::insert_before_heading(path("notes/a.md"), "Notes", "Intro.\n"),
         OperationKind::insert_after_heading(path("notes/a.md"), "Notes", "First.\n"),
+        OperationKind::write_control_file(ControlFile::Schema, "version: 1\n"),
     ]
 }
 
@@ -7097,6 +7098,7 @@ fn an_operation_is_a_kind_and_its_fields() {
         r#"{"kind":"delete_section","fields":{"path":"notes/a.md","heading":"Scratch"}}"#,
         r#"{"kind":"insert_before_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"Intro.\n"}}"#,
         r#"{"kind":"insert_after_heading","fields":{"path":"notes/a.md","heading":"Notes","content":"First.\n"}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema","content":"version: 1\n"}}"#,
     ];
     assert_eq!(operation_kinds().len(), pinned.len());
     for (kind, json) in operation_kinds().into_iter().zip(pinned) {
@@ -7560,13 +7562,17 @@ fn a_plan_refuses_a_field_it_does_not_know_at_every_level() {
 
     let authored = serde_json::to_value(PlanDocument::operations(an_authored_plan()))
         .expect("an authored plan as JSON");
+    // The authored plan holds one operation of every kind, then a cascading
+    // move, then an operation carrying conditions.
+    let (cascading, conditioned) = (operation_kinds().len(), operation_kinds().len() + 1);
     for pointer in [
-        "",
-        "/operations/18/cascade/0",
-        "/operations/19",
-        "/operations/19/fields",
-        "/operations/19/conditions/0",
+        String::new(),
+        format!("/operations/{cascading}/cascade/0"),
+        format!("/operations/{conditioned}"),
+        format!("/operations/{conditioned}/fields"),
+        format!("/operations/{conditioned}/conditions/0"),
     ] {
+        let pointer = pointer.as_str();
         let json = with_surprise(&authored, pointer);
         assert!(
             serde_json::from_str::<PlanDocument>(&json).is_err(),
@@ -7992,6 +7998,7 @@ fn plan_faults() -> Vec<PlanFault> {
         PlanFault::unexpanded_rule(vec![3]),
         PlanFault::expanded_target_ordered(vec![2]),
         PlanFault::misplaced_cascade(vec![0]),
+        PlanFault::control_file_beside_documents(vec![1]),
     ]
 }
 
@@ -8814,6 +8821,10 @@ fn applier_decision(operation: &Operation) -> String {
             heading,
             content,
         } => format!("insert {} bytes after {heading} of {path}", content.len()),
+        OperationKind::WriteControlFile { file, content } => match file {
+            ControlFile::Schema => format!("write the schema, {} bytes", content.len()),
+            ControlFile::Config => format!("write the config, {} bytes", content.len()),
+        },
     };
     let observed: Vec<String> = conditions
         .iter()
@@ -9594,6 +9605,48 @@ fn a_cascade_where_planning_writes_none_is_a_fault() {
     );
 }
 
+/// **A plan that changes a vault control file changes nothing else** (ADR
+/// 0032). An authored plan and a resolved plan alike name each control-file
+/// write that stands beside an operation on documents; a plan of control-file
+/// writes alone, and a plan of document operations alone, carry no fault.
+#[test]
+fn a_control_file_write_beside_a_document_operation_is_a_fault() {
+    let schema = || {
+        Operation::new(OperationKind::write_control_file(
+            ControlFile::Schema,
+            "version: 1\n",
+        ))
+    };
+    let config = || Operation::new(OperationKind::write_control_file(ControlFile::Config, ""));
+    let document = || Operation::new(OperationKind::delete_document(path("notes/a.md")));
+    let authored = |operations| AuthoredPlan::new(VaultAddress::name(name("notes")), operations);
+    assert_eq!(
+        authored(vec![schema(), config()]).control_files_beside_documents(),
+        None
+    );
+    assert_eq!(
+        authored(vec![document(), document()]).control_files_beside_documents(),
+        None
+    );
+    assert_eq!(
+        authored(vec![document(), schema(), config()]).control_files_beside_documents(),
+        Some(PlanFault::control_file_beside_documents(vec![1, 2]))
+    );
+
+    let mut resolved = a_bare_resolved_plan();
+    resolved.operations = vec![config()];
+    assert_eq!(resolved.control_files_beside_documents(), None);
+    resolved.operations.insert(0, document());
+    assert_eq!(
+        resolved.control_files_beside_documents(),
+        Some(PlanFault::control_file_beside_documents(vec![1]))
+    );
+    assert_eq!(
+        wire(&PlanFault::control_file_beside_documents(vec![1])),
+        r#"{"kind":"control_file_beside_documents","positions":[1]}"#
+    );
+}
+
 /// **A resolved plan carries no folder move.** Planning expands one into a
 /// document move per document the folder holds, as it expands a `where`
 /// target, so a resolved plan still carrying one names it in the same fault.
@@ -10086,6 +10139,39 @@ fn a_create_by_rule_reads_with_and_without_a_rule() {
         r#"{"kind":"create_by_rule","fields":{"rule":""}}"#,
         r#"{"kind":"create_document","fields":{"path":"a.md","content":"","rule":"a"}}"#,
         r#"{"kind":"set_frontmatter","fields":{"path":"a.md","field":"f","value":1,"body":"a"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Operation>(refused).is_err(),
+            "reading {refused} produced an operation"
+        );
+    }
+}
+
+/// **A `write_control_file` names its file by role**, `schema` or `config`,
+/// and carries the file's whole content; it names no path, since where each
+/// role lives is the planner's to say, and it reads back exactly the kind that
+/// wrote it. A role the vocabulary does not name, a missing part and a key of
+/// another kind are refused at the read.
+#[test]
+fn a_write_control_file_names_its_file_by_role_and_carries_its_content() {
+    for (file, role) in [
+        (ControlFile::Schema, "schema"),
+        (ControlFile::Config, "config"),
+    ] {
+        let json = format!(
+            r#"{{"kind":"write_control_file","fields":{{"file":"{role}","content":"x = 1\n"}}}}"#
+        );
+        let read: OperationKind = serde_json::from_str(&json).expect("a control-file write");
+        assert_eq!(read, OperationKind::write_control_file(file, "x = 1\n"));
+        assert_eq!(wire(&read), json);
+    }
+    for refused in [
+        r#"{"kind":"write_control_file","fields":{"file":"gitignore","content":""}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema"}}"#,
+        r#"{"kind":"write_control_file","fields":{"content":"version: 1\n"}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":null,"content":""}}"#,
+        r#"{"kind":"write_control_file","fields":{"file":"schema","content":"","path":".norn/schema.yaml"}}"#,
+        r#"{"kind":"create_document","fields":{"path":"a.md","content":"","file":"schema"}}"#,
     ] {
         assert!(
             serde_json::from_str::<Operation>(refused).is_err(),

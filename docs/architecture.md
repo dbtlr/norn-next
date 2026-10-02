@@ -2480,6 +2480,23 @@ declared, a declared variable missing or an undeclared one supplied, a value tha
 the target's path, a number past what the allocator counts, a clock outside the years
 `{{date}}` writes, and a document the renderer refuses leave the operation unresolved naming
 why. A resolved plan still carrying one is `request/plan-invalid` (`unexpanded_rule`).
+A plan also writes the vault's control files, through one whole-file kind,
+`write_control_file`, which names its file by role — the schema or the config — and carries
+its whole content. The planner maps the role to the in-vault path the host reads it at,
+`.norn/schema.yaml` or `.norn/config.toml` (`norn-config`'s convention), and reads that
+target as a control file rather than as a document, since the vault's walk does not enter
+the schema's path: it is created where it is absent and replaced where it stands, guarded by
+the state it held like any target, so create exclusivity and drift refuse it as they refuse a
+document's write. Content its role's parser does not read leaves the operation unresolved at
+planning, and a resolved plan carrying such content is `request/plan-invalid`, so a plan
+never lands a control file the next reload would refuse. A control file is no document: it
+is not judged under the schema, it is no link's candidate and holds no link the vault reads,
+and the changeset records no row for it. A plan writing a control file beside a document
+operation is `request/plan-invalid` (`control_file_beside_documents`), which is ADR 0032's
+"a plan that changes a vault control file changes nothing else". Landing one takes nothing
+into service: the watcher's control-file facts are discarded, so the vault keeps serving the
+declaration it pinned and reports the authored file as a reload pending until a reload or a
+recovery reads it.
 A plan also carries document-local kinds: a frontmatter field set, removed, pushed to or popped from, the body
 replaced, and a section replaced, deleted, appended to, or written before or after its
 heading. Each composes as a pure function of its one document's bytes through `norn-text`,

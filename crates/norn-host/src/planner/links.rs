@@ -113,6 +113,7 @@ use norn_wire::{
 };
 
 use super::compose::{Composition, Kept, Skipped, content_hash, holding};
+use super::control::role_at;
 use super::lineage::{Drawn, Lineage, Relink, Removal, Retarget};
 use crate::derivation::document_links;
 
@@ -185,6 +186,11 @@ fn reads_links_over<'o>(
 /// set reads one as no document, before the plan and after it. Built only by
 /// [`Target::new`], from the plan's file states, so planning and the applier
 /// read a side alike whether or not its bytes are still there to decode.
+///
+/// **A control file is no document on either side** ([`super::control`]),
+/// whatever its bytes: the vault derives none from it, so it is no link's
+/// candidate and holds no link the vault reads, and a plan writing one reads
+/// no link.
 pub(crate) struct Target<'a> {
     /// The file, at the spelling the plan writes it.
     path: &'a DocumentPath,
@@ -208,11 +214,12 @@ impl<'a> Target<'a> {
         after: &FileState,
         bytes: Option<&'a [u8]>,
     ) -> Self {
+        let document = role_at(path.as_str()).is_none();
         Target {
             path,
             stood: before.hash().is_some(),
-            before: before.is_document(),
-            after: bytes.filter(|_| after.is_document()),
+            before: document && before.is_document(),
+            after: bytes.filter(|_| document && after.is_document()),
         }
     }
 
