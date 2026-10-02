@@ -2226,8 +2226,9 @@ leg that next reads it pins the empty declaration, the deleted schema's findings
 into it, since a store must equal one derived from zero over the same files ([ADR
 0026](decisions/0026-a-derived-store-records-the-derivation-that-wrote-it.md)). A registered
 `schema_source` that names nothing is a read refusal like any unreadable schema: the
-operator named that file. The watcher covers an in-vault schema whose folder does not stand yet at its place below the
-root, so a schema written there later is a control-file fact like any other.
+operator named that file. The watcher covers an in-vault schema whose folder does not stand
+yet at its place below the root, so a schema written there later is a control-file fact like
+any other.
 
 Attach and explicit per-vault reload are the two activation boundaries. A reload reads and
 validates both files before it changes Lane 1 state. A read or parse error refuses the reload,
@@ -2258,8 +2259,8 @@ host shutting down or whose job channel is gone.
 **An attach has no such declaration to fall back on, and does not refuse.** This concerns a
 declaration the build cannot read — a schema that is unreadable or does not parse as one.
 An absent default schema is no such declaration: it is the empty declaration, which an
-attach derives under, as the paragraph on a vault that declares no schema says. It acquires
-the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and
+attach derives under, as the paragraph on a vault that declares no schema says. An attach
+over an unreadable declaration acquires the maintainer lock, watcher coverage and the store, pins nothing, derives nothing, and
 the entry publishes `Untrusted` naming the cause — so the vault is observable and the
 status seam can explain it, where a refused attach would hide it and a derivation under an
 empty model would answer confidently wrong questions about every document. The entry owes
@@ -2540,8 +2541,8 @@ the state it held like any target, so create exclusivity and drift refuse it as 
 document's write. A schema write over a registration naming a `schema_source` does not
 resolve, since that vault never reads `.norn/schema.yaml`. Content its role's parser does not
 read leaves the operation unresolved at planning, and a resolved plan carrying such content is
-`request/plan-invalid`, so a plan never lands a control file the next reload would refuse. A control file is no document: it
-is not judged under the schema, it is no link's candidate and holds no link the vault reads,
+`request/plan-invalid`, so a plan never lands a control file the next reload would refuse.
+A control file is no document: it is not judged under the schema, it is no link's candidate and holds no link the vault reads,
 and the changeset records no row for it. No document operation resolves at a control file's
 path or at a name beneath it, so none writes a control file or makes its path a folder. A
 plan writing a control file beside a document
