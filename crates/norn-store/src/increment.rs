@@ -73,6 +73,22 @@ pub enum Change {
         path: DocumentPath,
         provenance: Provenance,
     },
+    /// A place that held no document row and is left empty: the findings
+    /// recorded about it go, in this transaction, and nothing else is written.
+    ///
+    /// **It is not a death.** A death tombstones a path the store derived a
+    /// document at; a place whose bytes never decoded holds no row, and a
+    /// tombstone there would state the removal of a document the vault never
+    /// held. What such a place holds is its findings — a quarantine finding
+    /// says its bytes are not a document — and when an act empties the place,
+    /// those findings are about nothing. Ending them in the act's own
+    /// transaction is what keeps a read seeing the whole state before the act
+    /// or the whole state after it (ADR 0032), and what makes the store equal a
+    /// build from zero over the emptied tree.
+    ///
+    /// No row changes, so it names no class and no path for the link-health
+    /// re-decision: nothing a link resolves to moved.
+    Vacated { path: DocumentPath },
 }
 
 /// One finding a changeset's own act derived, recorded in the changeset's
@@ -256,12 +272,23 @@ pub(crate) fn apply(
             // A heal streaming fifty thousand entries fails on whichever one is
             // pathological, and the operation alone reads the same for all of
             // them.
+            // A vacated place changes no row and no link resolution, so it
+            // takes the discard below and nothing else.
+            if let Change::Vacated { path } = &change {
+                let discarded = discard_the_subject(&mut statements.discard_subject, path);
+                tally.findings_discarded +=
+                    discarded.map_err(|problem| error::in_entry(index, path, problem))?;
+                #[cfg(feature = "induced-failure")]
+                crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
+                continue;
+            }
             let applied = match &change {
                 Change::Upsert(facts) => {
                     refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
                         |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
                     )
                 }
+                Change::Vacated { .. } => unreachable!("a vacated place is handled above"),
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
                 Change::Death { path, provenance } => record_death(
@@ -866,7 +893,7 @@ fn refuse_a_declaration_the_store_does_not_pin(
 fn subject(change: &Change) -> &DocumentPath {
     match change {
         Change::Upsert(facts) => &facts.path,
-        Change::Death { path, .. } => path,
+        Change::Death { path, .. } | Change::Vacated { path } => path,
     }
 }
 

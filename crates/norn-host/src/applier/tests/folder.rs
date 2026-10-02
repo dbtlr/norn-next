@@ -211,4 +211,5 @@ fn a_folder_move_carrying_a_quarantined_file_rewrites_no_link_naming_it() {
             .as_deref(),
         Some(super::UNDECODABLE)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }

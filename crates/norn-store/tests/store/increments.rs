@@ -2171,3 +2171,52 @@ const TORN_BODY_LINES: usize = 20_000;
 /// what "the increment stopped writing through an open transaction" looks like
 /// from outside.
 const SPILLED_WAL_FLOOR: u64 = 128 * 1024;
+
+/// **A vacated place ends the findings about it and records no death.** A
+/// finding stands at a path no row was ever derived at; the entry takes it in
+/// the changeset's own transaction, and unlike a death leaves no tombstone and
+/// no document counted, so the store is what a build from zero over the
+/// emptied place holds.
+#[test]
+fn a_vacated_place_discards_its_findings_and_records_no_tombstone() {
+    let scratch = Scratch::new("vacated-place");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .record_finding(&violation("held/quarantined.md"))
+        .expect("recording a finding");
+    assert_eq!(
+        request
+            .stored_findings(&path("held/quarantined.md"))
+            .expect("findings")
+            .len(),
+        1
+    );
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Composed,
+            [Change::Vacated {
+                path: path("held/quarantined.md"),
+            }],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    assert_eq!(outcome.tombstones_recorded, 0);
+    assert_eq!(outcome.documents_deleted, 0);
+    assert!(
+        request
+            .stored_findings(&path("held/quarantined.md"))
+            .expect("findings")
+            .is_empty()
+    );
+    assert_eq!(
+        request
+            .stored_tombstone(&path("held/quarantined.md"))
+            .expect("a tombstone read"),
+        None
+    );
+}

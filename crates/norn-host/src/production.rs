@@ -2454,7 +2454,10 @@ pub(crate) struct PlanEffect {
 /// a case-only rename's retired spelling, which a volume that folds resolves
 /// to the renamed file, dies all the same. A document the tree lists there
 /// again was put back by another writer, and is the watcher's to report, as
-/// the ledger's entry expects absence.
+/// the ledger's entry expects absence. A path with no row that the store holds
+/// findings at — a quarantined file the plan removed or moved — has them ended
+/// in the same changeset, found from the store's findings and not from the
+/// plan's record of what the file was, so the store equals a build from zero.
 ///
 /// Every death is entered ahead of every upsert, so a case-only rename's old
 /// spelling dies before its new one is written under a store whose path order
@@ -2497,6 +2500,18 @@ pub(crate) fn commit_plan_changeset(
             pending.push(Change::Death {
                 path: left.path.clone(),
                 provenance: Provenance::PlanDelete,
+            });
+        } else if !pending
+            .store
+            .begin_request()
+            .stored_findings(&left.path)
+            .map_err(store_effect)?
+            .is_empty()
+        {
+            // A place whose bytes never decoded holds findings and no row, and
+            // a plan that empties it leaves them about nothing.
+            pending.push(Change::Vacated {
+                path: left.path.clone(),
             });
         }
     }
@@ -3088,7 +3103,7 @@ impl Vacated {
                 Change::Death { path, .. } if path.carries_marker() => {
                     self.roots.insert(path.unrendered_ancestor().to_owned());
                 }
-                Change::Death { .. } | Change::Upsert(_) => {}
+                Change::Death { .. } | Change::Vacated { .. } | Change::Upsert(_) => {}
             }
         }
     }
@@ -3612,7 +3627,7 @@ fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool
         .iter()
         .map(|change| match change {
             Change::Upsert(facts) => (&facts.path, true),
-            Change::Death { path, .. } => (path, false),
+            Change::Death { path, .. } | Change::Vacated { path } => (path, false),
         })
         .collect()
 }

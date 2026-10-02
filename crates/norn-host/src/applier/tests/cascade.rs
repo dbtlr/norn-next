@@ -948,9 +948,8 @@ fn a_retargeted_link_sharing_its_key_with_a_respelled_one_is_still_retargeted() 
 impl Fixture {
     /// Plan `operations`, preview the plan — whose judgment recomputes it and
     /// its forecast, which must agree with planning's — and apply it,
-    /// handing back what planning resolved. The store is not compared with
-    /// a build from zero: a moved quarantined file's finding outlives the
-    /// apply until a heal (NORN-323).
+    /// handing back what planning resolved. The store must equal a build
+    /// from zero after it.
     fn previewed_and_applied_over_quarantine(&mut self, operations: Vec<Operation>) -> Resolution {
         let resolution = self.resolution(operations);
         let (previewed, forecast) = self
@@ -959,6 +958,7 @@ impl Fixture {
         assert_eq!(previewed, resolution.plan);
         assert_eq!(forecast.links, resolution.forecast.links);
         applied(self.apply(resolution.plan.clone()));
+        self.assert_store_is_a_build_from_zero();
         resolution
     }
 }
