@@ -1698,10 +1698,11 @@ maintainer lock, before the edited registration is served. `vault status` and `d
 observe the serving set these verbs change: a vault a change holds is reported held, a vault
 an edit served is reported by the entry serving the edit alone, and that entry reports no
 delivered engine section and no advisories until its own attach publishes them.
-Every vault operation requires a registration ([ADR 0033](decisions/0033-every-vault-operation-requires-a-registration.md)):
-only registered vaults attach, and a directory no registered vault contains is set up by
-`init`, which registers it. Lazy attach
-bounds file-descriptor and watch usage against a measured budget, not an assumed one.
+Every vault operation requires a registration ([ADR
+0033](decisions/0033-every-vault-operation-requires-a-registration.md)): only registered
+vaults attach, and a directory no registered vault contains is registered by `vault
+register` today and will be set up by `init`, which registers it. Lazy attach bounds
+file-descriptor and watch usage against a measured budget, not an assumed one.
 
 ```mermaid
 graph LR
