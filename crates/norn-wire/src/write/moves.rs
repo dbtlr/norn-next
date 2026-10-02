@@ -36,11 +36,12 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::apply::ApplyMode;
-use crate::document::{DOCUMENT_EXTENSION, DocumentPath, is_document_extension, leaf_extension};
+use crate::document::{DOCUMENT_EXTENSION, DocumentPath, is_document_extension};
 use crate::plan::document::AuthoredPlan;
 use crate::plan::document::is_false;
 use crate::plan::forecast::FolderPath;
 use crate::plan::operation::{AuthorCondition, Operation, OperationKind};
+use crate::vault_path::leaf_extension;
 
 /// What a `move` moves: one document, or every document a folder holds.
 ///

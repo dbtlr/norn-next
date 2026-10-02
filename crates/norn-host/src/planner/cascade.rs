@@ -746,7 +746,7 @@ impl<'a> Cascade<'a> {
             }
             Decider::Move { to, .. } => self
                 .spelling(to)
-                .and_then(stored_path)
+                .map(stored_path)
                 .map(|at| (to.clone(), at)),
         };
         Some(Destination { by, to })
@@ -773,9 +773,7 @@ impl<'a> Cascade<'a> {
             ) else {
                 continue;
             };
-            let (Some(holder), Some(source)) = (stored_path(landed), stored_path(stood)) else {
-                continue;
-            };
+            let (holder, source) = (stored_path(landed), stored_path(stood));
             let Some(bytes) = self
                 .composition
                 .targets
@@ -968,11 +966,6 @@ mod tests {
                 other => panic!("no longer resolves: {other:?}"),
             }
         };
-        let unaddressable = detail("../c.md");
-        assert!(
-            unaddressable.contains("`../c.md`, which is no path"),
-            "{unaddressable}"
-        );
         let itself = detail("a.md");
         assert!(itself.contains("the same document"), "{itself}");
     }

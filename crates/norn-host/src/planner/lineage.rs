@@ -503,11 +503,8 @@ mod tests {
     }
 
     /// **A rewriting delete is kept only where its `rewrite_to` names one
-    /// document at a path a link can be respelled toward.** One document at
-    /// a path both the vault's rule and the store's grammar read keeps it; a
-    /// path either refuses — one the vault's rule does not read, or one
-    /// whose leaf the store's grammar reduces to no stem — does not, nor
-    /// does naming no document, as planning leaves each unresolved.
+    /// document.** Naming no document does not keep it, as planning leaves
+    /// it unresolved.
     #[test]
     fn a_rewriting_delete_is_kept_only_where_its_target_is_a_path_links_can_name() {
         let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
@@ -518,12 +515,6 @@ mod tests {
         let naming = |after: Resolves| TargetNaming::new(Resolves::none(), after, None);
         let one = |at: &str| Resolves::one(DocumentPath::new(at).expect("a document path"));
         assert!(removal.kept_by(false, Some(&naming(one("x/c.md"))), &normalizer));
-        for unreadable in ["../c.md", "x/...md"] {
-            assert!(
-                !removal.kept_by(false, Some(&naming(one(unreadable))), &normalizer),
-                "{unreadable}"
-            );
-        }
         assert!(!removal.kept_by(false, Some(&naming(Resolves::none())), &normalizer));
         assert!(!removal.kept_by(false, None, &normalizer));
     }

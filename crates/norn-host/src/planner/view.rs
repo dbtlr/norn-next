@@ -95,9 +95,7 @@ impl FolderContents {
     /// otherwise.
     fn take(&mut self, path: &Path) {
         let spelled = path.to_string_lossy();
-        match document_path(path)
-            .filter(|at| crate::production::is_markdown(path) && unholdable(at).is_none())
-        {
+        match document_path(path).filter(|_| crate::production::is_markdown(path)) {
             Some(document) => self.documents.push(document),
             None => self.leave(&spelled),
         }
@@ -163,21 +161,6 @@ pub(crate) fn wire_hash(hash: norn_fs::ContentHash) -> ContentHash {
 /// parses as one, since normalizing only drops names.
 pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
     DocumentPath::new(path.to_str()?).ok()
-}
-
-/// Why the store's index cannot hold a document at `spelling`, or `None`
-/// where it can.
-///
-/// The wire admits any relative, non-empty path; the index keys a document by
-/// the store's own grammar, which also refuses a backslash, a control byte, an
-/// empty or `.`/`..` segment, and a leaf whose stem is `.` or `..`. A plan
-/// whose target the index cannot hold would publish a file the vault's
-/// derivation then quarantines, so the planner asks the store's rule rather
-/// than restating it. `spelling` is the normalized one, as the store keys by.
-pub(crate) fn unholdable(spelling: &DocumentPath) -> Option<String> {
-    norn_store::DocumentPath::new(spelling.as_str())
-        .err()
-        .map(|refusal| refusal.to_string())
 }
 
 /// A view that reads each name once and answers every later read of it with

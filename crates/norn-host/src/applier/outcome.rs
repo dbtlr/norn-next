@@ -138,7 +138,9 @@ impl ApplyOutcome {
         for transition in &plan.transitions {
             // A path no vault path normalizes to names nothing the heal can
             // read again, so the vault is healed whole, as it is where the
-            // root cannot be walked.
+            // root cannot be walked. The document-path grammar refuses every
+            // spelling the normalizer refuses, so no transition reaches this;
+            // it is the conservative answer, never a panic.
             let Ok(path) = normalizer.normalize(std::path::Path::new(transition.path.as_str()))
             else {
                 return Batch::rescan(norn_fs::RescanScope::Vault);

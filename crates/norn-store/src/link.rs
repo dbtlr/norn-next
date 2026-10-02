@@ -49,12 +49,10 @@
 //! the separator and a path never does, so the two kinds share one key column
 //! and no key of one kind equals a key of the other.
 
-use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind};
+use norn_wire::{DOCUMENT_EXTENSION, LinkAddress, LinkAddressKind, leaf_stem};
 
 use crate::facts::LinkFact;
-use crate::path::{
-    DocumentPath, SuffixKey, fold_ascii_case, leaf_stem, spell_path_key, suffix_probe,
-};
+use crate::path::{DocumentPath, SuffixKey, fold_ascii_case, spell_path_key, suffix_probe};
 
 /// The separator between segments, in a target and in a path alike.
 const SEPARATOR: char = '/';

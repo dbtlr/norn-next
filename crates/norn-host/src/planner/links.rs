@@ -549,9 +549,7 @@ pub(crate) fn reach(
     let mut probed = Vec::new();
     let mut originals = Vec::new();
     for target in targets {
-        let Some(stored) = stored_path(target.path) else {
-            continue;
-        };
+        let stored = stored_path(target.path);
         let file = identity(target.path);
         overlay = if replaces(target, file.as_ref(), lineage) {
             overlay.replacing(stored.clone())
@@ -565,7 +563,7 @@ pub(crate) fn reach(
             .as_ref()
             .and_then(|file| lineage.source(file))
             .and_then(|drawn| stood.get(&drawn.from).copied())
-            .and_then(stored_path)
+            .map(stored_path)
             .unwrap_or_else(|| stored.clone());
         for link in document_links(bytes) {
             let rewritten = file.as_ref().is_some_and(|file| written.holds(file, &link));
@@ -706,7 +704,7 @@ pub(crate) fn rewrite_destination(
         return None;
     };
     let file = normalizer.normalize(Path::new(path.as_str())).ok()?;
-    Some((file, stored_path(path)?))
+    Some((file, stored_path(path)))
 }
 
 /// **The one rule a delete's cascade follows**: whether a link that
@@ -830,10 +828,7 @@ pub(crate) fn reaching(
             .get(&retarget.position)
             .map(|named| &named.old.before)
         {
-            Some(Resolves::One { path }) => match stored_path(path) {
-                Some(stored) => overlay.reaching(stored),
-                None => overlay,
-            },
+            Some(Resolves::One { path }) => overlay.reaching(stored_path(path)),
             Some(Resolves::None {}) => match norn_store::spelled_place(&retarget.old) {
                 Some(place) => overlay.reaching(place),
                 None => overlay,
@@ -1280,10 +1275,9 @@ pub(crate) fn address(link: &norn_store::LinkFact) -> String {
     }
 }
 
-/// `path` as the store names it, where its grammar holds it; planning leaves
-/// an operation naming any other unresolved.
-pub(crate) fn stored_path(path: &DocumentPath) -> Option<norn_store::DocumentPath> {
-    norn_store::DocumentPath::new(path.as_str()).ok()
+/// `path` as the store names it.
+pub(crate) fn stored_path(path: &DocumentPath) -> norn_store::DocumentPath {
+    norn_store::DocumentPath::from(path)
 }
 
 /// A stored path as the wire names it.
@@ -1973,8 +1967,7 @@ mod tests {
     /// **A wikilink rewrite resolves only where its ends name a document to
     /// retarget to that is not the one `old` named, where the plan leaves
     /// it.** An `old` naming one document or none and a `new` naming one
-    /// document at a path both the vault's rule and the store's grammar read
-    /// resolve; a `new` at a path either refuses, an `old` naming several,
+    /// document resolve; an `old` naming several,
     /// and the two naming one document — at one path, or across the move
     /// carrying `old`'s document to where `new` names — do not. A `new`
     /// naming the path `old`'s document leaves names whatever stands there
@@ -2005,13 +1998,6 @@ mod tests {
             resolves(&ends(Resolves::none(), one("x/c.md")), &still).as_deref(),
             Some("x/c.md")
         );
-        for unreadable in ["../c.md", "x/...md"] {
-            assert_eq!(
-                resolves(&ends(one("a.md"), one(unreadable)), &still),
-                None,
-                "{unreadable}"
-            );
-        }
         assert_eq!(
             resolves(&ends(Resolves::several(), one("c.md")), &still),
             None

@@ -1819,16 +1819,23 @@ fn an_unwritable_registry_advertises_its_account_as_prose() {
 
 // ── The document row and its columns ─────────────────────────────────────
 
-/// A path advertises the one rule its reader keeps and no pattern: the rest of
-/// what a document path may hold is the store's grammar, and a second
-/// definition of it here would be a second grammar.
+/// A path advertises the grammar it is parsed through in its description and
+/// no pattern: the grammar is written once, as code, and a regular expression
+/// here would be a second definition of it.
 #[test]
 fn a_document_path_advertises_the_grammar_it_is_parsed_through() {
     let schema = schema_of::<DocumentPath>();
     assert_eq!(schema["type"].as_str(), Some("string"));
     assert_eq!(schema["minLength"].as_u64(), Some(1));
     assert!(schema.get("pattern").is_none(), "{schema}");
-    for sentence in ["Not empty", "relative to the vault root"] {
+    for sentence in [
+        "Not empty",
+        "relative to the vault root",
+        "backslash",
+        "control character",
+        "empty, `.` or `..`",
+        "extension",
+    ] {
         assert!(
             schema["description"]
                 .as_str()

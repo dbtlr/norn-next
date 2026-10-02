@@ -13,7 +13,7 @@ use norn_wire::{
 
 use super::edit;
 use super::links::{self, wire_family};
-use super::view::{Entry, VaultView, document_path, unholdable, wire_hash};
+use super::view::{Entry, VaultView, document_path, wire_hash};
 use crate::derivation::{decodes, document_links};
 
 /// What composing a plan's operations came to.
@@ -273,9 +273,6 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             }
             Entry::Blocked { detail, .. } => return Ok(Place::NoFile(detail)),
         };
-        if let Some(detail) = unholdable(&spelling) {
-            return Ok(Place::NoFile(detail));
-        }
         self.targets.insert(
             spelling.clone(),
             ComposedTarget {
@@ -1173,8 +1170,8 @@ mod tests {
 
     #[test]
     fn a_path_in_a_second_spelling_is_the_file_its_one_spelling_names() {
-        let vault = MemoryVault::with(&[("a/b.md", "b")]);
-        for spelling in ["a//b.md", "./a/b.md", "a/./b.md", "a/b.md/"] {
+        let vault = MemoryVault::with(&[("a/b.md", "b")]).folding_case();
+        for spelling in ["A/b.md", "a/B.md", "A/B.MD"] {
             let operations = [Operation::new(OperationKind::delete_document(path(
                 spelling,
             )))];
@@ -1187,16 +1184,6 @@ mod tests {
                 "{spelling}"
             );
         }
-    }
-
-    #[test]
-    fn a_path_climbing_out_through_a_parent_name_does_not_resolve() {
-        let vault = MemoryVault::with(&[("a/b.md", "b")]);
-        let detail = unresolvable_detail(
-            &vault,
-            Operation::new(OperationKind::delete_document(path("x/../a/b.md"))),
-        );
-        assert!(detail.contains("names no document"), "{detail}");
     }
 
     fn composed_text(vault: &MemoryVault, operation: Operation, at: &str) -> Option<String> {
@@ -1630,10 +1617,10 @@ mod tests {
 
     #[test]
     fn two_spellings_of_one_file_compose_as_one_target() {
-        let vault = MemoryVault::with(&[("a/b.md", "one two")]);
+        let vault = MemoryVault::with(&[("a/b.md", "one two")]).folding_case();
         let operations = [
             Operation::new(OperationKind::str_replace(path("a/b.md"), "one", "1")),
-            Operation::new(OperationKind::str_replace(path("a//b.md"), "two", "2")),
+            Operation::new(OperationKind::str_replace(path("A/b.md"), "two", "2")),
         ];
         let composition =
             compose(&operations, &in_order(&operations), &vault).expect("an infallible view");

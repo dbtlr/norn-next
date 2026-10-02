@@ -105,7 +105,7 @@ const UNNORMALIZED: &[(&str, &str)] = &[
     ("..alpha", "`.` or `..` stem"),
     ("docs/..alpha", "`.` or `..` stem"),
     ("...md", "`.` or `..` stem"),
-    ("docs/glossary\0.md", "NUL"),
+    ("docs/glossary\0.md", "control"),
     ("docs/gloss\u{7}ary.md", "control"),
 ];
 

@@ -560,6 +560,7 @@ mod tag;
 mod target;
 mod trust;
 mod vault;
+mod vault_path;
 mod verb;
 mod write;
 
@@ -644,6 +645,7 @@ pub use vault::resolve::{ResolveParams, ResolveReport};
 pub use vault::set::{VaultChange, VaultReplace, VaultSetParams, VaultSetReport};
 pub use vault::status::{StatusParams, StatusReport};
 pub use vault::unregister::{UnregisterParams, UnregisterReport};
+pub use vault_path::{PathProblem, is_refused_character, is_refused_segment, leaf_stem};
 pub use verb::{
     Addressing, RequestScope, UnknownAddressing, UnknownRequestScope, UnknownVerb, Verb,
 };

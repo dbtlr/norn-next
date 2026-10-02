@@ -246,7 +246,7 @@ pub(super) fn check(
         return Err(Unfit::Invalid(fault));
     }
     let normalizer = view.normalizer();
-    let stored = stored_paths(plan).map_err(|paths| Unfit::Invalid(disagreement(paths)))?;
+    let stored = stored_paths(plan);
     let misshapen = shape_disagrees(plan, normalizer);
     if !misshapen.is_empty() {
         return Err(Unfit::Invalid(disagreement(misshapen)));
@@ -437,32 +437,20 @@ pub(super) fn stage(
     })
 }
 
-/// Every transition's path as the store names it, or why the plan names a
-/// target at a path the store cannot name, which would be published and never
-/// recorded.
+/// Every transition's path as the store names it.
 ///
 /// **A plan names each target at one spelling.** The planner writes every
 /// transition at a normalized spelling, and the kernel keeps a path as it is
-/// given — a `./` component included — so a target spelled otherwise, as a
-/// plan edited by hand can be, would be published, recorded and derived at a
-/// second spelling of one file. Normalizing a path drops only its `.` and
-/// empty components, and the store's grammar refuses both, so a path the store
-/// names is already the one spelling of its file. Where the store cannot
-/// name a target, every such target's path is returned.
-fn stored_paths(plan: &ResolvedPlan) -> Result<Vec<norn_store::DocumentPath>, Vec<DocumentPath>> {
-    let mut stored = Vec::with_capacity(plan.transitions.len());
-    let mut unnamed = Vec::new();
-    for transition in &plan.transitions {
-        match norn_store::DocumentPath::new(transition.path.as_str()) {
-            Ok(path) => stored.push(path),
-            Err(_) => unnamed.push(transition.path.clone()),
-        }
-    }
-    if unnamed.is_empty() {
-        Ok(stored)
-    } else {
-        Err(unnamed)
-    }
+/// given, so a target spelled otherwise would be published, recorded and
+/// derived at a second spelling of one file. Normalizing a path drops only
+/// its `.` and empty components, and the document-path grammar a transition
+/// is read through refuses both, so a transition's path is already the one
+/// spelling of its file.
+fn stored_paths(plan: &ResolvedPlan) -> Vec<norn_store::DocumentPath> {
+    plan.transitions
+        .iter()
+        .map(|transition| norn_store::DocumentPath::from(&transition.path))
+        .collect()
 }
 
 /// Remove every shadow `staged` holds, publishing nothing.

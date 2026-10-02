@@ -7,7 +7,7 @@
 use norn_config::schema::{
     CreationProblem, Template, TemplateError, VaultSchema, VaultSchemaError,
 };
-use norn_wire::{AuthoredValue, ValueMap};
+use norn_wire::{AuthoredValue, PathProblem, ValueMap};
 
 /// A schema declaring two creation rules and the inbox.
 const CREATING: &[u8] = b"version: 1
@@ -227,10 +227,10 @@ fn a_target_whose_file_name_is_md_alone_is_refused() {
 #[test]
 fn a_target_starting_at_the_filesystem_root_is_refused() {
     let (_, problem, message) = creation_refusal(&task_targeting("/tasks/{{seq}}.md"));
-    assert_eq!(problem, CreationProblem::Absolute);
+    assert_eq!(problem, CreationProblem::Path(PathProblem::Absolute));
     assert_eq!(
         message,
-        "`creatable.task.target` starts with `/`, and a target is relative to the vault root"
+        "`creatable.task.target` names no document path: it is absolute, and a vault path is relative to the vault root"
     );
 }
 
@@ -239,17 +239,15 @@ fn a_target_starting_at_the_filesystem_root_is_refused() {
 /// literal text, wherever in the path they stand.
 #[test]
 fn a_target_with_a_dot_segment_is_refused() {
-    for (target, segment) in [
-        ("../tasks/{{seq}}.md", ".."),
-        ("tasks/../../{{seq}}.md", ".."),
-        ("./tasks/{{seq}}.md", "."),
+    for target in [
+        "../tasks/{{seq}}.md",
+        "tasks/../../{{seq}}.md",
+        "./tasks/{{seq}}.md",
     ] {
         let (_, problem, _) = creation_refusal(&task_targeting(target));
         assert_eq!(
             problem,
-            CreationProblem::DotSegment {
-                segment: segment.to_string()
-            },
+            CreationProblem::Path(PathProblem::DotSegment),
             "{target}"
         );
     }
@@ -264,20 +262,26 @@ fn a_target_segment_with_dots_beside_other_text_reads() {
     }
 }
 
-/// **Every segment names something**: a `//`, a trailing `/`, and a target
-/// that is empty hold an empty segment.
+/// **Every segment names something**: a `//` and a trailing `/` hold an
+/// empty segment, and an empty target names nothing at all.
 #[test]
 fn a_target_with_an_empty_segment_is_refused() {
-    for target in ["tasks//{{seq}}.md", "tasks/", ""] {
+    for target in ["tasks//{{seq}}.md", "tasks/"] {
         let (_, problem, _) = creation_refusal(&task_targeting(target));
-        assert_eq!(problem, CreationProblem::EmptySegment, "{target}");
+        assert_eq!(
+            problem,
+            CreationProblem::Path(PathProblem::EmptySegment),
+            "{target}"
+        );
     }
+    let (_, problem, _) = creation_refusal(&task_targeting(""));
+    assert_eq!(problem, CreationProblem::Path(PathProblem::Empty));
 }
 
 #[test]
 fn a_target_with_a_backslash_is_refused() {
     let (_, problem, _) = creation_refusal(&task_targeting("tasks\\\\{{seq}}.md"));
-    assert_eq!(problem, CreationProblem::Backslash);
+    assert_eq!(problem, CreationProblem::Path(PathProblem::Backslash));
 }
 
 /// **A `:` is not portable in a file name**: Windows reads it as a drive or
@@ -333,20 +337,22 @@ fn a_target_holding_the_clock_slugged_reads() {
 /// the literal text.
 #[test]
 fn a_target_the_store_cannot_hold_is_refused() {
-    for (target, stem) in [("x/..md", "."), ("x/...md", "..")] {
+    for target in ["x/..md", "x/...md"] {
         let (_, problem, _) = creation_refusal(&task_targeting(target));
         assert_eq!(
             problem,
-            CreationProblem::DotStem {
-                stem: stem.to_string()
-            },
+            CreationProblem::Path(PathProblem::DotStem),
             "{target}"
         );
     }
     // YAML's own escapes, so the schema bytes carry the character itself.
     for target in ["x/\\x01{{seq}}.md", "x/\\t{{seq}}.md", "x\\x7f/{{seq}}.md"] {
         let (_, problem, _) = creation_refusal(&task_targeting(target));
-        assert_eq!(problem, CreationProblem::ControlCharacter, "{target}");
+        assert_eq!(
+            problem,
+            CreationProblem::Path(PathProblem::ControlCharacter),
+            "{target}"
+        );
     }
 }
 
@@ -559,9 +565,7 @@ fn an_inbox_target_is_judged_as_a_target() {
         (at.as_str(), problem),
         (
             "inbox.target",
-            CreationProblem::DotSegment {
-                segment: "..".to_string()
-            }
+            CreationProblem::Path(PathProblem::DotSegment)
         )
     );
 }

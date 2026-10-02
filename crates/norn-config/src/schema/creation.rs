@@ -6,10 +6,11 @@
 //! Both are written in the grammar of [`Template`].
 //!
 //! **Everything about where a token may stand is judged at schema read.** A
-//! target ends in `.md`, is relative, stays inside the vault, and is a path the
-//! store can hold — no leading `/`, no empty, `.` or `..` segment, no `\`, no
-//! control character, and no file name that is `.` or `..` once its extension
-//! is dropped — judged on its literal text and where its tokens stand, since a
+//! target ends in `.md`, is relative, stays inside the vault, and is a document
+//! path by the one grammar [`PathProblem::of_document`] writes — no leading
+//! `/`, no empty, `.` or `..` segment, no `\`, no control character, and no
+//! file name that is `.` or `..` once its extension is dropped — judged on its
+//! literal text and where its tokens stand, since a
 //! token's value is not known until a document is made. A target holds no `:`,
 //! which is not portable in a file name, so `{{now}}` and `{{time}}` stand in
 //! one only as `{{now|slug}}` and `{{time|slug}}`. `{{seq}}` stands only in a
@@ -38,7 +39,7 @@ use std::fmt;
 
 use serde_yaml::{Mapping, Value};
 
-use norn_wire::{AuthoredValue, FiniteFloat, ValueMap};
+use norn_wire::{AuthoredValue, DocumentPath, FiniteFloat, PathProblem, ValueMap};
 
 use super::template::{
     FillError, Part, Slot, Template, TemplateError, TemplateValues, Token, UnsafeValue,
@@ -143,8 +144,8 @@ impl Target {
     /// `template` as a target, or the reason it is none.
     fn read(template: Template) -> Result<Self, CreationProblem> {
         let standing = standing_in(&template);
-        if let Some(problem) = document_path_problem(&standing) {
-            return Err(problem);
+        if let Some(problem) = PathProblem::of_document(&standing) {
+            return Err(CreationProblem::Path(problem));
         }
         if standing.contains(':') {
             return Err(CreationProblem::Colon);
@@ -196,16 +197,14 @@ impl Target {
     /// can hold, inside the vault and ending in `.md`, whatever it is
     /// supplied. A numbered target fills to
     /// its [slot](Target::seq_slot) at the number `values` carries.
-    pub fn fill(&self, values: &TemplateValues) -> Result<String, FillError> {
-        match self.seq_slot(values)? {
-            Some(slot) => Ok(slot.path(values.seq().ok_or(FillError::NoSeq)?)),
-            None => {
-                let path = fill_path(self.template.parts(), values)?;
-                match document_path_problem(&path) {
-                    Some(problem) => Err(FillError::NotADocumentPath { path, problem }),
-                    None => Ok(path),
-                }
-            }
+    pub fn fill(&self, values: &TemplateValues) -> Result<DocumentPath, FillError> {
+        let path = match self.seq_slot(values)? {
+            Some(slot) => slot.path(values.seq().ok_or(FillError::NoSeq)?),
+            None => fill_path(self.template.parts(), values)?,
+        };
+        match PathProblem::of_document(&path) {
+            Some(problem) => Err(FillError::NotADocumentPath { path, problem }),
+            None => Ok(DocumentPath::new(path).expect("the document-path grammar admits it")),
         }
     }
 
@@ -236,7 +235,7 @@ impl Target {
         // A number adds digits alone to the file name, so the slot holds a
         // document path at every number exactly where it holds one at the
         // stand-in.
-        match document_path_problem(&slot.spelled(STAND_IN)) {
+        match PathProblem::of_document(&slot.spelled(STAND_IN)) {
             Some(problem) => Err(FillError::NotADocumentPath {
                 path: slot.spelled("{{seq}}"),
                 problem,
@@ -348,53 +347,6 @@ fn standing_in(template: &Template) -> String {
             Part::Token(_) => STAND_IN,
         })
         .collect()
-}
-
-/// Why `path` is no path the store holds a document at, or `None` where it is
-/// one.
-///
-/// These are the store's refusals, rule for rule: `segment_problem` and
-/// `DocumentPath::new` in `norn-store`'s `path` module. An empty or absolute
-/// path, a `\`, a control character, an empty, `.` or `..` segment, and a
-/// file name that is `.` or `..` once its extension is dropped. This crate
-/// cannot reach the store, and `norn_wire::DocumentPath` holds only the first
-/// two of them, so they are written here until one grammar the vocabulary owns
-/// holds them all.
-fn document_path_problem(path: &str) -> Option<CreationProblem> {
-    if path.starts_with('/') {
-        return Some(CreationProblem::Absolute);
-    }
-    if path.contains('\\') {
-        return Some(CreationProblem::Backslash);
-    }
-    if path.contains(char::is_control) {
-        return Some(CreationProblem::ControlCharacter);
-    }
-    // An empty path splits into one segment, which is empty.
-    for segment in path.split('/') {
-        match segment {
-            "" => return Some(CreationProblem::EmptySegment),
-            "." | ".." => {
-                return Some(CreationProblem::DotSegment {
-                    segment: segment.to_string(),
-                });
-            }
-            _ => {}
-        }
-    }
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    // The extension is the text after the last dot inside the name: a leading
-    // dot opens a name, not an extension.
-    let stem = match file_name.rfind('.') {
-        Some(dot) if dot > 0 => &file_name[..dot],
-        _ => file_name,
-    };
-    if stem == "." || stem == ".." {
-        return Some(CreationProblem::DotStem {
-            stem: stem.to_string(),
-        });
-    }
-    None
 }
 
 /// One run of a target's path segment: literal text holding no `/`, or a
@@ -528,10 +480,10 @@ pub enum CreationProblem {
         /// The variable named.
         name: String,
     },
-    /// The target starts with `/`.
-    Absolute,
-    /// The target's literal text holds `\`.
-    Backslash,
+    /// The target is no document path: what the document-path grammar
+    /// refuses in it, judged on its literal text with each token standing as
+    /// a plain value.
+    Path(PathProblem),
     /// The target's literal text holds `:`, which is not portable in a file
     /// name: Windows reads it as a drive or a stream.
     Colon,
@@ -540,22 +492,6 @@ pub enum CreationProblem {
     ClockWithColon {
         /// The token's name: `now` or `time`.
         token: String,
-    },
-    /// The target's literal text holds a control character, which the store
-    /// refuses in a path.
-    ControlCharacter,
-    /// The target's file name is `.` or `..` once its extension is dropped,
-    /// which names no document the store keys.
-    DotStem {
-        /// The file name without its extension: `.` or `..`.
-        stem: String,
-    },
-    /// The target holds an empty path segment: a `//`, or a `/` at its end.
-    EmptySegment,
-    /// The target holds a `.` or `..` segment.
-    DotSegment {
-        /// The segment, as written.
-        segment: String,
     },
     /// The target does not end in `.md`.
     NotMarkdown,
@@ -605,36 +541,15 @@ impl fmt::Display for CreationProblem {
                 formatter,
                 "names the variable `{name}`, which the rule's `variables` does not declare"
             ),
-            CreationProblem::Absolute => write!(
-                formatter,
-                "starts with `/`, and a target is relative to the vault root"
-            ),
-            CreationProblem::Backslash => write!(
-                formatter,
-                "holds `\\`, and a target separates its folders with `/` alone"
-            ),
+            CreationProblem::Path(problem) => {
+                write!(formatter, "names no document path: {problem}")
+            }
             CreationProblem::Colon => {
                 write!(formatter, "holds `:`, which is not portable in a file name")
             }
             CreationProblem::ClockWithColon { token } => write!(
                 formatter,
                 "holds `{{{{{token}}}}}`, which writes the clock with `:`, and `:` is not portable in a file name; `{{{{{token}|slug}}}}` writes it without"
-            ),
-            CreationProblem::ControlCharacter => write!(
-                formatter,
-                "holds a control character, which no document path holds"
-            ),
-            CreationProblem::DotStem { stem } => write!(
-                formatter,
-                "names a file that is `{stem}` once its extension is dropped, which no document path names"
-            ),
-            CreationProblem::EmptySegment => write!(
-                formatter,
-                "holds an empty path segment, and every segment of a target names something"
-            ),
-            CreationProblem::DotSegment { segment } => write!(
-                formatter,
-                "holds the segment `{segment}`, and a target names no `.` or `..` segment, so it stays inside the vault"
             ),
             CreationProblem::NotMarkdown => write!(
                 formatter,
