@@ -253,6 +253,13 @@ impl<'view, V: VaultView> Simulated<'view, V> {
 
     /// Where `path` leads, reading its before-state the first time the plan
     /// touches its identity.
+    ///
+    /// **A control file is no place a document operation leads to**, whatever
+    /// the vault holds there: the vault schema and config are written whole
+    /// by `write_control_file` alone ([`super::control`]), so an edit, a
+    /// create, a removal or a move naming either path does not resolve. The
+    /// schema path a registration names elsewhere in the vault is a place
+    /// the vault's walk does not enter, which the view answers as blocked.
     fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
         let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
             Ok(identity) => identity,
@@ -262,6 +269,15 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 )));
             }
         };
+        if let Some(file) = self.control_file_at(&identity) {
+            return Ok(Place::NoFile(format!(
+                "`{path}` is the vault {}, a control file no document operation writes: `write_control_file` writes it whole",
+                match file {
+                    ControlFile::Schema => "schema",
+                    ControlFile::Config => "config",
+                }
+            )));
+        }
         if let Some(spelling) = self.spelled.get(&identity) {
             return Ok(Place::File(identity, spelling.clone()));
         }
@@ -286,6 +302,20 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         self.read_at.insert(identity.clone(), spelling.clone());
         self.spelled.insert(identity.clone(), spelling.clone());
         Ok(Place::File(identity, spelling))
+    }
+
+    /// The role of the control file `identity` names, under the vault's
+    /// identity rule, so no spelling of a control file's path reaches it as a
+    /// document.
+    fn control_file_at(&self, identity: &NormalizedPath) -> Option<ControlFile> {
+        [ControlFile::Schema, ControlFile::Config]
+            .into_iter()
+            .find(|&file| {
+                self.view
+                    .normalizer()
+                    .normalize(Path::new(control_path(file).as_str()))
+                    .is_ok_and(|control| control == *identity)
+            })
     }
 
     /// The document standing so far at the file `path` leads to, or why none
@@ -1026,6 +1056,33 @@ mod tests {
                 .with_cascade(vec![rewrite("gone.md", "a", "b")]),
         );
         assert!(detail.contains("gone.md"), "{detail}");
+    }
+
+    /// **A document operation never writes a control file**: an edit, a
+    /// body replaced, a create and a move naming the vault config or the
+    /// vault schema's path do not resolve, saying the file is a control file,
+    /// however the vault holds it — only a `write_control_file` writes one.
+    #[test]
+    fn a_document_operation_naming_a_control_file_does_not_resolve() {
+        let vault = MemoryVault::with(&[
+            (".norn/config.toml", "[engine.sample]\n"),
+            (".norn/schema.yaml", "version: 1\n"),
+            ("a.md", "A\n"),
+        ]);
+        for at in [".norn/config.toml", ".norn/schema.yaml"] {
+            for kind in [
+                OperationKind::str_replace(path(at), "1", "2"),
+                OperationKind::replace_body(path(at), "x\n"),
+                OperationKind::delete_document(path(at)),
+                OperationKind::create_document(path(at), "x\n"),
+                OperationKind::move_document(path("a.md"), path(at)),
+                OperationKind::move_document(path(at), path("b.md")),
+            ] {
+                let name = kind.name();
+                let detail = unresolvable_detail(&vault, Operation::new(kind));
+                assert!(detail.contains("control file"), "{name} at {at}: {detail}");
+            }
+        }
     }
 
     #[test]
