@@ -1698,9 +1698,9 @@ maintainer lock, before the edited registration is served. `vault status` and `d
 observe the serving set these verbs change: a vault a change holds is reported held, a vault
 an edit served is reported by the entry serving the edit alone, and that entry reports no
 delivered engine section and no advisories until its own attach publishes them.
-Registration gates durability — durable database, watcher, warm trust — while unregistered
-roots get disposable derivation over a throwaway store. That second half is not built: the
-attach seam refuses a throwaway demand, and only registered vaults attach. Lazy attach
+Every vault operation requires a registration ([ADR 0033](decisions/0033-every-vault-operation-requires-a-registration.md)):
+only registered vaults attach, and a directory no registered vault contains is set up by
+`init`, which registers it. Lazy attach
 bounds file-descriptor and watch usage against a measured budget, not an assumed one.
 
 ```mermaid
@@ -1735,8 +1735,6 @@ Placement notes:
   contended entry refuses without preventing the process from serving unrelated
   registry entries. The channel-scoped listening socket is `norn-serve`'s
   independent process-level concern; an entry's maintainer lock never gates it.
-- Disposable derivation for unregistered roots is a host attach mode over a throwaway store.
-  It is not built; the attach seam refuses a demand that names that mode.
 - The first-run janitor that clears orphaned legacy cache directories is a host startup task
   over machine-local paths. It is not built; nothing sweeps those directories today.
 - The endpoint and bearer conventions on both ends of the loopback edges come from
