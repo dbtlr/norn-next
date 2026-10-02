@@ -66,7 +66,7 @@ use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(7);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(8);
 
 /// Why a path the vault holds produces no document facts.
 ///
