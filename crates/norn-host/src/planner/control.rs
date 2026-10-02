@@ -11,7 +11,10 @@
 //! than as a document, since the vault's walk does not enter the schema's path;
 //! the applier judges its content by [`unreadable_as_role`] rather than under
 //! the schema; no link reads one ([`super::links::Target`]); and the changeset
-//! records no document row for one.
+//! records no document row for one. A registration naming a `schema_source`
+//! reads no schema at the default path, so the view answers that path as a
+//! place no control file is written, and a schema write there does not
+//! resolve.
 //!
 //! **What a control target's content must be.** A write lands only content its
 //! role's parser reads — `norn-config`'s [`VaultSchema::parse`] for the schema

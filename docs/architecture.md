@@ -2511,8 +2511,9 @@ its whole content. The planner maps the role to the in-vault path the host reads
 target as a control file rather than as a document, since the vault's walk does not enter
 the schema's path: it is created where it is absent and replaced where it stands, guarded by
 the state it held like any target, so create exclusivity and drift refuse it as they refuse a
-document's write. Content its role's parser does not read leaves the operation unresolved at
-planning, and a resolved plan carrying such content is `request/plan-invalid`, so a plan
+document's write. A schema write over a registration naming a `schema_source` does not
+resolve, since that vault never reads `.norn/schema.yaml`. Content its role's parser does not
+read leaves the operation unresolved at planning, and a resolved plan carrying such content is `request/plan-invalid`, so a plan
 never lands a control file the next reload would refuse. A control file is no document: it
 is not judged under the schema, it is no link's candidate and holds no link the vault reads,
 and the changeset records no row for it. No document operation resolves at a control file's

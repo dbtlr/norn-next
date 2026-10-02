@@ -1027,3 +1027,52 @@ fn a_schema_replace_guarded_by_its_before_state_lands_and_a_stale_guard_refuses(
         migrated
     );
 }
+
+/// **A schema write does not resolve where the registration reads its schema
+/// from a source**: the vault never reads `.norn/schema.yaml` then, so a
+/// `write_control_file` of the schema is left unresolved, saying where the
+/// schema is read from, and neither that file nor the source is written.
+#[test]
+fn a_schema_write_does_not_resolve_where_the_registration_reads_a_schema_source() {
+    let (sandbox, vault) = a_vault("host-applies-schema-elsewhere");
+    let source = sandbox.work_dir().join("shared/schema.yaml");
+    std::fs::create_dir_all(source.parent().expect("a parent")).expect("the folder");
+    std::fs::write(&source, "version: 1\n").expect("the schema");
+    let host = vault.host_reading_schema_from(
+        norn_config::registry::SchemaSource::new(&source).expect("a schema source"),
+    );
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let default = std::fs::read(vault.path().join(".norn/schema.yaml")).expect("a default");
+
+    let refused = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::operations(AuthoredPlan::new(
+                VaultAddress::name(vault.name().clone()),
+                vec![Operation::new(OperationKind::write_control_file(
+                    norn_wire::ControlFile::Schema,
+                    "version: 1\n# mine\n",
+                ))],
+            )),
+        ))
+        .expect("an apply over a ready vault is admitted")
+        .wait()
+        .expect_err("a schema write the vault never reads is refused");
+    assert_eq!(refused.code(), &ReasonCode::VaultPlanRefused);
+    let ErrorDetail::PlanRefused {
+        plan, unresolved, ..
+    } = refused.detail()
+    else {
+        panic!("refused with {:?}", refused.detail());
+    };
+    assert!(plan.transitions.is_empty(), "{:?}", plan.transitions);
+    assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+    assert_eq!(
+        std::fs::read(vault.path().join(".norn/schema.yaml")).expect("the default stands"),
+        default
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).expect("the source stands"),
+        "version: 1\n"
+    );
+}

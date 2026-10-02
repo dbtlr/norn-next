@@ -341,6 +341,24 @@ fn not_a_document_path(at: &Path) -> Entry {
     }
 }
 
+impl TreeView {
+    /// Whether `path` is the default schema's path, `.norn/schema.yaml`,
+    /// under the root's identity rule.
+    fn is_the_default_schema(&self, path: &NormalizedPath) -> bool {
+        let schema = super::control::control_path(norn_wire::ControlFile::Schema);
+        self.normalizer()
+            .normalize(Path::new(schema.as_str()))
+            .is_ok_and(|schema| schema == *path)
+    }
+
+    /// Whether the walk does not enter `path` because the host excluded it.
+    fn excludes_as_the_host(&self, path: &NormalizedPath) -> bool {
+        norn_fs::Exclusions::new(self.normalizer(), &self.exclusions).is_ok_and(|exclusions| {
+            matches!(exclusions.reason(path), Some(norn_fs::Excluded::Host))
+        })
+    }
+}
+
 impl VaultView for TreeView {
     type Error = TreeViewError;
 
@@ -417,10 +435,24 @@ impl VaultView for TreeView {
     /// — is answered as a place no control file can be written, in its own
     /// words, so a plan writing there does not resolve rather than failing
     /// the read of the vault.
+    ///
+    /// **The schema is read where the vault reads it, or nowhere.** The walk
+    /// excludes the schema the vault reads, so the default schema path the
+    /// walk does not exclude is one whose registration reads its schema from
+    /// a `schema_source` instead: a write there would land a file the vault
+    /// never reads, so it is a place no control file is written.
     fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         let Some(at) = document_path(path.as_path()) else {
             return Ok(not_a_document_path(path.as_path()));
         };
+        if self.is_the_default_schema(path) && !self.excludes_as_the_host(path) {
+            return Ok(Entry::Blocked {
+                detail: format!(
+                    "the vault reads its schema from the `schema_source` its registration names, never from `{at}`"
+                ),
+                barrier: Barrier::Closed,
+            });
+        }
         Ok(
             match norn_fs::read_if_present_and_hash(&self.root, path.as_path()) {
                 Ok(Some(read)) => {
