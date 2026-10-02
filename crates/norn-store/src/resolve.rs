@@ -151,12 +151,33 @@ impl AmbiguityIgnore {
     /// The globs match with ASCII case folded where `order` folds it, and
     /// bytewise where it does not.
     pub fn admits(&self, path: &str, target_segments: usize, order: StoredPathOrder) -> bool {
+        target_segments >= self.admitting_segments(path, order)
+    }
+
+    /// The fewest segments a target spells that keep `path` in its class, on
+    /// a root whose path order is `order`: [`AmbiguityIgnore::admits`] holds
+    /// exactly for a target of at least this many segments.
+    ///
+    /// One for a path under no glob, and for a document at the root, whose
+    /// own name names its whole place. Otherwise the segments from the ignored
+    /// place down to the leaf, and never fewer than two, because a
+    /// one-segment target spells a stem alone and names no place below the
+    /// root.
+    ///
+    /// A store writes it beside each document it derives
+    /// (`documents.admitting_segments`), so a link key's head seeks the
+    /// members its class admits rather than stepping past the ones it keeps
+    /// out.
+    pub fn admitting_segments(&self, path: &str, order: StoredPathOrder) -> usize {
         let Some(ignored) = self.ignored_place(path, order.glob_case()) else {
-            return true;
+            return 1;
         };
         let depth = path.split(SEPARATOR).count();
+        if depth == 1 {
+            return 1;
+        }
         let from_the_place_to_the_leaf = depth - ignored + 1;
-        target_segments >= from_the_place_to_the_leaf && (target_segments > 1 || depth == 1)
+        from_the_place_to_the_leaf.max(2)
     }
 
     /// How many segments the shallowest spelling of `path` or one of its
@@ -373,6 +394,27 @@ pub(crate) fn link_key_class(
     )
 }
 
+/// The rows of `documents` a statement calls `alias` in the class a link's
+/// suffix key `link_key` opens whose stored admitting count is `admitting`:
+/// one run of the admitted-key index — `documents_admitted_suffix_key`, or
+/// `documents_admitted_folded_suffix_key` where the root folds — over the
+/// range [`link_key_class`] reads, held in ladder order. A class of a target
+/// of `segments` segments is the union of these runs for each count from one
+/// to `segments`, which is [`AmbiguityIgnore::admits`] read off the column the
+/// store derived it into rather than computed per row.
+pub(crate) fn link_key_admitted(
+    alias: &str,
+    key: SuffixKey,
+    link_key: &str,
+    admitting: &str,
+) -> String {
+    let column = format!("{alias}.{}", key.column());
+    format!(
+        "{alias}.admitting_segments = {admitting} AND {column} >= {link_key} \
+         AND {column} < {SUCCESSOR_FUNCTION}({link_key})"
+    )
+}
+
 /// The rows of `documents` a statement calls `alias` standing at a link's path
 /// key `link_key` — an expression holding the key in the space `key` selects —
 /// under the root's order: bytewise where it tells spellings apart, and with
@@ -543,6 +585,26 @@ mod tests {
             root.admits("docs/glossary.md", 1, Sensitive),
             "a path no glob matches"
         );
+    }
+
+    /// **The admitting count is the shortest target that keeps a place in
+    /// its class**: one for a place under no glob and for an ignored document
+    /// at the root, the segments from the ignored place to the leaf below it,
+    /// and two at least for an ignored place below the root.
+    #[test]
+    fn a_place_is_admitted_from_the_fewest_segments_that_name_it() {
+        let set = ignoring(&["archive/**", "attachments/*", "glossary.md"]);
+        for (path, segments) in [
+            ("notes/glossary.md", 1),
+            ("glossary.md", 1),
+            ("archive/norn/glossary.md", 3),
+            ("archive/glossary.md", 2),
+            ("attachments/image.md", 2),
+        ] {
+            assert_eq!(set.admitting_segments(path, Sensitive), segments, "{path}");
+            assert!(set.admits(path, segments, Sensitive), "{path}");
+            assert!(!set.admits(path, segments - 1, Sensitive), "{path}");
+        }
     }
 
     #[test]

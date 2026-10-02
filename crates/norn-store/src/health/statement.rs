@@ -346,44 +346,104 @@ pub(crate) fn discard_sql() -> String {
 }
 
 /// [`crate::ExplainedStatement::LinkHealthHeads`]: the head of what each
-/// distinct key names, at most `?5` documents in the resolution ladder's
+/// distinct key names, at most `?3` documents in the resolution ladder's
 /// order, each row the arm, the key's index in its list, and the document's
 /// id, path and rung.
 ///
 /// Two arms, one per key space a link is addressed in. The class arm walks
-/// the suffix keys `?1` lists, each a `[key, segments]` pair, and reads each
-/// key's class through [`resolve::link_key_class`] — a range seek of the
-/// suffix key the root probes, less the places the ignore set `?3` excludes
-/// under the order `?4` — its rung the document's suffix key. The path arm
-/// walks the path keys `?2` lists and reads the documents at each through
-/// [`resolve::link_key_path`], its rung the key itself, so a path key's rows
-/// rank by the path alone. Each head is cut in the statement, so a key costs
-/// its class and hands back at most `?5` rows, however large the class.
+/// the suffix keys `?1` lists, each a `[key, segments]` pair, and reads the
+/// members each key's class admits through [`resolve::link_key_admitted`],
+/// its rung the document's suffix key. The path arm walks the path keys `?2`
+/// lists and reads the documents at each through [`resolve::link_key_path`],
+/// its rung the key itself, so a path key's rows rank by the path alone. Each
+/// head is cut in the statement, so a key hands back at most `?3` rows,
+/// however large its class.
+///
+/// # A class's head is read past none of the members it keeps out
+///
+/// A document stays in the class of a key of `segments` segments where its
+/// stored admitting count is at most `segments`
+/// ([`crate::AmbiguityIgnore::admitting_segments`]). The members of one
+/// count stand together in that count's run of the admitted-key index, in
+/// ladder order, so the class arm reads each count from one to `segments` —
+/// the counts `?4` lists, from one up — as a seek of that run cut at `?3`
+/// rows, then cuts the union of those runs at `?3` in ladder order: a sort of
+/// at most `segments` heads, never of the class. A key costs its segments'
+/// worth of bounded seeks, and the members its class keeps out, however many
+/// sort ahead of its head, are never read.
+///
+/// **The count is read as the row was derived.** A changeset computes it
+/// under the declaration it is judged under, so where a pin moves the
+/// ignore set, a row derived below that pin holds the count the old set gave
+/// it until the heal that follows the pin derives it again, as it does
+/// every row the old declaration judged. A schema reload closes the entry's
+/// reader for its length, so no read answers in that window; a re-decision
+/// inside the heal's own changesets may read an old count, and a class is
+/// re-decided by every changeset that writes one of its members, the last of
+/// them after every member is derived under the new set.
 ///
 /// The rows come back in no stated order: the judgment orders each head, and
 /// merges a link's heads, by [`resolve::ladder_cmp`], the order the cut here
 /// spells in SQL.
 pub(crate) fn heads_sql(key: SuffixKey) -> String {
     let rung = key.column();
-    let class = class_predicate(key);
+    let admitted =
+        resolve::link_key_admitted("dl", key, "json_extract(j.value, '$[0]')", "n.value");
     let path = resolve::link_key_path("dp", key, "j.value");
-    let ladder = resolve::ladder(&format!("dl.{rung}"), "dl.path");
+    let runs = resolve::ladder(&format!("dl.{rung}"), "dl.path");
+    let merged = resolve::ladder(&format!("da.{rung}"), "da.path");
     format!(
         "SELECT {CLASS_ARM}, j.key, dc.id, dc.path, dc.{rung}
          FROM json_each(?1) AS j CROSS JOIN documents AS dc
-         WHERE dc.id IN (SELECT dl.id FROM documents AS dl WHERE {class}
-                         ORDER BY {ladder} LIMIT ?5)
+         WHERE dc.id IN (SELECT da.id FROM json_each(?4) AS n CROSS JOIN documents AS da
+                         WHERE n.value <= json_extract(j.value, '$[1]')
+                           AND da.id IN (SELECT dl.id FROM documents AS dl WHERE {admitted}
+                                         ORDER BY {runs} LIMIT ?3)
+                         ORDER BY {merged} LIMIT ?3)
          UNION ALL
          SELECT {PATH_ARM}, j.key, dc.id, dc.path, j.value
          FROM json_each(?2) AS j CROSS JOIN documents AS dc
          WHERE dc.id IN (SELECT dp.id FROM documents AS dp WHERE {path}
-                         ORDER BY dp.path LIMIT ?5)"
+                         ORDER BY dp.path LIMIT ?3)"
     )
+}
+
+/// The values [`heads_sql`] binds: the suffix keys beside their segment
+/// counts, the path keys, the head's bound, and the admitting counts from one
+/// to the most segments any listed suffix key spells.
+pub(crate) fn heads_parameters(
+    classes: &[(&str, u64)],
+    paths: &[&str],
+    head: usize,
+) -> Result<Vec<Value>, StoreError> {
+    let deepest = classes
+        .iter()
+        .map(|(_, segments)| *segments)
+        .max()
+        .unwrap_or(0);
+    let counts = canonical_json(&FrontmatterValue::Sequence(
+        (1..=deepest)
+            .map(|count| {
+                FrontmatterValue::Int(i64::try_from(count).expect("a segment count fits i64"))
+            })
+            .collect(),
+    ))?;
+    Ok(vec![
+        class_list(classes)?,
+        path_list(paths)?,
+        Value::Integer(i64::try_from(head).expect("a head fits i64")),
+        Value::Text(counts),
+    ])
 }
 
 /// [`crate::ExplainedStatement::LinkHealthTotals`]: how many documents each
 /// distinct key names, each row the arm, the key's index in its list, and the
-/// count, over the two arms and the same predicates [`heads_sql`] reads.
+/// count, over the two arms [`heads_sql`] reads. The class arm counts the
+/// key's range of the suffix key the root probes, less the places the ignore
+/// set `?3` excludes under the order `?4`, which is the set of members the
+/// stored admitting counts [`heads_sql`] seeks by admit; so it steps past the
+/// members its class keeps out, as a count of the class steps past every
+/// member it admits.
 pub(crate) fn totals_sql(key: SuffixKey) -> String {
     let class = class_predicate(key);
     let path = resolve::link_key_path("dp", key, "j.value");
@@ -409,17 +469,27 @@ fn class_predicate(key: SuffixKey) -> String {
     )
 }
 
-/// The values [`heads_sql`] binds, and [`totals_sql`] less the head's bound:
-/// the suffix keys beside their segment counts, the path keys, the ignore set
-/// and the order it is matched under, and the head's bound where it is one.
-pub(crate) fn keys_parameters(
+/// The values [`totals_sql`] binds: the suffix keys beside their segment
+/// counts, the path keys, and the ignore set and the order it is matched
+/// under.
+pub(crate) fn totals_parameters(
     classes: &[(&str, u64)],
     paths: &[&str],
     ignore: &AmbiguityIgnore,
     order: StoredPathOrder,
-    head: Option<usize>,
 ) -> Result<Vec<Value>, StoreError> {
-    let classes = canonical_json(&FrontmatterValue::Sequence(
+    Ok(vec![
+        class_list(classes)?,
+        path_list(paths)?,
+        Value::Text(ignore.encoded()),
+        Value::Text(order.as_str().to_string()),
+    ])
+}
+
+/// The suffix keys beside their segment counts, as the list of `[key,
+/// segments]` pairs the class arm of [`heads_sql`] and [`totals_sql`] walks.
+fn class_list(classes: &[(&str, u64)]) -> Result<Value, StoreError> {
+    canonical_json(&FrontmatterValue::Sequence(
         classes
             .iter()
             .map(|(key, segments)| {
@@ -431,15 +501,8 @@ pub(crate) fn keys_parameters(
                 ])
             })
             .collect(),
-    ))?;
-    let mut values = vec![
-        Value::Text(classes),
-        path_list(paths)?,
-        Value::Text(ignore.encoded()),
-        Value::Text(order.as_str().to_string()),
-    ];
-    values.extend(head.map(|head| Value::Integer(i64::try_from(head).expect("a head fits i64"))));
-    Ok(values)
+    ))
+    .map(Value::Text)
 }
 
 /// [`crate::ExplainedStatement::LinkHealthAnchors`]: for each `[link, target]`

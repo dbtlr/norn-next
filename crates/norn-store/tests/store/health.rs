@@ -1210,24 +1210,27 @@ fn seek(alias: &'static str, access: Access<'static>, constraint: &str) -> Seek 
 
 /// The seeks each judgment statement is held to under `order`.
 fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek> {
-    let (class_index, key, path_index, link_index, suffix_index, link_key) = match order {
-        Sensitive => (
-            "documents_suffix_key",
-            "suffix_key",
-            "documents_path",
-            "link_keys_key",
-            "link_keys_suffix_key",
-            "key",
-        ),
-        Folding => (
-            "documents_folded_suffix_key",
-            "folded_suffix_key",
-            "documents_path_nocase",
-            "link_keys_folded_key",
-            "link_keys_folded_suffix_key",
-            "folded_key",
-        ),
-    };
+    let (class_index, admitted_index, key, path_index, link_index, suffix_index, link_key) =
+        match order {
+            Sensitive => (
+                "documents_suffix_key",
+                "documents_admitted_suffix_key",
+                "suffix_key",
+                "documents_path",
+                "link_keys_key",
+                "link_keys_suffix_key",
+                "key",
+            ),
+            Folding => (
+                "documents_folded_suffix_key",
+                "documents_admitted_folded_suffix_key",
+                "folded_suffix_key",
+                "documents_path_nocase",
+                "link_keys_folded_key",
+                "link_keys_folded_suffix_key",
+                "folded_key",
+            ),
+        };
     let range = format!("({key}>? AND {key}<?)");
     // A page's driver, then each link it reached, its holder, and every key
     // it is held under.
@@ -1302,7 +1305,16 @@ fn seeks(statement: ExplainedStatement<'_>, order: StoredPathOrder) -> Vec<Seek>
             ),
             seek("sp", Access::Index(link_index), &format!("({link_key}=?)")),
         ],
-        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => vec![
+        ExplainedStatement::LinkHealthHeads => vec![
+            seek(
+                "dl",
+                Access::Index(admitted_index),
+                &format!("(admitting_segments=? AND {key}>? AND {key}<?)"),
+            ),
+            seek("da", Access::RowId, "(rowid=?)"),
+            seek("dp", Access::Index(path_index), "(path=?)"),
+        ],
+        ExplainedStatement::LinkHealthTotals => vec![
             seek("dl", Access::Index(class_index), &range),
             seek("dp", Access::Index(path_index), "(path=?)"),
         ],
@@ -1341,20 +1353,24 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             .expect("a query plan"),
     );
     read.assert_no_full_scan();
-    // A head is the ladder's first rows of a class, read in suffix-key order
-    // off the suffix-key index, and the ladder breaks a tie between equal keys
-    // by the path, which that index does not carry. So SQLite sorts only the
-    // rows sharing one key — the last term of the order — and the head's limit
-    // stops the read once it fills: a partial sort bounded by a run of equal
-    // keys, never the class. A page of a write's links is read in path order
-    // off the change-feed index, which does not say a path is one document's,
-    // so SQLite sorts the links of one path by ordinal — the one document's
-    // own links, which the changeset wrote — and the page's limit stops the
-    // read. Every other statement sorts nothing.
-    if matches!(
-        statement,
-        ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthWrittenLinks
-    ) {
+    // A head is the ladder's first rows of a class, each admitting count's
+    // run read in ladder order off the admitted-key index, which carries the
+    // key and the path both, so a run sorts nothing and its limit stops the
+    // read; the runs' union, at most a head per count the key's segments
+    // reach, is sorted whole and cut again: a sort bounded by the key's
+    // segments, never the class. A page of a write's links is read in path
+    // order off the change-feed index, which does not say a path is one
+    // document's, so SQLite sorts the links of one path by ordinal — the one
+    // document's own links, which the changeset wrote — and the page's limit
+    // stops the read. Every other statement sorts nothing.
+    let sorted = match statement {
+        ExplainedStatement::LinkHealthHeads => Some("USE TEMP B-TREE FOR ORDER BY"),
+        ExplainedStatement::LinkHealthWrittenLinks => {
+            Some("USE TEMP B-TREE FOR LAST TERM OF ORDER BY")
+        }
+        _ => None,
+    };
+    if let Some(sorted) = sorted {
         let sorts: Vec<&str> = read
             .rows()
             .iter()
@@ -1363,7 +1379,7 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
             .collect();
         assert_eq!(
             sorts,
-            ["USE TEMP B-TREE FOR LAST TERM OF ORDER BY"],
+            [sorted],
             "{statement:?} under {order:?}: {:?}",
             read.rows()
         );
@@ -1418,12 +1434,13 @@ fn judge(store: &mut Store, statement: ExplainedStatement<'_>, order: StoredPath
 /// document row, and of `link_keys_link` per link; the links held under a
 /// class a range seek of the link index over the key the root probes, and
 /// those held under a path key an equality seek of it, each link then reached
-/// by its row id and its holder by its own; each distinct key's head and
-/// total a range seek of the suffix key the root probes, or a seek of the
-/// path at a path key; each candidate's suffixes a range seek of the same
-/// suffix key; and each anchor a link reached by its row id and a handful of
-/// equality seeks into the one document it names. Nothing is read end to end,
-/// and only a head sorts, and only the rows sharing one key.
+/// by its row id and its holder by its own; each distinct key's head a range
+/// seek of the suffix key the root probes within each admitting count, and
+/// its total a range seek of that suffix key, or either a seek of the path at
+/// a path key; each candidate's suffixes a range seek of the same suffix key;
+/// and each anchor a link reached by its row id and a handful of equality
+/// seeks into the one document it names. Nothing is read end to end, and only
+/// a head sorts, and only the head of each admitting count it reads.
 ///
 /// Controls: each index a statement seeks dropped on a store of its own, and
 /// the bar fails for that statement.

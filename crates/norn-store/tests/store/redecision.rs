@@ -1448,6 +1448,75 @@ fn a_writes_work_follows_the_neighborhood_not_the_vault() {
     }
 }
 
+/// What writing `hub.md` at `written` cost a store under `order` holding
+/// `ignored` documents `archive/aNNNN/hub.md`, which `archive/**` keeps out of
+/// the class `hub` opens, beside `holders` — each `(path, body)` — linking
+/// `[[hub]]`: the counters the write moved, the steps its re-decision took,
+/// and the findings it left at `holder.md`.
+fn hub_write_beside_ignored(
+    order: StoredPathOrder,
+    ignored: usize,
+    holders: &[(&str, &str)],
+    written: &str,
+) -> (DerivationCounters, u64, Vec<Filed>) {
+    let mut vault = Vault::new(
+        &format!("redecide-ignored-{order:?}-{ignored}-{}", holders.len()),
+        order,
+    );
+    let mut documents: Vec<(String, &str)> = (0..ignored)
+        .map(|at| (format!("archive/a{at:04}/hub.md"), "hub\n"))
+        .collect();
+    documents.extend(holders.iter().map(|(at, body)| (at.to_string(), *body)));
+    vault.apply(
+        documents
+            .iter()
+            .map(|(at, body)| Change::Upsert(derived(at, body)))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut request = vault.store.begin_request();
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(derived(written, "hub\n"))],
+            &[],
+            &declared(),
+        )
+        .expect("writing the hub");
+    let steps = request.read_steps();
+    let counters = request.finish();
+    (counters, steps, vault.findings("holder.md"))
+}
+
+/// **A write's work does not follow the members its class keeps out.** Two
+/// thousand documents `archive/aNNNN/hub.md` under the ignored `archive/**`
+/// sort ahead of `zz/hub.md`, and writing it re-decides the broken `[[hub]]`
+/// in the same steps beside them as beside twenty: the head the re-decision
+/// reads seeks the members the class admits, never the ones it keeps out, so
+/// the link resolves to the one document written and its broken finding goes.
+#[test]
+fn a_writes_work_does_not_follow_the_ignored_members_of_its_class() {
+    for order in [Sensitive, Folding] {
+        let holder = [("holder.md", "[[hub]]\n")];
+        let (few, few_steps, few_filed) = hub_write_beside_ignored(order, 20, &holder, "zz/hub.md");
+        let (many, many_steps, many_filed) =
+            hub_write_beside_ignored(order, 2000, &holder, "zz/hub.md");
+        assert_eq!(few_filed, Vec::new(), "{order:?}");
+        assert_eq!(many_filed, Vec::new(), "{order:?}");
+        assert_eq!(counted(&many, "links_redecided"), 1, "{order:?}");
+        assert_eq!(counted(&many, "link_health_keys_resolved"), 1, "{order:?}");
+        assert_eq!(counted(&many, "findings_discarded"), 1, "{order:?}");
+        snapshot(&many).assert_equal_counts(
+            &snapshot(&few),
+            &format!("{order:?}: a hundred times the ignored members"),
+        );
+        assert_eq!(
+            many_steps, few_steps,
+            "{order:?}: a hundred times the ignored members moved the re-decision's work"
+        );
+    }
+}
+
 /// **A key the chunks hold in turn is resolved once.** Six hundred documents
 /// each link `[[hub.v1]]`, which is held under `hub/` and under `hub.v1/`, so
 /// writing one more document the stem `hub` names walks the class `hub/` in

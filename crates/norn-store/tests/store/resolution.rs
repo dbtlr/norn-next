@@ -662,6 +662,68 @@ fn a_hubs_in_links_resolve_one_key_once() {
     });
 }
 
+/// What judging a plan that creates `new/index.md` cost over `vault` holding
+/// `ignored` documents `archive/aNNNN/index.md`, which `archive/**` keeps out
+/// of the class `index` opens, beside `zz/index.md` and `holder.md` linking
+/// `[[index]]`: the links it judged, its work, and the steps its snapshot took.
+fn create_beside_ignored(mut vault: Vault, ignored: usize) -> (Vec<Judged>, ResolutionWork, u64) {
+    let paths: Vec<String> = (0..ignored)
+        .map(|at| format!("archive/a{at:04}/index.md"))
+        .collect();
+    let mut documents: Vec<(&str, &str)> =
+        paths.iter().map(|at| (at.as_str(), "index\n")).collect();
+    documents.push(("zz/index.md", "index\n"));
+    documents.push(("holder.md", "[[index]]\n"));
+    vault.write(&documents);
+
+    let snapshot = vault.snapshot();
+    let before = snapshot.counters().vm_steps();
+    let mut judged_links = Vec::new();
+    let work = snapshot
+        .resolution_changes(
+            &overlay(&["new/index.md"], &[]),
+            &[],
+            &declared(),
+            |change| {
+                judged_links.push(read(&change));
+            },
+        )
+        .expect("a judgment");
+    assert_eq!(snapshot.counters().full_scan_steps(), 0);
+    (judged_links, work, snapshot.counters().vm_steps() - before)
+}
+
+/// **A key's head costs the members its class admits, not the ones it keeps
+/// out.** Two thousand documents `archive/aNNNN/index.md` under the ignored
+/// `archive/**` sort ahead of `zz/index.md`, the one member the class `index`
+/// admits, and a plan creating `new/index.md` judges `[[index]]` in the same
+/// steps beside them as beside twenty: one link, one key, one head row, read
+/// by a seek of the admitted members alone.
+#[test]
+fn a_heads_work_does_not_follow_the_ignored_members_of_its_class() {
+    for order in [Sensitive, Folding] {
+        let (few, few_work, few_steps) = create_beside_ignored(
+            Vault::new(&format!("resolution-ignored-{order:?}-20"), order),
+            20,
+        );
+        let (many, many_work, many_steps) = create_beside_ignored(
+            Vault::new(&format!("resolution-ignored-{order:?}-2000"), order),
+            2000,
+        );
+        let expected = vec![judged("holder.md", "index", "one:zz/index.md", "several")];
+        assert_eq!(few, expected, "{order:?}");
+        assert_eq!(many, expected, "{order:?}");
+        assert_eq!(few_work.links_evaluated, 1, "{order:?}");
+        assert_eq!(few_work.keys_resolved, 1, "{order:?}");
+        assert_eq!(few_work.head_rows, 1, "{order:?}");
+        assert_eq!(many_work, few_work, "{order:?}");
+        assert_eq!(
+            many_steps, few_steps,
+            "{order:?}: a hundred times the ignored members moved the judgment's steps"
+        );
+    }
+}
+
 /// **A declaration the snapshot does not pin is refused**, as every read
 /// builder refuses one.
 #[test]

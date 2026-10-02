@@ -317,20 +317,23 @@ impl<'a> Request<'a> {
                     LINK_HEALTH_CHUNK,
                 )),
             ),
-            ExplainedStatement::LinkHealthHeads | ExplainedStatement::LinkHealthTotals => {
-                let head =
-                    (statement == ExplainedStatement::LinkHealthHeads).then_some(CANDIDATE_HEAD);
-                database.emitted_plan(
-                    &sql,
-                    params_from_iter(health::keys_parameters(
-                        &[(EXPLAINED_CLASS_KEY, 1)],
-                        &[EXPLAINED_PAGE_CURSOR_LEAF],
-                        &AmbiguityIgnore::none(),
-                        order,
-                        head,
-                    )?),
-                )
-            }
+            ExplainedStatement::LinkHealthHeads => database.emitted_plan(
+                &sql,
+                params_from_iter(health::heads_parameters(
+                    &[(EXPLAINED_CLASS_KEY, 1)],
+                    &[EXPLAINED_PAGE_CURSOR_LEAF],
+                    CANDIDATE_HEAD,
+                )?),
+            ),
+            ExplainedStatement::LinkHealthTotals => database.emitted_plan(
+                &sql,
+                params_from_iter(health::totals_parameters(
+                    &[(EXPLAINED_CLASS_KEY, 1)],
+                    &[EXPLAINED_PAGE_CURSOR_LEAF],
+                    &AmbiguityIgnore::none(),
+                    order,
+                )?),
+            ),
             ExplainedStatement::LinkHealthSuffixes => {
                 database.emitted_plan(&sql, params_from_iter(explained_suffixes(order)?.1))
             }

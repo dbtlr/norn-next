@@ -259,7 +259,19 @@ pub(crate) fn apply(
             let applied = match &change {
                 Change::Upsert(facts) => {
                     refuse_typed_values_the_pin_does_not_derive(pinned.as_deref(), facts).and_then(
-                        |()| upsert(&mut statements, stamp, recorded_at, facts, &mut tally),
+                        |()| {
+                            let admitting = declared
+                                .ambiguity_ignore()
+                                .admitting_segments(facts.path.as_str(), order);
+                            upsert(
+                                &mut statements,
+                                stamp,
+                                recorded_at,
+                                facts,
+                                admitting,
+                                &mut tally,
+                            )
+                        },
                     )
                 }
                 // The death's own provenance, which is a different thing from
@@ -446,13 +458,15 @@ impl<'t> Statements<'t> {
             // the cascade fires only for one.
             upsert_document: prepared(
                 "INSERT INTO documents (
-                     path, suffix_key, folded_suffix_key, content_hash, byte_length, body,
-                     body_hash, body_offset, frontmatter, frontmatter_projection_hash,
-                     frontmatter_diagnostic_count, generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     path, suffix_key, folded_suffix_key, admitting_segments, content_hash,
+                     byte_length, body, body_hash, body_offset, frontmatter,
+                     frontmatter_projection_hash, frontmatter_diagnostic_count, generation,
+                     derived_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(path) DO UPDATE SET
                      suffix_key                   = excluded.suffix_key,
                      folded_suffix_key            = excluded.folded_suffix_key,
+                     admitting_segments           = excluded.admitting_segments,
                      content_hash                 = excluded.content_hash,
                      byte_length                  = excluded.byte_length,
                      body                         = excluded.body,
@@ -552,11 +566,18 @@ impl<'t> Statements<'t> {
 /// the fingerprints off the feed and asks for a body only where the one it holds
 /// no longer matches. A document with no frontmatter projection carries no
 /// projection hash, which is the `NULL` pair [`crate::ddl::documents`] checks.
+///
+/// **The admitting count is the declaration's**, the one fact on the row the
+/// pinned schema shapes: `admitting` is the fewest segments a target spells
+/// that keeps this document in its class
+/// ([`crate::AmbiguityIgnore::admitting_segments`]), computed by the caller
+/// under the declaration the changeset is judged under and the store's order.
 fn upsert(
     statements: &mut Statements<'_>,
     generation: i64,
     derived_at: i64,
     facts: &DocumentFacts,
+    admitting: usize,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
     refuse_a_document_that_does_not_add_up(facts)?;
@@ -570,6 +591,7 @@ fn upsert(
                 facts.path.as_str(),
                 facts.path.suffix_key(),
                 facts.path.folded_suffix_key(),
+                i64::try_from(admitting).expect("a segment count fits i64"),
                 facts.content_hash,
                 facts.byte_length,
                 facts.body,
