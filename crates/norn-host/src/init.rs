@@ -75,9 +75,10 @@ version: 1
 ///
 /// **Deterministic**: a pure function of `observed`, so two previews of one
 /// vault write the same bytes. Each key is written quoted, every character a
-/// comment line cannot hold — a line break of any kind, any other control
-/// character, a byte-order mark — escaped as `\uXXXX`, with `"` and `\`
-/// escaped too, so no key ends its comment or reads as a declaration.
+/// comment line cannot hold ([`comment_holds`]) — a line break of any kind, a
+/// tab, a byte-order mark, and every character outside YAML's printable set —
+/// escaped as `\uXXXX`, with `"` and `\` escaped too, so no key ends its
+/// comment, reads as a declaration or makes the starter unreadable.
 pub(crate) fn starter_schema(observed: &[ObservedKey]) -> String {
     let mut schema = String::from(HEADER);
     if observed.is_empty() {
@@ -112,10 +113,7 @@ fn quoted(key: &str) -> String {
         match character {
             '"' => quoted.push_str("\\\""),
             '\\' => quoted.push_str("\\\\"),
-            character
-                if character.is_control()
-                    || matches!(character, '\u{2028}' | '\u{2029}' | '\u{feff}') =>
-            {
+            character if !comment_holds(character) => {
                 let _ = write!(quoted, "\\u{:04x}", u32::from(character));
             }
             character => quoted.push(character),
@@ -123,6 +121,23 @@ fn quoted(key: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+/// Whether a comment line holds `character` as it is: one of `x20`–`x7E`,
+/// `xA0`–`xD7FF`, `xE000`–`xFFFD` or `x10000`–`x10FFFF`, other than U+2028,
+/// U+2029 and the byte-order mark.
+///
+/// That is YAML's printable set — `x9`, `xA`, `xD`, `x20`–`x7E`, `x85`,
+/// `xA0`–`xD7FF`, `xE000`–`xFFFD`, `x10000`–`x10FFFF` — less its line breaks
+/// (line feed, carriage return, next line, and U+2028 and U+2029, which a
+/// YAML 1.1 reader breaks a line at), the tab and the byte-order mark. A
+/// character outside the set — a control character, or the noncharacters
+/// U+FFFE and U+FFFF — is refused by a YAML reader even inside a comment.
+fn comment_holds(character: char) -> bool {
+    matches!(
+        character,
+        '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..
+    ) && !matches!(character, '\u{2028}' | '\u{2029}' | '\u{feff}')
 }
 
 /// Every frontmatter key `vault`'s documents carry on `snapshot`, in key
@@ -315,6 +330,55 @@ mod tests {
             VaultSchema::parse(starter.as_bytes()).expect("the starter parses"),
             VaultSchema::default()
         );
+    }
+
+    /// **Every character outside YAML's printable set is escaped**, whichever
+    /// excluded class it falls in — the C0 controls but tab, line feed and
+    /// carriage return; delete and the C1 controls but next line; and the
+    /// noncharacters U+FFFE and U+FFFF, which a YAML reader refuses even
+    /// inside a comment — so a key holding any of them still leaves a starter
+    /// that parses and declares nothing, the character written as `\uXXXX`;
+    /// and the printable set's bounds are written as they are.
+    #[test]
+    fn every_character_outside_yaml_s_printable_set_is_escaped() {
+        let excluded = [
+            (0x00..=0x08),
+            (0x0b..=0x0c),
+            (0x0e..=0x1f),
+            (0x7f..=0x84),
+            (0x86..=0x9f),
+            (0xfffe..=0xffff),
+        ];
+        for class in excluded {
+            for code in class {
+                let character = char::from_u32(code).expect("a scalar value");
+                let starter = starter_schema(&[key(&format!("a{character}b"), 1, &[])]);
+                assert_eq!(
+                    VaultSchema::parse(starter.as_bytes()).map_err(|error| error.to_string()),
+                    Ok(VaultSchema::default()),
+                    "U+{code:04X}"
+                );
+                assert!(
+                    starter.ends_with(&format!("# \"a\\u{code:04x}b\": 1 document; \n")),
+                    "U+{code:04X}:\n{starter}"
+                );
+            }
+        }
+        for printable in [
+            '\u{a0}',
+            '\u{d7ff}',
+            '\u{e000}',
+            '\u{fffd}',
+            '\u{10000}',
+            '\u{10ffff}',
+        ] {
+            let starter = starter_schema(&[key(&format!("a{printable}b"), 1, &[])]);
+            assert!(
+                starter.ends_with(&format!("# \"a{printable}b\": 1 document; \n")),
+                "{printable:?}:\n{starter}"
+            );
+            VaultSchema::parse(starter.as_bytes()).expect("the starter parses");
+        }
     }
 
     /// **A key a comment line cannot hold whole is escaped**: a line break of
