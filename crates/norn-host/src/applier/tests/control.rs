@@ -154,3 +154,32 @@ fn a_resolved_control_file_write_whose_content_does_not_read_as_its_role_is_inva
     assert_eq!(envelope.code(), &ReasonCode::RequestPlanInvalid);
     assert_eq!(fixture.read(SCHEMA).as_deref(), Some("version: 1\n"));
 }
+
+/// **A control file is not judged under the vault schema**, though that
+/// schema declares fields and tags no control file carries: the config and
+/// the schema are written under a pinned schema requiring a field and
+/// reporting undeclared tags, each holding a tag and a link a document
+/// would be judged for, and both land.
+#[test]
+fn a_control_file_lands_under_a_schema_that_declares_what_it_does_not_carry() {
+    let mut fixture = fixture(&[("a.md", "---\nstatus: x\n---\n#ok\n")]);
+    fixture.pin(
+        "version: 1\nfields:\n  status:\n    required: true\n    type: text\ntags:\n  declared: [ok]\n  undeclared: report\n",
+    );
+    let config = "# [[nowhere]] #nope\n";
+    let schema = "version: 1\n# [[nowhere]] #nope\n";
+    let plan = fixture.plan(vec![
+        writing(ControlFile::Config, config),
+        writing(ControlFile::Schema, schema),
+    ]);
+    let applied = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&applied),
+        vec![
+            (CONFIG.to_string(), TargetResult::Wrote),
+            (SCHEMA.to_string(), TargetResult::Wrote),
+        ]
+    );
+    assert_eq!(fixture.read(CONFIG).as_deref(), Some(config));
+    assert_eq!(fixture.read(SCHEMA).as_deref(), Some(schema));
+}
