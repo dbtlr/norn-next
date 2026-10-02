@@ -64,8 +64,9 @@
 //! here too:
 //! [`ReloadFailure`], with the [`ControlFileFailure`] — a [`ControlFile`] and
 //! the [`ReloadStage`] it refused at — that three of its carriers hold alone.
-//! [`Directory`] is a directory a client asks a question about, the third
-//! path grammar beside [`VaultRoot`] and [`SchemaSource`]. [`EngineSection`]
+//! [`Directory`] is a directory a client asks a question about, a path
+//! grammar beside [`VaultRoot`], [`SchemaSource`] and [`DocumentPath`], whose
+//! grammar [`PathProblem`] writes once for every reader of a document path. [`EngineSection`]
 //! is what a host was delivered as a vault's engine section, which is what a
 //! status answer reports and what a vector refusal is composed against.
 //!

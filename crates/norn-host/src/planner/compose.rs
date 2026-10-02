@@ -189,8 +189,8 @@ pub(crate) fn compose<V: VaultView>(
 /// far, over the view the before-states are read from.
 ///
 /// **A file is its identity.** Every name an operation carries is normalized
-/// by the view's one rule, so two spellings of one file — `a//b.md` and
-/// `a/b.md`, or on a root that folds case `A.md` and `a.md` — are one file,
+/// by the view's one rule, so two spellings of one file — on a root that
+/// folds case, `A.md` and `a.md` — are one file,
 /// held at the spelling the tree lists. The one act that gives an identity a
 /// second spelling is a case-only rename, which writes the file at its new
 /// spelling and takes it away at its old one.

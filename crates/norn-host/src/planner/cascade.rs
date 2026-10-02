@@ -515,8 +515,9 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
 
 /// Why the delete `removal` rewriting the links naming its document does not
 /// resolve, its `rewrite_to` naming `named` after the plan rather than one
-/// document a link can be respelled toward: one at a path the vault's rule or
-/// the store's grammar refuses, said so; several, headed as a read heads an
+/// document a link can be respelled toward: one at a path the vault's rule
+/// refuses, said so (a backstop no target reaches, since the document-path
+/// grammar refuses every such path); several, headed as a read heads an
 /// ambiguous target; or none — the document the delete removes itself, said
 /// so, or no document at all.
 fn unnamed(
@@ -528,10 +529,10 @@ fn unnamed(
     let address = removal.rewrite_to().unwrap_or_default();
     if let Some(named) = named {
         match (&named.after, &named.candidates) {
-            // A document the store names that the vault's rule does not, or
-            // the other way round, is no file a link can be respelled toward:
-            // the delete is left out saying so, never landed leaving the
-            // links it was to rewrite.
+            // A document the vault's rule does not name is no file a link can
+            // be respelled toward: the delete is left out saying so, never
+            // landed leaving the links it was to rewrite. The document-path
+            // grammar refuses every such path, so no target reaches this.
             (Resolves::One { path }, _) => {
                 return UnresolvedReason::no_longer_resolves(format!(
                     "`rewrite_to` `{address}` names `{path}`, which is no path the links naming the removed document can be rewritten toward"
@@ -567,7 +568,8 @@ fn unnamed(
 /// ([`RetargetNaming::destination`]): its `old` names several documents
 /// before the plan, headed there; its `new` names none or several where the
 /// plan leaves the vault, the latter headed, or one at a path the vault's
-/// rule or the store's grammar refuses; or the two name one document where
+/// rule refuses (a backstop no target reaches, since the document-path
+/// grammar refuses every such path); or the two name one document where
 /// the plan leaves it, so no wikilink would change.
 fn unretargeted(
     retarget: &Retarget,

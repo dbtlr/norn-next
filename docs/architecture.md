@@ -2630,8 +2630,8 @@ unresolved, its reason naming every holding document once, in path order, and ho
 backlinks there are, so its plan answers `vault/plan-refused`. A delete leaving them broken
 lands, and the forecast advises on each link it leaves broken. A delete rewriting them reads
 its `rewrite_to` through the same door, as a wikilink written with it is held, where the plan
-leaves the vault: naming no document there — the one the delete removes among them — or one
-at a path the vault's rule refuses, it is left unresolved in words, and
+leaves the vault: naming no document there — the one the delete removes among them — it is
+left unresolved in words, and
 naming several, with the head of them a store built at the after-state would report and the
 ambiguous end named `target`, the only read of the door past the bound a link's judgment reads.
 Naming one, every backlink not already naming that document after the plan is respelled to

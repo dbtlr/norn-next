@@ -24,8 +24,8 @@ const SEPARATOR: char = '/';
 
 /// Why a text is no vault-relative path of the kind asked for.
 ///
-/// Closed: these are every refusal the grammar makes, and [`message`] is the
-/// one sentence each is read as.
+/// These are every refusal the grammar makes, and [`message`] is the one
+/// sentence each is read as.
 ///
 /// [`message`]: PathProblem::message
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -67,17 +67,25 @@ impl PathProblem {
         if let Some(problem) = PathProblem::of_place(text) {
             return Some(problem);
         }
-        if text.contains('\\') {
-            return Some(PathProblem::Backslash);
+        if let Some(character) = text
+            .chars()
+            .find(|&character| is_refused_character(character))
+        {
+            return Some(if character == '\\' {
+                PathProblem::Backslash
+            } else {
+                PathProblem::ControlCharacter
+            });
         }
-        if text.contains(char::is_control) {
-            return Some(PathProblem::ControlCharacter);
-        }
-        text.split(SEPARATOR).find_map(|segment| match segment {
-            "" => Some(PathProblem::EmptySegment),
-            "." | ".." => Some(PathProblem::DotSegment),
-            _ => None,
-        })
+        text.split(SEPARATOR)
+            .find(|segment| is_refused_segment(segment))
+            .map(|segment| {
+                if segment.is_empty() {
+                    PathProblem::EmptySegment
+                } else {
+                    PathProblem::DotSegment
+                }
+            })
     }
 
     /// Why `text` is no document path, or `None` where it is one:

@@ -525,9 +525,7 @@ pub(crate) fn left_as_written(skipped: &[Skipped], kept: &[Kept]) -> BTreeSet<En
 ///
 /// **A moved document's links are read from where it stood.** Each probe's
 /// before-holder is its document's lineage source, where a move carried its
-/// content from, so a relative link a move breaks is read breaking. A target
-/// the store's grammar cannot name is no file the store reads, and is left
-/// out; planning leaves an operation naming one unresolved.
+/// content from, so a relative link a move breaks is read breaking.
 pub(crate) fn reach(
     targets: &[Target<'_>],
     lineage: &Lineage,
@@ -691,11 +689,12 @@ pub(crate) fn rewrite_targets<I: LinkIndex + ?Sized>(
 }
 
 /// The one document the target `named` names where the plan leaves the
-/// vault, as the file the vault's rule reads and the path the store's
-/// grammar reads: what a rewriting delete's backlinks, or a wikilink
-/// rewrite's wikilinks, are respelled toward. `None` where it names no one
-/// document, or one at a path either refuses, which no link can be respelled
-/// toward.
+/// vault, as the file the vault's rule reads and the path the store names:
+/// what a rewriting delete's backlinks, or a wikilink rewrite's wikilinks,
+/// are respelled toward. `None` where it names no one document. The
+/// document-path grammar refuses every spelling the vault's rule refuses, so
+/// a document it names always normalizes; the arm for one that does not is
+/// the conservative answer, never a panic, and no target reaches it.
 pub(crate) fn rewrite_destination(
     named: &TargetNaming,
     normalizer: &PathNormalizer,

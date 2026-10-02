@@ -205,8 +205,7 @@ pub(super) struct Checked {
 /// [`PlanFault::UnexpandedTarget`], nor a creation by rule it did not
 /// expand, which stops as [`PlanFault::UnexpandedRule`], nor a cascade on a
 /// kind that does not cascade, which stops as [`PlanFault::MisplacedCascade`];
-/// the store can name every target; before
-/// any vault read, the transitions name exactly the files the operations
+/// before any vault read, the transitions name exactly the files the operations
 /// touch, each once ([`shape_disagrees`]); every target stands at the spelling
 /// the vault gives it, at a place the vault reads documents at; the plan
 /// records whether each hash's bytes decode as a document one way, and as
@@ -217,7 +216,7 @@ pub(super) struct Checked {
 /// again from those results through `links` ([`link_checks`]), is exactly the
 /// one it records; and every result passes the vault schema, or, for a forced
 /// plan, has each violation it introduces listed rather than refused. A plan
-/// whose store paths, shape, target places, recorded decoding or
+/// whose shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
 /// the files it disagrees at, never as drift. Drift, a failed condition, a
