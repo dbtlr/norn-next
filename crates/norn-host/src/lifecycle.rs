@@ -1141,8 +1141,9 @@ struct EntryState<A: SnapshotSource> {
     /// What a plan is resolved against over the coverage the entry holds, as
     /// [`EntryOps::plan_ground`] read it in the gate hold that last recorded
     /// the entry's declaration; `None` until then, and once the coverage goes
-    /// back. A preview, which holds no coverage, plans against it.
-    plan_ground: Option<PlanGround>,
+    /// back. A preview, which holds no coverage, plans against it, as its
+    /// read's establishing hold carries it out on the [`ReadHold`].
+    plan_ground: Option<Arc<PlanGround>>,
     /// The applies admitted against the entry and not yet run, in the order
     /// they were admitted. Each is demand on the entry while it waits.
     applies: ApplyQueue,
@@ -2689,7 +2690,7 @@ fn record_active_declaration<O: EntryOps>(
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
-    state.plan_ground = ops.plan_ground(attachment);
+    state.plan_ground = ops.plan_ground(attachment).map(Arc::new);
     state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
     record_advisories(state, ops, attachment);
 }
@@ -3925,6 +3926,10 @@ pub struct ReadHold<O: EntryOps> {
     /// The content model the snapshot's store pins, taken under the gate hold
     /// that established the snapshot.
     content_model: Arc<ContentModel>,
+    /// What a plan over the snapshot is resolved against, taken under the
+    /// gate hold that established the snapshot; `None` where the entry's ops
+    /// record none.
+    plan_ground: Option<Arc<PlanGround>>,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
     /// this type's own drop, under the gate, and the lease takes the gate
@@ -3997,6 +4002,14 @@ impl<O: EntryOps> ReadHold<O> {
     /// another.
     pub fn content_model(&self) -> &ContentModel {
         &self.content_model
+    }
+
+    /// The ground a preview on this hold plans against: what the entry's
+    /// coverage recorded, read in the gate hold that established the
+    /// snapshot, so a preview reads it without taking the gate again; `None`
+    /// where the entry's ops record none.
+    pub(crate) fn plan_ground(&self) -> Option<&PlanGround> {
+        self.plan_ground.as_deref()
     }
 }
 
@@ -5132,14 +5145,6 @@ impl<O: EntryOps> Host<O> {
         ))
     }
 
-    /// The ground a preview of the vault `name` plans against: what the
-    /// entry's coverage recorded, and nothing where it holds none.
-    pub(crate) fn plan_ground(&self, name: &VaultName) -> Option<PlanGround> {
-        let entry = self.shared.entries.get(name)?;
-        let state = entry.gate.lock().expect("entry gate poisoned");
-        state.plan_ground.clone()
-    }
-
     /// How many passes that stat every served root this host has run against
     /// its serving set: each classification a recheck runs, and each
     /// resolution of a directory.
@@ -5691,12 +5696,15 @@ impl<O: EntryOps> Host<O> {
         // the gate and whether the establishing round stayed one hold,
         // attested by the hold rather than reported by the establishment.
         //
-        // The model is the entry's under this same hold, so it and the
-        // snapshot established below describe one declaration, and the demand
+        // The model and the plan ground are the entry's under this same hold,
+        // so they and the snapshot established below describe one
+        // declaration, and a preview reads its ground off the hold rather
+        // than taking the gate again past its bound. The demand
         // is the one this hold answers under: `Ready`, or the healing of an
         // entry that has derived every fact this read met.
         let published = state.published_demand();
         let content_model = Arc::clone(&state.active_content_model);
+        let plan_ground = state.plan_ground.clone();
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
@@ -5725,6 +5733,7 @@ impl<O: EntryOps> Host<O> {
                 store: established.reading,
             },
             content_model,
+            plan_ground,
             _lease: lease,
         })
     }
@@ -5734,8 +5743,9 @@ impl<O: EntryOps> Host<O> {
     /// resolves it, and refuse the read with what the entry then publishes.
     ///
     /// It runs after the builder returned, so no statement runs under the
-    /// gate it takes. The publication and the refusal come out of that one
-    /// hold, so the read answers the demand it published.
+    /// gate it takes. Where the read takes the gate itself, the publication
+    /// and the refusal come out of that one hold, so the read answers the
+    /// demand it published.
     ///
     /// **It never waits for the gate.** It runs after the read's query, outside
     /// the read's bound, so it tries the gate once. Where another holder has
@@ -8362,6 +8372,69 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 #[cfg(test)]
 pub(crate) fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
     Demand::State(state).answer(&VaultName::new("answered").expect("a legal vault name"))
+}
+
+/// Another thread's hold of an entry's gate, kept until a case drops this or
+/// ten seconds pass, so a case that fails under it still ends.
+#[cfg(test)]
+pub(crate) struct GateHeldElsewhere {
+    let_go: Option<mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl GateHeldElsewhere {
+    /// Take `entry`'s gate on another thread, and return once it is held.
+    fn take<A: SnapshotSource>(entry: &Arc<Entry<A>>) -> Self {
+        let (holding, held) = mpsc::channel::<()>();
+        let (let_go, released) = mpsc::channel::<()>();
+        let entry = Arc::clone(entry);
+        let holder = std::thread::spawn(move || {
+            let hold = entry.gate.lock().expect("entry gate poisoned");
+            holding.send(()).expect("the case waits for the hold");
+            let _ = released.recv_timeout(Duration::from_secs(10));
+            drop(hold);
+        });
+        held.recv().expect("the holder took the gate");
+        GateHeldElsewhere {
+            let_go: Some(let_go),
+            holder: Some(holder),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GateHeldElsewhere {
+    /// Let the gate go, and return once the holder has.
+    fn drop(&mut self) {
+        // A holder that kept the gate its whole ten seconds has gone already.
+        if let Some(let_go) = self.let_go.take() {
+            let _ = let_go.send(());
+        }
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
+}
+
+#[cfg(test)]
+impl<O: EntryOps> Host<O> {
+    /// Once the next read of `name` lets the entry's gate go, take the gate
+    /// on another thread and keep it: the hold arrives on the receiver this
+    /// answers, and the gate goes back when the case drops it. A case outside
+    /// this module reaches a read's way past its establishing hold this way.
+    pub(crate) fn hold_the_gate_once_a_read_lets_go(
+        &self,
+        name: &VaultName,
+    ) -> mpsc::Receiver<GateHeldElsewhere> {
+        let entry = self.shared.entries.get(name).expect("the entry is served");
+        let (taken, held) = mpsc::channel();
+        let hook_entry = Arc::clone(&entry);
+        entry.gate.when_a_read_lets_go(move || {
+            let _ = taken.send(GateHeldElsewhere::take(&hook_entry));
+        });
+        held
+    }
 }
 
 #[cfg(test)]
@@ -22190,47 +22263,6 @@ mod tests {
         );
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
-    }
-
-    /// Another thread's hold of an entry's gate, kept until the case drops
-    /// this or ten seconds pass, so a case that fails under it still ends.
-    struct GateHeldElsewhere {
-        let_go: Option<mpsc::Sender<()>>,
-        holder: Option<thread::JoinHandle<()>>,
-    }
-
-    impl GateHeldElsewhere {
-        /// Take `entry`'s gate on another thread, and return once it is held.
-        fn take(entry: &Arc<Entry<FakeCoverage>>) -> Self {
-            let (holding, held) = mpsc::channel::<()>();
-            let (let_go, released) = mpsc::channel::<()>();
-            let entry = Arc::clone(entry);
-            let holder = thread::spawn(move || {
-                let hold = entry.gate.lock().expect("entry gate poisoned");
-                holding.send(()).expect("the case waits for the hold");
-                let _ = released.recv_timeout(Duration::from_secs(10));
-                drop(hold);
-            });
-            held.recv().expect("the holder took the gate");
-            GateHeldElsewhere {
-                let_go: Some(let_go),
-                holder: Some(holder),
-            }
-        }
-    }
-
-    impl Drop for GateHeldElsewhere {
-        /// Let the gate go, and return once the holder has.
-        fn drop(&mut self) {
-            // A holder that kept the gate its whole ten seconds has gone
-            // already.
-            if let Some(let_go) = self.let_go.take() {
-                let _ = let_go.send(());
-            }
-            if let Some(holder) = self.holder.take() {
-                let _ = holder.join();
-            }
-        }
     }
 
     /// The bound a read whose way out meets a held gate is held to: what it

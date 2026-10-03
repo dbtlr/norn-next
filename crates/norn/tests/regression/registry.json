@@ -1182,7 +1182,8 @@
           "crates/norn-host/src/lifecycle.rs::a_read_that_schedules_and_refuses_under_a_held_gate_leaves_the_dispatch_to_the_retry",
           "crates/norn-host/src/lifecycle.rs::a_queue_slot_given_back_under_a_held_gate_is_free_at_the_next_hold",
           "crates/norn-host/src/lifecycle.rs::a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold",
-          "crates/norn-host/src/lifecycle.rs::a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold"
+          "crates/norn-host/src/lifecycle.rs::a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold",
+          "crates/norn-host/src/production.rs::a_preview_answers_within_its_bound_while_another_holds_the_gate"
         ]
       }
     },
