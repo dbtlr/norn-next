@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "025143ffaac801404a7d700523414a743934da937d23d001f51256e424875203";
+const CONTRACT_DIGEST: &str = "00da548fa65f171df8e981e3f4b9b31aad73c036d7b0fe6e880d2dba6a1ac71d";
 
 /// The cases carried by tests today, by name.
 ///
@@ -126,6 +126,7 @@ const BOUND_CASES: &[&str] = &[
     "parse-failure-is-not-absence",
     "per-file-atomicity-and-durability",
     "predicate-filtering-in-sql-is-the-known-good-shape",
+    "reads-are-not-blocked-by-writes",
     "set-valued-answers-are-pushed-down",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
@@ -137,7 +138,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is seven classes rather than a bag:
+/// residue no subject reaches, and it is six classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -156,11 +157,6 @@ const BOUND_CASES: &[&str] = &[
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
-/// - **An unbounded call site.** The subject and its bounded form both exist;
-///   what is absent is the bound at named call sites of an existing
-///   declaration — a lock taken without the deadline its bounded take carries
-///   — which is an argument at a call rather than a name any declaration
-///   carries.
 ///
 /// The grounds beside such a reason hold the subjects it cites as present, so
 /// the audit still catches those moving; the claim that something is missing is
@@ -180,7 +176,6 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "maintenance-touches-the-affected-set-only",
     "output-parity-cannot-certify-structure",
     "present-but-unusable-config-refuses-loudly",
-    "reads-are-not-blocked-by-writes",
     "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
