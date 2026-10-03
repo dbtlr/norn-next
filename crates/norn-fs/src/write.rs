@@ -1725,6 +1725,7 @@ fn confirm_shadow(
             &invalid_data("the shadow is not the file staging made"),
         ));
     }
+    crate::reads::count_shadow_read();
     let (hash, len) =
         hashed_from(&mut file).map_err(|error| environment(OPERATION, &path, &error))?;
     if hash != after {
@@ -2127,6 +2128,7 @@ fn observe(
     if !metadata.file_type().is_file() {
         return Ok(Found::Other);
     }
+    crate::reads::count_target_read();
     let (hash, len) =
         hashed_from(&mut file).map_err(|error| environment("reading", full, &error))?;
     disturb(Window::Verifying);

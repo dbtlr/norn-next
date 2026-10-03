@@ -6,9 +6,10 @@
 //!
 //! # The counted set is narrow, and the fields say what is in it
 //!
-//! This is not every stat the crate takes. Three acts are counted — the opens
+//! This is not every stat the crate takes. Five acts are counted — the opens
 //! `open_regular_at` performs, the stats that act and the walk take
-//! along the way, and the directory entries a walk pulls off a stream — and
+//! along the way, the directory entries a walk pulls off a stream, and the
+//! write kernel's reads of a target and of a staged shadow — and
 //! [`ReadTally`]'s fields name them one at a time, each with what it leaves
 //! out. An act outside those fields is outside the tally by construction: no
 //! call site elsewhere reaches the counters.
@@ -75,6 +76,22 @@ pub struct ReadTally {
     /// written. A reader that needs the two apart splits the field rather than
     /// inferring the split.
     pub walk_dirents: u64,
+    /// Targets the write kernel read to judge their state: one per regular
+    /// file opened at a target's name and hashed through that descriptor, by
+    /// staging, by publication's verification again, and by a landing's
+    /// confirmation. A name holding no regular file — a create's absent
+    /// target among them — opens nothing to hash and is not one.
+    ///
+    /// Apart from [`ReadTally::document_opens`] because the act is another
+    /// protocol's: the kernel reads a target to judge a transition, through
+    /// its own no-follow open, and no byte of it reaches derivation. Every one
+    /// hashes exactly what it read, once.
+    pub target_reads: u64,
+    /// Staged shadows the write kernel read to confirm, just before a
+    /// publication act, that the shadow is still the file staging made and
+    /// still holds what staging wrote: one open and one hash per confirmation.
+    /// A shadow lives in the shadow home, under no name of the vault's.
+    pub shadow_reads: u64,
 }
 
 thread_local! {
@@ -82,6 +99,8 @@ thread_local! {
         document_opens: 0,
         stats: 0,
         walk_dirents: 0,
+        target_reads: 0,
+        shadow_reads: 0,
     }) };
     /// Whether a window already stands on this thread.
     static STANDING: Cell<bool> = const { Cell::new(false) };
@@ -159,6 +178,14 @@ pub(crate) fn count_dirents(entries: u64) {
     bump(|tally| tally.walk_dirents += entries);
 }
 
+pub(crate) fn count_target_read() {
+    bump(|tally| tally.target_reads += 1);
+}
+
+pub(crate) fn count_shadow_read() {
+    bump(|tally| tally.shadow_reads += 1);
+}
+
 fn bump(change: impl FnOnce(&mut ReadTally)) {
     TALLY.with(|cell| {
         let mut tally = cell.get();
@@ -180,12 +207,16 @@ mod tests {
         count_document_open();
         count_stat();
         count_dirents(4);
+        count_target_read();
+        count_shadow_read();
         assert_eq!(
             window.finish(),
             ReadTally {
                 document_opens: 1,
                 stats: 1,
-                walk_dirents: 4
+                walk_dirents: 4,
+                target_reads: 1,
+                shadow_reads: 1,
             }
         );
     }
@@ -203,9 +234,8 @@ mod tests {
         assert_eq!(
             second.finish(),
             ReadTally {
-                document_opens: 0,
-                stats: 0,
-                walk_dirents: 2
+                walk_dirents: 2,
+                ..ReadTally::default()
             }
         );
     }
