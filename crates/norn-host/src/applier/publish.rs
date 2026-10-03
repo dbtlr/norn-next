@@ -117,6 +117,9 @@ impl Publisher<'_> {
             .ground
             .landing(staged_path(plan, unit))
             .map_err(Stopped::Io)?;
+        // Where the written content lands: a respell stages at its old
+        // spelling and lands at its new one, which the ledger records.
+        let written_at = self.ground.landing(written_path).map_err(Stopped::Io)?;
         let stop = |refusal: &norn_fs::Refusal| stopped(refusal, written_path, &landing);
         let staged = match held {
             Held::Nothing => {
@@ -135,8 +138,8 @@ impl Publisher<'_> {
             .map_err(|refusal| stop(&refusal))?
         {
             Publication::Wrote(published) => {
-                if !landing.outside {
-                    self.own_writes.published(landing.relative, &published);
+                if !written_at.outside {
+                    self.own_writes.published(written_at.relative, &published);
                 }
                 progress
                     .folders_made
