@@ -1818,7 +1818,7 @@
           "crates/norn-host/src/applier/tests.rs::a_plan_missing_a_transition_is_refused",
           "crates/norn-host/src/applier/tests.rs::a_plan_disagreeing_at_several_files_names_every_one",
           "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_transitions_disagree_previews_as_its_apply_answers",
-          "crates/norn-host/src/planner/compose.rs::a_str_replace_whose_text_occurs_twice_does_not_resolve",
+          "crates/norn-host/src/applier/tests.rs::an_after_state_differing_from_the_composed_bytes_only_where_meaning_is_kept_is_refused",
           "crates/norn-text/tests/editing.rs::a_push_that_would_drop_a_comment_refuses",
           "crates/norn-text/tests/editing.rs::an_edit_moves_only_the_bytes_of_the_construct_it_addresses",
           "crates/norn-text/tests/editing.rs::a_key_the_scanner_decodes_differently_refuses_the_whole_block",

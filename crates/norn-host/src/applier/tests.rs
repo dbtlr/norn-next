@@ -1462,6 +1462,44 @@ fn a_plan_missing_a_transition_is_refused() {
     assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
 }
 
+/// **The after-state check compares bytes, not meaning.** A transition
+/// recording bytes that read as the very document its operation composes — a
+/// comment added, a space more, other line terminators, the last one gone — is
+/// refused all the same, naming the file, and the file is untouched: what the
+/// write contract keeps byte for byte, the gate checks byte for byte.
+#[test]
+fn an_after_state_differing_from_the_composed_bytes_only_where_meaning_is_kept_is_refused() {
+    let source = "---\nstatus: draft\n---\n# A\n";
+    for recorded in [
+        "---\nstatus: final # kept\n---\n# A\n",
+        "---\nstatus:  final\n---\n# A\n",
+        "---\r\nstatus: final\r\n---\r\n# A\r\n",
+        "---\nstatus: final\n---\n# A",
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", source)]);
+        let mut plan = fixture.plan(vec![setting(
+            "a.md",
+            "status",
+            norn_wire::AuthoredValue::string("final"),
+        )]);
+        assert_eq!(
+            plan.transitions[0].after,
+            present("---\nstatus: final\n---\n# A\n")
+        );
+        plan.transitions[0].after = present(recorded);
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            vec![path("a.md")],
+            "{recorded:?}"
+        );
+        assert_eq!(
+            fixture.read("a.md").as_deref(),
+            Some(source),
+            "{recorded:?}"
+        );
+    }
+}
+
 /// An edit whose after-state is changed to its before-state would answer
 /// found and write nothing, as if the edit had landed: refused.
 #[test]
