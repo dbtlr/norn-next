@@ -27,24 +27,25 @@ use norn_wire::{
     Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
     IllegalOperationId, InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration,
     LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, MalformedLadder, ModelIdentity, MoveParams, MoveSubject, Moved,
-    NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady,
-    Operation, OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem,
-    PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance,
-    Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
-    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
-    ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
-    ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
-    RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
-    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
-    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
-    UntrustedReason, ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress,
-    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
-    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
-    is_refused_segment, leaf_stem,
+    ListReport, MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport,
+    MigrationRefusal, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams,
+    NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
+    OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
+    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
+    ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
+    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
+    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
+    ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
+    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
+    WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character, is_refused_segment,
+    leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -155,6 +156,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::VaultRootChanged,
         ReasonCode::VaultPlanInterrupted,
         ReasonCode::VaultWriteFailed,
+        ReasonCode::VaultMigrationRefused,
         ReasonCode::RequestOutOfBound,
         ReasonCode::RequestPartNotTaken,
         ReasonCode::RequestCursorNotTaken,
@@ -314,7 +316,22 @@ fn error_details() -> Vec<ErrorDetail> {
             .map(ErrorDetail::unsupported_attach_mode),
     );
     details.extend(apply_details());
+    details.extend(migration_refusals().into_iter().flat_map(|reason| {
+        [ControlFile::Schema, ControlFile::Config]
+            .map(|file| ErrorDetail::migration_refused(file, reason.clone()))
+    }));
     details
+}
+
+/// Every reason a migration is refused for.
+fn migration_refusals() -> Vec<MigrationRefusal> {
+    vec![
+        MigrationRefusal::unreadable("the file is not YAML"),
+        MigrationRefusal::version_ahead(3, 1),
+        MigrationRefusal::no_step(0, 1),
+        MigrationRefusal::comment_lost("# the owner reads this"),
+        MigrationRefusal::changed(),
+    ]
 }
 
 /// Every name the grammar accepts, spread across the punctuation it admits.
@@ -2502,7 +2519,7 @@ fn a_vault_address_is_an_object_tagged_by() {
 
 // ── The verb registry ────────────────────────────────────────────────────
 
-/// The registry holds twenty-two verbs, and every one of them is the flat
+/// The registry holds twenty-three verbs, and every one of them is the flat
 /// string it renders as, read back as the verb it renders.
 #[test]
 fn every_verb_is_the_flat_string_it_renders_as() {
@@ -2528,9 +2545,10 @@ fn every_verb_is_the_flat_string_it_renders_as() {
         "vault_resolve",
         "vault_status",
         "vault_reload",
+        "vault_migrate",
         "doctor_registry",
     ];
-    assert_eq!(Verb::ALL.len(), 22);
+    assert_eq!(Verb::ALL.len(), 23);
     assert_eq!(verbs().len(), strings.len());
     for (verb, string) in verbs().into_iter().zip(strings) {
         assert_eq!(verb.as_str(), string);
@@ -2618,7 +2636,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
         named.sort_unstable();
         named
     };
-    assert_eq!(Verb::ALL.len(), 22);
+    assert_eq!(Verb::ALL.len(), 23);
     assert_eq!(
         addressed(Addressing::Required),
         [
@@ -2636,6 +2654,7 @@ fn every_verb_carries_a_vault_address_or_carries_none_and_one_may_carry_either()
             "search",
             "set",
             "validate",
+            "vault_migrate",
             "vault_reload",
         ]
     );
@@ -10272,6 +10291,113 @@ fn an_init_report_is_one_of_three_outcomes() {
         wire(&reports[2]),
         r#"{"outcome":"schema_elsewhere","source":"/home/person/shared/schema.yaml"}"#
     );
+}
+
+/// **A `vault migrate` request names its vault and states its mode**, and
+/// nothing else: there is no default mode, and a key it does not name is
+/// refused.
+#[test]
+fn a_migrate_request_names_its_vault_and_states_its_mode() {
+    let request: MigrateParams =
+        serde_json::from_str(r#"{"vault":{"by":"name","name":"notes"},"mode":"apply"}"#)
+            .expect("a migrate request");
+    assert_eq!(
+        request,
+        MigrateParams::new(VaultAddress::name(name("notes")), ApplyMode::Apply)
+    );
+    round_trip(&request);
+    for refused in [
+        r#"{"vault":{"by":"name","name":"notes"}}"#,
+        r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","to":2}"#,
+        r#"{"mode":"preview"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<MigrateParams>(refused).is_err(),
+            "{refused} read as a migrate request"
+        );
+    }
+}
+
+/// **A `vault migrate` answers one of two outcomes, each an object tagged
+/// `outcome`**: the control files migrated — the apply's own report, a
+/// preview's plan or an apply's landing, with the refusal of the reload after
+/// a landing beside it, or `null` — or every control file already current,
+/// which plans nothing. Each reads back as itself.
+#[test]
+fn a_migrate_report_is_migrated_or_already_current() {
+    let reports = [
+        MigrateReport::migrated(ApplyReport::previewed(a_bare_resolved_plan(), a_forecast())),
+        MigrateReport::migrated_reload_refused(
+            ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()),
+            ErrorEnvelope::new(
+                "the vault config cannot be read",
+                ErrorDetail::reload_failed(ReloadFailure::unsupported()),
+            ),
+        ),
+        MigrateReport::already_current(),
+    ];
+    for report in &reports {
+        round_trip(report);
+    }
+    assert!(
+        wire(&reports[0]).starts_with(r#"{"outcome":"migrated","report":{"outcome":"previewed","#)
+    );
+    assert!(
+        wire(&reports[0]).ends_with(r#","reload_refused":null}"#),
+        "{}",
+        wire(&reports[0])
+    );
+    assert!(
+        wire(&reports[1]).contains(r#""reload_refused":{"code":"vault/reload-failed","#),
+        "{}",
+        wire(&reports[1])
+    );
+    assert_eq!(wire(&reports[2]), r#"{"outcome":"already_current"}"#);
+}
+
+/// **A migration refused names the control file and why**, the reason an
+/// object tagged `reason`: a file whose version cannot be read, one at a
+/// version ahead of this build or one no step migrates from, a rewrite that
+/// would lose a comment, and a file another writer changed while the
+/// migration ran. Each reads back as itself, under `vault/migration-refused`.
+#[test]
+fn a_migration_refused_names_the_file_and_why() {
+    let cases = [
+        (
+            MigrationRefusal::unreadable("the file is not YAML"),
+            r#"{"reason":"unreadable","detail":"the file is not YAML"}"#,
+        ),
+        (
+            MigrationRefusal::version_ahead(3, 1),
+            r#"{"reason":"version_ahead","found":3,"current":1}"#,
+        ),
+        (
+            MigrationRefusal::no_step(0, 1),
+            r#"{"reason":"no_step","found":0,"current":1}"#,
+        ),
+        (
+            MigrationRefusal::comment_lost("# keep me"),
+            r##"{"reason":"comment_lost","comment":"# keep me"}"##,
+        ),
+        (MigrationRefusal::changed(), r#"{"reason":"changed"}"#),
+    ];
+    for (reason, json) in cases {
+        assert_eq!(wire(&reason), json);
+        round_trip(&reason);
+    }
+    let envelope = ErrorEnvelope::new(
+        "the schema's rewrite loses a comment",
+        ErrorDetail::migration_refused(
+            ControlFile::Schema,
+            MigrationRefusal::comment_lost("# keep me"),
+        ),
+    );
+    assert_eq!(envelope.code(), &ReasonCode::VaultMigrationRefused);
+    assert_eq!(
+        wire(&envelope),
+        r##"{"code":"vault/migration-refused","message":"the schema's rewrite loses a comment","detail":{"code":"vault/migration-refused","file":"schema","reason":{"reason":"comment_lost","comment":"# keep me"}}}"##
+    );
+    round_trip(&envelope);
 }
 
 /// **A `create_by_rule` takes the generic envelope.** It expands one for one

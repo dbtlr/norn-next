@@ -12,20 +12,21 @@
 //! [`Verb::addressing`](crate::Verb::addressing) says the same thing, and the
 //! verb table holds the two together.
 //!
-//! **`vault status` and `vault reload` carry a vault address.** Both are
-//! vault-scope requests, and every vault-scope params type in the vocabulary
+//! **`vault status`, `vault reload` and `vault migrate` carry a vault
+//! address.** All three are vault-scope requests, and every vault-scope params type in the vocabulary
 //! names its vault by a [`VaultAddress`](crate::VaultAddress) —
 //! [`Addressing`](crate::Addressing) says so for every verb that carries one.
 //! An address naming a root asks for a throwaway attach, which has no
 //! lifecycle to observe and nothing to reload, so the host refuses it
 //! `host/unsupported-attach-mode` here as it does for every read.
 //!
-//! **Neither of them carries an answer reading.** A status and a reload are
+//! **None of them carries an answer reading.** A status and a reload are
 //! lifecycle observations rather than reads: a status is taken off what an
 //! entry already publishes and creates no demand, and a reload reports what it
-//! applied. Neither answers from a database, so neither has an epoch or a
-//! generation to have been answered under, and their reports cross as
-//! themselves rather than inside a
+//! applied. A migration is a write over the vault's control files, which
+//! reports the apply it ran as an apply does. None answers from a database,
+//! so none has an epoch or a generation to have been answered under, and
+//! their reports cross as themselves rather than inside a
 //! [`VaultAnswer`](crate::VaultAnswer). Registry reports cross the same way,
 //! for the same reason.
 //!
@@ -39,6 +40,7 @@
 //! refusal of the status request.
 
 pub(crate) mod list;
+pub(crate) mod migrate;
 pub(crate) mod register;
 pub(crate) mod reload;
 pub(crate) mod resolve;

@@ -22,11 +22,11 @@
 use norn_wire::{
     Addressing, ApplyParams, ApplyReport, CountParams, CountReport, DeleteParams, DescribeParams,
     DescribeReport, DoctorRegistryParams, DoctorRegistryReport, EditParams, FindParams, FindReport,
-    GetParams, GetReport, InitParams, InitReport, ListParams, ListReport, MoveParams, NewParams,
-    RegisterParams, RegisterReport, ReloadParams, ReloadReport, ResolveParams, ResolveReport,
-    RewriteWikilinkParams, SearchParams, SearchReport, SetParams, StatusParams, StatusReport,
-    UnregisterParams, UnregisterReport, ValidateParams, ValidateReport, VaultSetParams,
-    VaultSetReport, Verb,
+    GetParams, GetReport, InitParams, InitReport, ListParams, ListReport, MigrateParams,
+    MigrateReport, MoveParams, NewParams, RegisterParams, RegisterReport, ReloadParams,
+    ReloadReport, ResolveParams, ResolveReport, RewriteWikilinkParams, SearchParams, SearchReport,
+    SetParams, StatusParams, StatusReport, UnregisterParams, UnregisterReport, ValidateParams,
+    ValidateReport, VaultSetParams, VaultSetReport, Verb,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -263,6 +263,15 @@ fn verb_table() -> Vec<Spelling> {
             report_rows: None,
             params: schema_of::<ReloadParams>(),
             report: schema_of::<ReloadReport>(),
+        },
+        Spelling {
+            vault_at: VaultAt::Params,
+            verb: Verb::VaultMigrate,
+            params_type: "MigrateParams",
+            report_type: "MigrateReport",
+            report_rows: None,
+            params: schema_of::<MigrateParams>(),
+            report: schema_of::<MigrateReport>(),
         },
         Spelling {
             vault_at: VaultAt::Params,

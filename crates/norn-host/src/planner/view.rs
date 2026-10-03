@@ -12,6 +12,8 @@ use std::sync::Arc;
 use norn_fs::{NormalizedPath, PathKind, PathNormalizer, Reach, Refusal, SkipReason, WalkError};
 use norn_wire::{ContentHash, DocumentPath, FilePath};
 
+use super::control::SchemaPlace;
+
 /// The vault as the planner reads it.
 ///
 /// **Files, not the store.** A before-state is the hash of the bytes a target
@@ -259,6 +261,47 @@ pub(crate) struct TreeView {
     root: PathBuf,
     exclusions: Vec<PathBuf>,
     vault: norn_fs::Vault,
+    schema: SchemaAt,
+}
+
+/// Where the view reads the vault schema's role, resolved when it opens
+/// ([`SchemaPlace`]).
+enum SchemaAt {
+    /// Beneath the root, at this path relative to it.
+    InVault(PathBuf),
+    /// Outside the root: the folder, and the file's name in it.
+    Outside { folder: PathBuf, name: PathBuf },
+    /// A place no schema write lands at, and why, in words.
+    Nowhere(String),
+}
+
+impl SchemaAt {
+    /// Where `place` is read, and whether a write can land there: a place
+    /// outside the root only where the vault's shadow home publishes into
+    /// its folder ([`norn_fs::ShadowHome::publishes_outside`]).
+    fn of(place: &SchemaPlace) -> Self {
+        match place {
+            SchemaPlace::InVault(relative) => SchemaAt::InVault(relative.clone()),
+            SchemaPlace::Outside {
+                folder,
+                name,
+                shadows,
+            } => match shadows.publishes_outside(folder) {
+                Ok(()) => SchemaAt::Outside {
+                    folder: folder.clone(),
+                    name: name.clone(),
+                },
+                Err(unpublishable) => SchemaAt::Nowhere(format!(
+                    "the schema source `{}` cannot be written: {unpublishable}",
+                    folder.join(name).display()
+                )),
+            },
+            SchemaPlace::NoFile(source) => SchemaAt::Nowhere(format!(
+                "the schema source `{}` names no file",
+                source.display()
+            )),
+        }
+    }
 }
 
 /// Why the vault on disk could not be read.
@@ -289,13 +332,19 @@ impl std::error::Error for TreeViewError {
 }
 
 impl TreeView {
-    /// The vault at `root`, whose walk does not enter `exclusions`.
-    pub(crate) fn open(root: &Path, exclusions: &[PathBuf]) -> Result<Self, TreeViewError> {
+    /// The vault at `root`, whose walk does not enter `exclusions`, reading
+    /// its schema at `schema`.
+    pub(crate) fn open(
+        root: &Path,
+        exclusions: &[PathBuf],
+        schema: &SchemaPlace,
+    ) -> Result<Self, TreeViewError> {
         let vault = norn_fs::Vault::open(root, exclusions).map_err(TreeViewError::Walk)?;
         Ok(TreeView {
             root: root.to_owned(),
             exclusions: exclusions.to_vec(),
             vault,
+            schema: SchemaAt::of(schema),
         })
     }
 
@@ -342,6 +391,16 @@ fn not_a_document_path(at: &Path) -> Entry {
 }
 
 impl TreeView {
+    /// `relative` beneath `anchor` as a reader names it: relative to the
+    /// root where it lies beneath it, and whole otherwise.
+    fn spelled_for_humans(&self, anchor: &Path, relative: &Path) -> String {
+        if anchor == self.root {
+            relative.display().to_string()
+        } else {
+            anchor.join(relative).display().to_string()
+        }
+    }
+
     /// Whether `path` is the default schema's path, `.norn/schema.yaml`,
     /// under the root's identity rule.
     fn is_the_default_schema(&self, path: &NormalizedPath) -> bool {
@@ -349,13 +408,6 @@ impl TreeView {
         self.normalizer()
             .normalize(Path::new(schema.as_str()))
             .is_ok_and(|schema| schema == *path)
-    }
-
-    /// Whether the walk does not enter `path` because the host excluded it.
-    fn excludes_as_the_host(&self, path: &NormalizedPath) -> bool {
-        norn_fs::Exclusions::new(self.normalizer(), &self.exclusions).is_ok_and(|exclusions| {
-            matches!(exclusions.reason(path), Some(norn_fs::Excluded::Host))
-        })
     }
 }
 
@@ -436,40 +488,51 @@ impl VaultView for TreeView {
     /// words, so a plan writing there does not resolve rather than failing
     /// the read of the vault.
     ///
-    /// **The schema is read where the vault reads it, or nowhere.** The walk
-    /// excludes the schema the vault reads, so the default schema path the
-    /// walk does not exclude is one whose registration reads its schema from
-    /// a `schema_source` instead: a write there would land a file the vault
-    /// never reads, so it is a place no control file is written.
+    /// **The schema is read where the registration reads it** ([ADR
+    /// 0034]): the schema's role, named at the default schema's path, is
+    /// read at the [`SchemaPlace`] the view opened over — that default, a
+    /// `schema_source` inside the vault, or one outside it — and answered at
+    /// the role's path. A place no write can land at — a source naming no
+    /// file, or one outside the vault the shadow home cannot publish into —
+    /// is a place no control file is written, in its own words.
+    ///
+    /// [ADR 0034]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0034-a-schema-write-lands-where-the-registration-reads-the-schema.md
     fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
         let Some(at) = document_path(path.as_path()) else {
             return Ok(not_a_document_path(path.as_path()));
         };
-        if self.is_the_default_schema(path) && !self.excludes_as_the_host(path) {
-            return Ok(Entry::Blocked {
-                detail: format!(
-                    "the vault reads its schema from the `schema_source` its registration names, never from `{at}`"
-                ),
-                barrier: Barrier::Closed,
-            });
-        }
-        Ok(
-            match norn_fs::read_if_present_and_hash(&self.root, path.as_path()) {
-                Ok(Some(read)) => {
-                    let (bytes, hash) = read.into_parts();
-                    Entry::Document {
-                        at,
-                        bytes: Arc::from(bytes),
-                        hash: wire_hash(hash),
-                    }
+        let (anchor, relative) = if self.is_the_default_schema(path) {
+            match &self.schema {
+                SchemaAt::InVault(relative) => (self.root.as_path(), relative.as_path()),
+                SchemaAt::Outside { folder, name } => (folder.as_path(), name.as_path()),
+                SchemaAt::Nowhere(detail) => {
+                    return Ok(Entry::Blocked {
+                        detail: detail.clone(),
+                        barrier: Barrier::Closed,
+                    });
                 }
-                Ok(None) => Entry::Absent { at },
-                Err(refusal) => Entry::Blocked {
-                    detail: format!("`{at}` cannot hold a control file: {refusal}"),
-                    barrier: Barrier::Occupied,
-                },
+            }
+        } else {
+            (self.root.as_path(), path.as_path())
+        };
+        Ok(match norn_fs::read_if_present_and_hash(anchor, relative) {
+            Ok(Some(read)) => {
+                let (bytes, hash) = read.into_parts();
+                Entry::Document {
+                    at,
+                    bytes: Arc::from(bytes),
+                    hash: wire_hash(hash),
+                }
+            }
+            Ok(None) => Entry::Absent { at },
+            Err(refusal) => Entry::Blocked {
+                detail: format!(
+                    "`{}` cannot hold a control file: {refusal}",
+                    self.spelled_for_humans(anchor, relative)
+                ),
+                barrier: Barrier::Occupied,
             },
-        )
+        })
     }
 
     fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, TreeViewError> {
@@ -797,7 +860,7 @@ mod tests {
         std::fs::create_dir_all(scratch.join("folder")).expect("a folder");
         std::fs::write(scratch.join("folder/a.md"), "A").expect("a document");
         std::os::unix::fs::symlink("folder", scratch.join("link")).expect("a link");
-        let view = TreeView::open(scratch.root(), &[]).expect("a vault");
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
         (scratch, view)
     }
 
@@ -848,8 +911,12 @@ mod tests {
         let scratch = Scratch::new("planner-view-control");
         std::fs::create_dir_all(scratch.join(".norn")).expect("the control folder");
         std::fs::write(scratch.join(".norn/schema.yaml"), "version: 1\n").expect("a schema");
-        let view =
-            TreeView::open(scratch.root(), &[PathBuf::from(".norn/schema.yaml")]).expect("a vault");
+        let view = TreeView::open(
+            scratch.root(),
+            &[PathBuf::from(".norn/schema.yaml")],
+            &SchemaPlace::default(),
+        )
+        .expect("a vault");
         let schema = view
             .normalizer()
             .normalize(Path::new(".norn/schema.yaml"))
@@ -885,6 +952,72 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// **The schema's role is read where the registration reads it** (ADR
+    /// 0034), and answered at the role's path: a `schema_source` inside the
+    /// vault at its own path, one outside it in its folder, while the
+    /// default path holds other bytes; and a source naming no file, or one
+    /// whose folder the shadow home cannot publish into, is a place no
+    /// control file is written, naming why.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn the_tree_view_reads_the_schema_where_the_registration_reads_it() {
+        let scratch = Scratch::new("planner-view-schema-place");
+        let vault = scratch.join("vault");
+        std::fs::create_dir_all(vault.join(".norn")).expect("the control folder");
+        std::fs::create_dir_all(vault.join("schemas")).expect("a schema folder");
+        std::fs::write(vault.join(".norn/schema.yaml"), "default\n").expect("a default");
+        std::fs::write(vault.join("schemas/notes.yaml"), "inside\n").expect("a source");
+        let shared = scratch.join("shared");
+        std::fs::create_dir_all(&shared).expect("a shared folder");
+        std::fs::write(shared.join("schema.yaml"), "outside\n").expect("a source");
+        let shadows = norn_fs::ShadowHome::resolve(
+            &vault,
+            &scratch.join("data/tmp"),
+            &norn_fs::MaintainershipKey::new("norn", "notes", "base").expect("a key"),
+        )
+        .expect("a shadow home");
+        let read = |place: &SchemaPlace| {
+            let view = TreeView::open(&vault, &[], place).expect("a vault");
+            let schema = view
+                .normalizer()
+                .normalize(Path::new(".norn/schema.yaml"))
+                .expect("a vault path");
+            view.control_entry(&schema).expect("a readable tree")
+        };
+        let outside = |folder: &Path| SchemaPlace::Outside {
+            folder: folder.to_owned(),
+            name: PathBuf::from("schema.yaml"),
+            shadows: shadows.clone(),
+        };
+        for (place, holds) in [
+            (SchemaPlace::default(), "default\n"),
+            (
+                SchemaPlace::InVault(PathBuf::from("schemas/notes.yaml")),
+                "inside\n",
+            ),
+            (outside(&shared), "outside\n"),
+        ] {
+            let Entry::Document { at, bytes, .. } = read(&place) else {
+                panic!("the schema stands at {place:?}");
+            };
+            assert_eq!(at.as_str(), ".norn/schema.yaml");
+            assert_eq!(&*bytes, holds.as_bytes());
+        }
+        for (place, says) in [
+            (SchemaPlace::NoFile(PathBuf::from("/")), "names no file"),
+            (outside(&scratch.join("gone")), "cannot be written"),
+        ] {
+            let Entry::Blocked {
+                detail,
+                barrier: Barrier::Closed,
+            } = read(&place)
+            else {
+                panic!("no schema is written at {place:?}");
+            };
+            assert!(detail.contains(says), "{detail}");
+        }
     }
 
     #[test]
@@ -928,7 +1061,7 @@ mod tests {
     fn on_a_folding_tree_another_spelling_reads_the_listed_document() {
         let scratch = Scratch::new("planner-view-folding");
         std::fs::write(scratch.join("Note.md"), "N").expect("a document");
-        let view = TreeView::open(scratch.root(), &[]).expect("a vault");
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
         if view.normalizer().case_sensitivity() != norn_fs::CaseSensitivity::Insensitive {
             return;
         }

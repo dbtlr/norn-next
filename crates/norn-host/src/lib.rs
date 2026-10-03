@@ -14,6 +14,7 @@ mod derivation;
 mod evidence;
 mod init;
 mod lifecycle;
+mod migrate;
 mod planner;
 mod production;
 mod read;

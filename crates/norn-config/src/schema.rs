@@ -649,20 +649,44 @@ fn at<'a>(document: &'a serde_yaml::Mapping, key: &str) -> Option<&'a Value> {
         .filter(|value| !value.is_null())
 }
 
-fn read_version(document: &serde_yaml::Mapping) -> Result<(), VaultSchemaError> {
+/// The version schema `text` states, read as [`VaultSchema::parse`] reads it
+/// and judged against no version: what the migration ladder walks from.
+///
+/// **A schema that holds no document states the version this build reads**,
+/// since it is the declaration that declares nothing, which every version
+/// spells alike; a document that is not a mapping, or states no integer
+/// `version`, states none.
+pub(crate) fn stated_version(text: &str) -> Result<i64, VaultSchemaError> {
+    let document: Value =
+        serde_yaml::from_str(text).map_err(|error| VaultSchemaError::NotYaml {
+            message: error.to_string(),
+        })?;
+    match document {
+        Value::Null => Ok(SCHEMA_VERSION),
+        Value::Mapping(mapping) => version_in(&mapping),
+        other => Err(VaultSchemaError::NotAMapping {
+            found: type_name(&other),
+        }),
+    }
+}
+
+/// The integer `version` `document` states.
+fn version_in(document: &serde_yaml::Mapping) -> Result<i64, VaultSchemaError> {
     let Some(value) = at(document, "version") else {
         return Err(VaultSchemaError::Version {
             detail: "the vault schema carries no `version`, so its grammar is unknown".to_string(),
         });
     };
-    let Some(found) = value.as_i64() else {
-        return Err(VaultSchemaError::Version {
-            detail: format!(
-                "`version` is {}, and a schema version is an integer",
-                type_name(value)
-            ),
-        });
-    };
+    value.as_i64().ok_or_else(|| VaultSchemaError::Version {
+        detail: format!(
+            "`version` is {}, and a schema version is an integer",
+            type_name(value)
+        ),
+    })
+}
+
+fn read_version(document: &serde_yaml::Mapping) -> Result<(), VaultSchemaError> {
+    let found = version_in(document)?;
     if found != SCHEMA_VERSION {
         return Err(VaultSchemaError::Version {
             detail: format!(

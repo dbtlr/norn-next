@@ -17,6 +17,7 @@ use super::observe::{
     TargetState, Unit, failed_conditions, identity, is_create, is_removal, misread, observe,
     recorded_lineage, transition_index, units,
 };
+use super::place::{Ground, Landing};
 use super::recompose::{Recomposed, disagreement, recompose};
 use super::schema;
 use super::shape::shape_disagrees;
@@ -170,8 +171,7 @@ pub(super) fn classify(refusal: &Refusal) -> Classified {
 /// Check every target of `plan` and stage every written one: [`check`], then
 /// [`stage`].
 pub(super) fn check_and_stage(
-    anchor: &Path,
-    root: norn_fs::Identity,
+    ground: &Ground<'_>,
     shadows: &ShadowHome,
     plan: &ResolvedPlan,
     view: &TreeView,
@@ -179,7 +179,7 @@ pub(super) fn check_and_stage(
     links: Links<'_>,
 ) -> Result<StagedPlan, Stop> {
     let checked = check(plan, view, declared, links).map_err(Stop::from)?;
-    stage(anchor, root, shadows, plan, view.normalizer(), checked)
+    stage(ground, shadows, plan, view.normalizer(), checked)
 }
 
 /// A plan every check passed: what each target publishes, and in which
@@ -400,8 +400,7 @@ pub(super) fn check(
 /// it. What is returned holds no bytes: the checked contents are dropped when
 /// this returns.
 pub(super) fn stage(
-    anchor: &Path,
-    root: norn_fs::Identity,
+    ground: &Ground<'_>,
     shadows: &ShadowHome,
     plan: &ResolvedPlan,
     normalizer: &PathNormalizer,
@@ -421,10 +420,10 @@ pub(super) fn stage(
     for position in order {
         let unit = units[position];
         let content = contents[position].as_deref();
-        let held = match stage_one(anchor, root, shadows, plan, unit, content) {
+        let held = match stage_one(ground, shadows, plan, unit, content) {
             Ok(held) => held,
             Err(stop) => {
-                discard_all(anchor, shadows, staged);
+                discard_all(ground, shadows, plan, staged);
                 return Err(stop);
             }
         };
@@ -457,17 +456,32 @@ fn stored_paths(plan: &ResolvedPlan) -> Vec<norn_store::DocumentPath> {
         .collect()
 }
 
-/// Remove every shadow `staged` holds, publishing nothing.
+/// Remove every shadow `staged` holds, publishing nothing, each through the
+/// anchor its target was staged under.
 #[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 pub(super) fn discard_all(
-    anchor: &Path,
+    ground: &Ground<'_>,
     shadows: &ShadowHome,
+    plan: &ResolvedPlan,
     staged: impl IntoIterator<Item = StagedTarget>,
 ) {
     for target in staged {
         if let Held::Staged(staged) = target.held {
-            norn_fs::discard(anchor, staged, shadows);
+            // Only a target that landed somewhere was staged, so its landing
+            // resolves; one that did not leaves its shadow to the home's sweep.
+            if let Ok(landing) = ground.landing(staged_path(plan, target.unit)) {
+                norn_fs::discard(landing.anchor, staged, shadows);
+            }
         }
+    }
+}
+
+/// The plan path the kernel stages `unit` at: its one transition's, or a
+/// respell's old spelling.
+pub(super) fn staged_path(plan: &ResolvedPlan, unit: Unit) -> &DocumentPath {
+    match unit {
+        Unit::One(index) => &plan.transitions[index].path,
+        Unit::Respell { old, .. } => &plan.transitions[old].path,
     }
 }
 
@@ -656,8 +670,7 @@ impl Judging<'_> {
 /// Stage `unit` with `content`, or say why the plan stops.
 #[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
 fn stage_one(
-    anchor: &Path,
-    root: norn_fs::Identity,
+    ground: &Ground<'_>,
     shadows: &ShadowHome,
     plan: &ResolvedPlan,
     unit: Unit,
@@ -705,7 +718,13 @@ fn stage_one(
             )
         }
     };
-    match norn_fs::stage(anchor, root, Path::new(path.as_str()), transition, shadows) {
+    let landing = ground.landing(path).map_err(Stop::Failed)?;
+    // A target outside the vault is held to its folder as it stands now:
+    // the kernel records that identity and publication checks it again.
+    let Some(root) = landing.root(ground).map_err(Stop::Failed)? else {
+        return Err(drifted_away(path, &landing, &transition));
+    };
+    match norn_fs::stage(landing.anchor, root, landing.relative, transition, shadows) {
         Ok(Staging::Staged(staged)) => Ok(Held::Staged(staged)),
         Ok(Staging::Landed(landed)) => Ok(Held::Landed(landed)),
         Err(refusal) => Err(match classify(&refusal) {
@@ -713,9 +732,31 @@ fn stage_one(
                 Stop::Refused(vec![RefusedCheck::drifted(path.clone(), holds)])
             }
             Classified::NameTaken => Stop::Refused(vec![RefusedCheck::name_taken(path.clone())]),
-            Classified::RootReplaced => Stop::RootReplaced,
+            Classified::RootReplaced => landing
+                .replaced_outside()
+                .map_or(Stop::RootReplaced, Stop::Failed),
             Classified::Io(detail) => Stop::Failed(detail),
         }),
+    }
+}
+
+/// The stop for a target outside the vault whose folder is gone before it
+/// was staged: a create's name is not there to take, and anything else no
+/// longer holds what the plan was checked against.
+fn drifted_away(
+    path: &DocumentPath,
+    landing: &Landing<'_>,
+    transition: &norn_fs::Transition<'_>,
+) -> Stop {
+    match transition {
+        norn_fs::Transition::Create { .. } => Stop::Failed(format!(
+            "the folder `{}` the vault schema would be created in is gone",
+            landing.anchor.display()
+        )),
+        _ => Stop::Refused(vec![RefusedCheck::drifted(
+            path.clone(),
+            FileState::absent(),
+        )]),
     }
 }
 

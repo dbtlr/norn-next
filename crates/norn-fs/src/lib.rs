@@ -130,7 +130,7 @@ pub use read::{
 pub use refusal::Refusal;
 pub use shadow::{
     DiscardRefusal, FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome,
-    Swept, discard_homes, is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
+    Swept, Unpublishable, discard_homes, is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, Reach, ReadFile, SkipFact, SkipReason, Vault, Walk,

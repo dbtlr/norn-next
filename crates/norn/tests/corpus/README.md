@@ -147,7 +147,7 @@ the shape that replaces it:
 | `SR-count` | An unpaged total with a flat or nested distribution becomes a keyset-paged list of tallies, each a grouping tuple with a count. |
 | `SR-validate` | Unpaged findings filtered by code globs, with an exit status an error finding sets, become the findings standing under the active schema, paged by keyset or tallied by kind and severity. A standing finding is a row of a complete `VaultAnswer`, never an unsatisfied part or a refusal; exit status arrives with the renderings at Layer 6. |
 | `SR-describe` | Structure counts, a config dump and a contents summary become a keyset-paged list of declared and observed facets: keys and declarations only. |
-| `SR-top-level` | The pin's command list and global block give way to a decided command list and global block that are not yet rendered. The ruling names what the code holds today: the 15 verbs of the wire verb registry, `Verb::ALL`, and the machine-local verbs the architecture reserves. |
+| `SR-top-level` | The pin's command list and global block give way to a decided command list and global block that are not yet rendered. The ruling names what the code holds today: the 23 verbs of the wire verb registry, `Verb::ALL`, and the machine-local verbs the architecture reserves. |
 
 Every format a recorded case selected is a rendering of one report, and the
 renderings land at Layer 6.
@@ -157,9 +157,9 @@ authored with no corpus evidence, as its `unrecorded` category says: no case
 records any of its subcommands. `search`, `doctor`, `vault resolve`,
 `model fetch` and `vault migrate` are new. No command at the pin was any of
 them, so they sit in no category and are authored with no corpus evidence.
-The wire verb registry holds `search`, `vault_resolve` and `doctor_registry`,
-the registry half of `doctor`; `model fetch` and `vault migrate` are decided
-and not yet in it. The
+The wire verb registry holds `search`, `vault_resolve`, `vault_migrate` and
+`doctor_registry`, the registry half of `doctor`; `model fetch` is decided and
+not yet in it. The
 nine `unseeded` commands carry no behavior at the pin, so none of them needs a
 ruling here.
 

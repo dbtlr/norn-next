@@ -15,6 +15,7 @@ use norn_wire::{
 
 use super::{Applier, ApplyOutcome, OwnWriteLedger};
 use crate::apply::PlanSnapshot;
+use crate::planner::control::SchemaPlace;
 use crate::planner::links::testing::{resolve_over_files as resolve, snapshot_of, vault};
 use crate::planner::resolve::Resolution;
 use crate::planner::view::{TreeView, VaultView};
@@ -79,6 +80,9 @@ pub(super) struct Fixture {
     pub(super) shadows: ShadowHome,
     pub(super) root: norn_fs::Identity,
     pub(super) exclusions: Vec<PathBuf>,
+    /// Where the vault schema lives: the default, unless a case says
+    /// otherwise.
+    pub(super) schema: SchemaPlace,
     pub(super) store: Store,
     pub(super) recorded: Recorded,
     /// The content model the store pins, which its links are judged under.
@@ -145,6 +149,7 @@ impl Fixture {
             shadows,
             root,
             exclusions,
+            schema: SchemaPlace::default(),
             store,
             declared: norn_store::ContentModel::none(),
         }
@@ -180,7 +185,7 @@ impl Fixture {
     /// `operations` resolved against the vault, its links judged on the
     /// store as it stands, every one of them resolving.
     pub(super) fn resolution(&self, operations: Vec<Operation>) -> Resolution {
-        let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
+        let view = TreeView::open(&self.vault, &self.exclusions, &self.schema).expect("a vault");
         let name = VaultName::new("notes").expect("a legal vault name");
         let authored = AuthoredPlan::new(VaultAddress::name(name), operations);
         let links = self.links();
@@ -211,6 +216,7 @@ impl Fixture {
             anchor: &self.vault,
             root: self.root,
             exclusions: &self.exclusions,
+            schema: &self.schema,
             shadows: &self.shadows,
             own_writes: &self.recorded,
             publishing: &|| true,
@@ -318,7 +324,7 @@ impl Fixture {
 }
 
 fn order_of(vault: &Path) -> StoredPathOrder {
-    let view = TreeView::open(vault, &[]).expect("a vault");
+    let view = TreeView::open(vault, &[], &SchemaPlace::default()).expect("a vault");
     crate::stored_path_order(view.normalizer().case_sensitivity())
 }
 
@@ -590,7 +596,8 @@ fn re_sending_conditioned_operations_is_refused_rather_than_repeated() {
         norn_wire::AuthorCondition::content_hash(path("a.md"), seen),
     ])];
     applied(fixture.apply(fixture.plan(operations.clone())));
-    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &SchemaPlace::default())
+        .expect("a vault");
     let name = VaultName::new("notes").expect("a legal vault name");
     let again = resolve(
         AuthoredPlan::new(VaultAddress::name(name), operations),
@@ -875,13 +882,18 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
         creating("new/c.md", "c\n"),
         deleting("b.md"),
     ]);
-    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &SchemaPlace::default())
+        .expect("a vault");
     let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
     let links = fixture.links();
     let before = norn_testkit::process::open_fd_count().expect("a count");
+    let ground = super::place::Ground {
+        vault: &fixture.vault,
+        root: fixture.root,
+        schema: &fixture.schema,
+    };
     let staged = super::stage::check_and_stage(
-        &fixture.vault,
-        fixture.root,
+        &ground,
         &fixture.shadows,
         &plan,
         &view,
@@ -899,8 +911,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
         held.len()
     );
     let publisher = super::publish::Publisher {
-        anchor: &fixture.vault,
-        root: fixture.root,
+        ground,
         shadows: &fixture.shadows,
         own_writes: &fixture.recorded,
     };
@@ -1310,7 +1321,7 @@ fn an_extra_transition_with_a_wrong_before_state_is_invalid_not_drift() {
 #[test]
 fn a_transition_spelled_in_another_case_is_invalid_where_case_is_told_apart() {
     let mut fixture = Fixture::new(&[("a.md", "draft\n")]);
-    let folds = TreeView::open(&fixture.vault, &[])
+    let folds = TreeView::open(&fixture.vault, &[], &SchemaPlace::default())
         .expect("a vault")
         .normalizer()
         .case_sensitivity()
@@ -1524,7 +1535,8 @@ fn a_plan_exchanging_two_documents_through_a_third_name_is_invalid() {
         moving("b.md", "a.md"),
         moving("t.md", "b.md"),
     ];
-    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &SchemaPlace::default())
+        .expect("a vault");
     let name = VaultName::new("notes").expect("a legal vault name");
     let authored = AuthoredPlan::new(VaultAddress::name(name), operations.clone());
     match resolve(authored, fixture.root_identity(), &BTreeSet::new(), &view) {
@@ -1654,6 +1666,7 @@ impl Fixture {
             anchor: &self.vault,
             root: self.root,
             exclusions: &self.exclusions,
+            schema: &self.schema,
             shadows: &self.shadows,
             own_writes: &meddling,
             publishing: &|| true,
@@ -2453,6 +2466,7 @@ fn an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_noth
         anchor: &fixture.vault,
         root: fixture.root,
         exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
         shadows: &fixture.shadows,
         own_writes: &fixture.recorded,
         publishing: &|| false,
@@ -2487,6 +2501,7 @@ impl Fixture {
             &self.vault,
             self.root,
             &self.exclusions,
+            &self.schema,
             &declared,
             &links.index(),
         )

@@ -12,6 +12,7 @@ use norn_wire::{ErrorEnvelope, ReloadParams, ReloadReport, TrustState, VaultName
 
 use crate::address::registered_name;
 use crate::lifecycle::{Demand, EntryOps, Host, HostError};
+use crate::planner::control::SchemaSite;
 use crate::{JobFailure, Registration};
 
 /// A registered engine boundary that receives one vault's optional parsed
@@ -415,18 +416,16 @@ impl ReloadCandidate {
     }
 }
 
+/// Where the schema `registration` reads lives, from the root `covered_root`
+/// covers: the folder a read anchors at, and the file's name beneath it.
 fn schema_anchor_at(
     registration: &Registration,
     covered_root: &Path,
 ) -> Result<(PathBuf, PathBuf), ReloadError> {
-    let Some(source) = registration.schema_source.as_ref() else {
-        return Ok((covered_root.to_owned(), PathBuf::from(IN_VAULT_SCHEMA_PATH)));
-    };
-    if let Ok(relative) = source.as_path().strip_prefix(registration.root.as_path()) {
-        let operational = covered_root.join(relative);
-        return schema_anchor_from_source(&operational);
+    match SchemaSite::of(registration) {
+        SchemaSite::Default => Ok((covered_root.to_owned(), PathBuf::from(IN_VAULT_SCHEMA_PATH))),
+        site => schema_anchor_from_source(&site.file_at(covered_root)),
     }
-    schema_anchor_from_source(source.as_path())
 }
 
 fn fingerprints(schema: ContentHash, config: Option<&norn_fs::ReadAndHash>) -> ActiveFingerprints {

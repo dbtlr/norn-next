@@ -11,22 +11,34 @@
 //! than as a document, since the vault's walk does not enter the schema's path;
 //! the applier judges its content by [`unreadable_as_role`] rather than under
 //! the schema; no link reads one ([`super::links::Target`]); and the changeset
-//! records no document row for one. A registration naming a `schema_source`
-//! reads no schema at the default path, so the view answers that path as a
-//! place no control file is written, and a schema write there does not
-//! resolve.
+//! records no document row for one.
+//!
+//! **The schema's role is resolved against the registration** ([ADR 0034]).
+//! A schema transition keeps naming [`IN_VAULT_SCHEMA_PATH`], and the file it
+//! lands at is the one the registration reads ([`SchemaPlace`]): that
+//! default, a `schema_source` inside the vault root, or one outside it. The
+//! view reads the role there, and the applier stages and publishes it there,
+//! each time it touches the target, so a plan never says where its schema
+//! bytes land: a re-sent plan lands where the registration reads the schema
+//! then, guarded by the before-state hash.
 //!
 //! **What a control target's content must be.** A write lands only content its
 //! role's parser reads — `norn-config`'s [`VaultSchema::parse`] for the schema
 //! and [`VaultConfig::parse`] for the config — so a plan never publishes a
 //! control file the next reload would refuse.
+//!
+//! [ADR 0034]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0034-a-schema-write-lands-where-the-registration-reads-the-schema.md
 
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use norn_config::schema::VaultSchema;
 use norn_config::vault::VaultConfig;
 use norn_config::{IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
+use norn_fs::ShadowHome;
 use norn_wire::{ControlFile, DocumentPath};
+
+use crate::Registration;
 
 /// Where the vault schema a `write_control_file` writes lives.
 static SCHEMA_PATH: LazyLock<DocumentPath> = LazyLock::new(|| {
@@ -37,6 +49,95 @@ static SCHEMA_PATH: LazyLock<DocumentPath> = LazyLock::new(|| {
 static CONFIG_PATH: LazyLock<DocumentPath> = LazyLock::new(|| {
     DocumentPath::new(IN_VAULT_CONFIG_PATH).expect("the config convention is a vault path")
 });
+
+/// Where the vault schema a registration reads lives, as a schema write
+/// lands at it ([ADR 0034]).
+///
+/// [ADR 0034]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0034-a-schema-write-lands-where-the-registration-reads-the-schema.md
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SchemaPlace {
+    /// Beneath the vault root, at this path relative to it: the default
+    /// [`IN_VAULT_SCHEMA_PATH`], or a `schema_source` inside the vault.
+    InVault(PathBuf),
+    /// Outside the vault root: the folder a write there is anchored at, the
+    /// file's name in it, and the vault's shadow home, which a write there
+    /// stages in where a rename reaches the folder from it.
+    Outside {
+        folder: PathBuf,
+        name: PathBuf,
+        shadows: ShadowHome,
+    },
+    /// A `schema_source` naming no file — a filesystem root, or a path
+    /// ending in `..` — which every read refuses and no write lands at.
+    NoFile(PathBuf),
+}
+
+impl Default for SchemaPlace {
+    /// The default schema, beneath the vault root.
+    fn default() -> Self {
+        SchemaPlace::InVault(PathBuf::from(IN_VAULT_SCHEMA_PATH))
+    }
+}
+
+impl SchemaPlace {
+    /// Where `registration`'s schema lives ([`SchemaSite::of`]), staged
+    /// through `shadows` where it lies outside the vault. Does no I/O.
+    pub(crate) fn of(registration: &Registration, shadows: &ShadowHome) -> Self {
+        match SchemaSite::of(registration) {
+            SchemaSite::Default => SchemaPlace::default(),
+            SchemaSite::InVault(relative) => SchemaPlace::InVault(relative.to_owned()),
+            SchemaSite::Outside(source) => match (source.parent(), source.file_name()) {
+                (Some(folder), Some(name)) => SchemaPlace::Outside {
+                    folder: folder.to_owned(),
+                    name: PathBuf::from(name),
+                    shadows: shadows.clone(),
+                },
+                _ => SchemaPlace::NoFile(source.to_owned()),
+            },
+        }
+    }
+}
+
+/// Where a registration names its schema file, before any root is joined
+/// to it: the one reading of a `schema_source` against the registered root,
+/// which every resolution of the schema's file — the plan's
+/// [`SchemaPlace`], the reload's read and the watcher's path — projects
+/// from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SchemaSite<'a> {
+    /// No `schema_source`: the default, [`IN_VAULT_SCHEMA_PATH`] beneath the
+    /// vault root.
+    Default,
+    /// A `schema_source` beneath the registered root, relative to it, as
+    /// the host excludes it from the walk.
+    InVault(&'a Path),
+    /// A `schema_source` outside the registered root, as it is spelled.
+    Outside(&'a Path),
+}
+
+impl<'a> SchemaSite<'a> {
+    /// Where `registration` names its schema file. Does no I/O.
+    pub(crate) fn of(registration: &'a Registration) -> Self {
+        let Some(source) = registration.schema_source.as_ref() else {
+            return SchemaSite::Default;
+        };
+        let source = source.as_path();
+        match source.strip_prefix(registration.root.as_path()) {
+            Ok(relative) => SchemaSite::InVault(relative),
+            Err(_) => SchemaSite::Outside(source),
+        }
+    }
+
+    /// The schema file at this site, for a vault whose root is spelled
+    /// `covered_root`.
+    pub(crate) fn file_at(self, covered_root: &Path) -> PathBuf {
+        match self {
+            SchemaSite::Default => covered_root.join(IN_VAULT_SCHEMA_PATH),
+            SchemaSite::InVault(relative) => covered_root.join(relative),
+            SchemaSite::Outside(source) => source.to_owned(),
+        }
+    }
+}
 
 /// The in-vault path the control file `file` lives at.
 pub(crate) fn control_path(file: ControlFile) -> &'static DocumentPath {

@@ -290,6 +290,24 @@ impl ShadowHome {
         Self::resolve_where(vault_root, data_tmp, key, vault == data)
     }
 
+    /// [`ShadowHome::resolve`], with whether the data directory shares the
+    /// vault's filesystem stated rather than read, so another crate's suite
+    /// on a machine with one filesystem can reach the in-vault fallback home.
+    ///
+    /// **Behind `test-support`**, as
+    /// [`PathNormalizer::for_sensitivity`](crate::PathNormalizer::for_sensitivity)
+    /// is: a shipped build has no way to state a relation between filesystems
+    /// that nothing read.
+    #[cfg(feature = "test-support")]
+    pub fn resolve_stating(
+        vault_root: &Path,
+        data_tmp: &Path,
+        key: &MaintainershipKey,
+        same_device: bool,
+    ) -> Result<ShadowHome, Refusal> {
+        Self::resolve_where(vault_root, data_tmp, key, same_device)
+    }
+
     /// [`ShadowHome::resolve`], with the device comparison's answer passed in
     /// rather than read off the filesystem.
     ///
@@ -344,6 +362,44 @@ impl ShadowHome {
         self.within_vault.as_deref()
     }
 
+    /// Whether a shadow staged in this home can be published into `folder`,
+    /// a folder outside the vault root the home serves, or why not.
+    ///
+    /// **Only a data-root home on the folder's filesystem can** (ADR 0034).
+    /// Publication is a rename, which cannot cross a filesystem, and the
+    /// write kernel reaches a fallback home only through the vault root's
+    /// handle, which a write anchored at another folder does not hold.
+    pub fn publishes_outside(&self, folder: &Path) -> Result<(), Unpublishable> {
+        if self.within_vault.is_some() {
+            return self.publishes_outside_where(folder, false);
+        }
+        let folder_device = device_of(folder).map_err(Unpublishable::Unread)?;
+        let home_device = device_of(&self.directory).map_err(Unpublishable::Unread)?;
+        self.publishes_outside_where(folder, folder_device == home_device)
+    }
+
+    /// [`ShadowHome::publishes_outside`], with the device comparison's answer
+    /// passed in, as [`ShadowHome::resolve_where`] takes it, so a machine
+    /// with one filesystem can check the case where the two differ.
+    pub(crate) fn publishes_outside_where(
+        &self,
+        folder: &Path,
+        same_device: bool,
+    ) -> Result<(), Unpublishable> {
+        if self.within_vault.is_some() {
+            return Err(Unpublishable::FallbackHome {
+                home: self.directory.clone(),
+            });
+        }
+        if !same_device {
+            return Err(Unpublishable::OtherFilesystem {
+                home: self.directory.clone(),
+                folder: folder.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// The name of a shadow nothing has taken yet, in this home.
     ///
     /// Each call yields a name no previous call in this process yielded. The
@@ -394,6 +450,41 @@ impl ShadowHome {
         Ok(swept)
     }
 }
+
+/// Why a shadow home cannot publish into a folder outside the vault root it
+/// serves ([`ShadowHome::publishes_outside`]).
+#[derive(Debug)]
+pub enum Unpublishable {
+    /// The home is the in-vault fallback, which the write kernel reaches only
+    /// through the vault root.
+    FallbackHome { home: PathBuf },
+    /// The home is on another filesystem than the folder, and a rename cannot
+    /// cross one.
+    OtherFilesystem { home: PathBuf, folder: PathBuf },
+    /// The folder's or the home's device could not be read.
+    Unread(Refusal),
+}
+
+impl std::fmt::Display for Unpublishable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unpublishable::FallbackHome { home } => write!(
+                formatter,
+                "the vault stages its writes in `{}`, inside the vault, which no write outside the vault can publish from",
+                home.display()
+            ),
+            Unpublishable::OtherFilesystem { home, folder } => write!(
+                formatter,
+                "the vault stages its writes in `{}`, on another filesystem than `{}`, and a rename cannot cross filesystems",
+                home.display(),
+                folder.display()
+            ),
+            Unpublishable::Unread(refusal) => refusal.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for Unpublishable {}
 
 /// Remove every shadow directly under [`FALLBACK`] beneath `vault_root`,
 /// whatever its age.
@@ -874,6 +965,40 @@ mod tests {
             !home.directory().starts_with(&vault),
             "a shadow home inside the vault on one filesystem"
         );
+    }
+
+    /// **A home publishes into a folder outside the vault only where a
+    /// rename can reach it** (ADR 0034): a data-root home on the folder's
+    /// filesystem can; the in-vault fallback, which the write kernel reaches
+    /// only through the vault root, cannot; nor can a home on another
+    /// filesystem than the folder, since a rename cannot cross one.
+    #[test]
+    fn a_home_publishes_outside_the_vault_only_where_a_rename_reaches() {
+        let scratch = Scratch::new("shadow-outside");
+        let vault = scratch.directory("vault");
+        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let folder = scratch.directory("shared");
+
+        let data_root = ShadowHome::resolve(&vault, &data_tmp, &key()).expect("a shadow home");
+        assert_eq!(data_root.placement(), Placement::DataRoot);
+        assert!(data_root.publishes_outside(&folder).is_ok());
+        assert!(matches!(
+            data_root.publishes_outside_where(&folder, false),
+            Err(Unpublishable::OtherFilesystem { .. })
+        ));
+
+        let fallback =
+            ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
+        assert!(matches!(
+            fallback.publishes_outside(&folder),
+            Err(Unpublishable::FallbackHome { .. })
+        ));
+
+        let absent = scratch.path("nowhere");
+        assert!(matches!(
+            data_root.publishes_outside(&absent),
+            Err(Unpublishable::Unread(_))
+        ));
     }
 
     /// **The bar on the fallback.** Two filesystems put shadows under the

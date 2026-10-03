@@ -70,7 +70,7 @@
 //! is what a host was delivered as a vault's engine section, which is what a
 //! status answer reports and what a vector refusal is composed against.
 //!
-//! The seven verbs of the vault namespace and
+//! The eight verbs of the vault namespace and
 //! [`doctor`](DoctorRegistryParams)'s registry half are spelled the same
 //! way: [`RegisterParams`] answering
 //! [`RegisterReport`], [`UnregisterParams`] answering [`UnregisterReport`],
@@ -78,10 +78,13 @@
 //! is a [`VaultChange`], or a [`VaultReplace`] where the field has no default to be
 //! cleared to — answering [`VaultSetReport`], [`ResolveParams`] answering
 //! [`ResolveReport`], [`StatusParams`] answering [`StatusReport`],
-//! [`ReloadParams`] answering [`ReloadReport`] of a [`ReloadOutcome`], and
+//! [`ReloadParams`] answering [`ReloadReport`] of a [`ReloadOutcome`],
+//! [`MigrateParams`] answering [`MigrateReport`] — the apply's own report of
+//! the control files' rewrite, or that every one is already current — or
+//! refused for a [`MigrationRefusal`], and
 //! [`DoctorRegistryParams`] answering [`DoctorRegistryReport`] over the
 //! [`RegistrySanity`] of the registry itself, its [`RegistryProblem`]s and the
-//! [`EngineHealth`] of each vault. What those eight report about a
+//! [`EngineHealth`] of each vault. What those nine report about a
 //! registration is spelled here too: the [`Registration`] itself, the
 //! [`Published`] answer an entry carries, the [`Fingerprints`] it serves
 //! under, the [`Drift`] its authored control files stand at, the
@@ -643,6 +646,7 @@ pub use tag::fold_tag;
 pub use target::{Anchor, IllegalTarget, ResolutionTarget};
 pub use trust::{NotReady, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
 pub use vault::list::{ListParams, ListReport};
+pub use vault::migrate::{MigrateParams, MigrateReport, MigrationRefusal};
 pub use vault::register::{RegisterParams, RegisterReport};
 pub use vault::reload::{ReloadOutcome, ReloadParams, ReloadReport};
 pub use vault::resolve::{ResolveParams, ResolveReport};
