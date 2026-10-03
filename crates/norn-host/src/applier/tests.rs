@@ -414,6 +414,33 @@ fn a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **The folders an apply makes and removes are the folders its forecast
+/// named.** A plan creating two folders deep under a missing folder and
+/// removing the last document of a nested folder is forecast at planning,
+/// then applied: the applied outcome's folders made and removed are compared
+/// with the forecast's as values, so neither side can drift from the other.
+#[test]
+fn the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named() {
+    let mut fixture = Fixture::new(&[("keep.md", "# Keep\n"), ("old/sub/last.md", "# Last\n")]);
+    let resolution = fixture.resolution(vec![
+        creating("fresh/deep/c.md", "# C\n"),
+        deleting("old/sub/last.md"),
+    ]);
+    assert!(
+        !resolution.forecast.folders_made.is_empty()
+            && !resolution.forecast.folders_removed.is_empty(),
+        "the case forecasts a folder both ways: {:?}",
+        resolution.forecast
+    );
+    let applied = applied(fixture.apply(resolution.plan));
+    assert_eq!(applied.folders_made, resolution.forecast.folders_made);
+    assert_eq!(applied.folders_removed, resolution.forecast.folders_removed);
+    assert_eq!(
+        fixture.tree(),
+        vec!["fresh", "fresh/deep", "fresh/deep/c.md", "keep.md"]
+    );
+}
+
 impl Fixture {
     /// The names in the shadow home: every shadow a stage left behind.
     pub(super) fn shadows_left(&self) -> Vec<String> {
