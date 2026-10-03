@@ -19,7 +19,9 @@
 //! unless the condition is `always()` or `!cancelled()`, which only widen when
 //! a step runs. Any other condition vouches for nothing, which is the strict
 //! side: a condition that would have held is refused with one that would not.
-//! Nor does a step whose environment sets a key cargo, rustc or rustup reads —
+//! Nor does any step of a workflow holding a YAML merge key, `<<`, anywhere:
+//! the parser does not apply it, so what it merges in would go unseen. Nor
+//! does a step whose environment sets a key cargo, rustc or rustup reads —
 //! a runner, wrapper, compiler or flags named there decide what the command
 //! builds and runs — unless the key is one that cannot keep a test from
 //! running, nor a step whose `env`, or its job's or workflow's, cannot be read
@@ -211,6 +213,7 @@ pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
 fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
+    let merged = carries_a_merge_key(&document);
     let workflow_env = layered(Some(&BTreeMap::new()), document.get("env"));
     let workflow_shell = Shell::defaulted_by(&document);
     let Some(jobs) = document.get("jobs") else {
@@ -247,11 +250,30 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
                 env: env.unwrap_or_default(),
                 vouches: !(job_conditional || is_conditional(step))
                     && job_shell.under(Shell::named_by(step)).runs_one_process()
-                    && env_reads,
+                    && env_reads
+                    && !merged,
             });
         }
     }
     Ok(steps)
+}
+
+/// Whether a YAML merge key, `<<`, sits in any mapping under `value`.
+///
+/// The parser does not apply a merge: it leaves `<<` a key like any other, so
+/// a mapping holding one is not the mapping the runner reads, and what it
+/// merges in goes unseen. Where it sits does not matter to the answer — a
+/// workflow holding one anywhere vouches for nothing — because the strict side
+/// costs nothing while no workflow here merges.
+fn carries_a_merge_key(value: &Value) -> bool {
+    match value {
+        Value::Mapping(mapping) => mapping
+            .iter()
+            .any(|(key, value)| key.as_str() == Some("<<") || carries_a_merge_key(value)),
+        Value::Sequence(sequence) => sequence.iter().any(carries_a_merge_key),
+        Value::Tagged(tagged) => carries_a_merge_key(&tagged.value),
+        _ => false,
+    }
 }
 
 /// The shell a step's command runs under, as one level of the workflow names
@@ -979,6 +1001,49 @@ mod tests {
             &["        env:", "          LANE_FEATURES: induced-failure"],
         );
         assert_eq!(vouching(&unrelated), vec![true], "{unrelated}");
+    }
+
+    /// **A workflow carrying a YAML merge key anywhere vouches for nothing**:
+    /// the parser leaves `<<` a key like any other, so the mapping this reads
+    /// is not the one the runner reads, and what it merges in — a condition,
+    /// a tolerance, a shell, an environment — goes unseen.
+    #[test]
+    fn a_merge_key_anywhere_in_a_workflow_vouches_for_nothing() {
+        for merged in [
+            one_step(
+                &[],
+                &[],
+                &["        <<: {if: 'false', continue-on-error: true}"],
+            ),
+            one_step(&[], &["    <<: {continue-on-error: true}"], &[]),
+            one_step(&["<<: {defaults: {run: {shell: 'true {0}'}}}"], &[], &[]),
+            one_step(
+                &[],
+                &[],
+                &["        env:", "          <<: {RUSTC_WRAPPER: 'true'}"],
+            ),
+            one_step(
+                &["x-skip: &skip", "  if: 'false'"],
+                &[],
+                &["        <<: *skip"],
+            ),
+            [
+                "jobs:",
+                "  j:",
+                "    steps:",
+                "      - run: x",
+                "  other:",
+                "    steps:",
+                "      - <<: {if: 'false'}",
+                "        run: y",
+            ]
+            .join("\n"),
+        ] {
+            assert!(
+                vouching(&merged).iter().all(|vouches| !vouches),
+                "a step vouched in\n{merged}"
+            );
+        }
     }
 
     /// **A workflow that is not one is an error**, never an empty answer.
