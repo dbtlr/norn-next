@@ -244,6 +244,8 @@ mod tests {
         let note = scratch.place("notes/note.md", b"body");
         let anchor = scratch.at("");
         #[cfg(feature = "induced-failure")]
+        let _serial = crate::reads::recording_cases();
+        #[cfg(feature = "induced-failure")]
         let _recording = crate::reads::record_files();
 
         let window = ReadWindow::open();

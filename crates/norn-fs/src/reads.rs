@@ -324,6 +324,18 @@ fn bump(change: impl FnOnce(&mut ReadTally)) {
     });
 }
 
+/// Take the turn every unit test in this crate that arms a recording, or
+/// reads a window unarmed, holds for its whole case: the arm is the
+/// process's, so one case's arm reaches another case's window on another
+/// thread.
+#[cfg(all(test, feature = "induced-failure"))]
+pub(crate) fn recording_cases() -> std::sync::MutexGuard<'static, ()> {
+    static RECORDING_CASES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    RECORDING_CASES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -372,19 +384,12 @@ mod tests {
         );
     }
 
-    /// The arm is the process's, so the cases that arm it or read it unarmed
-    /// take turns.
-    #[cfg(feature = "induced-failure")]
-    static RECORDING_CASES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// An armed window names the file each counted read read, by the act that
     /// read it, once per read: a file read twice is named twice.
     #[cfg(feature = "induced-failure")]
     #[test]
     fn an_armed_window_names_each_file_its_reads_read() {
-        let _serial = RECORDING_CASES
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = recording_cases();
         let _recording = record_files();
         let window = ReadWindow::open();
         count_document_read(Path::new("note.md"));
@@ -416,9 +421,7 @@ mod tests {
     #[cfg(feature = "induced-failure")]
     #[test]
     fn a_window_names_files_only_while_armed_and_standing() {
-        let _serial = RECORDING_CASES
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let _serial = recording_cases();
         let unarmed = ReadWindow::open();
         count_document_read(Path::new("unarmed.md"));
         let (tally, files) = unarmed.finish_with_files();
