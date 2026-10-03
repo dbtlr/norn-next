@@ -1001,6 +1001,92 @@ inbox:
         );
     }
 
+    /// A schema whose rules fill whole path segments from their variables, so
+    /// what their targets say about a place is decided only once filled.
+    const SEGMENT_SCHEMA: &[u8] = b"version: 1
+creatable:
+  note:
+    target: \"notes/{{var.name}}.md\"
+    variables: [name]
+  filed:
+    target: \"{{var.dir}}/{{var.file}}/x.md\"
+    variables: [dir, file]
+";
+
+    /// `operation` planned alone over an empty vault under
+    /// [`SEGMENT_SCHEMA`], which writes nothing: the operation left
+    /// unresolved, and its words.
+    fn refused_by_segments(operation: Operation) -> (Operation, String) {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(SEGMENT_SCHEMA),
+            vec![operation],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        assert!(resolution.plan.transitions.is_empty());
+        (
+            resolution.unresolved[0].operation.clone(),
+            left_in_words(&resolution),
+        )
+    }
+
+    /// **The strict document-path grammar judges the path a target fills to,
+    /// not the target as written**: `notes/{{var.name}}.md` is a legal
+    /// target, and a value carrying a control character — which no value
+    /// rule refuses on its own — fills it to a path the grammar refuses. The
+    /// creation is unresolved naming that filled path and the grammar's
+    /// reason.
+    #[test]
+    fn a_filled_path_the_document_grammar_refuses_is_unresolved_naming_it() {
+        let filled = "notes/a\u{7}b.md";
+        assert_eq!(
+            norn_wire::PathProblem::of_document(filled),
+            Some(norn_wire::PathProblem::ControlCharacter)
+        );
+        let operation = by_rule(
+            Some("note"),
+            &[("name", "a\u{7}b")],
+            ValueMap::default(),
+            None,
+        );
+        let (left, detail) = refused_by_segments(operation.clone());
+        assert_eq!(left, operation, "the rule fills to no path to create at");
+        assert!(detail.contains(&format!("{filled:?}")), "{detail}");
+        assert!(
+            detail.contains(norn_wire::PathProblem::ControlCharacter.message()),
+            "{detail}"
+        );
+    }
+
+    /// **A target filled to a control file's place is refused by the gate a
+    /// document operation meets there**: `{{var.dir}}/{{var.file}}/x.md`
+    /// names no control file as written, and filled with `.norn` and a
+    /// control file's name it lies beneath that file. What is left unresolved
+    /// is the concrete create the rule expanded into, at the filled path, in
+    /// the words a create written there by hand meets.
+    #[test]
+    fn a_filled_path_beneath_a_control_file_is_unresolved_by_the_control_file_gate() {
+        for (file, role) in [("schema.yaml", "schema"), ("config.toml", "config")] {
+            let filled = format!(".norn/{file}/x.md");
+            let (left, detail) = refused_by_segments(by_rule(
+                Some("filed"),
+                &[("dir", ".norn"), ("file", file)],
+                ValueMap::default(),
+                None,
+            ));
+            assert_eq!(left.kind, create(&filled, ""));
+            let (_, by_hand) = refused_by_segments(Operation::new(create(&filled, "")));
+            assert_eq!(detail, by_hand);
+            assert!(
+                detail.contains(&format!(
+                    "`.norn/{file}/x.md` lies beneath the vault {role}'s path"
+                )),
+                "{detail}"
+            );
+        }
+    }
+
     /// **A document the renderer refuses is unresolved, naming the
     /// refusal**: frontmatter past the bound the reader admits would read as
     /// none.
