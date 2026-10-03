@@ -22,8 +22,13 @@
 //!
 //! **A command is read whole or not at all.** It is one line, holding no shell
 //! metacharacter anywhere — no pipe, list operator, redirection, comment,
-//! expansion, escape, quote or subshell — so it is one process with the
-//! arguments it spells. The arguments are then held to a grammar: optionally
+//! expansion, brace, wildcard, tilde, escape, quote or subshell — and it runs under `bash` or `sh`,
+//! named or left as the runner's default, so it is one process with the
+//! arguments it spells: each of those shells splits such a line on whitespace
+//! and does nothing else to it. Any other `shell:`, on the step or as a job's
+//! or the workflow's `defaults.run.shell`, is a template the runner hands the
+//! command to, and the template decides what runs — `true {0}` runs nothing.
+//! The arguments are then held to a grammar: optionally
 //! the flake tripwire in front, then either the lane script with a package, a
 //! target and harness arguments that select nothing, or `cargo test` with the
 //! flags that name a package, a feature and one target and the few that change
@@ -50,9 +55,12 @@ const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
 pub(crate) const LANE_FEATURES: &str = "LANE_FEATURES";
 
 /// The characters that make a command more, or other, than one process with
-/// the arguments it spells.
+/// the arguments it spells: besides the operators, quotes and substitutions,
+/// the braces, wildcards and tilde `bash` and `sh` expand a word holding them
+/// into other words.
 const SHELL_METACHARACTERS: &[char] = &[
-    '|', '&', ';', '<', '>', '#', '$', '\\', '\'', '"', '(', ')', '`', '\n',
+    '|', '&', ';', '<', '>', '#', '$', '\\', '\'', '"', '(', ')', '`', '\n', '{', '}', '*', '?',
+    '[', ']', '~',
 ];
 
 /// One step of one job, as the workflow declares it.
@@ -63,9 +71,9 @@ pub(crate) struct Step {
     pub(crate) run: Option<String>,
     /// The workflow's, the job's and the step's `env`, the nearer winning.
     pub(crate) env: BTreeMap<String, String>,
-    /// Whether the step or its job carries `continue-on-error:`, or an `if:`
-    /// that may skip it.
-    pub(crate) conditional: bool,
+    /// Whether the step vouches for what its command runs: nothing around the
+    /// command may skip it, tolerate its failure, or change what it runs.
+    pub(crate) vouches: bool,
 }
 
 /// One step that runs a target's ignored cases wholesale through
@@ -165,9 +173,9 @@ pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
                 continue;
             };
             match invocation(run) {
-                // A step that may be skipped or may fail unnoticed vouches
-                // for nothing it runs.
-                _ if step.conditional => {}
+                // A step that may be skipped, may fail unnoticed, or may run
+                // other than its command spells vouches for nothing it runs.
+                _ if !step.vouches => {}
                 Some(Invocation::Lane { package, target }) => read.lanes.push(LaneStep {
                     package,
                     target,
@@ -197,6 +205,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
     let workflow_env = env_of(document.get("env"));
+    let workflow_shell = Shell::defaulted_by(&document);
     let Some(jobs) = document.get("jobs") else {
         return Ok(Vec::new());
     };
@@ -210,6 +219,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             return Err(format!("job `{name}` is not a mapping"));
         }
         let job_conditional = is_conditional(job);
+        let job_shell = workflow_shell.under(Shell::defaulted_by(job));
         let mut job_env = workflow_env.clone();
         job_env.extend(env_of(job.get("env")));
         let Some(declared) = job.get("steps") else {
@@ -227,11 +237,73 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             steps.push(Step {
                 run: step.get("run").and_then(Value::as_str).map(str::to_string),
                 env,
-                conditional: job_conditional || is_conditional(step),
+                vouches: !(job_conditional || is_conditional(step))
+                    && job_shell.under(Shell::named_by(step)).runs_one_process(),
             });
         }
     }
     Ok(steps)
+}
+
+/// The shell a step's command runs under, as one level of the workflow names
+/// it.
+#[derive(Clone, Copy, Debug)]
+enum Shell<'a> {
+    /// No shell is named here, so an outer level's stands, or else the
+    /// runner's default — `bash`, or `sh` where there is no `bash`, on the
+    /// Linux and macOS runners these workflows run on.
+    Unnamed,
+    /// The value of a `shell:` key, read as it is written.
+    Named(&'a Value),
+    /// A `defaults`, or its `run`, that is not the mapping a workflow holds
+    /// there, so whatever shell it names cannot be read.
+    Unread,
+}
+
+impl<'a> Shell<'a> {
+    /// The shell a step's own `shell:` names.
+    fn named_by(step: &'a Value) -> Self {
+        step.get("shell").map_or(Shell::Unnamed, Shell::Named)
+    }
+
+    /// The shell a job's or workflow's `defaults.run.shell` names.
+    fn defaulted_by(node: &'a Value) -> Self {
+        let Some(defaults) = node.get("defaults") else {
+            return Shell::Unnamed;
+        };
+        if !defaults.is_mapping() {
+            return Shell::Unread;
+        }
+        match defaults.get("run") {
+            None => Shell::Unnamed,
+            Some(run) if run.is_mapping() => Shell::named_by(run),
+            Some(_) => Shell::Unread,
+        }
+    }
+
+    /// The shell in force where `nearer` is the next level in: the nearer
+    /// name wins, and a level that cannot be read leaves nothing read.
+    fn under(self, nearer: Self) -> Self {
+        match (self, nearer) {
+            (Shell::Unread, _) | (_, Shell::Unread) => Shell::Unread,
+            (outer, Shell::Unnamed) => outer,
+            (_, named) => named,
+        }
+    }
+
+    /// Whether this shell runs a command holding no shell metacharacter as
+    /// one process with the arguments it spells. `bash` and `sh` do — the
+    /// runner runs the script file with them, and each splits such a line on
+    /// whitespace alone. Any other `shell:` is a command template the runner
+    /// hands the script file to, so it decides what runs: `true {0}` runs
+    /// nothing, and `pwsh` or `python` read the line by other rules.
+    fn runs_one_process(self) -> bool {
+        match self {
+            Shell::Unnamed => true,
+            Shell::Named(Value::String(shell)) => shell == "bash" || shell == "sh",
+            Shell::Named(_) | Shell::Unread => false,
+        }
+    }
 }
 
 /// Whether a job or step carries a key that lets it be skipped or fail
@@ -543,7 +615,8 @@ mod tests {
         .map(|tail| format!("{build} {tail}"))
         .collect();
         for metacharacter in [
-            "|", "&", ";", "<", ">", "#", "$", "\\", "'", "\"", "(", ")", "`",
+            "|", "&", ";", "<", ">", "#", "$", "\\", "'", "\"", "(", ")", "`", "{", "}", "*", "?",
+            "[", "]", "~",
         ] {
             commands.push(format!("{build} {metacharacter}"));
         }
@@ -554,6 +627,13 @@ mod tests {
             // `true`, and backgrounds the second.
             format!("{build},x||true"),
             format!("{build},&"),
+            // Brace expansion: the shell runs `--features
+            // induced-failure,induced-failure` with `induced-failure,zzz` as a
+            // name filter that matches no test.
+            format!("{build},{{induced-failure,zzz}}"),
+            // Pathname expansion: `-p *` is every file in the working
+            // directory, and all but the first are name filters.
+            "cargo test --locked -p * --features induced-failure".to_string(),
             format!("echo {build}"),
             format!("true {build}"),
             format!("+nightly {build}"),
@@ -653,10 +733,7 @@ mod tests {
     fn conditional_under(condition: &str) -> (bool, bool) {
         let on_step = format!("jobs:\n  j:\n    steps:\n      - if: {condition}\n        run: x\n");
         let on_job = format!("jobs:\n  j:\n    if: {condition}\n    steps:\n      - run: x\n");
-        (
-            steps(&on_step)[0].conditional,
-            steps(&on_job)[0].conditional,
-        )
+        (!steps(&on_step)[0].vouches, !steps(&on_job)[0].vouches)
     }
 
     /// **A condition that only widens when a step runs leaves it vouching**,
@@ -712,8 +789,96 @@ mod tests {
             "      - run: echo tolerated",
         ]
         .join("\n");
-        let conditional: Vec<bool> = steps(&tolerant).iter().map(|s| s.conditional).collect();
+        let conditional: Vec<bool> = steps(&tolerant).iter().map(|s| !s.vouches).collect();
         assert_eq!(conditional, vec![true, true]);
+    }
+
+    /// Whether each step of `workflow` vouches for what it runs.
+    fn vouching(workflow: &str) -> Vec<bool> {
+        steps(workflow).iter().map(|step| step.vouches).collect()
+    }
+
+    /// One step running `x`, with `step`, `job` and `workflow` lines spliced
+    /// in at each level — each written at that level's indentation already.
+    fn one_step(workflow: &[&str], job: &[&str], step: &[&str]) -> String {
+        let mut lines: Vec<&str> = workflow.to_vec();
+        lines.extend(["jobs:", "  j:"]);
+        lines.extend(job);
+        lines.extend(["    steps:", "      - run: x"]);
+        lines.extend(step);
+        lines.join("\n") + "\n"
+    }
+
+    /// **A step whose shell is not `bash` or `sh` vouches for nothing**, the
+    /// step's `shell:` first, then its job's and its workflow's
+    /// `defaults.run.shell`: any other shell runs the command as something
+    /// other than one process with the arguments it spells.
+    #[test]
+    fn a_shell_other_than_bash_or_sh_vouches_for_nothing() {
+        for shell in [
+            "'true {0}'",
+            "'echo {0}'",
+            "bash -c true {0}",
+            "pwsh",
+            "python",
+            "${{ matrix.shell }}",
+            "''",
+            "[bash]",
+            "",
+        ] {
+            let step_line = format!("        shell: {shell}");
+            let job_lines = [
+                "    defaults:",
+                "      run:",
+                &format!("        shell: {shell}"),
+            ];
+            let workflow_lines = ["defaults:", "  run:", &format!("    shell: {shell}")];
+            for (placement, workflow) in [
+                ("step", one_step(&[], &[], &[&step_line])),
+                ("job", one_step(&[], &job_lines, &[])),
+                ("workflow", one_step(&workflow_lines, &[], &[])),
+            ] {
+                assert_eq!(
+                    vouching(&workflow),
+                    vec![false],
+                    "a step under a {placement} `shell: {shell}` vouched\n{workflow}"
+                );
+            }
+        }
+        for unreadable in [
+            one_step(&["defaults: a string"], &[], &[]),
+            one_step(&["defaults:", "  run: a string"], &[], &[]),
+            one_step(&[], &["    defaults: a string"], &[]),
+            one_step(&[], &["    defaults:", "      run: [a, list]"], &[]),
+        ] {
+            assert_eq!(vouching(&unreadable), vec![false], "{unreadable}");
+        }
+        for read in [
+            one_step(&[], &[], &[]),
+            one_step(&[], &[], &["        shell: bash"]),
+            one_step(&[], &[], &["        shell: sh"]),
+            one_step(
+                &[],
+                &["    defaults:", "      run:", "        shell: sh"],
+                &[],
+            ),
+            one_step(&["defaults:", "  run:", "    shell: bash"], &[], &[]),
+            // The nearer shell wins, so a step's own `bash` is the shell it
+            // runs under whatever its job's default names.
+            one_step(
+                &[],
+                &["    defaults:", "      run:", "        shell: pwsh"],
+                &["        shell: bash"],
+            ),
+            // A `defaults.run` naming only a working directory names no shell.
+            one_step(
+                &["defaults:", "  run:", "    working-directory: crates"],
+                &[],
+                &[],
+            ),
+        ] {
+            assert_eq!(vouching(&read), vec![true], "{read}");
+        }
     }
 
     /// **A workflow that is not one is an error**, never an empty answer.
