@@ -52,8 +52,10 @@
 //! arguments are then held to a grammar: optionally the flake tripwire in
 //! front, then either the lane script with a package, a target and harness
 //! arguments that select nothing, or `cargo test` with the flags that name a
-//! package, a feature and one target and the few that change nothing about
-//! which tests run. A command outside that grammar runs nothing, so a step this
+//! package, a feature and the targets it selects and the few that change
+//! nothing about which tests run. `--release` is not among them: it compiles
+//! out every test gated on `debug_assertions`. A command outside that grammar
+//! runs nothing, so a step this
 //! cannot read fails whatever needed it rather than vouching for a test it may
 //! not run.
 //!
@@ -530,7 +532,7 @@ fn featured_runs_of(arguments: &[&str]) -> Option<Vec<FeaturedRun>> {
     let mut tokens = arguments.iter().copied();
     while let Some(token) = tokens.next() {
         match token {
-            "--locked" | "--frozen" | "--offline" | "--release" => {}
+            "--locked" | "--frozen" | "--offline" => {}
             "-p" | "--package" => packages.push(tokens.next()?),
             "-F" | "--features" => features.extend(tokens.next()?.split(',')),
             "--lib" => targets.push(Target::Lib),
@@ -676,7 +678,7 @@ mod tests {
                 vec![run("norn-host", None, "induced-failure")],
             ),
             (
-                "cargo test --package norn-host -F induced-failure --release",
+                "cargo test --package norn-host -F induced-failure --offline",
                 vec![run("norn-host", None, "induced-failure")],
             ),
             (
@@ -741,6 +743,7 @@ mod tests {
             "-- some_other_case",
             "--tests",
             "--no-run",
+            "--release",
             "--all-features",
             "--workspace --exclude norn-fs",
         ]
