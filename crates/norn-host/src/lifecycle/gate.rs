@@ -28,9 +28,10 @@
 //! and a taker waiting that way holds nothing but the lock that counts it, so
 //! it never waits on the gate while holding it. A caller that owes the state
 //! a write and must not wait for the gate — a demand lease going back from its
-//! drop, whatever thread drops it — leaves it with
-//! [`EntryGate::run_under_the_next_hold`], and the next take of the gate runs
-//! it before its taker reads the state.
+//! drop, whatever thread drops it, and a read past its query, giving its pin
+//! back, giving back a queue slot its dispatch took, or leaving the verdict on
+//! damage it met — leaves it with [`EntryGate::run_under_the_next_hold`], and
+//! the next take of the gate runs it before its taker reads the state.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -344,10 +345,10 @@ impl<T: Stanced> EntryGate<T> {
 
     /// Take the gate from a drop, waiting for it, and count the take. Every
     /// drop-side take that waits for an entry gate comes through here: a
-    /// read's hold giving its pin back, a withdrawal that did not commit
-    /// putting the entry back in service, and the host's destruction tearing
-    /// each entry down. A demand lease giving itself back does not wait, and
-    /// defers through [`EntryGate::run_under_the_next_hold`] instead, which
+    /// withdrawal that did not commit putting the entry back in service, and
+    /// the host's destruction tearing each entry down. A demand lease giving
+    /// itself back and a read's hold giving its pin back do not wait, and
+    /// defer through [`EntryGate::run_under_the_next_hold`] instead, which
     /// reads through poison the same way.
     ///
     /// **It reads through a poisoned gate on every thread**, unwinding or not.

@@ -465,6 +465,52 @@ pub fn canonical_spelling(path: &Path) -> PathBuf {
     spelling
 }
 
+/// The most links a spelling is followed through before it is kept as is.
+const MAX_LINK_HOPS: usize = 40;
+
+/// `path` at its [`canonical_spelling`], with every link that dangles now
+/// followed to where it will point once its target exists.
+///
+/// [`canonical_spelling`] keeps a dangling link as spelled, but a file created
+/// beneath its target is reached through the link, so two spellings of one
+/// absent file must agree on it. A relative link text is taken from the
+/// directory holding the link. A chain of more than 40 links, or a loop, is
+/// kept at its [`canonical_spelling`], since the filesystem refuses to follow
+/// it and no file is ever created through it.
+#[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
+pub fn canonical_spelling_through_links(path: &Path) -> PathBuf {
+    let spelled = canonical_spelling(path);
+    let mut spelling = spelled.clone();
+    for _ in 0..MAX_LINK_HOPS {
+        let Some((link, rest)) = first_dangling_link(&spelling) else {
+            return spelling;
+        };
+        let Ok(text) = fs::read_link(&link) else {
+            return spelling;
+        };
+        let target = link.parent().unwrap_or(Path::new("/")).join(text);
+        spelling = canonical_spelling(&target.join(rest));
+    }
+    spelled
+}
+
+/// The first component of `spelling` that is a link, with the components
+/// beneath it. A canonical spelling holds no link that resolves, so one found
+/// is one that dangles.
+#[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
+fn first_dangling_link(spelling: &Path) -> Option<(PathBuf, PathBuf)> {
+    let components: Vec<_> = spelling.components().collect();
+    let mut prefix = PathBuf::new();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if fs::symlink_metadata(&prefix).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            let rest = components[index + 1..].iter().collect();
+            return Some((prefix, rest));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     identity_of(left) == identity_of(right)
@@ -844,6 +890,62 @@ mod tests {
             canonical_spelling(&scratch.join("link/not/../yet/.")),
             resolved.join("yet")
         );
+    }
+
+    /// A link that dangles is followed to where it will point: an absolute
+    /// text as written, a relative text from the directory holding the link,
+    /// `..` included, and a chain of dangling links to its last target.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_dangling_link_is_followed_to_where_it_will_point() {
+        let scratch = scratch();
+        std::fs::create_dir_all(scratch.join("target")).unwrap();
+        std::fs::create_dir_all(scratch.join("links")).unwrap();
+        let target = std::fs::canonicalize(scratch.join("target")).unwrap();
+        let links = std::fs::canonicalize(scratch.join("links")).unwrap();
+        let symlink = |name: &str, text: &Path| {
+            std::os::unix::fs::symlink(text, links.join(name)).unwrap();
+            links.join(name)
+        };
+
+        let absolute = symlink("absolute", &target.join("absolute.yaml"));
+        let sibling = symlink("sibling", Path::new("sibling.yaml"));
+        let parent = symlink("parent", Path::new("../target/parent.yaml"));
+        symlink("second", Path::new("../target/chained.yaml"));
+        let first = symlink("first", Path::new("second"));
+
+        assert_eq!(
+            canonical_spelling_through_links(&absolute),
+            target.join("absolute.yaml")
+        );
+        assert_eq!(
+            canonical_spelling_through_links(&sibling),
+            links.join("sibling.yaml")
+        );
+        assert_eq!(
+            canonical_spelling_through_links(&parent),
+            target.join("parent.yaml")
+        );
+        assert_eq!(
+            canonical_spelling_through_links(&first),
+            target.join("chained.yaml")
+        );
+    }
+
+    /// Links that loop never reach a file, so a spelling through them is
+    /// kept as spelled, whichever link of the loop the hop bound stops at.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // The tree this case arranges and judges.
+    fn a_spelling_through_a_link_loop_is_kept_as_spelled() {
+        let scratch = scratch();
+        let root = std::fs::canonicalize(scratch.join(".")).unwrap();
+        for (link, text) in [("a", "b"), ("b", "c"), ("c", "a"), ("x", "y"), ("y", "x")] {
+            std::os::unix::fs::symlink(text, root.join(link)).unwrap();
+        }
+
+        for spelled in [root.join("a/schema.yaml"), root.join("x/schema.yaml")] {
+            assert_eq!(canonical_spelling_through_links(&spelled), spelled);
+        }
     }
 
     /// A `..` past what resolves steps back into a directory that does

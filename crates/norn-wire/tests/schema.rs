@@ -528,6 +528,7 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
         sorted(tag_constants(&schema, "code")),
         sorted([
             "host/duplicate-root",
+            "host/shared-schema",
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
@@ -712,6 +713,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
         sorted(codes),
         sorted([
             "host/duplicate-root",
+            "host/shared-schema",
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault",
@@ -897,6 +899,7 @@ fn every_collision_advertises_the_one_name_set() {
     let detail = schema_of::<ErrorDetail>();
     for (code, field) in [
         ("host/duplicate-root", "aliases"),
+        ("host/shared-schema", "aliases"),
         ("vault/ambiguous-root", "candidates"),
     ] {
         let branch = branches(&detail)
@@ -2797,7 +2800,12 @@ fn a_doctor_registry_report_advertises_the_registry_it_read() {
     );
     assert_eq!(
         sorted(tag_constants(&schema_of::<RegistryProblem>(), "problem")),
-        sorted(["duplicate_root", "root_unreadable", "root_missing"])
+        sorted([
+            "duplicate_root",
+            "shared_schema",
+            "root_unreadable",
+            "root_missing"
+        ])
     );
     let sanity = schema_of::<RegistrySanity>();
     let problems = branches(&sanity)

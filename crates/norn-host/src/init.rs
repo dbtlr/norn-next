@@ -64,7 +64,7 @@ use norn_wire::{
 };
 
 use crate::address::registered_name;
-use crate::apply::unreadable;
+use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
 use crate::planner::control::control_path;
 use crate::planner::view::{Entry, TreeView, VaultView};
@@ -320,10 +320,16 @@ where
         vault: &VaultAddress,
     ) -> Result<Starter, ErrorEnvelope> {
         let observed = self
-            .answer_read(vault, |name, snapshot, declared| {
-                let report = match self.schema_standing(name).map_err(BuildRefused::Answered)? {
+            .answer_read_on_hold(vault, |name, hold| {
+                let report = match schema_standing(name, hold.plan_ground())
+                    .map_err(BuildRefused::Answered)?
+                {
                     Some(schema) => Err(schema),
-                    None => Ok(observed_fields(vault, snapshot, declared)?),
+                    None => Ok(observed_fields(
+                        vault,
+                        hold.snapshot(),
+                        hold.content_model(),
+                    )?),
                 };
                 Ok(Built {
                     unsatisfied: Vec::new(),
@@ -360,38 +366,41 @@ where
         }
         Ok(Starter::Planned(Box::new(plan), forecast))
     }
+}
 
-    /// Where a schema stands at the default path the vault `name` reads it
-    /// at, or `None` where nothing that reads as one does: read as the
-    /// planner reads a control target ([`VaultView::control_entry`]), on the
-    /// ground the entry's coverage stands on.
-    ///
-    /// Something there that is no file — a folder, a link — is no schema
-    /// standing, and is left to the starter's own planning, which refuses to
-    /// write there naming it.
-    fn schema_standing(&self, name: &VaultName) -> Result<Option<DocumentPath>, ErrorEnvelope> {
-        // An entry recording no ground is left to the preview, which answers
-        // that as the host defect it is.
-        let Some(ground) = self.plan_ground(name) else {
-            return Ok(None);
-        };
-        ground.standing(name)?;
-        let view = TreeView::open(&ground.root, &ground.exclusions)
-            .map_err(|error| unreadable(name, error))?;
-        let schema = control_path(ControlFile::Schema);
-        let Ok(identity) = view.normalizer().normalize(Path::new(schema.as_str())) else {
-            return Ok(None);
-        };
-        Ok(
-            match view
-                .control_entry(&identity)
-                .map_err(|error| unreadable(name, error))?
-            {
-                Entry::Document { at, .. } => Some(at),
-                Entry::Absent { .. } | Entry::Folder | Entry::Blocked { .. } => None,
-            },
-        )
-    }
+/// Where a schema stands at the default path the vault `name` reads it at, or
+/// `None` where nothing that reads as one does: read as the planner reads a
+/// control target ([`VaultView::control_entry`]), on `ground`, the ground the
+/// entry's coverage stands on as the read's establishing hold read it.
+///
+/// Something there that is no file — a folder, a link — is no schema
+/// standing, and is left to the starter's own planning, which refuses to
+/// write there naming it.
+fn schema_standing(
+    name: &VaultName,
+    ground: Option<&PlanGround>,
+) -> Result<Option<DocumentPath>, ErrorEnvelope> {
+    // An entry recording no ground is left to the preview, which answers
+    // that as the host defect it is.
+    let Some(ground) = ground else {
+        return Ok(None);
+    };
+    ground.standing(name)?;
+    let view = TreeView::open(&ground.root, &ground.exclusions)
+        .map_err(|error| unreadable(name, error))?;
+    let schema = control_path(ControlFile::Schema);
+    let Ok(identity) = view.normalizer().normalize(Path::new(schema.as_str())) else {
+        return Ok(None);
+    };
+    Ok(
+        match view
+            .control_entry(&identity)
+            .map_err(|error| unreadable(name, error))?
+        {
+            Entry::Document { at, .. } => Some(at),
+            Entry::Absent { .. } | Entry::Folder | Entry::Blocked { .. } => None,
+        },
+    )
 }
 
 #[cfg(test)]

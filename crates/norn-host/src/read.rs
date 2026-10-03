@@ -29,7 +29,7 @@ use norn_wire::{
 };
 
 use crate::address::registered_name;
-use crate::lifecycle::{EntryOps, HoldReading, Host, ReadSource, SnapshotSource};
+use crate::lifecycle::{EntryOps, HoldReading, Host, ReadHold, ReadSource, SnapshotSource};
 use crate::refusal::{PageRefused, page_refusal};
 use crate::text::TextLayer;
 
@@ -121,12 +121,26 @@ where
         address: &norn_wire::VaultAddress,
         build: impl FnOnce(&VaultName, &Snapshot, &ContentModel) -> Result<Built<R, W>, BuildRefused>,
     ) -> Result<Answered<R, W>, ErrorEnvelope> {
+        self.answer_read_on_hold(address, |name, hold| {
+            build(name, hold.snapshot(), hold.content_model())
+        })
+    }
+
+    /// [`Host::answer_read`], its builder handed the hold itself, for a read
+    /// that needs what the hold carries beside its snapshot and content
+    /// model: the plan ground its establishing hold read, which a builder
+    /// reads off the hold rather than taking the entry gate again.
+    pub(crate) fn answer_read_on_hold<R, W>(
+        &self,
+        address: &norn_wire::VaultAddress,
+        build: impl FnOnce(&VaultName, &ReadHold<O>) -> Result<Built<R, W>, BuildRefused>,
+    ) -> Result<Answered<R, W>, ErrorEnvelope> {
         let name = registered_name(address)?;
         let hold = self
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         let reading = hold.reading().answer_reading(name)?;
-        let built = match build(name, hold.snapshot(), hold.content_model()) {
+        let built = match build(name, &hold) {
             Ok(built) => built,
             Err(BuildRefused::Answered(envelope)) => return Err(envelope),
             Err(BuildRefused::Page(refusal)) => {

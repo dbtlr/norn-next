@@ -7,7 +7,9 @@
 //!
 //! The refusals are the host's: `host/already-served` where the name is
 //! already registered, `host/duplicate-root` where another registration
-//! already reaches that root, `host/registry-unwritable` where the registry
+//! already reaches that root, `host/shared-schema` where the schema file the
+//! registration would be served under is the file another registration uses,
+//! `host/registry-unwritable` where the registry
 //! file could not be read or replaced, and `host/entry-untrusted` where the root
 //! itself could not be read — carrying the environmental-refusal reason,
 //! which is the rendering the registry recheck gives such a root.

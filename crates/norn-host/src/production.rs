@@ -5833,6 +5833,39 @@ mod tests {
         );
     }
 
+    /// **A preview does not wait for the entry gate once its snapshot
+    /// stands.** In the instant the preview's read lets the gate go, another
+    /// holder takes it and keeps it far past the read's bound. The preview
+    /// plans on the ground its establishing hold read, and answers within its
+    /// bound rather than once the holder lets go.
+    #[test]
+    fn a_preview_answers_within_its_bound_while_another_holds_the_gate() {
+        let f = Fixture::new("preview-held-gate");
+        fs::create_dir_all(f.vault().join("wave")).unwrap();
+        fs::write(f.vault().join("wave/a.md"), "---\nwave: flip\n---\n").unwrap();
+        let (host, name, _lease) = ready_host(&f, fixture_ops(&f));
+        let held = host.hold_the_gate_once_a_read_lets_go(&name);
+
+        let started = std::time::Instant::now();
+        let previewed = host
+            .set(flipping(&name, norn_wire::ApplyMode::Preview))
+            .expect("the preview is admitted")
+            .wait();
+        let waited = started.elapsed();
+        drop(held.recv().expect("the preview's read let the gate go"));
+        assert!(
+            waited < crate::READ_SETTLE_BOUND,
+            "the preview waited {waited:?} for a held gate, past its bound of {:?}",
+            crate::READ_SETTLE_BOUND
+        );
+        let previewed = previewed.expect("the preview answers its plan");
+        let norn_wire::ApplyReport::Previewed { plan, .. } = previewed.report else {
+            panic!("a preview answered {:?}", previewed.report);
+        };
+        let written: Vec<&str> = plan.transitions.iter().map(|t| t.path.as_str()).collect();
+        assert_eq!(written, ["wave/a.md"]);
+    }
+
     /// **An apply that reads the store mints one read handle for its job
     /// through the coverage's read seam and accounts the mint to the job
     /// account**: a `where` match mints it, the store's read-only open

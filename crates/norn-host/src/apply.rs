@@ -629,8 +629,10 @@ where
     /// exactly the refusal its apply would.
     ///
     /// The ground is the one the entry's coverage recorded, read under the
-    /// gate; whether its root still stands there is asked of the filesystem
-    /// after the gate is given back, as an apply's planning asks it.
+    /// gate hold that established the read's snapshot and carried on the
+    /// hold, so the preview takes the gate no more once its snapshot stands;
+    /// whether its root still stands there is asked of the filesystem after
+    /// the gate is given back, as an apply's planning asks it.
     pub(crate) fn preview(&self, name: &VaultName, plan: PlanDocument) -> ApplyAnswer {
         let hold = self
             .begin_read(name)
@@ -640,7 +642,7 @@ where
         // gate hold that publishes the coverage this read holds, so only ops
         // that report none — test ops — reach the refusal: a host defect,
         // answered as the read seam it is, never as a cause the vault met.
-        let ground = self.plan_ground(name).ok_or_else(|| {
+        let ground = hold.plan_ground().ok_or_else(|| {
             ErrorEnvelope::new(
                 "the entry records no ground to plan against, so the preview was not planned",
                 ErrorDetail::reader_unavailable(
@@ -662,19 +664,18 @@ where
             // what it planned: resolving checks no schema, so the plan it
             // answers goes through the same checks a resolved plan's does.
             PlanDocument::Operations(authored) => {
-                let resolution =
-                    resolve_on(authored, &ground, name, &snapshot).map_err(answered)?;
+                let resolution = resolve_on(authored, ground, name, &snapshot).map_err(answered)?;
                 let resolution = fully_resolved(resolution)?;
                 preview_resolved(
                     resolution.plan,
                     resolution.forecast.left_behind,
-                    &ground,
+                    ground,
                     &snapshot,
                 )
                 .map_err(answered)
             }
             PlanDocument::Resolved(resolved) => {
-                preview_resolved(resolved, Vec::new(), &ground, &snapshot).map_err(answered)
+                preview_resolved(resolved, Vec::new(), ground, &snapshot).map_err(answered)
             }
         })();
         // What the preview's link judgments cost is the read account's,
