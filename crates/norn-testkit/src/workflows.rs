@@ -82,6 +82,9 @@ use crate::regression::Target;
 /// step spells it.
 pub(crate) const LANE_SCRIPT: &str = ".github/scripts/lane-suite.sh";
 
+/// The lane script's file name, which a command naming it by any path holds.
+const LANE_SCRIPT_FILE: &str = "lane-suite.sh";
+
 /// The wrapper a step may run its command through, which runs the command it
 /// is given and changes nothing about it.
 const FLAKE_TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
@@ -147,8 +150,10 @@ pub(crate) struct CiSteps {
     /// whenever it runs, so each is held to the package rows, the stems and
     /// the features its target needs.
     pub(crate) every_lane: Vec<LaneStep>,
-    /// Every command naming [`LANE_SCRIPT`] that does not read whole,
-    /// vouching or not. Its package and target cannot be read, so it counts
+    /// Every command naming the lane script's file, by any path, that does not
+    /// read whole, vouching or not — a step's `working-directory` can put the
+    /// script at a spelling other than [`LANE_SCRIPT`]. Its package and target
+    /// cannot be read, so it counts
     /// as no lane step anywhere above; the lane guards refuse it instead,
     /// rather than leave a step that may adopt a suite unchecked.
     pub(crate) unread_lanes: Vec<String>,
@@ -179,7 +184,7 @@ impl CiSteps {
                     self.every_lane.push(lane);
                 }
                 Some(Invocation::Test(runs)) if step.vouches => self.featured.extend(runs),
-                None if run.contains(LANE_SCRIPT) => self.unread_lanes.push(run.to_string()),
+                None if run.contains(LANE_SCRIPT_FILE) => self.unread_lanes.push(run.to_string()),
                 _ => {}
             }
         }

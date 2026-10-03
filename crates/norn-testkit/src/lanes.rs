@@ -906,5 +906,12 @@ mod tests {
         let refusal = check_lane_steps_agree(&unread, "norn-host", HOST_TABLE)
             .expect_err("a lane command this cannot read was accepted");
         assert!(refusal.contains("tee lane.log"), "{refusal}");
+        let elsewhere = ci(&[
+            HOST_MEMORY,
+            &["run: scripts/lane-suite.sh norn-newcomer memory"],
+        ]);
+        let refusal = check_lane_steps_agree(&elsewhere, "norn-host", HOST_TABLE)
+            .expect_err("the lane script spelled from another folder was accepted");
+        assert!(refusal.contains("scripts/lane-suite.sh"), "{refusal}");
     }
 }
