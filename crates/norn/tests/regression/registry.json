@@ -631,7 +631,7 @@
       "sources": ["NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the structures are resident and a mutation's use of them is bounded: crates/norn-store/src/ddl/facts.rs holds links and the reverse suffix key as maintained rows, and crates/norn-store/src/increment.rs writes them over the changed set alone. The counter lane holds a mutation's judgments of them to the hub's in-links, the same at 300 documents as at 2000, with no table or index stepped end to end, and pins how many judgments one preview makes whatever the number of holders: four for a hub's move in crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales — the cascade's backlink pass and spelling probe, planning's change set, and the applier's re-derivation of it — with two counted opens of each planned file, one per stage, and the kernel's staging look opening each written target that already stands once more, outside that tally; one, two and three for a hub's deletes in crates/norn-host/tests/counter_gate.rs::a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales; and ten for a wikilink rewrite in crates/norn-host/tests/counter_gate.rs::a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales. That holds a structure to one build per judging stage and never one per document. It does not hold the operation half: every one of those plans is one operation, so no count shows a plan of several operations judging its change set once per stage rather than once per operation. It is pre-committed as crates/norn-host/tests/counter_gate.rs::a_plan_of_several_operations_judges_once_per_stage_at_both_scales.",
+        "reason": "the structures are resident and a mutation's use of them is bounded: crates/norn-store/src/ddl/facts.rs holds links and the reverse suffix key as maintained rows, and crates/norn-store/src/increment.rs writes them over the changed set alone. The counter lane holds a mutation's judgments of them to the hub's in-links, the same at 300 documents as at 2000, with no table or index stepped end to end, and pins how many judgments one preview makes whatever the number of holders: four for a hub's move in crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales — the cascade's backlink pass and spelling probe, planning's change set, and the applier's re-derivation of it — with two counted opens of each planned file, one per stage, and the kernel's staging look, which the preview runs as an apply's staging would, reading each target that already stands once more, counted apart as a target read — twenty-one, the holders it replaces and the hub's old name; one, two and three for a hub's deletes in crates/norn-host/tests/counter_gate.rs::a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales; and ten for a wikilink rewrite in crates/norn-host/tests/counter_gate.rs::a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales. That holds a structure to one build per judging stage and never one per document. It does not hold the operation half: every one of those plans is one operation, so no count shows a plan of several operations judging its change set once per stage rather than once per operation. It is pre-committed as crates/norn-host/tests/counter_gate.rs::a_plan_of_several_operations_judges_once_per_stage_at_both_scales.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/facts.rs" },
           { "present": "crates/norn-store/src/increment.rs" },
@@ -1733,7 +1733,9 @@
           "crates/norn-host/src/lifecycle/tests/applies.rs::an_apply_arriving_during_a_reconcile_takes_the_claim_before_the_next_turn_and_maintenance",
           "crates/norn-host/tests/verbs.rs::a_matching_document_the_intake_derived_is_matched_by_the_next_apply",
           "crates/norn-host/tests/fd_budget.rs::an_apply_minting_a_reader_stays_in_budget_and_accumulates_no_descriptor",
-          "crates/norn-host/src/applier/tests.rs::a_changed_before_state_on_a_touched_file_is_drift"
+          "crates/norn-host/src/applier/tests.rs::a_changed_before_state_on_a_touched_file_is_drift",
+          "crates/norn-host/tests/counter_gate.rs::an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_where_apply_costs_the_same_at_both_scales"
         ]
       }
     },
@@ -1781,14 +1783,16 @@
       "name": "whole-vault-work-is-declared-and-triggered-deliberately",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Full derivation is never reached from a mutation's request path: a mutation's row-touch counters are bounded by its declared affected set, and precondition evaluation is one indexed statement per selector.",
+      "property": "Full derivation is never reached from a mutation's request path: an apply derives exactly the documents it writes, and its row-touch counters — documents upserted, deleted and tombstoned, links re-decided, and its changeset's read steps — follow its touched set, the same at 300 documents as at 2000. A `where` selector is evaluated on the apply's one snapshot in a fixed number of statements, the same at both vault sizes, stepping no table or index end to end.",
       "sources": ["NRN-a63", "NRN-a59", "NORN-a15", "NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "the subjects exist: a mutation plans and applies in its apply job and reaches no full derivation, a `where` target is matched through the find builder in crates/norn-host/src/planner/expand.rs, and the counter lane already holds a one-document changeset's counters flat across vault scale and a hub's link work to its in-links. What is missing is the measurement: no counter-lane workload runs a real `set --where` apply end to end and holds its row-touch counters to its declared affected set and its precondition statements to one per selector, at two vault scales. NORN-299's counter-lane workloads author it as crates/norn-host/tests/counter_gate.rs::a_where_apply_costs_the_same_at_both_scales, the name pre-committed here, so the audit fails the day it is declared and binding this case to it is what ends the dormancy.",
-        "grounds": [
-          { "present": "crates/norn-host/src/planner/expand.rs" },
-          { "symbol-absent": "crates/norn-host/tests/counter_gate.rs::a_where_apply_costs_the_same_at_both_scales" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/counter_gate.rs::an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_where_apply_costs_the_same_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_hub_writes_link_health_work_follows_its_in_links_at_both_scales"
         ]
       }
     },
@@ -1810,15 +1814,14 @@
       "name": "write-through-the-composed-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "An apply reads each file it touches a fixed number of times, the same at any vault size and any plan size, and reads no file it neither touches nor plans from; its commit reads each written file back once, to reach the store without holding its bytes, and hashes it once. Re-reading what the apply just composed a growing number of times is the shape this forbids.",
+      "property": "An apply reads each file it touches a fixed number of times by each protocol that reads it, set by what the plan does to that file, the same at 300 documents as at 2000 and at plans of 1, 10, 22 and 200 targets, and reads no file it neither touches nor plans from; its commit reads each written file back once, to reach the store without holding its bytes, and each read hashes what it read once. Re-reading what the apply just composed a growing number of times is the shape this forbids.",
       "sources": ["NRN-a59", "NRN-a63", "NRN-a62"],
       "binding": {
-        "status": "dormant",
-        "reason": "the commit is built: crates/norn-host/src/production.rs::commit_plan_changeset reads each file a plan left present back once through the anchored read, which hashes it as it reads, so the composed state reaches the store without the applier holding its bytes. A preview's reads are counted: crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales holds a hub's move preview to two counted opens of each file it plans from, once while planning and once while the applier judges the plan, at both vault scales; the kernel's staging look opens each written target that already stands once more, outside that tally. What is missing is the bar on an apply: no counter-lane workload holds an apply's file reads per target to a fixed number at two vault sizes and two plan sizes, nor holds it to the files it touches or plans from. NORN-299's counter-lane workloads author that bar as crates/norn-host/tests/counter_gate.rs::an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales, the name pre-committed here.",
-        "grounds": [
-          { "symbol-present": "crates/norn-host/src/production.rs::commit_plan_changeset" },
-          { "symbol-present": "crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales" },
-          { "symbol-absent": "crates/norn-host/tests/counter_gate.rs::an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/counter_gate.rs::an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_where_apply_costs_the_same_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales"
         ]
       }
     },

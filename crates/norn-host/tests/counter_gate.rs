@@ -906,13 +906,14 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile, ignored: usize) 
 ///
 /// The hub and its planted in-links are derived by the attach heal beside
 /// each profile's generated tree. A preview of the delete through the host,
-/// saying the links may be left broken, records one entry per in-link. The judgment the preview's planning and
-/// an apply's check each run — the store's resolution door, on a snapshot
-/// of the attached store, with the hub overlaid as removed — is then counted
-/// directly: it judges the twenty in-links, resolves the one key they share
-/// once, reads the hub as the one row that key's head holds, runs the same
-/// three statements by name, and steps no table or index end to end, at
-/// `ambiguous` (300 documents) exactly as at `realistic` (2000).
+/// saying the links may be left broken, records one entry per in-link. The
+/// judgment the preview's planning and an apply's check each run — the
+/// store's resolution door, on a snapshot of the attached store, with the
+/// hub overlaid as removed — is then counted directly: it judges the twenty
+/// in-links, resolves the one key they share once, reads the hub as the one
+/// row that key's head holds, runs the same three statements by name, and
+/// steps no table or index end to end, at `ambiguous` (300 documents)
+/// exactly as at `realistic` (2000).
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
@@ -1139,8 +1140,11 @@ fn moved_hub_path() -> String {
 /// calling thread, where a preview plans and judges its plan, reads the same
 /// documents through `norn-fs` at both scales: two counted opens per planned
 /// file, the hub and its twenty holders each opened once while planning and
-/// once while the applier judges the plan; the kernel's staging look opens
-/// each written target that already stands once more, outside this tally.
+/// once while the applier judges the plan. The kernel's staging look, which
+/// the preview runs as an apply's staging would, reads each target that
+/// already stands once more, counted apart as a target read: the twenty
+/// holders it replaces and the hub's old name it removes, and not the new
+/// name, which holds no file to read.
 /// What the preview's judgments on the store's resolution door cost is
 /// read off the host's read account, as the preview really ran them — the
 /// cascade's backlink pass and spelling probe, the planning's change set and
@@ -1162,6 +1166,7 @@ fn a_hub_moves_cascade_follows_its_in_links_at_both_scales() {
             ("rewrites_planned", HUB_IN_LINKS as u64),
             ("entries_written", HUB_IN_LINKS as u64),
             ("document_opens", 2 * (HUB_IN_LINKS as u64 + 1)),
+            ("target_reads", HUB_IN_LINKS as u64 + 1),
             ("judgments", 4),
             ("full_scan_steps", 0),
         ] {
@@ -1208,7 +1213,7 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
             .expect("a preview is answered")
             .wait()
             .expect("the hub's move previews");
-        let read = thread_reads(window.finish());
+        let read = window.finish();
         let judged = host.read_evidence().since(account).preview_link_judgments;
         let norn_wire::ApplyReport::Previewed { plan, .. } = previewed.report else {
             panic!("a preview answered {:?}", previewed.report);
@@ -1244,9 +1249,10 @@ fn one_hub_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsho
     let counters: CounterSnapshot = [
         ("rewrites_planned", rewrites),
         ("entries_written", entries),
-        ("document_opens", read.get("document_opens")),
-        ("stats", read.get("stats")),
-        ("walk_dirents", read.get("walk_dirents")),
+        ("document_opens", read.document_opens),
+        ("target_reads", read.target_reads),
+        ("stats", read.stats),
+        ("walk_dirents", read.walk_dirents),
         ("judgments", judged.judgments),
         ("links_evaluated", judged.links_evaluated),
         ("keys_resolved", judged.keys_resolved),
@@ -2485,8 +2491,9 @@ fn one_apply(
 /// exactly its fate's budget by each protocol, and each staged shadow must be
 /// read once, under a name of its own: an absolute path whose file name is a
 /// shadow name, outside `root` or in the shadow home's fallback below it, so
-/// a shadow read counted against a document fails. A read of a file the plan does not
-/// touch fails here even where it leaves every count at its budget.
+/// a shadow read counted against a document fails. A read of a file the
+/// plan does not touch fails here even where it leaves every count at its
+/// budget.
 #[cfg(feature = "induced-failure")]
 fn the_reads_name_the_touched_files(
     profile: &norn_fixtures::Profile,
