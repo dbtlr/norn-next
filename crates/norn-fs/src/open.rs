@@ -294,10 +294,8 @@ pub(crate) fn open_regular_at(
         component: last.to_os_string(),
     })?;
     Ok(match FileType::from_raw_mode(stat.st_mode as _) {
-        FileType::RegularFile => {
-            crate::reads::count_document_open();
-            Reached::Regular(fd)
-        }
+        // The read that follows counts itself, once per read of the file.
+        FileType::RegularFile => Reached::Regular(fd),
         _ => Reached::Nothing(Unreached::not_regular(last)),
     })
 }

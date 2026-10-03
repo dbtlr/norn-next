@@ -28,7 +28,7 @@ use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
-use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
+use crate::evidence::{JobEvidence, count_changeset, count_document_derived, count_increment_work};
 use crate::planner::control::{SchemaPlace, SchemaSite};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
@@ -333,6 +333,13 @@ fn apply_over(
         &mint,
         ground.declared.content_model(),
     );
+    // What the job's snapshot ran is the job account's however the apply
+    // ends, as its mint is: counted once, where planning and applying are
+    // done with it, before the snapshot itself goes.
+    let counted = SnapshotCounted {
+        snapshot: &planned_on,
+        evidence,
+    };
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
@@ -362,6 +369,7 @@ fn apply_over(
         links: &planned_on,
     }
     .apply(resolved, &store);
+    drop(counted);
     drop(planned_on);
     if let crate::applier::ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) =
         outcome
@@ -383,6 +391,21 @@ fn apply_over(
             None => ApplyEnding::StoodDown,
         },
         heal,
+    }
+}
+
+/// Counts what an apply job's snapshot ran into the job account when it is
+/// dropped, so every way out of [`apply_over`] — an answer, a refusal planning
+/// met, damage — counts it once.
+struct SnapshotCounted<'s, 'a> {
+    snapshot: &'s crate::apply::PlanSnapshot<'a>,
+    evidence: &'s JobEvidence,
+}
+
+impl Drop for SnapshotCounted<'_, '_> {
+    fn drop(&mut self) {
+        self.evidence
+            .count_apply_snapshot(self.snapshot.job_snapshot_work());
     }
 }
 
@@ -3896,7 +3919,10 @@ impl<'s> Pending<'s> {
         // is recorded rather than dropped: the job that applied it is the only
         // place the tallies are ever visible, since a changeset that landed
         // leaves the same rows behind however many entries it held. A flush
-        // carrying findings alone applied no changeset and counts none.
+        // carrying findings alone applied no changeset and counts none, but
+        // its request wrote those findings and read the store, which the job
+        // did either way.
+        count_increment_work(&self.counters, request.read_steps());
         if applied {
             count_changeset(&outcome);
         }
@@ -5297,6 +5323,35 @@ mod tests {
         assert!(receiver.seen.lock().unwrap().len() > delivered);
     }
 
+    /// **A flush carrying findings alone is its job's work too.** A vault
+    /// holding nothing but a name the directory grammar quarantines derives
+    /// no row, so its attach's one flush carries the finding at the place the
+    /// name renders onto and no changeset: the account counts no changeset
+    /// applied, and counts the finding that flush's request wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_flush_carrying_findings_alone_counts_what_its_request_wrote() {
+        let f = Fixture::new("findings-only-flush");
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let ops = fixture_ops(&f);
+        let evidence = Arc::clone(&ops.evidence);
+        let (_host, _name, _lease) = ready_host(&f, ops);
+        let spent = evidence.read();
+        assert_eq!(
+            (spent.changesets_applied, spent.documents_upserted),
+            (0, 0),
+            "the quarantined name derived a row, so no flush here carries findings alone: \
+             {spent:?}"
+        );
+        assert!(
+            spent.findings_written >= 1,
+            "the attach filed the quarantined name's finding in a flush of its own, and the \
+             account counts none of it: {spent:?}"
+        );
+    }
+
     /// **A dry run of a schema edit answers what the activation then does, and
     /// derives nothing.** No document is derived again, the entry never leaves
     /// `Ready`, and its status reading stands as it was. The activating reload
@@ -5886,7 +5941,10 @@ mod tests {
     /// reporting two statements, and an apply naming no `where` target that
     /// changes no document's presence mints nothing. A delete mints one
     /// handle too: its planning's resolution change set and the applier's
-    /// check of it read the one snapshot.
+    /// check of it read the one snapshot. **What the one snapshot ran is the
+    /// job account's too**, however the apply ends: the `where` here matches
+    /// a document already holding the value it sets, which the applier
+    /// refuses, and its snapshot is counted all the same.
     #[test]
     fn an_apply_reading_the_store_mints_one_reader_for_its_job_and_accounts_it() {
         let f = Fixture::new("apply-mint-account");
@@ -5913,9 +5971,10 @@ mod tests {
         .expect("a set by path is admitted")
         .wait()
         .expect("a set by path applies");
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            0,
+            (spent.apply_mints, spent.apply_snapshots_opened),
+            (0, 0),
             "an apply naming no `where` target minted a read handle"
         );
 
@@ -5926,10 +5985,19 @@ mod tests {
             ])))
             .expect("a set by `where` is admitted")
             .wait();
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            2,
+            spent.apply_mint_statements, 2,
             "the apply's mint is missing from the job account"
+        );
+        assert_eq!(
+            (spent.apply_mints, spent.apply_snapshots_opened),
+            (1, 1),
+            "the refused apply's one snapshot is missing from the job account"
+        );
+        assert!(
+            spent.apply_statements > 0 && spent.apply_vm_steps > 0,
+            "the `where` match ran nothing the job account holds: {spent:?}"
         );
 
         let before = evidence.read();
@@ -5947,9 +6015,14 @@ mod tests {
         .expect("a delete is admitted")
         .wait()
         .expect("a delete applies");
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            2,
+            (
+                spent.apply_mints,
+                spent.apply_mint_statements,
+                spent.apply_snapshots_opened
+            ),
+            (1, 2, 1),
             "a delete's planning and check minted other than one read handle"
         );
     }

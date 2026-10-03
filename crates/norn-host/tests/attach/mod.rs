@@ -399,6 +399,12 @@ impl ServingHost {
     pub fn evidence(&self) -> EvidenceReading {
         self.account.read()
     }
+
+    /// The file each counted read of this host's jobs read while a
+    /// recording stood ([`norn_host::JobEvidence::files_read`]).
+    pub fn files_read(&self) -> Vec<norn_fs::reads::FileRead> {
+        self.account.files_read()
+    }
 }
 
 impl Deref for ServingHost {

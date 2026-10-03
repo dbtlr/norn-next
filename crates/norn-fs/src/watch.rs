@@ -20,7 +20,7 @@ use notify::event::{CreateKind, EventKind, ModifyKind, RenameMode};
 use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::exclusion::Exclusions;
-use crate::hash::hashed_from;
+use crate::hash::uncounted_echo_hashed_from;
 use crate::path::{CaseSensitivity, NormalizedPath, PathError, PathNormalizer};
 use crate::write::{AfterState, Published};
 use crate::{Identity, PostState, path_identity};
@@ -2073,7 +2073,7 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
             if metadata.len() != expected.len || metadata.modified().ok() != Some(expected.mtime) {
                 return false;
             }
-            hashed_from(&mut file)
+            uncounted_echo_hashed_from(&mut file)
                 .is_ok_and(|(hash, len)| hash == expected.content_hash && len == expected.len)
         }
     }

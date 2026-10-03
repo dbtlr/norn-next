@@ -36,6 +36,19 @@
 //! only because it re-read everything says nothing about a reader that re-read
 //! some of it.
 
+/// **The Layer 3 mass-delete cost limit**: the steps a class or a path a
+/// changeset names, which no link and no finding is held under, costs that
+/// changeset's re-decision at most, read off [`norn_store::Request::read_steps`]
+/// over the changeset's request.
+///
+/// A mass delete names a class and a path per document it removes, and most
+/// name ones no link points at; what holds such a delete's cost to its own
+/// size is that each of those keys costs a small constant. Two bars read it:
+/// the store's re-decision suite over a bare changeset, and the host's counter
+/// lane over a plan of deletes applied through the host, so the limit the
+/// store holds is the one the `delete` verb is held to.
+pub const STEPS_PER_EMPTY_KEY: u64 = 20;
+
 /// A line in the row count: what a drain of `n` rows may cost.
 ///
 /// `floor` absorbs what a drain pays once — preparing, opening the cursor, the

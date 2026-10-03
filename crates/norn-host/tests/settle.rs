@@ -301,6 +301,27 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES)
             }
+            "APPLY_DOCUMENT_READS_PER_REPLACED_TARGET" => {
+                always_authored(baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET)
+            }
+            "APPLY_TARGET_READS_PER_REPLACED_TARGET" => {
+                always_authored(baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET)
+            }
+            "APPLY_DOCUMENT_READS_PER_CREATED_TARGET" => {
+                always_authored(baselines::APPLY_DOCUMENT_READS_PER_CREATED_TARGET)
+            }
+            "APPLY_TARGET_READS_PER_CREATED_TARGET" => {
+                always_authored(baselines::APPLY_TARGET_READS_PER_CREATED_TARGET)
+            }
+            "APPLY_DOCUMENT_READS_PER_REMOVED_TARGET" => {
+                always_authored(baselines::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET)
+            }
+            "APPLY_TARGET_READS_PER_REMOVED_TARGET" => {
+                always_authored(baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET)
+            }
+            "APPLY_SHADOW_READS_PER_WRITTEN_TARGET" => {
+                always_authored(baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET)
+            }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"
