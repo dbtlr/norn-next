@@ -1249,7 +1249,7 @@
       "name": "containment-is-checked-once-for-every-operation",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every document target is contained under the canonical vault root by the write kernel, the one layer every verb's writes pass through, so a verb inherits containment rather than re-deriving it: for every kind of write, a target that is no name below the root, or that is reached through a folder that is a symbolic link at staging or at publication, is refused, and a verb aimed that way writes nothing outside the root. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
+      "property": "Every document target is contained under the canonical vault root, and a verb inherits that containment rather than re-deriving it: every verb plans through the one planner, whose view of the vault does not follow a symbolic link, and applies through the one write kernel, which for every kind of write refuses, at staging and again at publication, a target that is no name below the root or that is reached through a folder that is a symbolic link; so a verb aimed that way is refused and writes nothing outside the root. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "bound",
@@ -1257,7 +1257,9 @@
           "crates/norn-fs/tests/kernel/anchoring.rs::a_linked_folder_refuses_staging_for_every_kind",
           "crates/norn-fs/tests/kernel/anchoring.rs::a_folder_swapped_for_a_link_refuses_publication_for_every_kind",
           "crates/norn-fs/tests/kernel/anchoring.rs::a_path_that_leaves_the_root_is_refused",
+          "crates/norn-host/src/planner/view.rs::the_tree_view_tells_a_folder_an_absence_and_a_blocked_name_apart",
           "crates/norn-host/tests/verbs.rs::a_verb_aimed_through_a_folder_linked_out_of_the_vault_is_refused_and_writes_nothing_outside",
+          "crates/norn-host/tests/verbs.rs::a_creation_by_rule_filling_into_a_folder_linked_out_of_the_vault_is_refused",
           "crates/norn-host/tests/applies.rs::a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses",
           "crates/norn-host/tests/migrate.rs::a_schema_source_outside_the_vault_is_rewritten_where_it_lives",
           "crates/norn-host/src/applier/place.rs::the_schema_lands_where_the_registration_reads_it",
