@@ -134,3 +134,4 @@ pub mod scale;
 pub mod scratch;
 pub mod wait;
 pub mod work;
+mod workflows;

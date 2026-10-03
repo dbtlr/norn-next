@@ -32,6 +32,10 @@ norn-store = { path = "../norn-store" }
 norn-wire = { path = "../norn-wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The workflow reader parses `.github/workflows` as the YAML it is, so a
+# comment, a continued scalar or a key other than `run` is never read as part
+# of the command a step runs.
+serde_yaml = { workspace = true }
 # The architecture gate reads the workspace root manifest: `[patch.crates-io]`
 # is what makes a directory under `vendor/` a patched published release rather
 # than a local crate hiding in an exempt directory.

@@ -47,11 +47,11 @@
 //! is the contract the carrier is authored against.
 //!
 //! What is left waits on nothing any subject names — a shell step, a
-//! `compile_fail` doctest, a reader behind a feature, a vocabulary nobody has
-//! written, a guard with no home decided. Those reasons expire only when a
+//! `compile_fail` doctest, a vocabulary nobody has written, a guard with no
+//! home decided, a surface nothing wires. Those reasons expire only when a
 //! person re-derives them, so the class is pinned by name in
-//! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is that
-//! the class is a reviewed list rather than a silent majority.
+//! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is
+//! that the class is a reviewed list rather than a silent majority.
 //!
 //! # What this suite is not
 //!
@@ -60,7 +60,8 @@
 //! assigned to a layer. What the audit does hold is the record: names unique,
 //! properties present and distinct, citations shaped like citations, the
 //! mandatory set exactly the one the harness pins, and every bound case naming
-//! a test cargo really compiled into the suite.
+//! a test cargo really compiled into the suite — with no feature, or with the
+//! carrier feature on where a CI step builds the suite that way.
 //!
 //! # The digest is the ratchet
 //!
@@ -138,7 +139,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is six classes rather than a bag:
+/// residue no subject reaches, and it is five classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -147,9 +148,6 @@ const BOUND_CASES: &[&str] = &[
 ///   reference names. The clauses beside it are carried by a module of an
 ///   integration target, which the grammar cites, so binding the case on those
 ///   alone would name carriers for a clause none of them asserts.
-/// - **A reader behind a feature.** The declaration is there; what is absent is
-///   the `induced-failure` selection cargo would compile it under, which is a
-///   fact about a build rather than about a file's text.
 /// - **An absent vault-rule vocabulary.** No file is settled to declare a rule
 ///   set, so no name can be pre-committed as the carrier's.
 /// - **A guard with no settled home.** The scan or lint the case waits on has
@@ -157,6 +155,10 @@ const BOUND_CASES: &[&str] = &[
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
+///
+/// A reader behind the `induced-failure` feature is not a residue: the audit
+/// lists the feature build where a cited test is missing without it, and holds
+/// such a carrier to a CI step running its package with the feature on.
 ///
 /// The grounds beside such a reason hold the subjects it cites as present, so
 /// the audit still catches those moving; the claim that something is missing is
@@ -206,12 +208,13 @@ fn registry() -> Registry {
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
 /// runs rather than about the text of a file: one `--list` pair per cited
-/// target.
+/// target, and a second pair with the carrier feature on for a target a cited
+/// test is missing from without it.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();
     let root = workspace_root();
-    let tests = TestIndex::from_cargo(&root, registry.cited_targets());
+    let tests = registry.test_index(&root);
     let problems = registry.audit(&root, &tests);
     assert!(
         problems.is_empty(),
