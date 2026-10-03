@@ -1202,6 +1202,7 @@
           "crates/norn-host/src/applier/tests.rs::re_sending_conditioned_operations_is_refused_rather_than_repeated",
           "crates/norn-host/tests/verbs.rs::a_set_where_writes_exactly_the_matched_documents_in_one_changeset",
           "crates/norn-host/tests/verbs.rs::a_set_where_naming_an_unknown_key_is_unresolved_naming_it",
+          "crates/norn-host/tests/verbs.rs::a_set_where_with_a_typed_bound_matches_what_a_find_answers",
           "crates/norn-host/src/planner/resolve.rs::an_expected_value_holds_only_for_exactly_that_value",
           "crates/norn-host/src/planner/resolve.rs::a_nested_expected_value_is_judged_by_equality",
           "crates/norn-host/tests/verbs.rs::a_set_guarded_by_an_absent_field_writes_only_where_it_is_absent"
@@ -1235,7 +1236,7 @@
       "name": "containment-is-checked-once-for-every-operation",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every document target is contained under the canonical vault root by the write kernel, once per operation, in the one layer every verb applies through, so a verb inherits containment rather than re-deriving it. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
+      "property": "Every document target is contained under the canonical vault root by the write kernel, the one layer every verb's writes pass through, so a verb inherits containment rather than re-deriving it: for every kind of write, a target that is no name below the root, or that is reached through a folder that is a symbolic link at staging or at publication, is refused, and a verb aimed that way writes nothing outside the root. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "bound",
@@ -1738,6 +1739,7 @@
         "status": "bound",
         "tests": [
           "crates/norn-host/src/planner/rule.rs::a_filled_path_the_document_grammar_refuses_is_unresolved_naming_it",
+          "crates/norn-wire/tests/round_trip.rs::a_document_path_refuses_what_no_vault_holds_a_document_at",
           "crates/norn-host/src/planner/rule.rs::a_filled_path_beneath_a_control_file_is_unresolved_by_the_control_file_gate",
           "crates/norn-host/src/planner/rule.rs::a_creation_by_rule_expands_into_the_document_its_rule_makes",
           "crates/norn-host/tests/verbs.rs::a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it",

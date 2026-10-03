@@ -1514,6 +1514,85 @@ fn a_where_matching_past_one_page_expands_to_every_matched_document() {
     }
 }
 
+/// A schema declaring the two keys the typed-bound case compares as a number
+/// and as a date.
+const TYPED_SCHEMA: &str =
+    "version: 1\nfields:\n  gate_weight:\n    type: number\n  gate_when:\n    type: date\n";
+
+/// **A `where` bound is judged by the query layer's comparison rule, under
+/// the key's declared type.** `gate_weight` is declared a number and
+/// `gate_when` a date, and each set of values is chosen so that comparing
+/// raw text answers another set than the declared type does: `10` and `100`
+/// sort before `9` as text and `9.0` after it, and a time at `+01:00` reads
+/// later than `09:00Z` as text while standing earlier. A set whose `where`
+/// is `after` each bound writes exactly what a find with the same part
+/// answers, previewed and applied alike, and that is the typed answer.
+#[test]
+fn a_set_where_with_a_typed_bound_matches_what_a_find_answers() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-set-where-typed",
+        &[
+            ("typed/n-neg.md", "---\ngate_weight: -1\n---\n"),
+            ("typed/n10.md", "---\ngate_weight: 10\n---\n"),
+            ("typed/n100.md", "---\ngate_weight: 100\n---\n"),
+            ("typed/n9.md", "---\ngate_weight: 9\n---\n"),
+            ("typed/n9-0.md", "---\ngate_weight: 9.0\n---\n"),
+            ("typed/n9-5.md", "---\ngate_weight: 9.5\n---\n"),
+            (
+                "typed/d-early.md",
+                "---\ngate_when: 2026-03-04T09:30:00+01:00\n---\n",
+            ),
+            (
+                "typed/d-late.md",
+                "---\ngate_when: 2026-03-04T08:30:00-01:00\n---\n",
+            ),
+            (
+                "typed/d-next.md",
+                "---\ngate_when: 2026-03-05T00:00:00+00:00\n---\n",
+            ),
+        ],
+    );
+    std::fs::write(vault.path().join(".norn/schema.yaml"), TYPED_SCHEMA).expect("write the schema");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let marking = |bound: &Predicate, mode| {
+        SetParams::new(
+            address(&vault),
+            mode,
+            WriteTarget::matching([bound.clone()]),
+            vec![FieldChange::set("marked", AuthoredValue::string("yes"))],
+        )
+    };
+
+    let bounds: [(Predicate, &[&str]); 2] = [
+        (
+            Predicate::after("gate_weight", "9"),
+            &["typed/n10.md", "typed/n100.md", "typed/n9-5.md"],
+        ),
+        (
+            Predicate::after("gate_when", "2026-03-04T09:00:00Z"),
+            &["typed/d-late.md", "typed/d-next.md"],
+        ),
+    ];
+    for (bound, typed) in bounds {
+        let answered = found(&host, &vault, vec![bound.clone()]);
+        assert_eq!(
+            answered, typed,
+            "a find under {bound:?} is not the typed answer"
+        );
+
+        let plan = previewed(host.set(marking(&bound, ApplyMode::Preview)));
+        let matched: Vec<&str> = plan.transitions.iter().map(|t| t.path.as_str()).collect();
+        assert_eq!(
+            matched, answered,
+            "the set's `where` {bound:?} matched another set than the find"
+        );
+        let (_, changeset, targets) = applied(host.set(marking(&bound, ApplyMode::Apply)));
+        assert_eq!(changeset, ChangesetOutcome::Committed);
+        assert_eq!(targets, wrote(typed), "{bound:?}");
+    }
+}
+
 /// **A move previews its link cascade, then applies the plan it previewed.**
 /// The linker names the moved document by its bare stem and by a relative
 /// path; the preview writes nothing and carries both rewrites on the move,
