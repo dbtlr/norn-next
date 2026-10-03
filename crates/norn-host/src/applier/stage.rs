@@ -722,7 +722,7 @@ fn stage_one(
     // A target outside the vault is held to its folder as it stands now:
     // the kernel records that identity and publication checks it again.
     let Some(root) = landing.root(ground).map_err(Stop::Failed)? else {
-        return Err(drifted_away(path, &transition));
+        return Err(drifted_away(path, &landing, &transition));
     };
     match norn_fs::stage(landing.anchor, root, landing.relative, transition, shadows) {
         Ok(Staging::Staged(staged)) => Ok(Held::Staged(staged)),
@@ -742,11 +742,16 @@ fn stage_one(
 /// The stop for a target outside the vault whose folder is gone before it
 /// was staged: a create's name is not there to take, and anything else no
 /// longer holds what the plan was checked against.
-fn drifted_away(path: &DocumentPath, transition: &norn_fs::Transition<'_>) -> Stop {
+fn drifted_away(
+    path: &DocumentPath,
+    landing: &Landing<'_>,
+    transition: &norn_fs::Transition<'_>,
+) -> Stop {
     match transition {
-        norn_fs::Transition::Create { .. } => {
-            Stop::Failed(format!("the folder `{path}` would be created in is gone"))
-        }
+        norn_fs::Transition::Create { .. } => Stop::Failed(format!(
+            "the folder `{}` the vault schema would be created in is gone",
+            landing.anchor.display()
+        )),
         _ => Stop::Refused(vec![RefusedCheck::drifted(
             path.clone(),
             FileState::absent(),
