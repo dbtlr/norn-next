@@ -396,9 +396,6 @@ fn quoted_between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str>
 /// else reads the pair, so a feature dropped from a step is silent — the suite
 /// compiles away, `lane-suite.sh`'s zero-pass guard catches it at whatever hour
 /// that lane runs, and per-PR nothing notices. This is what notices.
-///
-/// Every lane step is held to this, conditional or not: a step that may run is
-/// a step that has to build what it runs.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own test sources.
 pub fn assert_lane_steps_name_the_features_their_targets_need(
     manifest_dir: &Path,
@@ -487,11 +484,6 @@ fn packages_outside_the_rows(adopting: &BTreeSet<String>) -> Vec<String> {
 /// a step naming a package the rows do not know adopts a whole suite that no
 /// guard reads at all, which is the first two hazards with nothing standing
 /// where they would be caught.
-///
-/// A lane step counts here whether or not it is conditional. A step that may
-/// run adopts the ignored cases it would run, which is the first hazard; that
-/// it may also not run is a question for whoever relies on it running, and the
-/// regression audit is the reader that asks it.
 pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&str, &str)]) {
     let steps = ci_steps_in(&workflows_directory(manifest_dir))
         .unwrap_or_else(|problem| panic!("{problem}"));

@@ -14,10 +14,11 @@
 //! a command spelled in a step's `name` or in another key is no command at all.
 //!
 //! **A step vouches for what it runs only when nothing decides it may not
-//! run.** A step or job carrying `if:` or `continue-on-error:`, whatever the
-//! value, may be skipped or may fail without failing the run, so it vouches for
-//! nothing. That is the strict side: an `if: ${{ !cancelled() }}` that would
-//! have run is refused with an `if: false` that would not.
+//! run.** A step or job carrying `continue-on-error:`, whatever the value, may
+//! fail without failing the run, and one carrying an `if:` may be skipped —
+//! unless the condition is `always()` or `!cancelled()`, which only widen when
+//! a step runs. Any other condition vouches for nothing, which is the strict
+//! side: a condition that would have held is refused with one that would not.
 //!
 //! **A command is read whole or not at all.** It is one line, holding no shell
 //! metacharacter anywhere — no pipe, list operator, redirection, comment,
@@ -62,7 +63,8 @@ pub(crate) struct Step {
     pub(crate) run: Option<String>,
     /// The workflow's, the job's and the step's `env`, the nearer winning.
     pub(crate) env: BTreeMap<String, String>,
-    /// Whether the step or its job carries `if:` or `continue-on-error:`.
+    /// Whether the step or its job carries `continue-on-error:`, or an `if:`
+    /// that may skip it.
     pub(crate) conditional: bool,
 }
 
@@ -74,9 +76,6 @@ pub(crate) struct LaneStep {
     pub(crate) target: String,
     /// The features the step names through [`LANE_FEATURES`].
     pub(crate) features: BTreeSet<String>,
-    /// Whether the step runs whenever its workflow does: no `if:` and no
-    /// `continue-on-error:` on it or its job.
-    pub(crate) vouches: bool,
 }
 
 /// One `cargo test` invocation's reach over one package with one feature on.
@@ -92,7 +91,8 @@ pub(crate) struct FeaturedRun {
 /// What the workflows run.
 #[derive(Debug, Default)]
 pub(crate) struct CiSteps {
-    /// Every lane step, whether or not it vouches.
+    /// The vouching lane steps: a lane step that may be skipped, or whose
+    /// failure is tolerated, adopts nothing.
     pub(crate) lanes: Vec<LaneStep>,
     /// What the vouching `cargo test` steps run with a feature on.
     pub(crate) featured: BTreeSet<FeaturedRun>,
@@ -111,13 +111,13 @@ impl CiSteps {
         })
     }
 
-    /// The features the vouching lane steps adopting `package`'s `target`
-    /// name between them, or `None` where no vouching lane step adopts it.
+    /// The features the lane steps adopting `package`'s `target` name between
+    /// them, or `None` where no lane step adopts it.
     pub(crate) fn adopted(&self, package: &str, target: &str) -> Option<BTreeSet<String>> {
         let mut adopting = self
             .lanes
             .iter()
-            .filter(|lane| lane.vouches && lane.package == package && lane.target == target)
+            .filter(|lane| lane.package == package && lane.target == target)
             .peekable();
         adopting.peek()?;
         Some(
@@ -165,14 +165,16 @@ pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
                 continue;
             };
             match invocation(run) {
+                // A step that may be skipped or may fail unnoticed vouches
+                // for nothing it runs.
+                _ if step.conditional => {}
                 Some(Invocation::Lane { package, target }) => read.lanes.push(LaneStep {
                     package,
                     target,
                     features: features_named(step.env.get(LANE_FEATURES)),
-                    vouches: !step.conditional,
                 }),
-                Some(Invocation::Test(runs)) if !step.conditional => read.featured.extend(runs),
-                Some(Invocation::Test(_)) | None => {}
+                Some(Invocation::Test(runs)) => read.featured.extend(runs),
+                None => {}
             }
         }
     }
@@ -233,9 +235,30 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
 }
 
 /// Whether a job or step carries a key that lets it be skipped or fail
-/// without failing the run.
+/// without failing the run: any `continue-on-error:`, and any `if:` other
+/// than one of [`WIDENING_CONDITIONS`].
 fn is_conditional(node: &Value) -> bool {
-    node.get("if").is_some() || node.get("continue-on-error").is_some()
+    let narrows = node.get("if").is_some_and(|condition| {
+        !condition
+            .as_str()
+            .is_some_and(|condition| WIDENING_CONDITIONS.contains(&unwrapped(condition)))
+    });
+    narrows || node.get("continue-on-error").is_some()
+}
+
+/// The `if:` conditions that only widen when a step runs: each runs it in
+/// every case the default `success()` does, and in more. Any other condition
+/// may skip a step the run needed, so it fails closed.
+const WIDENING_CONDITIONS: &[&str] = &["always()", "!cancelled()"];
+
+/// A condition with its optional `${{ }}` wrapper and surrounding whitespace
+/// taken off.
+fn unwrapped(condition: &str) -> &str {
+    let condition = condition.trim();
+    condition
+        .strip_prefix("${{")
+        .and_then(|inner| inner.strip_suffix("}}"))
+        .map_or(condition, str::trim)
 }
 
 /// The scalar entries of an `env` mapping, each as the string the runner
@@ -625,31 +648,72 @@ mod tests {
         );
     }
 
-    /// **`if:` and `continue-on-error:` make a step conditional whatever their
-    /// value, on the step or on its job.**
+    /// Whether a step guarded by `if: <condition>` reads as conditional, with
+    /// the condition on the step and then on its job.
+    fn conditional_under(condition: &str) -> (bool, bool) {
+        let on_step = format!("jobs:\n  j:\n    steps:\n      - if: {condition}\n        run: x\n");
+        let on_job = format!("jobs:\n  j:\n    if: {condition}\n    steps:\n      - run: x\n");
+        (
+            steps(&on_step)[0].conditional,
+            steps(&on_job)[0].conditional,
+        )
+    }
+
+    /// **A condition that only widens when a step runs leaves it vouching**,
+    /// on the step or its job, bare or inside `${{ }}`.
     #[test]
-    fn a_condition_on_a_step_or_its_job_makes_it_conditional() {
-        let workflow = [
+    fn a_condition_that_only_widens_when_a_step_runs_leaves_it_unconditional() {
+        for condition in [
+            "always()",
+            "${{ always() }}",
+            // YAML reads a bare leading `!` as a tag, so the bare spelling is
+            // quoted, as a workflow has to quote it.
+            "'!cancelled()'",
+            "${{ !cancelled() }}",
+            "${{!cancelled()}}",
+            "\"  ${{   always()   }}  \"",
+        ] {
+            assert_eq!(
+                conditional_under(condition),
+                (false, false),
+                "`if: {condition}` was read as narrowing when the step runs"
+            );
+        }
+    }
+
+    /// **Every other condition fails closed**, on the step or its job, and
+    /// `continue-on-error:` does whatever its value.
+    #[test]
+    fn any_other_condition_makes_a_step_conditional() {
+        for condition in [
+            "success()",
+            "${{ success() }}",
+            "false",
+            "github.event_name == 'push'",
+            "${{ !cancelled() && false }}",
+            "'!cancelled() && false'",
+            "true",
+        ] {
+            assert_eq!(
+                conditional_under(condition),
+                (true, true),
+                "`if: {condition}` was read as never narrowing when the step runs"
+            );
+        }
+        let tolerant = [
             "jobs:",
             "  plain:",
             "    steps:",
-            "      - run: echo runs",
-            "      - if: ${{ !cancelled() }}",
-            "        run: echo maybe",
             "      - continue-on-error: false",
             "        run: echo tolerated",
-            "  guarded:",
-            "    if: github.ref == 'refs/heads/main'",
-            "    steps:",
-            "      - run: echo maybe",
             "  tolerant:",
             "    continue-on-error: true",
             "    steps:",
             "      - run: echo tolerated",
         ]
         .join("\n");
-        let conditional: Vec<bool> = steps(&workflow).iter().map(|s| s.conditional).collect();
-        assert_eq!(conditional, vec![false, true, true, true, true]);
+        let conditional: Vec<bool> = steps(&tolerant).iter().map(|s| s.conditional).collect();
+        assert_eq!(conditional, vec![true, true]);
     }
 
     /// **A workflow that is not one is an error**, never an empty answer.
