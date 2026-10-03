@@ -306,7 +306,7 @@ fn shared_schema(name: &VaultName, conflict: &AliasConflict) -> ErrorEnvelope {
         .join(", ");
     ErrorEnvelope::new(
         format!(
-            "{incumbents} already uses this schema file, so `{name}` is not registered over it: \
+            "{incumbents} already uses this schema file, so the change to `{name}` is refused: \
              a schema write for one vault would rewrite the other's"
         ),
         ErrorDetail::shared_schema(conflict.aliases().clone()),

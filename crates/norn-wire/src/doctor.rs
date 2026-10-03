@@ -151,8 +151,8 @@ impl std::error::Error for NoProblems {}
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RegistrySanity {
-    /// Every registration names a root of its own, and every root is there and
-    /// readable.
+    /// Every registration names a root of its own and a schema file of its own,
+    /// and every root is there and readable.
     Sound {},
     /// These are what is wrong.
     #[non_exhaustive]
@@ -225,7 +225,7 @@ impl JsonSchema for RegistrySanity {
             "oneOf": [
                 {
                     "type": "object",
-                    "description": "Every registration names a root of its own, and every root is there and\nreadable.",
+                    "description": "Every registration names a root of its own and a schema file of its own,\nand every root is there and readable.",
                     "properties": {
                         "state": {
                             "type": "string",

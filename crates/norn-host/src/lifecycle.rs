@@ -4405,8 +4405,9 @@ impl<O: EntryOps> Host<O> {
     /// Everything runs under the registration lock, and in this order: a name
     /// the set serves is refused; the root is admitted at its canonical
     /// spelling, or refused where it is no readable directory; a root a served
-    /// vault already reaches is refused naming every such vault; the file is
-    /// written, or refused where it already records the name; and only then
+    /// vault already reaches is refused naming every such vault; a schema file
+    /// another registration uses is refused naming every such registration;
+    /// the file is written, or refused where it already records the name; and only then
     /// does the set change. So every refusal leaves both as they stood, and
     /// two registrations of one root cannot both find it unserved. The read of
     /// the served roots is best-effort — the classification the join runs is
@@ -4517,7 +4518,11 @@ impl<O: EntryOps> Host<O> {
     /// directory it reaches now. An edit that leaves every field as it stands,
     /// on an entry the admission finds idle and unparked in the same hold,
     /// answers the registration as it stands, and writes and withdraws
-    /// nothing.
+    /// nothing. An edit that moves the schema file the registration is served
+    /// under, by its source or by a root with no source, is refused where
+    /// another registration already uses the file at the new place; an edit
+    /// that leaves the file where it was is not refused for a sharing already
+    /// standing.
     ///
     /// **Then the change takes the path an unregistration takes.** The entry
     /// is withdrawn from service under its own gate, in the hold that finds
@@ -4570,10 +4575,11 @@ impl<O: EntryOps> Host<O> {
             }
         }
         amended.schema_source = edit.schema_source.applied_to(amended.schema_source.take());
-        // The schema file moves with the root or the source, and only a move
-        // is weighed: a sharing that already stands is the doctor's to name,
-        // and no edit of another field is refused for it.
-        if amended.root != current.root || amended.schema_source != current.schema_source {
+        // Only a move of the effective schema file is weighed: a sharing that
+        // already stands is the doctor's to name, and no edit that leaves the
+        // file where it was, a root move under a source included, is refused
+        // for it.
+        if crate::registry::schema_file_moves(current, &amended) {
             crate::registry::unshared_schema(&shared.entries.registrations(), &amended)?;
         }
         amended.poll_backend = edit.poll_backend.applied_to(amended.poll_backend);

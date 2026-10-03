@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use norn_config::IN_VAULT_SCHEMA_PATH;
 use norn_config::registry::{Entry, Registry, VaultRoot};
-use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_directory};
+use norn_fs::{
+    Identity, Refusal, canonical_spelling, canonical_spelling_through_links, path_identity,
+    readable_directory,
+};
 use norn_wire::{
     DoctorRegistryParams, DoctorRegistryReport, EngineHealth, ErrorEnvelope, ListParams,
     ListReport, MaintainerIdentity, NameSet, RegisterParams, RegisterReport, RegistryProblem,
@@ -339,8 +342,9 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
-/// Whether the registry is in order over the served `roots`, given ascending
-/// by name: every root there, readable, and reached by one registration.
+/// Whether the registry is in order over the served `entries`, given ascending
+/// by name: every root there, readable, and reached by one registration, and
+/// every schema file used by one registration.
 ///
 /// **Identity is the classification a recheck runs.** The roots are grouped by
 /// the identity each resolves to through [`roots_by_identity`], and a group
@@ -352,8 +356,12 @@ impl<O: EntryOps> Host<O> {
 /// directory, and it lists — and a root that is not is unreadable too, so a
 /// registration whose root became a file or lost its permissions is named.
 ///
-/// The problems come in name order. The cost is one stat of every root and,
-/// for each that resolves, one stat and one listing more.
+/// **A schema file two or more registrations use is one
+/// [`RegistryProblem::SharedSchema`]** naming them all, unless they share a
+/// root, which the duplicate root names once. The problems come in name order
+/// for the roots, then the shared schema files in the order their identities
+/// sort. The cost is one stat of every root and, for each that resolves, one
+/// stat and one listing more, and one stat and resolution of every schema file.
 pub(crate) fn sanity<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> RegistrySanity {
     let entries: Vec<&Entry> = entries.into_iter().collect();
     let roots: Vec<(&VaultName, &Path)> = entries
@@ -438,8 +446,16 @@ fn schema_file(entry: &Entry) -> SchemaFile {
     );
     match path_identity(&path) {
         Ok(Some(identity)) => SchemaFile::Present(identity),
-        _ => SchemaFile::Absent(canonical_spelling(&path)),
+        _ => SchemaFile::Absent(canonical_spelling_through_links(&path)),
     }
+}
+
+/// Whether amending `current` to `amended` changes the schema file the
+/// registration is served under: its source, or, with no source, the default
+/// beneath a root that moved.
+pub(crate) fn schema_file_moves(current: &Entry, amended: &Entry) -> bool {
+    amended.schema_source != current.schema_source
+        || (amended.schema_source.is_none() && amended.root != current.root)
 }
 
 /// Every name among `entries` that uses each schema file, one stat per
@@ -461,9 +477,10 @@ fn schema_groups<'a>(
 /// one a registration among `served` other than itself already uses, naming
 /// every such registration beside it.
 ///
-/// A schema write for a vault rewrites the file wherever it lives, so a file
-/// two registrations use is a file one vault's write rewrites under the
-/// other. The comparison is the file's identity, never its spelling.
+/// A schema write for a vault's in-vault default rewrites the file any
+/// registration sourcing it reads, and `vault migrate` (NORN-224) rewrites the
+/// active schema wherever it lives, so a file two registrations use is a file
+/// one vault's write rewrites under the other. The comparison is the file's identity, never its spelling.
 pub(crate) fn unshared_schema(
     served: &[Entry],
     candidate: &Entry,
@@ -1199,6 +1216,81 @@ mod tests {
             )])
             .unwrap()
         );
+    }
+
+    /// **A hard link is the one spelling no path resolution unifies**, so only
+    /// the file's identity names it one file with its original.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_a_schema_file_is_the_same_schema_file() {
+        let tree = Tree::new("sanity-hard-link-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        std::fs::create_dir_all(alpha.join(".norn")).unwrap();
+        let schema = alpha.join(".norn/schema.yaml");
+        std::fs::write(&schema, b"").unwrap();
+        let hard = tree.path("hard.yaml");
+        std::fs::hard_link(&schema, &hard).unwrap();
+        let registrations = [served("alpha", &alpha), sourced("beta", &beta, &hard)];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap()
+        );
+    }
+
+    /// **An absent file named through a link to an existing ancestor is the
+    /// file its resolved spelling names.**
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_schema_file_reached_through_a_linked_ancestor_is_shared() {
+        let tree = Tree::new("sanity-absent-linked-ancestor");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        let through = tree.link("alink", &alpha).join(".norn/schema.yaml");
+        assert!(
+            unshared_schema(
+                &[served("alpha", &alpha)],
+                &sourced("beta", &beta, &through)
+            )
+            .is_err()
+        );
+    }
+
+    /// **A source spelled through a link that dangles now is refused once its
+    /// target is where another registration's schema will be**, so an init
+    /// that creates the file afterwards cannot make two vaults share it.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_through_a_dangling_link_is_the_file_the_link_will_reach() {
+        let tree = Tree::new("sanity-dangling-link-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        let link = tree.link("link", &alpha.join(".norn"));
+        let candidate = sourced("beta", &beta, &link.join("schema.yaml"));
+        assert!(unshared_schema(&[served("alpha", &alpha)], &candidate).is_err());
+    }
+
+    /// Only a change of the file a registration is served under is a move of
+    /// its schema file: a root that moves under a source leaves the file where
+    /// it was.
+    #[test]
+    fn a_root_move_under_a_schema_source_does_not_move_the_schema_file() {
+        let source = SchemaSource::new("/schemas/one.yaml").unwrap();
+        let other = SchemaSource::new("/schemas/two.yaml").unwrap();
+        let plain = |root: &str| served("alpha", Path::new(root));
+        let sourced_at =
+            |root: &str, source: &SchemaSource| plain(root).with_schema_source(source.clone());
+        assert!(!schema_file_moves(
+            &sourced_at("/a", &source),
+            &sourced_at("/b", &source)
+        ));
+        assert!(schema_file_moves(
+            &sourced_at("/a", &source),
+            &sourced_at("/a", &other)
+        ));
+        assert!(schema_file_moves(&plain("/a"), &plain("/b")));
+        assert!(schema_file_moves(&plain("/a"), &sourced_at("/a", &source)));
+        assert!(!schema_file_moves(&plain("/a"), &plain("/a")));
     }
 
     /// A conflict is between at least two registrations, and the floor is the

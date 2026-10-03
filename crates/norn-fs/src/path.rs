@@ -465,6 +465,50 @@ pub fn canonical_spelling(path: &Path) -> PathBuf {
     spelling
 }
 
+/// The most links a spelling is followed through before it is kept as is.
+const MAX_LINK_HOPS: usize = 40;
+
+/// `path` at its [`canonical_spelling`], with every link that dangles now
+/// followed to where it will point once its target exists.
+///
+/// [`canonical_spelling`] keeps a dangling link as spelled, but a file created
+/// beneath its target is reached through the link, so two spellings of one
+/// absent file must agree on it. A relative link text is taken from the
+/// directory holding the link. A chain longer than [`MAX_LINK_HOPS`], or a
+/// loop, is kept as spelled, the same as the filesystem would refuse it.
+#[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
+pub fn canonical_spelling_through_links(path: &Path) -> PathBuf {
+    let mut spelling = canonical_spelling(path);
+    for _ in 0..MAX_LINK_HOPS {
+        let Some((link, rest)) = first_dangling_link(&spelling) else {
+            return spelling;
+        };
+        let Ok(text) = fs::read_link(&link) else {
+            return spelling;
+        };
+        let target = link.parent().unwrap_or(Path::new("/")).join(text);
+        spelling = canonical_spelling(&target.join(rest));
+    }
+    spelling
+}
+
+/// The first component of `spelling` that is a link, with the components
+/// beneath it. A canonical spelling holds no link that resolves, so one found
+/// is one that dangles.
+#[allow(clippy::disallowed_methods)] // norn-fs owns path resolution.
+fn first_dangling_link(spelling: &Path) -> Option<(PathBuf, PathBuf)> {
+    let components: Vec<_> = spelling.components().collect();
+    let mut prefix = PathBuf::new();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component);
+        if fs::symlink_metadata(&prefix).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            let rest = components[index + 1..].iter().collect();
+            return Some((prefix, rest));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     identity_of(left) == identity_of(right)
