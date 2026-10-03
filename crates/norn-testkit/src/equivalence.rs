@@ -713,7 +713,7 @@ impl ProjectedFinding {
 /// Read it with [`DerivedRows::read`]. It carries what [`StoreProjection`]
 /// carries and drops what it drops — row identifiers, write generations and
 /// timestamps, none of which is a function of the vault — plus each document
-/// row's stored suffix keys, raw and folded. Tombstones stay out for the
+/// row's stored suffix keys, raw and folded, and its admitting count. Tombstones stay out for the
 /// projection's reason: a death is one store's history, and a store derived
 /// from zero records none.
 ///
@@ -743,6 +743,10 @@ impl DerivedRows {
             let at = format!("document[{}]", stored.path.as_str());
             suffix_keys.push((format!("{at}.suffix_key"), quoted(&stored.raw)));
             suffix_keys.push((format!("{at}.folded_suffix_key"), quoted(&stored.folded)));
+            suffix_keys.push((
+                format!("{at}.admitting_segments"),
+                stored.admitting_segments.to_string(),
+            ));
         })?;
         for (field, value) in suffix_keys {
             let collided = fields.insert(field, value);

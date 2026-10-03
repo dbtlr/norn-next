@@ -1045,8 +1045,9 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of stored suffix keys, raw and folded, each beside
-    /// the path whose row holds them, in path order.
+    /// The next bounded page of stored suffix keys, raw and folded, and the
+    /// admitting count stored with them, each beside the path whose row holds
+    /// them, in path order.
     ///
     /// `documents.suffix_key` and `documents.folded_suffix_key` are derived
     /// columns: the path type writes them and the resolution ladder ranges over
@@ -1058,7 +1059,10 @@ impl<'a> Request<'a> {
     /// a document page for the sake of one verifier.
     ///
     /// The pair is what makes a row checkable: the stored key on one side, the
-    /// path that has to produce it on the other. `after` is exclusive, and the
+    /// path that has to produce it on the other. The admitting count is read
+    /// beside them because it is the other column a class is read through
+    /// (`documents.admitting_segments`), so a digest of the derived rows
+    /// carries it. `after` is exclusive, and the
     /// order is `path`'s own bytewise order, which is total over a column one
     /// row per path is stored under.
     pub fn suffix_keys_after(
@@ -2412,7 +2416,7 @@ const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, ge
 /// column is read off the row the seek reached rather than off an index of its
 /// own, because `documents_suffix_key` orders by the key and this page orders
 /// by the path.
-const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key, folded_suffix_key, admitting_segments
              FROM documents
              WHERE path > COALESCE(?1, '')
              ORDER BY path
@@ -2609,12 +2613,19 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     }))
 }
 
-/// One row's path and the two suffix keys stored beside it.
+/// One row's path and the two suffix keys and the admitting count stored
+/// beside it.
 fn stored_suffix_key(row: &Row<'_>) -> Reading<StoredSuffixKeys> {
     let path: String = row.get(0)?;
     let raw: String = row.get(1)?;
     let folded: String = row.get(2)?;
-    Ok(DocumentPath::new(&path).map(|path| StoredSuffixKeys { path, raw, folded }))
+    let admitting_segments: usize = row.get(3)?;
+    Ok(DocumentPath::new(&path).map(|path| StoredSuffixKeys {
+        path,
+        raw,
+        folded,
+        admitting_segments,
+    }))
 }
 
 fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {

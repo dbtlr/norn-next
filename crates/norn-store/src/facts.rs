@@ -399,8 +399,9 @@ pub struct StoredDocument {
     pub derived_at: i64,
 }
 
-/// The suffix keys one document row holds, beside the path that has to
-/// produce them: what [`crate::Request::suffix_keys_after`] pages.
+/// The suffix keys one document row holds, and the admitting count that keeps
+/// it in their classes, beside the path that has to produce them: what
+/// [`crate::Request::suffix_keys_after`] pages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredSuffixKeys {
     pub path: DocumentPath,
@@ -409,6 +410,10 @@ pub struct StoredSuffixKeys {
     /// `documents.folded_suffix_key`, which
     /// [`DocumentPath::folded_suffix_key`] recomputes.
     pub folded: String,
+    /// `documents.admitting_segments`, which
+    /// [`crate::AmbiguityIgnore::admitting_segments`] recomputes under the
+    /// declaration the row was derived under.
+    pub admitting_segments: usize,
 }
 
 /// The case behaviour a vault root was **proven** to have at the filesystem

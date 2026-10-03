@@ -12,8 +12,8 @@
 //! So the corpus below is attached by a real host, which derives it from zero
 //! through the heal every attach runs — the main vault, and a second one for
 //! the tag stance the main vault does not take, since a stance is a vault's own
-//! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints and their raw and
-//! folded suffix keys, the links and the keys the link index holds them
+//! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints, their raw and
+//! folded suffix keys and their admitting counts, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
 //! with their typed halves and the offset spelling beside a typed date, every finding with its candidates, classes and path keys, the
 //! terms the full-text index holds, and the pinned vault schema. Row
@@ -62,8 +62,8 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(7),
-    "0762d2b6487ed13020916d8a1d6b79b3a38642360a434e6968b40c67da53746d",
+    DerivationVersion::new(8),
+    "37782cd463d905c97e8cb663ded92a0a0c30dc6736ef6854a96a3fe2e99dbb61",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -86,6 +86,8 @@ fields:
 tags:
   declared: [project, area/norn, solo]
   undeclared: report
+paths:
+  ambiguity_ignore: [\"archive/**\"]
 ";
 
 /// The schema of the second vault: the other stance a tag facet can take on
@@ -194,6 +196,10 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         ("health/Links.md", LINK_HEALTH.as_bytes().to_vec()),
         ("twins/one/twin.md", b"# One twin\n".to_vec()),
         ("twins/two/twin.md", b"# The other twin\n".to_vec()),
+        // A third twin under the ignored `archive/**`, which the class
+        // `[[twin]]` opens keeps out: a target reaches it only by naming
+        // `archive/old/twin`, and its row stores that count.
+        ("archive/old/twin.md", b"# The archived twin\n".to_vec()),
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
     ]
 }
@@ -743,6 +749,13 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
                     .get(&field.replace(".folded_suffix_key", ".suffix_key"))
                     .is_some_and(|raw| raw != value)),
         "no suffix key that folds to another spelling is exercised"
+    );
+    assert_eq!(
+        rows.fields()
+            .get("document[archive/old/twin.md].admitting_segments")
+            .map(String::as_str),
+        Some("3"),
+        "no document the ambiguity-ignore set keeps out of a class is exercised"
     );
 
     let field_rows: Vec<&FieldRow> = projection

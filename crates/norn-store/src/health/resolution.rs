@@ -70,12 +70,11 @@
 //! the side being resolved are counted in. Two rows left over tell several
 //! from one, so no key's whole class is ever counted.
 //!
-//! **One limit stands on that bound.** The head is read in ladder order with
-//! the places the ambiguity-ignore set keeps out dropped as the read meets
-//! them, so a class whose head stands behind many ignored members steps
-//! through each before the cut is reached: what such a key costs grows with
-//! the ignored members ahead of its head. The statement is link health's own,
-//! and the changeset's re-decision pays the same; NORN-320 bounds it.
+//! **The members a class keeps out are never read.** The head seeks the
+//! members the ambiguity-ignore set admits by the admitting count each
+//! document row stores, so a class whose head stands behind many ignored
+//! members costs what one without them does. The statement is link health's
+//! own, and the changeset's re-decision reads it the same way.
 //!
 //! # The caller filters
 //!
@@ -355,10 +354,9 @@ impl Snapshot {
     /// 256 at a time in one statement, and only a key
     /// some link is held under is read; its links are read a chunk at a time,
     /// and each distinct key a chunk holds is resolved once, its head cut at
-    /// two more rows than the targets it could name. Nothing counts a class.
-    /// The one limit: a head is read past every member of its class the
-    /// ambiguity-ignore set keeps out ahead of it, so a class with many such
-    /// members costs them (NORN-320).
+    /// two more rows than the targets it could name, and never past the
+    /// members of its class the ambiguity-ignore set keeps out. Nothing counts
+    /// a class.
     pub fn resolution_changes(
         &self,
         overlay: &PathOverlay,
@@ -944,8 +942,7 @@ impl<'a, R: Runner> Judging<'a, R> {
                 paths,
                 keys: arms,
             } = arms(&listed);
-            let values: Vec<Value> =
-                statement::keys_parameters(&classes, &paths, self.ignore, self.order, Some(bound))?;
+            let values: Vec<Value> = statement::heads_parameters(&classes, &paths, bound)?;
             let rows = self.runner.read_all(
                 ResolutionStatement::Heads,
                 statement::heads_sql(self.key),
@@ -986,7 +983,7 @@ impl<'a, R: Runner> Judging<'a, R> {
             keys: arms,
         } = arms(keys);
         let values: Vec<Value> =
-            statement::keys_parameters(&classes, &paths, self.ignore, self.order, None)?;
+            statement::totals_parameters(&classes, &paths, self.ignore, self.order)?;
         let rows = self.runner.read_all(
             ResolutionStatement::Totals,
             statement::totals_sql(self.key),

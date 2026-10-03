@@ -662,6 +662,143 @@ fn a_hubs_in_links_resolve_one_key_once() {
     });
 }
 
+/// What judging a plan that creates `new/index.md` cost over `vault` holding
+/// `members` documents `{place}/aNNNN/index.md` beside `zz/index.md` and
+/// `holder.md` linking `[[index]]`: the links it judged, its work, and the
+/// steps its snapshot took. Under `archive/**` a `place` the root's order
+/// matches to `archive` is kept out of the class `index` opens, and any other
+/// is admitted to it.
+fn create_beside(
+    mut vault: Vault,
+    place: &str,
+    members: usize,
+) -> (Vec<Judged>, ResolutionWork, u64) {
+    let paths: Vec<String> = (0..members)
+        .map(|at| format!("{place}/a{at:04}/index.md"))
+        .collect();
+    let mut documents: Vec<(&str, &str)> =
+        paths.iter().map(|at| (at.as_str(), "index\n")).collect();
+    documents.push(("zz/index.md", "index\n"));
+    documents.push(("holder.md", "[[index]]\n"));
+    vault.write(&documents);
+
+    let snapshot = vault.snapshot();
+    let before = snapshot.counters().vm_steps();
+    let mut judged_links = Vec::new();
+    let work = snapshot
+        .resolution_changes(
+            &overlay(&["new/index.md"], &[]),
+            &[],
+            &declared(),
+            |change| {
+                judged_links.push(read(&change));
+            },
+        )
+        .expect("a judgment");
+    assert_eq!(snapshot.counters().full_scan_steps(), 0);
+    (judged_links, work, snapshot.counters().vm_steps() - before)
+}
+
+/// [`create_beside`] over twenty and over two thousand members at `place`,
+/// each on a fresh store under `order`.
+fn create_beside_few_and_many(
+    order: StoredPathOrder,
+    place: &str,
+) -> [(Vec<Judged>, ResolutionWork, u64); 2] {
+    [20, 2000].map(|members| {
+        create_beside(
+            Vault::new(
+                &format!("resolution-beside-{order:?}-{place}-{members}"),
+                order,
+            ),
+            place,
+            members,
+        )
+    })
+}
+
+/// **A key's head costs the members its class admits, not the ones it keeps
+/// out.** Two thousand documents `archive/aNNNN/index.md` under the ignored
+/// `archive/**` sort ahead of `zz/index.md`, the one member the class `index`
+/// admits, and a plan creating `new/index.md` judges `[[index]]` in the same
+/// steps beside them as beside twenty: one link, one key, one head row, read
+/// by a seek of the admitted members alone. On a root that folds case
+/// `Archive/aNNNN/index.md` is the same ignored place, kept out by the same
+/// stored count.
+#[test]
+fn a_heads_work_does_not_follow_the_ignored_members_of_its_class() {
+    for (order, place) in [
+        (Sensitive, "archive"),
+        (Folding, "archive"),
+        (Folding, "Archive"),
+    ] {
+        let at = format!("{order:?} {place}");
+        let [(few, few_work, few_steps), (many, many_work, many_steps)] =
+            create_beside_few_and_many(order, place);
+        let expected = vec![judged("holder.md", "index", "one:zz/index.md", "several")];
+        assert_eq!(few, expected, "{at}");
+        assert_eq!(many, expected, "{at}");
+        assert_eq!(few_work.links_evaluated, 1, "{at}");
+        assert_eq!(few_work.keys_resolved, 1, "{at}");
+        assert_eq!(few_work.head_rows, 1, "{at}");
+        assert_eq!(many_work, few_work, "{at}");
+        assert_eq!(
+            many_steps, few_steps,
+            "{at}: a hundred times the ignored members moved the judgment's steps"
+        );
+    }
+}
+
+/// **A key's head costs its bound, not the members its class admits.** Two
+/// thousand documents `x/aNNNN/index.md` the class `index` admits are judged
+/// in the same steps as twenty: each admitting count's run of the class is
+/// cut at the head's bound before the runs are merged, so no read walks a
+/// run past the rows the head can hand back.
+#[test]
+fn a_heads_work_does_not_follow_the_members_its_class_admits() {
+    for order in [Sensitive, Folding] {
+        let [(few, few_work, few_steps), (many, many_work, many_steps)] =
+            create_beside_few_and_many(order, "x");
+        let expected = vec![judged("holder.md", "index", "several", "several")];
+        assert_eq!(few, expected, "{order:?}");
+        assert_eq!(many, expected, "{order:?}");
+        assert_eq!(few_work.keys_resolved, 1, "{order:?}");
+        assert_eq!(few_work.head_rows, 3, "{order:?}");
+        assert_eq!(many_work, few_work, "{order:?}");
+        assert_eq!(
+            many_steps, few_steps,
+            "{order:?}: a hundred times the admitted members moved the judgment's steps"
+        );
+    }
+}
+
+/// **A head merged across admitting counts is cut to its bound.**
+/// `[[archive/index]]` admits four documents `?/archive/index.md` under no
+/// ignored place, of count one, and the ignored `archive/index.md`, of count
+/// two. Each count's run is read up to the bound, so their union holds four
+/// rows; the head hands back the three its bound allows, two past the one
+/// target the plan creates.
+#[test]
+fn a_head_merged_across_admitting_counts_is_cut_to_its_bound() {
+    both_orders("resolution-two-counts", |mut vault| {
+        vault.write(&[
+            ("p/archive/index.md", "p\n"),
+            ("q/archive/index.md", "q\n"),
+            ("r/archive/index.md", "r\n"),
+            ("s/archive/index.md", "s\n"),
+            ("archive/index.md", "ignored\n"),
+            ("holder.md", "[[archive/index]]\n"),
+        ]);
+        let (judged_links, work) = vault.judge(&overlay(&["new/archive/index.md"], &[]), &[]);
+        assert_eq!(
+            judged_links,
+            [judged("holder.md", "archive/index", "several", "several")]
+        );
+        assert_eq!(work.keys_resolved, 1);
+        assert_eq!(work.head_rows, 3);
+    });
+}
+
 /// **A declaration the snapshot does not pin is refused**, as every read
 /// builder refuses one.
 #[test]

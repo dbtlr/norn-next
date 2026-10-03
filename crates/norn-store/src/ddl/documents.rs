@@ -52,6 +52,24 @@
 //! no statement reads and that a bad write could make disagree with the path
 //! beside it.
 //!
+//! # The admitting count: the one column the declaration shapes
+//!
+//! `admitting_segments` is the fewest segments a link target spells that keeps
+//! the document in its ambiguity class
+//! ([`crate::AmbiguityIgnore::admitting_segments`]): one for a place no
+//! ambiguity-ignore glob reaches, more for one under an ignored place. It is a
+//! function of the path and the pinned declaration together, so it is not a
+//! second spelling of the path; the changeset that writes the row computes it
+//! under the declaration it is judged under, and a pin that moves the ignore
+//! set is followed by a heal that writes every row again.
+//!
+//! `documents_admitted_suffix_key` and `documents_admitted_folded_suffix_key`
+//! lead with it, then the key the root probes and the path, so a link key's
+//! head seeks the members of one count in ladder order and never reads the
+//! members its class keeps out (the link-health head statement). The two
+//! indexes are a second copy of the key and the path for each row, which is
+//! the price of a head whose cost does not grow with an ignored subtree.
+//!
 //! # Two indexes over one column: the root's order and the answer's
 //!
 //! `documents_path` is unique and compares bytes, which is what the store's
@@ -173,6 +191,7 @@ const STATEMENTS: &[&str] = &[
     path                         TEXT    NOT NULL CHECK (path <> ''),
     suffix_key                   TEXT    NOT NULL,
     folded_suffix_key            TEXT    NOT NULL,
+    admitting_segments           INTEGER NOT NULL CHECK (admitting_segments >= 1),
     content_hash                 TEXT    NOT NULL,
     byte_length                  INTEGER NOT NULL,
     body                         TEXT    NOT NULL,
@@ -189,6 +208,10 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
     "CREATE INDEX documents_folded_suffix_key ON documents(folded_suffix_key)",
+    "CREATE INDEX documents_admitted_suffix_key
+    ON documents(admitting_segments, suffix_key, path)",
+    "CREATE INDEX documents_admitted_folded_suffix_key
+    ON documents(admitting_segments, folded_suffix_key, path)",
     "CREATE INDEX documents_change_feed ON documents(
     generation, path, content_hash, body_hash, frontmatter_projection_hash
 )",

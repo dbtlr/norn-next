@@ -55,7 +55,10 @@
 //!   must read more at the larger scale on the counts it names. A plan's
 //!   links are held the same way: judging the links a hub's delete reaches,
 //!   and generating the cascade a hub's move plans, each cost the hub's
-//!   in-links at both scales.
+//!   in-links at both scales. A hub's write and the judgment of its delete
+//!   are held again beside namesakes of the hub that the vault's
+//!   ambiguity-ignore set keeps out of its class, a subtree that grows with
+//!   the vault, so a head read stepping past them would count differently.
 //! - **Reads contend on one entry and run only their establishment under its
 //!   gate.** Under the `overlapping reads on one entry` workload, eight reads
 //!   start while a ninth holds the entry's one connection, and the hold is let
@@ -646,13 +649,68 @@ fn plant_hub_in_links(vault: &attach::Vault) {
     }
 }
 
+/// The folder the ignored-subtree bars plant the hub's ignored namesakes
+/// under. Its name sorts ahead of `hub-gate` as a suffix key's second
+/// segment, so every member stands ahead of the hub in the resolution
+/// ladder's order: where a head read stepped past the members its class
+/// keeps out, it would step past all of them before it reached the hub.
+const IGNORED_HUB_FOLDER: &str = "hub-gate-archive/";
+
+/// The ambiguity-ignore glob the ignored-subtree bars declare.
+const IGNORED_HUB_PLACE: &str = "hub-gate-archive/**";
+
+/// How many namesakes of the hub the ignored-subtree bars plant beside
+/// `profile`: a quarter of its documents, so the subtree grows with the vault
+/// — 75 at `ambiguous`, 500 at `realistic` — and a cost that followed it would
+/// count differently across the pair.
+fn ignored_hub_members(profile: &norn_fixtures::Profile) -> usize {
+    profile.docs / 4
+}
+
+/// Declare [`IGNORED_HUB_PLACE`] in `vault`'s schema and plant `count`
+/// documents at the hub's stem under it, before anything attaches the vault.
+/// The glob keeps every one of them out of the class the bare stem opens, so
+/// the in-links name the hub alone once it is written, and nothing while it
+/// is not.
+fn plant_ignored_hub_members(vault: &attach::Vault, count: usize) {
+    std::fs::write(
+        vault.path().join(".norn/schema.yaml"),
+        format!("version: 1\npaths:\n  ambiguity_ignore: [\"{IGNORED_HUB_PLACE}\"]\n"),
+    )
+    .expect("declaring the ignored subtree");
+    for at in 0..count {
+        let path = vault
+            .path()
+            .join(format!("{IGNORED_HUB_FOLDER}{at:04}/{HUB_STEM}.md"));
+        std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(&path, "an archived hub\n").expect("writing an ignored namesake");
+    }
+}
+
+/// The declaration the store pins over a hub vault, as a write or a judgment
+/// is judged under it: the pinned fingerprint, and [`IGNORED_HUB_PLACE`]
+/// where the vault declares it.
+fn hub_declaration(store: &mut Store, ignoring: bool) -> ContentModel {
+    let declared = the_pinned_declaration(store);
+    if ignoring {
+        declared.declare_ambiguity_ignore(
+            norn_wire::Pattern::parse(IGNORED_HUB_PLACE).expect("the ignored subtree's glob"),
+        )
+    } else {
+        declared
+    }
+}
+
 /// **The hub's stem is the planted neighborhood's alone.** No document the
-/// attachment derived beside the planted in-links shares it.
+/// attachment derived beside the planted in-links shares it, but for the
+/// ignored members [`plant_ignored_hub_members`] plants under
+/// [`IGNORED_HUB_PLACE`].
 fn assert_the_hub_stem_is_the_neighborhoods_alone(store: &mut Store) {
     let hub = DocumentPath::new(&hub_path()).expect("a document path");
     let mut sharing = Vec::new();
     attach::for_each_derived_path(store, |path| {
-        if path.stem() == hub.stem() {
+        if path.stem() == hub.stem() && !path.as_str().starts_with(IGNORED_HUB_FOLDER) {
             sharing.push(path.as_str().to_string());
         }
     });
@@ -684,10 +742,64 @@ fn a_hub_writes_link_health_work_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
 
-    let small_counters = one_hub_write("counter-gate-hub-ambiguous", &small);
-    let large_counters = one_hub_write("counter-gate-hub-realistic", &large);
+    let small_counters = one_hub_write("counter-gate-hub-ambiguous", &small, 0);
+    let large_counters = one_hub_write("counter-gate-hub-realistic", &large, 0);
 
-    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+    assert_the_hub_write_redecided_its_in_links(&small, &small_counters, &large, &large_counters);
+    SizeIndependencePair::new(
+        "writing a hub with a fixed number of in-links",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// **The write-work bar beside an ignored subtree (NORN-320).** The bar
+/// above, over a vault that also declares [`IGNORED_HUB_PLACE`] and holds
+/// [`ignored_hub_members`] namesakes of the hub under it — 75 at `ambiguous`
+/// and 500 at `realistic`, every one ahead of the hub in the ladder's order
+/// and kept out of the class `[[hub-gate-hub]]` opens. Writing the hub
+/// re-decides the same in-links, reads the hub as the one candidate, and
+/// takes the same read steps at both scales: the head the re-decision reads
+/// seeks the members the class admits and never steps past the ones it keeps
+/// out.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_hub_writes_link_health_work_follows_its_in_links_beside_an_ignored_subtree() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_hub_write(
+        "counter-gate-hub-ignored-ambiguous",
+        &small,
+        ignored_hub_members(&small),
+    );
+    let large_counters = one_hub_write(
+        "counter-gate-hub-ignored-realistic",
+        &large,
+        ignored_hub_members(&large),
+    );
+
+    assert_the_hub_write_redecided_its_in_links(&small, &small_counters, &large, &large_counters);
+    SizeIndependencePair::new(
+        "writing a hub with a fixed number of in-links beside an ignored subtree",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// **The hub's write re-decided exactly its in-links** at both scales: each
+/// planted in-link once, under the one key their class names, read once,
+/// with the hub its one candidate, every broken finding they held discarded
+/// and none filed in their place.
+fn assert_the_hub_write_redecided_its_in_links(
+    small: &norn_fixtures::Profile,
+    small_counters: &CounterSnapshot,
+    large: &norn_fixtures::Profile,
+    large_counters: &CounterSnapshot,
+) {
+    for (profile, counters) in [(small, small_counters), (large, large_counters)] {
         for (name, expected) in [
             ("links_redecided", HUB_IN_LINKS as u64),
             ("link_health_keys_resolved", 1),
@@ -703,23 +815,25 @@ fn a_hub_writes_link_health_work_follows_its_in_links_at_both_scales() {
                 profile.name
             );
         }
+        assert!(
+            counters.get("read_steps") > 0,
+            "writing the hub over `{}` took no read step, so the bar reads no head",
+            profile.name
+        );
     }
-
-    SizeIndependencePair::new(
-        "writing a hub with a fixed number of in-links",
-        ScaleObservation::new(&small, small_counters),
-        ScaleObservation::new(&large, large_counters),
-    )
-    .assert_size_independent();
 }
 
-/// Attach `profile` with [`HUB_IN_LINKS`] planted beside it, write the hub
-/// they all name directly through the store, and hand back what the write
-/// derived.
-fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+/// Attach `profile` with [`HUB_IN_LINKS`] planted beside it, and `ignored`
+/// namesakes of the hub under [`IGNORED_HUB_PLACE`] where `ignored` is not
+/// zero, write the hub they all name directly through the store, and hand
+/// back what the write derived and the read steps it took.
+fn one_hub_write(label: &str, profile: &norn_fixtures::Profile, ignored: usize) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
     plant_hub_in_links(&vault);
+    if ignored > 0 {
+        plant_ignored_hub_members(&vault, ignored);
+    }
     {
         let host = vault.host();
         attach::attach_and_wait(&host, vault.name());
@@ -729,21 +843,16 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
     let derived = attach::derived_documents(&mut store);
     assert_eq!(
         derived,
-        profile.docs + HUB_IN_LINKS,
-        "`{}` emits {} documents and {HUB_IN_LINKS} in-links were planted beside them, and the \
-         attachment derived {derived}",
+        profile.docs + HUB_IN_LINKS + ignored,
+        "`{}` emits {} documents and {HUB_IN_LINKS} in-links and {ignored} ignored namesakes \
+         were planted beside them, and the attachment derived {derived}",
         profile.name,
         profile.docs
     );
     assert_the_hub_stem_is_the_neighborhoods_alone(&mut store);
 
+    let declared = hub_declaration(&mut store, ignored > 0);
     let mut request = store.begin_request();
-    let declared = request
-        .vault_schema_pin()
-        .expect("reading the pinned schema")
-        .map_or_else(norn_store::ContentModel::none, |pin| {
-            norn_store::ContentModel::under(pin.fingerprint)
-        });
     request
         .apply_increment(
             IncrementProvenance::Derived,
@@ -757,15 +866,19 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
             &declared,
         )
         .expect("writing the hub");
+    let read_steps = request.read_steps();
     let reading = request.finish();
     assert!(
         !reading.is_all_zero(),
         "writing the hub counted nothing, so the bar over it holds no reading"
     );
-    let snapshot: CounterSnapshot = reading.readings().collect();
+    let snapshot: CounterSnapshot = reading
+        .readings()
+        .chain([("read_steps", read_steps)])
+        .collect();
     record_the_counters(
         &format!(
-            "writing a hub with {HUB_IN_LINKS} in-links over `{}`",
+            "writing a hub with {HUB_IN_LINKS} in-links and {ignored} ignored namesakes over `{}`",
             profile.name
         ),
         &snapshot,
@@ -777,10 +890,9 @@ fn one_hub_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 /// Deleting the document [`HUB_IN_LINKS`] others link by its bare stem,
 /// leaving their links broken, records exactly those links, and judging them costs the same at both
 /// per-PR scales: a plan's change set costs the links it reaches and the
-/// candidates they resolve against, never the vault around them. The bar
-/// stands where no member of a key's class is kept out by the
-/// ambiguity-ignore set ahead of its head, which the head read steps through
-/// (NORN-320); the profiles declare no ignore set.
+/// candidates they resolve against, never the vault around them. Its twin
+/// below holds the same bar beside an ignored subtree that grows with the
+/// vault.
 ///
 /// The hub and its planted in-links are derived by the attach heal beside
 /// each profile's generated tree. A preview of the delete through the host,
@@ -797,10 +909,63 @@ fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
 
-    let small_counters = one_hub_delete("counter-gate-hub-delete-ambiguous", &small);
-    let large_counters = one_hub_delete("counter-gate-hub-delete-realistic", &large);
+    let small_counters = one_hub_delete("counter-gate-hub-delete-ambiguous", &small, 0);
+    let large_counters = one_hub_delete("counter-gate-hub-delete-realistic", &large, 0);
 
-    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+    assert_the_hub_delete_judged_its_in_links(&small, &small_counters, &large, &large_counters);
+    SizeIndependencePair::new(
+        "judging the links a hub's delete reaches",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// **The resolution change set's bar beside an ignored subtree (NORN-320).**
+/// The bar above, over a vault that also declares [`IGNORED_HUB_PLACE`] and
+/// holds [`ignored_hub_members`] namesakes of the hub under it — 75 at
+/// `ambiguous` and 500 at `realistic`, every one ahead of the hub in the
+/// ladder's order and kept out of the class `[[hub-gate-hub]]` opens. The
+/// hub's delete records the same entries, and judging them reads the hub as
+/// the one head row in the same statements and steps at both scales: the
+/// head seeks the members the class admits and never steps past the ones it
+/// keeps out.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_hub_deletes_resolution_change_set_follows_its_in_links_beside_an_ignored_subtree() {
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_hub_delete(
+        "counter-gate-hub-delete-ignored-ambiguous",
+        &small,
+        ignored_hub_members(&small),
+    );
+    let large_counters = one_hub_delete(
+        "counter-gate-hub-delete-ignored-realistic",
+        &large,
+        ignored_hub_members(&large),
+    );
+
+    assert_the_hub_delete_judged_its_in_links(&small, &small_counters, &large, &large_counters);
+    SizeIndependencePair::new(
+        "judging the links a hub's delete reaches beside an ignored subtree",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// **The hub's delete judged exactly its in-links** at both scales: an entry
+/// for each, one key resolved once, the hub its one head row, and no table or
+/// index stepped end to end.
+fn assert_the_hub_delete_judged_its_in_links(
+    small: &norn_fixtures::Profile,
+    small_counters: &CounterSnapshot,
+    large: &norn_fixtures::Profile,
+    large_counters: &CounterSnapshot,
+) {
+    for (profile, counters) in [(small, small_counters), (large, large_counters)] {
         for (name, expected) in [
             ("entries_recorded", HUB_IN_LINKS as u64),
             ("links_evaluated", HUB_IN_LINKS as u64),
@@ -817,22 +982,23 @@ fn a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales() {
             );
         }
     }
-
-    SizeIndependencePair::new(
-        "judging the links a hub's delete reaches",
-        ScaleObservation::new(&small, small_counters),
-        ScaleObservation::new(&large, large_counters),
-    )
-    .assert_size_independent();
 }
 
 /// Attach `profile` with the hub and [`HUB_IN_LINKS`] in-links planted beside
-/// it, preview the hub's delete through the host, and count the store's
-/// judgment of the links it reaches.
-fn one_hub_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+/// it, and `ignored` namesakes of the hub under [`IGNORED_HUB_PLACE`] where
+/// `ignored` is not zero, preview the hub's delete through the host, and
+/// count the store's judgment of the links it reaches.
+fn one_hub_delete(
+    label: &str,
+    profile: &norn_fixtures::Profile,
+    ignored: usize,
+) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
     plant_hub_in_links(&vault);
+    if ignored > 0 {
+        plant_ignored_hub_members(&vault, ignored);
+    }
     std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
     let hub = norn_wire::DocumentPath::new(hub_path()).expect("a document path");
     {
@@ -869,7 +1035,14 @@ fn one_hub_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnaps
     }
 
     let mut store = vault.store();
-    let declared = the_pinned_declaration(&mut store);
+    assert_eq!(
+        attach::derived_documents(&mut store),
+        profile.docs + HUB_IN_LINKS + 1 + ignored,
+        "`{}` derived other than its documents, the hub, its in-links and {ignored} ignored \
+         namesakes",
+        profile.name
+    );
+    let declared = hub_declaration(&mut store, ignored > 0);
     let snapshot = std::sync::Arc::new(store.open_reader().reader.expect("a reader"))
         .try_take()
         .expect("a handle nothing is reading holds its connection")
@@ -921,7 +1094,8 @@ fn one_hub_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnaps
     .collect();
     record_the_counters(
         &format!(
-            "judging the links a hub's delete reaches, {HUB_IN_LINKS} in-links over `{}`",
+            "judging the links a hub's delete reaches, {HUB_IN_LINKS} in-links and {ignored} \
+             ignored namesakes over `{}`",
             profile.name
         ),
         &counters,
@@ -944,9 +1118,11 @@ fn moved_hub_path() -> String {
 /// new folder plans one rewrite per in-link, and generating that cascade
 /// costs the same at both per-PR scales: a move's cascade costs the links it
 /// reaches, the spellings it probes and the documents it rewrites, never the
-/// vault around them. The bar stands where no member of a key's class is kept
-/// out by the ambiguity-ignore set ahead of its head (NORN-320); the profiles
-/// declare no ignore set.
+/// vault around them. The profiles declare no ignore set: the head read
+/// seeks past no member of its class the ignore set keeps out (the hub write
+/// and delete bars' ignored-subtree twins hold that), but the cascade's
+/// backlink pass and the naming of its targets still read a class through the
+/// ignore filter row by row (NORN-339).
 ///
 /// A preview of the move through the host plans a cascade of one rewrite
 /// per in-link and records one written entry per rewritten link, and the
@@ -1105,10 +1281,11 @@ const LONELY_STEM: &str = "hub-gate-lonely";
 ///
 /// Each costs the same judgments, links evaluated, keys resolved, head rows,
 /// statements and steps, and steps no table or index end to end, at
-/// `ambiguous` (300 documents) exactly as at `realistic` (2000). The bar
-/// stands where no member of a key's class is kept out by the
-/// ambiguity-ignore set ahead of its head (NORN-320); the profiles declare no
-/// ignore set.
+/// `ambiguous` (300 documents) exactly as at `realistic` (2000). The
+/// profiles declare no ignore set: the head read seeks past no member of its
+/// class the ignore set keeps out (the hub write and delete bars'
+/// ignored-subtree twins hold that), but the backlink pass still reads a
+/// class through the ignore filter row by row (NORN-339).
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales() {
@@ -1303,9 +1480,11 @@ const RETARGET_STEM: &str = "hub-gate-retarget";
 /// the applier's computation of it again, each naming both ends again: the
 /// same judgments, links evaluated, keys resolved, head rows, statements and
 /// steps, and no table or index stepped end to end, at `ambiguous` (300
-/// documents) exactly as at `realistic` (2000). The bar stands where no
-/// member of a key's class is kept out by the ambiguity-ignore set ahead of
-/// its head (NORN-320); the profiles declare no ignore set.
+/// documents) exactly as at `realistic` (2000). The profiles declare no
+/// ignore set: the head read seeks past no member of its class the ignore set
+/// keeps out (the hub write and delete bars' ignored-subtree twins hold
+/// that), but naming `old` and `new` and the cascade's backlink pass still
+/// read a class through the ignore filter row by row (NORN-339).
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales() {

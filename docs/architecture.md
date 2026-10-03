@@ -2125,7 +2125,12 @@ ignored place: a target does where its segments reach that place's last segment,
 one-segment target does only where the ignored document stands at the root, whose name is
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
-that does not tell the two apart. Every glob matches under that one rule: a path part of a
+that does not tell the two apart. Each document row stores its admitting count, the fewest
+segments a target spells that keeps the document in its class under the pinned declaration,
+written by the changeset that derives the row; a pin that moves the ignore set is followed by
+the heal that derives every row again. Link health's head statement seeks a class by that
+count beside the key the root probes, so a head never reads the members its class keeps
+out; every other class read tests the globs row by row and steps past them (NORN-339). Every glob matches under that one rule: a path part of a
 find, a count or a validate matches with ASCII case folded where the store's order folds and
 bytewise where it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root
 that folds and not on one that tells the two apart. A find's and a count's path range is read
@@ -2308,7 +2313,9 @@ control files through the normal attach path. The host does not persist an accep
 candidate.
 
 The schema fingerprint is the invalidation key for schema-dependent derived tables. A re-pin
-discards schema-keyed rows and names no paths, so a vault-wide walk records them again. That
+discards schema-keyed rows and names no paths, so a vault-wide walk records them again. The
+one exception is a document row's admitting count, which the pin leaves standing and the walk
+derives again in place (its declaration is below). That
 walk is hash-authoritative for the *content* half, and the pin's own generation is what
 reaches a row whose content never drifted: **a row stamped at or below the generation the
 standing pin was taken at owes its judgment again**, so a document whose bytes have not
@@ -2384,6 +2391,21 @@ fingerprint it was read from, an increment refuses typed values derived under an
 than the one pinned in its own transaction, and refuses a declaration read under any other
 to judge its link health by, and every read builder refuses a declaration
 its snapshot does not pin.
+
+The **admitting count** is the one column of a document row the declaration shapes: the
+fewest segments a link target spells that keeps the document in its ambiguity class. Its
+declaration under [ADR 0027](decisions/0027-link-health-rides-the-changeset.md): its inputs
+are the document's path and the pinned ambiguity-ignore set, matched under the store's
+order; derivation is deterministic, one pure function of the two; it is maintained inside
+the document's own changeset, computed under the declaration that changeset is judged under;
+and its invalidation key is the standing schema pin. **A re-pin does not discard it**: the
+pin's transaction leaves the column standing, and the heal that follows converges it by
+deriving every row below the pin again, so until that heal reaches a row, the row holds the
+count the old ignore set gave it. No read observes that window, because a schema reload
+closes the entry's reader until the heal converges. A re-decision inside the heal's own
+changesets may read an old count, but a class is re-decided by every changeset that writes
+one of its members, and the last of them runs after every member is derived under the new
+set.
 
 **Exclusion is a membership boundary**: an excluded place holds no rows, and any row
 standing under an excluded root is pruned by the next leg that ranges over that root —
@@ -2798,8 +2820,8 @@ rewrite's `old` names or the place it spells, and each distinct key
 a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
-with one limit link health's head statement carries too: a head is read past every member
-of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
+and a head seeks the members its class admits, never the ones the ambiguity-ignore set keeps
+out. A
 plan that changes no document's presence, deletes no document, writes no link and carries
 no wikilink rewrite records nothing and reads no snapshot; a delete is read even where the
 plan refills its path, since the document there is then replaced with every presence as it

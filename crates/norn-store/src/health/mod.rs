@@ -983,12 +983,10 @@ fn resolve_keys(
         connection,
         work,
         &statement::heads_sql(key),
-        params_from_iter(statement::keys_parameters(
+        params_from_iter(statement::heads_parameters(
             &classes,
             &paths,
-            ignore,
-            order,
-            Some(CANDIDATE_HEAD),
+            CANDIDATE_HEAD,
         )?),
         |row| {
             Ok(Ok((
@@ -1030,8 +1028,8 @@ fn resolve_keys(
             connection,
             work,
             &statement::totals_sql(key),
-            params_from_iter(statement::keys_parameters(
-                &classes, &paths, ignore, order, None,
+            params_from_iter(statement::totals_parameters(
+                &classes, &paths, ignore, order,
             )?),
             |row| {
                 Ok(Ok((
