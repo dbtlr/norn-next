@@ -2114,7 +2114,12 @@ ignored place: a target does where its segments reach that place's last segment,
 one-segment target does only where the ignored document stands at the root, whose name is
 the whole place. The globs match under the store's order — with ASCII case folded where it
 folds, bytewise where it does not — so `archive/**` ignores `Archive/notes.md` on a root
-that does not tell the two apart. Every glob matches under that one rule: a path part of a
+that does not tell the two apart. Each document row stores its admitting count, the fewest
+segments a target spells that keeps the document in its class under the pinned declaration,
+written by the changeset that derives the row; a pin that moves the ignore set is followed by
+the heal that derives every row again. Link health's head statement seeks a class by that
+count beside the key the root probes, so a head never reads the members its class keeps
+out; every other class read tests the globs row by row and steps past them (NORN-339). Every glob matches under that one rule: a path part of a
 find, a count or a validate matches with ASCII case folded where the store's order folds and
 bytewise where it does not, so `find --path 'archive/**'` reaches `Archive/x.md` on a root
 that folds and not on one that tells the two apart. A find's and a count's path range is read
@@ -2787,8 +2792,8 @@ rewrite's `old` names or the place it spells, and each distinct key
 a chunk of links holds is resolved
 once through link health's own head statement, cut at two rows past the targets it could
 name: the work is the links the plan reaches plus the candidates they resolve against,
-with one limit link health's head statement carries too: a head is read past every member
-of its class the ambiguity-ignore set keeps out ahead of it (NORN-320). A
+and a head seeks the members its class admits, never the ones the ambiguity-ignore set keeps
+out. A
 plan that changes no document's presence, deletes no document, writes no link and carries
 no wikilink rewrite records nothing and reads no snapshot; a delete is read even where the
 plan refills its path, since the document there is then replaced with every presence as it
