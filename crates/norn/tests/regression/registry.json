@@ -1657,7 +1657,7 @@
       "name": "format-never-implies-consent",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Writing requires an explicit preview or apply mode on every write request, with no default: a write request naming no mode does not read, and a preview leaves the vault as it was.",
+      "property": "Writing requires an explicit preview or apply mode on every write request, with no default: a write request naming no mode is refused when it is parsed, and a preview leaves the vault as it was.",
       "sources": ["NRN-212"],
       "binding": {
         "status": "bound",
@@ -1667,6 +1667,12 @@
           "crates/norn-wire/tests/round_trip.rs::the_applier_decides_every_mode_and_document_without_a_default",
           "crates/norn-wire/tests/round_trip.rs::an_init_request_names_its_vault_and_states_its_mode",
           "crates/norn-wire/tests/round_trip.rs::a_migrate_request_names_its_vault_and_states_its_mode",
+          "crates/norn-wire/tests/round_trip.rs::a_set_request_is_its_target_keys_beside_its_own",
+          "crates/norn-wire/tests/round_trip.rs::an_edit_request_compiles_to_one_operation_per_edit",
+          "crates/norn-wire/tests/round_trip.rs::a_new_request_compiles_to_one_create",
+          "crates/norn-wire/tests/round_trip.rs::a_move_request_compiles_to_the_move_its_source_names",
+          "crates/norn-wire/tests/round_trip.rs::a_delete_request_compiles_to_one_delete_saying_what_becomes_of_its_links",
+          "crates/norn-wire/tests/round_trip.rs::a_rewrite_wikilink_request_compiles_to_one_rewrite",
           "crates/norn-host/tests/applies.rs::every_verbs_preview_leaves_every_entry_of_the_vault_as_it_was"
         ]
       }
