@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 117;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "84345f4caf032041fff89e3c27e4acc461c6d31e33763054869ad4998a1e2033";
+const CONTRACT_DIGEST: &str = "c102b1fdb445ecadac2b24400ffc04a07db1dccbf0c74bb60dc400ff6092a7b4";
 
 /// The cases carried by tests today, by name.
 ///
@@ -153,7 +153,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is six classes rather than a bag:
+/// residue no subject reaches, and it is five classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -169,10 +169,6 @@ const BOUND_CASES: &[&str] = &[
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
-/// - **A carrier a named task authors.** The subject stands and the test that
-///   would carry the case is the deliverable of a task the reason names, which
-///   settles the test's name and home; until it does, no name is pre-committed
-///   for it, and the task closing is what re-derives the reason.
 ///
 /// A reader behind the `induced-failure` feature is not a residue: the audit
 /// lists the feature build where a cited test is missing without it, and holds
@@ -190,7 +186,6 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
-    "error-variant-matches-the-operation-reported",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
@@ -199,8 +194,6 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
     "vault-wide-work-is-a-declared-roster",
-    "whole-vault-work-is-declared-and-triggered-deliberately",
-    "write-through-the-composed-post-state",
 ];
 
 fn workspace_root() -> PathBuf {
