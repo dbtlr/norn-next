@@ -592,7 +592,8 @@ impl TestIndex {
 
     /// The same index, with listings supplied directly for what the targets
     /// compiled with [`CARRIER_FEATURE`] on.
-    pub fn with_featured_listings(
+    #[cfg(test)]
+    pub(crate) fn with_featured_listings(
         mut self,
         listings: impl IntoIterator<Item = ((String, Target), Listing)>,
     ) -> Self {
@@ -686,7 +687,7 @@ impl TestIndex {
 
     /// The same question asked of what `target` compiled with
     /// [`CARRIER_FEATURE`] on, or `None` where that build was not listed.
-    pub fn resolve_featured(
+    pub(crate) fn resolve_featured(
         &self,
         target: &TargetRef,
         function: &str,
@@ -954,11 +955,11 @@ impl Registry {
         hex(&hasher.finish())
     }
 
-    /// Every cargo target a bound case cites, for [`TestIndex::from_cargo`].
+    /// Every cargo target a bound case cites, for [`Registry::test_index`].
     ///
     /// A reference this cannot resolve is left out rather than reported: the
     /// audit reports it, with the rest of what is wrong with that case.
-    pub fn cited_targets(&self) -> BTreeSet<TargetRef> {
+    pub(crate) fn cited_targets(&self) -> BTreeSet<TargetRef> {
         self.bound_cases()
             .flat_map(|case| case.binding.tests.iter())
             .filter_map(|reference| TestRef::parse(reference).ok())
@@ -1434,7 +1435,7 @@ impl Registry {
         }
 
         let read = steps.get_or_insert_with(|| {
-            crate::lanes::ci_steps_in(&workspace_root.join(".github").join("workflows"))
+            crate::workflows::ci_steps_in(&workspace_root.join(".github").join("workflows"))
         });
         let read = match read {
             Ok(read) => read,
@@ -1469,14 +1470,14 @@ impl Registry {
         }
 
         let lane_features = match selected {
-            Target::Integration(stem) => read.adopted.get(&(package.to_string(), stem.clone())),
+            Target::Integration(stem) => read.adopted(package, stem),
             Target::Lib => None,
         };
         match lane_features {
             None => problems.push(format!(
                 "names `{test}`, which cargo compiled as ignored, and no CI step runs the ignored \
                  cases of `{package} {selected}` wholesale. An ignored carrier runs only where a \
-                 lane step adopts its target"
+                 lane step adopts its target, whole and unconditionally"
             )),
             Some(features) if featured && !features.contains(CARRIER_FEATURE) => {
                 problems.push(format!(
@@ -1493,7 +1494,7 @@ impl Registry {
 }
 
 /// What the workflows run, or why they could not be read.
-type Steps = Result<crate::lanes::CiSteps, String>;
+type Steps = Result<crate::workflows::CiSteps, String>;
 
 /// What is wrong with the module path a carrier reference implies, or nothing.
 ///
@@ -2470,8 +2471,8 @@ mod tests {
 
     /// The one integration target the synthetic workspace holds, and the
     /// carriers in it: a plain test, a test an ignore-lane adopts, a test
-    /// ignored for a reason no lane names, and a plain and an adopted test
-    /// compiled only with the carrier feature on.
+    /// ignored for a reason no lane names, and a plain, an adopted and an
+    /// orphaned test compiled only with the carrier feature on.
     const CARRIER_SOURCE: &str = "\
 #[test]
 fn a_carrier() {}
@@ -2484,6 +2485,11 @@ fn a_featured_carrier() {}
 #[cfg(feature = \"induced-failure\")]
 #[ignore = \"soak-lane case: nightly work\"]
 fn an_adopted_featured_carrier() {}
+
+#[test]
+#[cfg(feature = \"induced-failure\")]
+#[ignore = \"flaky on this machine\"]
+fn an_orphan_featured_carrier() {}
 
 #[test]
 #[ignore = \"soak-lane case: nightly work\"]
@@ -2742,6 +2748,7 @@ fn a_carrier() {}
                     "an_adopted_carrier",
                     "an_adopted_featured_carrier",
                     "an_orphan_carrier",
+                    "an_orphan_featured_carrier",
                 ]
                 .into_iter()
                 .map(String::from)
@@ -2750,6 +2757,7 @@ fn a_carrier() {}
                     "an_adopted_carrier",
                     "an_adopted_featured_carrier",
                     "an_orphan_carrier",
+                    "an_orphan_featured_carrier",
                 ]
                 .into_iter()
                 .map(String::from)
@@ -2768,11 +2776,24 @@ fn a_carrier() {}
             .iter()
             .map(|command| format!("      - run: {command}\n"))
             .collect();
+        let steps = if steps.is_empty() {
+            " []\n".to_string()
+        } else {
+            format!("\n{steps}")
+        };
         std::fs::write(
             workflows.join("tests.yml"),
-            format!("jobs:\n  tests:\n    steps:\n{steps}"),
+            format!("jobs:\n  tests:\n    steps:{steps}"),
         )
         .expect("a workflow");
+    }
+
+    /// Write `yaml` as the scratch workspace's workflow `file`.
+    #[allow(clippy::disallowed_methods)] // Builds the workflow the step reader is tested against.
+    fn write_workflow(root: &Scratch, file: &str, yaml: &str) {
+        let workflows = root.join(".github/workflows");
+        std::fs::create_dir_all(&workflows).expect("a workflows directory");
+        std::fs::write(workflows.join(file), yaml).expect("a workflow");
     }
 
     /// What the audit says when the bound case cites `function` in the scratch
@@ -4032,6 +4053,161 @@ fn a_carrier() {}
             vec![&("demo".to_string(), Target::Integration("suite".to_string()))],
         );
         assert_eq!(featured.audit(root.root(), &listed), Vec::<String>::new());
+    }
+
+    /// The command a step runs to build the scratch package's tests with the
+    /// carrier feature on.
+    const FEATURE_BUILD: &str = "cargo test --locked -p demo --features induced-failure";
+
+    /// **A step naming the carrier's own target with the feature on runs it.**
+    #[test]
+    fn a_carrier_behind_the_feature_passes_where_a_step_runs_its_target_with_it() {
+        let root = scratch();
+        run_steps(&root, &[&format!("{FEATURE_BUILD} --test suite")]);
+        assert_eq!(
+            featured_audit(&root, "a_featured_carrier"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// **A step vouches only where it runs the feature build itself, whole and
+    /// unconditionally.** Each workflow below spells the command somewhere and
+    /// runs something else: arguments behind a redirection, a scalar continued
+    /// onto a filter, the command as a name, an argument to `echo`, a comment,
+    /// the far side of `||`, a line after `exit`, a heredoc, a variable, a
+    /// condition, a failure the job tolerates, a background job, a feature that
+    /// is not the carrier's, and a comment line between steps.
+    #[test]
+    fn a_step_that_only_spells_the_feature_build_is_no_such_step() {
+        let steps = [
+            format!("      - run: {FEATURE_BUILD} 2>&1 no_such_filter\n"),
+            format!("      - run: {FEATURE_BUILD} > out -- --skip x\n"),
+            format!("      - run: {FEATURE_BUILD} > out\n"),
+            format!("      - run: {FEATURE_BUILD}\n          no_such_filter\n"),
+            format!("      - run: >\n          {FEATURE_BUILD}\n          no_such_filter\n"),
+            format!("      - name: {FEATURE_BUILD}\n        run: echo done\n"),
+            format!("      - run: echo {FEATURE_BUILD}\n"),
+            format!("      - run: true # {FEATURE_BUILD}\n"),
+            format!("      - run: true || {FEATURE_BUILD}\n"),
+            format!("      - run: |\n          exit 0\n          {FEATURE_BUILD}\n"),
+            format!(
+                "      - run: |\n          cat <<EOF\n          {FEATURE_BUILD}\n          EOF\n"
+            ),
+            format!("      - env:\n          CMD: {FEATURE_BUILD}\n        run: $CMD\n"),
+            format!("      - if: false\n        run: {FEATURE_BUILD}\n"),
+            format!("      - continue-on-error: true\n        run: {FEATURE_BUILD}\n"),
+            format!("      - run: {FEATURE_BUILD} &\n"),
+            format!("      - run: {FEATURE_BUILD} || true\n"),
+            "      - run: cargo test --locked -p demo --features other\n".to_string(),
+            format!("      - run: echo before\n      # {FEATURE_BUILD}\n      - run: echo after\n"),
+        ];
+        let mut workflows: Vec<String> = steps
+            .iter()
+            .map(|step| format!("jobs:\n  tests:\n    steps:\n{step}"))
+            .collect();
+        workflows.push(format!(
+            "jobs:\n  tests:\n    if: false\n    steps:\n      - run: {FEATURE_BUILD}\n"
+        ));
+        workflows.push(format!(
+            "jobs:\n  tests:\n    continue-on-error: true\n    steps:\n      - run: \
+             {FEATURE_BUILD}\n"
+        ));
+        for workflow in workflows {
+            let root = scratch();
+            write_workflow(&root, "tests.yml", &workflow);
+            let found = featured_audit(&root, "a_featured_carrier");
+            assert!(
+                found.iter().any(|problem| problem
+                    .contains("no CI step runs `cargo test -p demo --features induced-failure`")),
+                "the workflow vouched for the carrier:\n{workflow}\n{found:#?}"
+            );
+        }
+    }
+
+    /// **An ignored carrier behind the feature needs a lane step that builds
+    /// with it, read off the step's environment value.** A YAML comment is not
+    /// part of that value, a condition on the step leaves it unrun, and an
+    /// argument the lane passes its harness that selects cases makes the step
+    /// run something other than the target's ignored cases.
+    #[test]
+    fn a_lane_step_that_only_spells_the_feature_is_no_such_step() {
+        let lane = ".github/scripts/lane-suite.sh demo suite";
+        for workflow in [
+            format!(
+                "jobs:\n  lanes:\n    steps:\n      - run: {lane}\n        env:\n          \
+                 LANE_FEATURES: other # induced-failure\n"
+            ),
+            format!(
+                "jobs:\n  lanes:\n    steps:\n      - if: false\n        run: {lane}\n        \
+                 env:\n          LANE_FEATURES: induced-failure\n"
+            ),
+            format!(
+                "jobs:\n  lanes:\n    steps:\n      - run: {lane} a_filter\n        env:\n          \
+                 LANE_FEATURES: induced-failure\n"
+            ),
+        ] {
+            let root = scratch();
+            write_workflow(&root, "lanes.yml", &workflow);
+            let found = featured_audit(&root, "an_adopted_featured_carrier");
+            assert!(
+                !found.is_empty(),
+                "the lane step vouched for the carrier:\n{workflow}"
+            );
+        }
+    }
+
+    /// **An ignored carrier behind the feature still opens its reason with a
+    /// lane prefix**, wherever a lane step builds its target with the feature.
+    #[test]
+    fn an_ignored_carrier_behind_the_feature_with_no_lane_prefix_is_caught() {
+        let root = scratch();
+        write_workflow(
+            &root,
+            "lanes.yml",
+            "jobs:\n  lanes:\n    steps:\n      - run: .github/scripts/lane-suite.sh demo suite\n        \
+             env:\n          LANE_FEATURES: induced-failure\n",
+        );
+        let found = featured_audit(&root, "an_orphan_featured_carrier");
+        assert!(
+            found.iter().any(|problem| problem
+                .contains("crates/demo/tests/suite.rs::an_orphan_featured_carrier")
+                && problem.contains("An ignored carrier runs only where a lane adopts it")),
+            "{found:#?}"
+        );
+    }
+
+    /// **A target cargo refused to build without the feature is not asked
+    /// again with it.** The refusal is what the audit reports; listing the
+    /// feature build instead would read a target that does not build as one
+    /// whose carriers sit behind the feature.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Writes a target that builds only with the feature.
+    fn a_target_cargo_refused_to_list_is_not_listed_with_the_feature() {
+        let root = cargo_workspace();
+        std::fs::write(
+            root.join("crates/demo/tests/gated.rs"),
+            "#[cfg(not(feature = \"induced-failure\"))]\ncompile_error!(\"builds only with the \
+             feature\");\n\n#[test]\nfn a_gated_carrier() {}\n",
+        )
+        .expect("a target that builds only with the feature");
+        write_workflow(
+            &root,
+            "tests.yml",
+            &format!("jobs:\n  tests:\n    steps:\n      - run: {FEATURE_BUILD}\n"),
+        );
+        let registry = cargo_registry("crates/demo/tests/gated.rs::a_gated_carrier");
+        let listed = registry.test_index(root.root());
+        assert!(
+            listed.featured.is_empty(),
+            "a target cargo refused to list was listed again with the feature: {listed:?}"
+        );
+        let found = registry.audit(root.root(), &listed);
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("listing `demo --test gated`'s tests failed")),
+            "{found:#?}"
+        );
     }
 
     #[test]
