@@ -1732,7 +1732,7 @@
       "name": "one-verdict-and-one-coercion-basis-per-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "One constraint engine answers for the intended post-state: for a given declaration, document and intended post-state, every write path returns the same verdict, judged by the derivation's own judge over the post-state's bytes; a plan refuses the violations it introduces on what it writes, and under force the `forced` list names exactly the findings its apply adds to what the validator held before. The write path coerces no value: a value is written exactly as authored and judged as written.",
+      "property": "One constraint engine answers for the intended post-state: every write verb compiles to operations the one applier judges with its one schema check, the derivation's own judge run over the post-state's bytes, so a preview and its apply, and every verb that produces a post-state, share one judge; a plan refuses the violations it introduces on what it writes, and under force the `forced` list names exactly the findings its apply adds to what the validator held before. The write path coerces no value: a value is written exactly as authored.",
       "sources": ["NRN-430", "NRN-474", "NRN-475", "NRN-37", "NRN-390", "NRN-119"],
       "binding": {
         "status": "bound",
@@ -1741,6 +1741,7 @@
           "crates/norn-host/tests/applies.rs::an_operations_preview_introducing_a_schema_violation_refuses_as_its_apply_does",
           "crates/norn-host/tests/verbs.rs::a_set_breaking_the_schema_is_refused_and_forced_lists_the_violation",
           "crates/norn-host/src/applier/tests.rs::a_forced_plan_previews_the_violation_it_lets_through_and_applies_the_same",
+          "crates/norn-host/tests/applies.rs::a_forced_operations_plan_previews_its_violation_and_applies_the_same",
           "crates/norn-host/tests/verbs.rs::a_forced_sets_violations_are_exactly_the_findings_its_apply_added",
           "crates/norn-text/tests/quoting.rs::hostile_block_values_read_back_as_themselves",
           "crates/norn-text/tests/quoting.rs::the_non_string_scalars_read_back_as_their_own_shapes",
