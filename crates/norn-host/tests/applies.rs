@@ -1014,7 +1014,8 @@ fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
 /// names the two documents of that stem before the move and two after, one
 /// of them at the moved path: which it names is not known, so the cascade
 /// leaves it as written and the forecast says why; several on both sides is
-/// no change the set records. The plan applies as previewed.
+/// no change the set records. The plan applies as previewed, and the link it
+/// skipped stands as written.
 #[test]
 fn a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link() {
     let (_sandbox, vault) = a_vault("host-applies-retargeted");
@@ -1072,6 +1073,12 @@ fn a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link() 
         panic!("an apply answered {:?}", applied.report);
     };
     assert_eq!(applied_plan, plan, "the apply answered another plan");
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("apply-twin-linker.md"))
+            .expect("the linker reads"),
+        "See [[apply-twin]].\n",
+        "the apply rewrote the link its forecast skipped"
+    );
 }
 
 /// Bytes that do not decode as a vault document: the host quarantines a file

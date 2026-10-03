@@ -418,7 +418,9 @@ fn a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds() {
 /// named.** A plan creating two folders deep under a missing folder and
 /// removing the last document of a nested folder is forecast at planning,
 /// then applied: the applied outcome's folders made and removed are compared
-/// with the forecast's as values, so neither side can drift from the other.
+/// with the forecast's as values, so neither side can drift from the other,
+/// and the targets it wrote are exactly the transitions the forecast came
+/// with.
 #[test]
 fn the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named() {
     let mut fixture = Fixture::new(&[("keep.md", "# Keep\n"), ("old/sub/last.md", "# Last\n")]);
@@ -432,7 +434,14 @@ fn the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named() {
         "the case forecasts a folder both ways: {:?}",
         resolution.forecast
     );
+    let planned: Vec<(String, TargetResult)> = resolution
+        .plan
+        .transitions
+        .iter()
+        .map(|transition| (transition.path.as_str().to_string(), TargetResult::Wrote))
+        .collect();
     let applied = applied(fixture.apply(resolution.plan));
+    assert_eq!(results(&applied), planned);
     assert_eq!(applied.folders_made, resolution.forecast.folders_made);
     assert_eq!(applied.folders_removed, resolution.forecast.folders_removed);
     assert_eq!(

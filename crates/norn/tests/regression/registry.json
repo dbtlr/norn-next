@@ -1616,7 +1616,7 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 4,
-      "property": "Forecast and apply are one classifier over the same bytes. What apply touches is a subset of what the forecast reported, and under no concurrent drift the two are equal set-wise and count-wise, including skips with their reasons. Every occurrence is classified individually rather than by first raw match, and an unresolved or ambiguous match is never rewritten silently, but refused or reported under the same classification apply will use.",
+      "property": "Forecast and apply are one classifier over the same bytes. What apply touches is a subset of what the forecast reported, and under no concurrent drift the targets an apply writes are the transitions its forecast came with and the folders it makes and removes are the ones its forecast names; each occurrence the forecast skips, with its reason, is one the apply leaves as written. Every occurrence is classified individually rather than by first raw match, and an unresolved or ambiguous match is never rewritten silently, but refused or reported under the same classification apply will use.",
       "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
       "binding": {
         "status": "bound",
@@ -1625,6 +1625,7 @@
           "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses",
           "crates/norn-host/tests/applies.rs::a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses",
           "crates/norn-host/src/applier/tests.rs::each_document_local_kind_previews_as_it_applies_and_a_re_send_is_found",
+          "crates/norn-host/src/applier/tests.rs::the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named",
           "crates/norn-host/tests/applies.rs::a_previewed_move_records_the_link_it_moves_and_applies_as_previewed",
           "crates/norn-host/src/applier/tests/differential.rs::every_planned_move_leaves_each_link_naming_what_it_named_or_says_why",
           "crates/norn-host/tests/applies.rs::a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link",
