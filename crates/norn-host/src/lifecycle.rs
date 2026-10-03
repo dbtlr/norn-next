@@ -4527,8 +4527,9 @@ impl<O: EntryOps> Host<O> {
     /// Everything runs under the registration lock, and in this order: a name
     /// the set serves is refused; the root is admitted at its canonical
     /// spelling, or refused where it is no readable directory; a root a served
-    /// vault already reaches is refused naming every such vault; the file is
-    /// written, or refused where it already records the name; and only then
+    /// vault already reaches is refused naming every such vault; a schema file
+    /// another registration uses is refused naming every such registration;
+    /// the file is written, or refused where it already records the name; and only then
     /// does the set change. So every refusal leaves both as they stood, and
     /// two registrations of one root cannot both find it unserved. The read of
     /// the served roots is best-effort — the classification the join runs is
@@ -4545,6 +4546,7 @@ impl<O: EntryOps> Host<O> {
         }
         let (admitted, identity) = crate::registry::admitted(registration)?;
         unclaimed_by_another(shared, &name, identity)?;
+        crate::registry::unshared_schema(&shared.entries.registrations(), &admitted)?;
         shared
             .ops
             .record(&admitted)
@@ -4638,7 +4640,11 @@ impl<O: EntryOps> Host<O> {
     /// directory it reaches now. An edit that leaves every field as it stands,
     /// on an entry the admission finds idle and unparked in the same hold,
     /// answers the registration as it stands, and writes and withdraws
-    /// nothing.
+    /// nothing. An edit that moves the schema file the registration is served
+    /// under, by its source or by a root with no source, is refused where
+    /// another registration already uses the file at the new place; an edit
+    /// that leaves the file where it was is not refused for a sharing already
+    /// standing.
     ///
     /// **Then the change takes the path an unregistration takes.** The entry
     /// is withdrawn from service under its own gate, in the hold that finds
@@ -4691,6 +4697,13 @@ impl<O: EntryOps> Host<O> {
             }
         }
         amended.schema_source = edit.schema_source.applied_to(amended.schema_source.take());
+        // Only a move of the effective schema file is weighed: a sharing that
+        // already stands is the doctor's to name, and no edit that leaves the
+        // file where it was, a root move under a source included, is refused
+        // for it.
+        if crate::registry::schema_file_moves(current, &amended) {
+            crate::registry::unshared_schema(&shared.entries.registrations(), &amended)?;
+        }
         amended.poll_backend = edit.poll_backend.applied_to(amended.poll_backend);
         if amended == *current {
             let state = entry.gate.lock().expect("entry gate poisoned");
@@ -27858,6 +27871,181 @@ mod tests {
             assert_eq!(report.registration.schema_source, None);
             assert_eq!(recorded(&ops, &name), Some(report.registration.clone()));
             assert_eq!(attached_under(&host, &ops, &name), report.registration);
+        }
+
+        /// A vault with a real schema file at its in-vault default, under a
+        /// scratch directory of its own: the root and the file's path.
+        #[cfg(unix)]
+        fn vault_with_schema(
+            scratch: &std::path::Path,
+            label: &str,
+        ) -> (std::path::PathBuf, std::path::PathBuf) {
+            let root = scratch.join(label);
+            std::fs::create_dir_all(root.join(".norn")).unwrap();
+            let schema = root.join(".norn/schema.yaml");
+            std::fs::write(&schema, b"").unwrap();
+            (root, schema)
+        }
+
+        /// **A registration whose schema file is the one another registration
+        /// uses is refused `host/shared-schema` naming both**, however the
+        /// file is spelled: here a link to the other vault's default schema.
+        /// Nothing is written and the set does not change.
+        #[cfg(unix)]
+        #[test]
+        fn a_registration_over_a_schema_file_another_uses_is_refused_and_writes_nothing() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("register-shared-schema");
+            let (alpha_root, schema) = vault_with_schema(scratch.root(), "alpha");
+            let beta_root = scratch.root().join("beta");
+            std::fs::create_dir_all(&beta_root).unwrap();
+            let link = scratch.root().join("beta-schema.yaml");
+            std::os::unix::fs::symlink(&schema, &link).unwrap();
+            let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
+            register(&host, &alpha, &alpha_root).expect("the first vault is registered");
+
+            let refusal = host
+                .vault_register(&RegisterParams::new(
+                    RegistryEntry::new(beta.clone(), VaultRoot::new(&beta_root).unwrap())
+                        .with_schema_source(SchemaSource::new(&link).unwrap()),
+                ))
+                .expect_err("a schema file another registration uses was registered");
+
+            assert_eq!(
+                refusal.detail(),
+                &ErrorDetail::shared_schema(colliding(&alpha, &beta))
+            );
+            assert_eq!(listed(&host), [alpha]);
+            assert_eq!(recorded(&ops, &beta), None);
+        }
+
+        /// **A registration over a schema file of its own is admitted**, beside
+        /// vaults that keep theirs in the vault.
+        #[cfg(unix)]
+        #[test]
+        fn a_registration_over_a_schema_file_of_its_own_is_admitted() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("register-own-schema");
+            let (alpha_root, _) = vault_with_schema(scratch.root(), "alpha");
+            let beta_root = scratch.root().join("beta");
+            std::fs::create_dir_all(&beta_root).unwrap();
+            let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Created(&[]), 2);
+            register(&host, &alpha, &alpha_root).unwrap();
+
+            host.vault_register(&RegisterParams::new(
+                RegistryEntry::new(beta.clone(), VaultRoot::new(&beta_root).unwrap())
+                    .with_schema_source(
+                        SchemaSource::new(scratch.root().join("beta-schema.yaml")).unwrap(),
+                    ),
+            ))
+            .expect("a schema file of its own is registered");
+
+            assert_eq!(listed(&host), [alpha, beta]);
+        }
+
+        /// **A `vault set` that points a vault's schema source at the file
+        /// another uses is refused, and the registration stands as it was.**
+        #[cfg(unix)]
+        #[test]
+        fn a_set_schema_source_over_a_file_another_uses_is_refused() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-shared-schema");
+            let (alpha_root, schema) = vault_with_schema(scratch.root(), "alpha");
+            let beta_root = scratch.root().join("beta");
+            std::fs::create_dir_all(&beta_root).unwrap();
+            let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Created(&[(&alpha, alpha_root.as_path()), (&beta, beta_root.as_path())]),
+                2,
+            );
+            record_startup(&host, &ops, &beta);
+            let standing = listed_registrations(&host);
+
+            let refusal = set(
+                &host,
+                VaultSetParams::new(beta.clone())
+                    .with_schema_source(VaultChange::set(SchemaSource::new(&schema).unwrap())),
+            )
+            .expect_err("a schema file another registration uses was set");
+
+            assert_eq!(
+                refusal.detail(),
+                &ErrorDetail::shared_schema(colliding(&alpha, &beta))
+            );
+            assert_eq!(listed_registrations(&host), standing);
+            assert!(ops.amendments.lock().unwrap().is_empty());
+        }
+
+        /// **A `vault set` that moves a vault's root onto a directory whose
+        /// default schema another registration uses as its source is refused**:
+        /// the effective schema file moves with the root.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_move_onto_a_schema_file_another_uses_is_refused() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-root-shared-schema");
+            let (target_root, schema) = vault_with_schema(scratch.root(), "target");
+            let (alpha_root, beta_root) =
+                (scratch.root().join("alpha"), scratch.root().join("beta"));
+            for root in [&alpha_root, &beta_root] {
+                std::fs::create_dir_all(root).unwrap();
+            }
+            let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+            let sourced = RegistryEntry::new(alpha.clone(), VaultRoot::new(&alpha_root).unwrap())
+                .with_schema_source(SchemaSource::new(&schema).unwrap());
+            let host = host_without_ambient_polling(
+                Arc::clone(&ops),
+                Roots::Registered(&[
+                    sourced,
+                    RegistryEntry::new(beta.clone(), VaultRoot::new(&beta_root).unwrap()),
+                ]),
+                2,
+            );
+            record_startup(&host, &ops, &beta);
+
+            let refusal = set(
+                &host,
+                VaultSetParams::new(beta.clone())
+                    .with_root(VaultReplace::set(VaultRoot::new(&target_root).unwrap())),
+            )
+            .expect_err("a root whose default schema another uses was set");
+
+            assert_eq!(
+                refusal.detail(),
+                &ErrorDetail::shared_schema(colliding(&alpha, &beta))
+            );
+        }
+
+        /// **An edit that leaves the schema file alone is not refused for a
+        /// sharing that already stood**: the doctor names it, and an operator
+        /// can still change a backend.
+        #[cfg(unix)]
+        #[test]
+        fn an_edit_that_leaves_the_schema_file_is_not_refused_for_an_existing_share() {
+            let ops = Arc::new(FakeOps::default());
+            let scratch = temp_base("set-existing-share");
+            let (_, schema) = vault_with_schema(scratch.root(), "schemas");
+            let [alpha, beta] = ["alpha", "beta"].map(|name| VaultName::new(name).unwrap());
+            let roots = [&alpha, &beta].map(|name| {
+                let root = scratch.root().join(name.to_string());
+                std::fs::create_dir_all(&root).unwrap();
+                RegistryEntry::new(name.clone(), VaultRoot::new(&root).unwrap())
+                    .with_schema_source(SchemaSource::new(&schema).unwrap())
+            });
+            let host = host_without_ambient_polling(Arc::clone(&ops), Roots::Registered(&roots), 2);
+            record_startup(&host, &ops, &beta);
+
+            let report = set(
+                &host,
+                VaultSetParams::new(beta.clone())
+                    .with_poll_backend(VaultChange::set(PollBackend::Poll)),
+            )
+            .expect("an edit that leaves the schema file is admitted");
+
+            assert_eq!(report.registration.poll_backend, Some(PollBackend::Poll));
         }
 
         /// A watch backend an edit pins is recorded, and the attach that

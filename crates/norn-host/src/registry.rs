@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use norn_config::IN_VAULT_SCHEMA_PATH;
 use norn_config::registry::{Entry, Registry, VaultRoot};
-use norn_fs::{Identity, Refusal, canonical_spelling, path_identity, readable_directory};
+use norn_fs::{
+    Identity, Refusal, canonical_spelling, canonical_spelling_through_links, path_identity,
+    readable_directory,
+};
 use norn_wire::{
     DoctorRegistryParams, DoctorRegistryReport, EngineHealth, ErrorEnvelope, ListParams,
     ListReport, MaintainerIdentity, NameSet, RegisterParams, RegisterReport, RegistryProblem,
@@ -167,8 +171,11 @@ impl<O: EntryOps> Host<O> {
     /// incumbent serving that root goes on serving it. That read is
     /// best-effort: the classification the join runs is the authority, and
     /// where the filesystem moved between the two and the join parks the
-    /// root, the registration stands and `published` carries the park. A
-    /// registry file that cannot be written is refused
+    /// root, the registration stands and `published` carries the park. **A
+    /// schema file another registration uses is refused `host/shared-schema`**
+    /// naming every registration that uses it beside this one, compared by
+    /// file identity, because a schema write for one vault rewrites the file
+    /// the other reads. A registry file that cannot be written is refused
     /// `host/registry-unwritable`, and the serving set does not change.
     ///
     /// Nothing is attached here. The entry joins unattached, and the demand
@@ -240,18 +247,15 @@ impl<O: EntryOps> Host<O> {
     /// entry or a vault: the statuses are observations that record no demand
     /// and schedule nothing. **The sanity pass is `doctor`'s one reading of
     /// a root's identity** — it states each served root once and lists each
-    /// that resolves — and no lock is held while it does. The statuses read
+    /// that resolves — and it names registrations using one schema file, which
+    /// registration refuses but a hand edit of the file can still make; no
+    /// lock is held while it does. The statuses read
     /// inside the vaults as a status does: the two control files of an entry
     /// serving active fingerprints, and the `.gitignore` of one whose last
     /// attachment staged shadows in the vault-local fallback.
     pub fn doctor_registry(&self, _params: &DoctorRegistryParams) -> DoctorRegistryReport {
         let statuses = self.statuses();
-        let registry = sanity(statuses.iter().map(|status| {
-            (
-                &status.registration.name,
-                status.registration.root.as_path(),
-            )
-        }));
+        let registry = sanity(statuses.iter().map(|status| &status.registration));
         let engines = statuses.iter().map(|status| {
             EngineHealth::new(
                 status.registration.name.clone(),
@@ -283,6 +287,12 @@ impl<O: EntryOps> Host<O> {
     /// the derived state as every move does, because the store does not
     /// record the directory it was derived from. An edit that changes nothing
     /// answers the registration as it stands, and writes nothing.
+    ///
+    /// **An edit that moves the root or the schema source is refused
+    /// `host/shared-schema`** where the schema file the vault would then be
+    /// served under is the one another registration uses; an edit of another
+    /// field is not refused for a sharing already standing, which `doctor`
+    /// names.
     ///
     /// **The serving set is authoritative over a hand edit of the registry
     /// file.** The edit is made to the registration this host serves, and the
@@ -332,8 +342,9 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
-/// Whether the registry is in order over the served `roots`, given ascending
-/// by name: every root there, readable, and reached by one registration.
+/// Whether the registry is in order over the served `entries`, given ascending
+/// by name: every root there, readable, and reached by one registration, and
+/// every schema file used by one registration.
 ///
 /// **Identity is the classification a recheck runs.** The roots are grouped by
 /// the identity each resolves to through [`roots_by_identity`], and a group
@@ -345,12 +356,19 @@ impl<O: EntryOps> Host<O> {
 /// directory, and it lists — and a root that is not is unreadable too, so a
 /// registration whose root became a file or lost its permissions is named.
 ///
-/// The problems come in name order. The cost is one stat of every root and,
-/// for each that resolves, one stat and one listing more.
-pub(crate) fn sanity<'a>(
-    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
-) -> RegistrySanity {
-    let roots: Vec<(&VaultName, &Path)> = roots.into_iter().collect();
+/// **A schema file two or more registrations use is one
+/// [`RegistryProblem::SharedSchema`]** naming them all, unless it is the
+/// default schema file of a root they share, which the duplicate root names
+/// once. The problems come in name order
+/// for the roots, then the shared schema files in the order their identities
+/// sort. The cost is one stat of every root and, for each that resolves, one
+/// stat and one listing more, and one stat and resolution of every schema file.
+pub(crate) fn sanity<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> RegistrySanity {
+    let entries: Vec<&Entry> = entries.into_iter().collect();
+    let roots: Vec<(&VaultName, &Path)> = entries
+        .iter()
+        .map(|entry| (&entry.name, entry.root.as_path()))
+        .collect();
     let mut refused = BTreeMap::<VaultName, String>::new();
     let Ok(identities) = roots_by_identity(roots.iter().copied(), |name, refusal| {
         refused.insert(name.clone(), refusal.to_string());
@@ -385,7 +403,108 @@ pub(crate) fn sanity<'a>(
             problems.push(RegistryProblem::duplicate_root(conflict.aliases().clone()));
         }
     }
+    // Names sharing one root share its default schema file, and that is the
+    // duplicate root's to name: one cause is named once. A source they share
+    // is a cause of its own, which a fix of the root leaves standing.
+    let sourced: BTreeSet<&VaultName> = entries
+        .iter()
+        .filter(|entry| entry.schema_source.is_some())
+        .map(|entry| &entry.name)
+        .collect();
+    let defaults_of_one_root = |aliases: &BTreeSet<VaultName>| {
+        aliases
+            .first()
+            .and_then(|first| groups.get(first))
+            .is_some_and(|root| aliases.is_subset(root))
+            && aliases.iter().all(|alias| !sourced.contains(alias))
+    };
+    for aliases in schema_groups(entries.iter().copied()).into_values() {
+        if defaults_of_one_root(&aliases) {
+            continue;
+        }
+        if let Ok(conflict) = AliasConflict::new(aliases) {
+            problems.push(RegistryProblem::shared_schema(conflict.aliases().clone()));
+        }
+    }
     RegistrySanity::problems(problems).unwrap_or(RegistrySanity::sound())
+}
+
+/// The one schema file a registration reads and writes, as the filesystem
+/// names it.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SchemaFile {
+    /// A file the filesystem answers for: two spellings, a link and a hard
+    /// link to one file are one identity.
+    Present(Identity),
+    /// A file nothing stands at yet, which has no identity: the spelling its
+    /// existing ancestors resolve to, so two sources naming one absent file
+    /// are still one file once a write creates it.
+    Absent(PathBuf),
+}
+
+/// The schema file `entry` is served under: its `schema_source`, or the
+/// in-vault default beneath its root.
+///
+/// A file the filesystem refuses to answer for is judged by its spelling,
+/// the same as an absent one: an attach refuses such a file, so no write
+/// reaches it through a vault.
+fn schema_file(entry: &Entry) -> SchemaFile {
+    let path = entry.schema_source.as_ref().map_or_else(
+        || entry.root.as_path().join(IN_VAULT_SCHEMA_PATH),
+        |source| source.as_path().to_owned(),
+    );
+    match path_identity(&path) {
+        Ok(Some(identity)) => SchemaFile::Present(identity),
+        _ => SchemaFile::Absent(canonical_spelling_through_links(&path)),
+    }
+}
+
+/// Whether amending `current` to `amended` changes the schema file the
+/// registration is served under: its source, or, with no source, the default
+/// beneath a root that moved.
+pub(crate) fn schema_file_moves(current: &Entry, amended: &Entry) -> bool {
+    amended.schema_source != current.schema_source
+        || (amended.schema_source.is_none() && amended.root != current.root)
+}
+
+/// Every name among `entries` that uses each schema file, one stat per
+/// entry. A file only one name uses is a group of one.
+fn schema_groups<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> BTreeMap<SchemaFile, BTreeSet<VaultName>> {
+    let mut groups = BTreeMap::<SchemaFile, BTreeSet<VaultName>>::new();
+    for entry in entries {
+        groups
+            .entry(schema_file(entry))
+            .or_default()
+            .insert(entry.name.clone());
+    }
+    groups
+}
+
+/// Refuse `candidate` where the schema file it would be served under is the
+/// one a registration among `served` other than itself already uses, naming
+/// every such registration beside it.
+///
+/// A schema write for a vault's in-vault default rewrites the file any
+/// registration sourcing it reads, and `vault migrate` (NORN-224) rewrites the
+/// active schema wherever it lives, so a file two registrations use is a file
+/// one vault's write rewrites under the other. The comparison is the file's identity, never its spelling.
+pub(crate) fn unshared_schema(
+    served: &[Entry],
+    candidate: &Entry,
+) -> Result<(), RegistrationRefusal> {
+    let others = served.iter().filter(|entry| entry.name != candidate.name);
+    let wanted = schema_file(candidate);
+    let mut sharing: BTreeSet<VaultName> = others
+        .filter(|entry| schema_file(entry) == wanted)
+        .map(|entry| entry.name.clone())
+        .collect();
+    sharing.insert(candidate.name.clone());
+    match AliasConflict::new(sharing) {
+        Ok(conflict) => Err(RegistrationRefusal::SharedSchema(conflict)),
+        Err(_) => Ok(()),
+    }
 }
 
 /// Why a registration was not recorded in the registry file.
@@ -481,6 +600,9 @@ pub(crate) enum RegistrationRefusal {
     /// Another registration already reaches the root. Every name here reaches
     /// it, the one asked for among them.
     DuplicateRoot(AliasConflict),
+    /// Another registration already uses the schema file. Every name here
+    /// uses it, the one asked for among them.
+    SharedSchema(AliasConflict),
     /// The root does not exist, is not a directory, or cannot be read: the
     /// registry's account of it.
     RootRefused(String),
@@ -677,7 +799,7 @@ fn conflicts_from_identities(
 #[allow(clippy::disallowed_methods)] // fixtures impersonate external filesystem retargets.
 mod tests {
     use super::*;
-    use norn_config::registry::VaultRoot;
+    use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_testkit::scratch::Scratch;
 
     fn entry(name: &str, root: &str) -> Entry {
@@ -970,11 +1092,7 @@ mod tests {
 
     /// The registry's sanity over `registrations`, as a doctor reads it.
     fn sanity_over(registrations: &[Entry]) -> RegistrySanity {
-        sanity(
-            registrations
-                .iter()
-                .map(|entry| (&entry.name, entry.root.as_path())),
-        )
+        sanity(registrations)
     }
 
     fn name(name: &str) -> VaultName {
@@ -1053,6 +1171,205 @@ mod tests {
             })
             .collect();
         assert_eq!(unreadable, [&name("file"), &name("looping")]);
+    }
+
+    /// A registration whose schema source is `source`, over `root`.
+    fn sourced(name: &str, root: &Path, source: &Path) -> Entry {
+        served(name, root).with_schema_source(SchemaSource::new(source).unwrap())
+    }
+
+    /// **Registrations using one schema file are one problem naming them
+    /// all**, whether the file is a default in one vault and a source for
+    /// another, or reached through a link.
+    #[cfg(unix)]
+    #[test]
+    fn registrations_using_one_schema_file_are_a_shared_schema_naming_them_all() {
+        let tree = Tree::new("sanity-shared-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        std::fs::create_dir_all(alpha.join(".norn")).unwrap();
+        let schema = alpha.join(".norn/schema.yaml");
+        std::fs::write(&schema, b"").unwrap();
+        let registrations = [
+            served("alpha", &alpha),
+            sourced("beta", &beta, &tree.link("beta-schema.yaml", &schema)),
+            served("gamma", &tree.dir("gamma")),
+        ];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap()
+        );
+    }
+
+    /// **A schema file that is not there yet is shared by the spelling two
+    /// sources give it**, and vaults whose default schemas are both absent
+    /// share nothing.
+    #[test]
+    fn an_absent_schema_file_is_shared_only_by_a_spelling_both_name() {
+        let tree = Tree::new("sanity-absent-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        let absent = tree.path("elsewhere/schema.yaml");
+        assert_eq!(
+            sanity_over(&[served("alpha", &alpha), served("beta", &beta)]),
+            RegistrySanity::sound()
+        );
+        assert_eq!(
+            sanity_over(&[
+                sourced("alpha", &alpha, &absent),
+                sourced("beta", &beta, &absent)
+            ]),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap()
+        );
+    }
+
+    /// **Names sharing a root leave to the duplicate root only the default
+    /// schema file the root gives them**: sources they also share are a second
+    /// cause and named, and defaults shared with no root in common are named.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_default_schema_shared_through_one_root_is_the_duplicate_roots_to_name() {
+        let tree = Tree::new("sanity-duplicate-root-schema");
+        let shared = tree.dir("shared");
+        let alias = tree.link("alias", &shared);
+        let third = tree.path("third.yaml");
+        let duplicate = || {
+            RegistryProblem::duplicate_root(NameSet::new([name("alpha"), name("beta")]).unwrap())
+        };
+
+        let both_sourced = [
+            sourced("alpha", &shared, &third),
+            sourced("beta", &alias, &third),
+        ];
+        assert_eq!(
+            sanity_over(&both_sourced),
+            RegistrySanity::problems([
+                duplicate(),
+                RegistryProblem::shared_schema(
+                    NameSet::new([name("alpha"), name("beta")]).unwrap()
+                ),
+            ])
+            .unwrap(),
+            "a source both name outlives a fix of their root"
+        );
+
+        let one_sourced_apart = [
+            served("alpha", &shared),
+            served("beta", &alias),
+            sourced("gamma", &alias, &tree.path("gamma.yaml")),
+        ];
+        assert_eq!(
+            sanity_over(&one_sourced_apart),
+            RegistrySanity::problems([RegistryProblem::duplicate_root(
+                NameSet::new([name("alpha"), name("beta"), name("gamma")]).unwrap()
+            )])
+            .unwrap(),
+            "the defaults two of three names share are the root's"
+        );
+
+        let norn = tree.dir("common/.norn");
+        let (delta, epsilon) = (tree.dir("delta"), tree.dir("epsilon"));
+        std::os::unix::fs::symlink(&norn, delta.join(".norn")).unwrap();
+        std::os::unix::fs::symlink(&norn, epsilon.join(".norn")).unwrap();
+        assert_eq!(
+            sanity_over(&[served("delta", &delta), served("epsilon", &epsilon)]),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("delta"), name("epsilon")]).unwrap()
+            )])
+            .unwrap(),
+            "defaults shared through a linked .norn share no root"
+        );
+    }
+
+    /// **A hard link is the one spelling no path resolution unifies**, so only
+    /// the file's identity names it one file with its original.
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_a_schema_file_is_the_same_schema_file() {
+        let tree = Tree::new("sanity-hard-link-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        std::fs::create_dir_all(alpha.join(".norn")).unwrap();
+        let schema = alpha.join(".norn/schema.yaml");
+        std::fs::write(&schema, b"").unwrap();
+        let hard = tree.path("hard.yaml");
+        std::fs::hard_link(&schema, &hard).unwrap();
+        let registrations = [served("alpha", &alpha), sourced("beta", &beta, &hard)];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap()
+        );
+    }
+
+    /// **An absent file named through a link to an existing ancestor is the
+    /// file its resolved spelling names.**
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_schema_file_reached_through_a_linked_ancestor_is_shared() {
+        let tree = Tree::new("sanity-absent-linked-ancestor");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        let through = tree.link("alink", &alpha).join(".norn/schema.yaml");
+        assert!(
+            unshared_schema(
+                &[served("alpha", &alpha)],
+                &sourced("beta", &beta, &through)
+            )
+            .is_err()
+        );
+    }
+
+    /// **A source spelled through a link that dangles now is refused once its
+    /// target is where another registration's schema will be**, so an init
+    /// that creates the file afterwards cannot make two vaults share it.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_through_a_dangling_link_is_the_file_the_link_will_reach() {
+        let tree = Tree::new("sanity-dangling-link-schema");
+        let (alpha, beta) = (tree.dir("alpha"), tree.dir("beta"));
+        let link = tree.link("link", &alpha.join(".norn"));
+        let candidate = sourced("beta", &beta, &link.join("schema.yaml"));
+        assert!(unshared_schema(&[served("alpha", &alpha)], &candidate).is_err());
+
+        std::fs::create_dir_all(alpha.join(".norn")).unwrap();
+        let file_link = tree.link("file-link.yaml", &alpha.join(".norn/schema.yaml"));
+        let registrations = [served("alpha", &alpha), sourced("beta", &beta, &file_link)];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap(),
+            "a source that is itself a dangling link to another vault's absent default"
+        );
+    }
+
+    /// Only a change of the file a registration is served under is a move of
+    /// its schema file: a root that moves under a source leaves the file where
+    /// it was.
+    #[test]
+    fn a_root_move_under_a_schema_source_does_not_move_the_schema_file() {
+        let source = SchemaSource::new("/schemas/one.yaml").unwrap();
+        let other = SchemaSource::new("/schemas/two.yaml").unwrap();
+        let plain = |root: &str| served("alpha", Path::new(root));
+        let sourced_at =
+            |root: &str, source: &SchemaSource| plain(root).with_schema_source(source.clone());
+        assert!(!schema_file_moves(
+            &sourced_at("/a", &source),
+            &sourced_at("/b", &source)
+        ));
+        assert!(schema_file_moves(
+            &sourced_at("/a", &source),
+            &sourced_at("/a", &other)
+        ));
+        assert!(schema_file_moves(&plain("/a"), &plain("/b")));
+        assert!(schema_file_moves(&plain("/a"), &sourced_at("/a", &source)));
+        assert!(!schema_file_moves(&plain("/a"), &plain("/a")));
     }
 
     /// A conflict is between at least two registrations, and the floor is the

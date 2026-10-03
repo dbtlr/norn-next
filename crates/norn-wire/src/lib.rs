@@ -309,7 +309,7 @@
 //! [`UntrustedReason::store_damaged_awaiting_demand`],
 //! [`UntrustedReason::schema_unreadable`],
 //! [`UntrustedReason::leg_unwound`],
-//! [`NameSet::new`], [`ErrorDetail::duplicate_root`],
+//! [`NameSet::new`], [`ErrorDetail::duplicate_root`], [`ErrorDetail::shared_schema`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
 //! [`ErrorDetail::already_served`], [`ErrorDetail::entry_held`],

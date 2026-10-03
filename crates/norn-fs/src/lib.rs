@@ -121,7 +121,8 @@ pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState, path_identity, readable_directory};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{
-    CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer, canonical_spelling,
+    CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer,
+    canonical_spelling, canonical_spelling_through_links,
 };
 pub use read::{
     PathKind, ReadAndHash, read_and_hash, read_if_present_and_hash, read_optional_and_hash,
