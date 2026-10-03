@@ -53,7 +53,9 @@
 //! `host/registry-unwritable` where the registry file could not be read or
 //! replaced, and the pre-check codes a register meets where the edit moves the
 //! root: `host/duplicate-root` where another registration already reaches the
-//! new root, and `host/entry-untrusted` where the new root itself could not be
+//! new root, `host/shared-schema` where an edit of the root or the schema
+//! source would serve the vault under a schema file another registration
+//! uses, and `host/entry-untrusted` where the new root itself could not be
 //! read — carrying the environmental-refusal reason, which is the rendering
 //! the registry recheck gives such a root. A root move is also refused as
 //! `vault unregister` is refused over the derived state it discards:

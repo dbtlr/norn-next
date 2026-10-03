@@ -257,6 +257,7 @@ impl RegistrationRefusal {
                 ErrorDetail::already_served(name.clone()),
             ),
             RegistrationRefusal::DuplicateRoot(conflict) => duplicate_registration(name, &conflict),
+            RegistrationRefusal::SharedSchema(conflict) => shared_schema(name, &conflict),
             RegistrationRefusal::RootRefused(refusal) => root_refused(refusal),
             RegistrationRefusal::MaintainerContended(incumbent) => maintainer_contended(incumbent),
             RegistrationRefusal::StateRefused(refusal) => ErrorEnvelope::new(
@@ -289,6 +290,26 @@ fn duplicate_registration(name: &VaultName, conflict: &AliasConflict) -> ErrorEn
     ErrorEnvelope::new(
         format!("{incumbents} already reaches this root, so `{name}` is not registered over it"),
         ErrorDetail::duplicate_root(conflict.aliases().clone()),
+    )
+}
+
+/// The envelope a registration over a schema file other registrations
+/// already use is refused with, naming every one of them beside `name`.
+fn shared_schema(name: &VaultName, conflict: &AliasConflict) -> ErrorEnvelope {
+    let incumbents = conflict
+        .aliases()
+        .names()
+        .iter()
+        .filter(|alias| *alias != name)
+        .map(|alias| format!("`{alias}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ErrorEnvelope::new(
+        format!(
+            "{incumbents} already uses this schema file, so `{name}` is not registered over it: \
+             a schema write for one vault would rewrite the other's"
+        ),
+        ErrorDetail::shared_schema(conflict.aliases().clone()),
     )
 }
 
