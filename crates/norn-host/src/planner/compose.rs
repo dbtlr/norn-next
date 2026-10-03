@@ -526,8 +526,10 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// it is absent, replaced where it stands.
     ///
     /// **A control file is read as one, never as a document**
-    /// ([`VaultView::control_entry`]), at the one path its role lives at
-    /// ([`control_path`]), and its content must read as its role's model
+    /// ([`VaultView::control_entry`]), at the one path its role is named at
+    /// ([`control_path`]), which the view reads where the role lives — the
+    /// schema where the registration reads it (ADR 0034) — and its content
+    /// must read as its role's model
     /// ([`unreadable_as_role`]): a write the next reload would refuse does
     /// not resolve. No folder is counted for it, since no document of the
     /// plan stands beside it.

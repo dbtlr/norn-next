@@ -11,6 +11,7 @@ use norn_wire::{
 };
 
 use super::{Fixture, applied, deleting, editing, moving, path};
+use crate::planner::control::SchemaPlace;
 use crate::planner::resolve::Resolution;
 use crate::planner::view::TreeView;
 
@@ -30,7 +31,8 @@ impl Fixture {
     /// `operations` planned against the vault, its links judged on the store
     /// as it stands, whether or not every operation resolves.
     pub(super) fn planned(&self, operations: Vec<Operation>) -> Resolution {
-        let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
+        let view = TreeView::open(&self.vault, &self.exclusions, &SchemaPlace::default())
+            .expect("a vault");
         let links = self.links();
         crate::planner::resolve::resolve(
             AuthoredPlan::new(crate::planner::links::testing::vault(), operations),
@@ -332,7 +334,8 @@ fn a_planned_cascade_recomposes_and_its_set_reproduces() {
 fn a_cascade_carried_into_planning_is_a_fault() {
     let fixture = Fixture::new(&[("a.md", "A\n"), ("h.md", "[[a]]\n")]);
     let carrying = moving("a.md", "b.md").with_cascade(vec![wikilink("h.md", "zzz", "b")]);
-    let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &SchemaPlace::default())
+        .expect("a vault");
     let links = fixture.links();
     let failure = crate::planner::resolve::resolve(
         AuthoredPlan::new(crate::planner::links::testing::vault(), vec![carrying]),

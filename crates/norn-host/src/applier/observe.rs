@@ -178,7 +178,8 @@ pub(super) fn observe<V: VaultView>(
 
 /// What one transition's target holds: a control file read as one
 /// ([`VaultView::control_entry`]) where the target is at the path a control
-/// file lives at, and a document otherwise.
+/// file is named at — the schema read where the registration reads it — and
+/// a document otherwise.
 fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V::Error> {
     let Some(identity) = identity(view.normalizer(), transition.path.as_str()) else {
         return Ok(TargetState::Unplaced);

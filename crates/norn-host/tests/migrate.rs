@@ -381,6 +381,92 @@ mod over_test_ladders {
         );
     }
 
+    /// The schema `vault` reads: its active fingerprint.
+    fn active_schema(host: &attach::ServingHost, vault: &attach::Vault) -> norn_fs::ContentHash {
+        host.inspect(vault.name())
+            .expect("the vault is served")
+            .active_fingerprints
+            .expect("the vault serves fingerprints")
+            .schema
+    }
+
+    /// **A schema read from a `schema_source` outside the vault is rewritten
+    /// where it lives** (ADR 0034): the plan names the schema's role at its
+    /// canonical path, the apply lands the rewrite at the source, nothing
+    /// is written at the default path, the vault reloads under what landed,
+    /// and a migration run again is already current.
+    #[test]
+    fn a_schema_source_outside_the_vault_is_rewritten_where_it_lives() {
+        let (sandbox, vault) = a_vault("host-migrate-source-outside", &[("a.md", "A\n")]);
+        let source = sandbox.work_dir().join("shared/schema.yaml");
+        std::fs::create_dir_all(source.parent().expect("a parent")).expect("the folder");
+        std::fs::write(&source, OLD_SCHEMA).expect("the schema");
+        let host = vault.host_reading_schema_from(SchemaSource::new(&source).expect("a source"));
+        let _lease = attach::attach_and_wait(&host, vault.name());
+
+        let plan = previewed(migrate(&host, &vault, ApplyMode::Preview).expect("a preview"));
+        assert_eq!(
+            writes(&plan),
+            vec![(ControlFile::Schema, NEW_SCHEMA.to_string())]
+        );
+        assert_eq!(
+            plan.transitions
+                .iter()
+                .map(|transition| (transition.path.as_str(), &transition.before))
+                .collect::<Vec<_>>(),
+            vec![(SCHEMA, &FileState::present(hash(OLD_SCHEMA)))]
+        );
+
+        let MigrateReport::Migrated { reload_refused, .. } =
+            migrate(&host, &vault, ApplyMode::Apply).expect("an apply")
+        else {
+            panic!("a migrate apply answered another outcome");
+        };
+        assert_eq!(reload_refused, None);
+        assert_eq!(
+            std::fs::read_to_string(&source).expect("the source stands"),
+            NEW_SCHEMA
+        );
+        assert_eq!(read(&vault, SCHEMA), None);
+        assert_eq!(
+            active_schema(&host, &vault),
+            norn_fs::ContentHash::of(NEW_SCHEMA.as_bytes())
+        );
+        assert_eq!(
+            migrate(&host, &vault, ApplyMode::Apply).expect("a migrate answers"),
+            MigrateReport::already_current()
+        );
+    }
+
+    /// **A schema read from a `schema_source` inside the vault is rewritten
+    /// where it lives**, and nothing is written at the default path.
+    #[test]
+    fn a_schema_source_inside_the_vault_is_rewritten_where_it_lives() {
+        let (_sandbox, vault) = a_vault(
+            "host-migrate-source-inside",
+            &[("schemas/notes.yaml", OLD_SCHEMA), ("a.md", "A\n")],
+        );
+        let source = vault.path().join("schemas/notes.yaml");
+        let host = vault.host_reading_schema_from(SchemaSource::new(&source).expect("a source"));
+        let _lease = attach::attach_and_wait(&host, vault.name());
+
+        let MigrateReport::Migrated { reload_refused, .. } =
+            migrate(&host, &vault, ApplyMode::Apply).expect("an apply")
+        else {
+            panic!("a migrate apply answered another outcome");
+        };
+        assert_eq!(reload_refused, None);
+        assert_eq!(
+            read(&vault, "schemas/notes.yaml").as_deref(),
+            Some(NEW_SCHEMA)
+        );
+        assert_eq!(read(&vault, SCHEMA), None);
+        assert_eq!(
+            active_schema(&host, &vault),
+            norn_fs::ContentHash::of(NEW_SCHEMA.as_bytes())
+        );
+    }
+
     /// **A step whose rewrite would lose a comment is refused, naming the
     /// file and the comment**, and nothing of either file is written.
     #[test]

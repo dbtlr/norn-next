@@ -9,6 +9,7 @@ use norn_wire::{
 
 use super::{Fixture, applied, deleting, path, refused, results};
 use crate::planner::compose::content_hash;
+use crate::planner::control::SchemaPlace;
 
 const SCHEMA: &str = ".norn/schema.yaml";
 const CONFIG: &str = ".norn/config.toml";
@@ -182,4 +183,90 @@ fn a_control_file_lands_under_a_schema_that_declares_what_it_does_not_carry() {
     );
     assert_eq!(fixture.read(CONFIG).as_deref(), Some(config));
     assert_eq!(fixture.read(SCHEMA).as_deref(), Some(schema));
+}
+
+/// **A schema write lands where the registration reads the schema** (ADR
+/// 0034), its transition still naming the schema's role: at a source
+/// outside the vault, with no own write recorded, since the ledger names
+/// vault paths only, and nothing at the default path; and a source another
+/// writer changed since the plan was resolved refuses it as drift at the
+/// role's path, writing nothing.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the source a case arranges.
+fn a_schema_write_lands_at_a_source_outside_the_vault() {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let folder = fixture.vault.parent().expect("a parent").join("shared");
+    std::fs::create_dir_all(&folder).expect("the source's folder");
+    std::fs::write(folder.join("schema.yaml"), "version: 1\n").expect("the source");
+    fixture.schema = SchemaPlace::Outside {
+        folder: folder.clone(),
+        name: "schema.yaml".into(),
+        shadows: fixture.shadows.clone(),
+    };
+    let schema = "version: 1\n# shared\n";
+    let plan = fixture.plan(vec![writing(ControlFile::Schema, schema)]);
+    assert_eq!(
+        plan.transitions,
+        vec![Transition::new(
+            path(SCHEMA),
+            present("version: 1\n"),
+            present(schema)
+        )]
+    );
+    let stale = plan.clone();
+    let applied = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&applied),
+        vec![(SCHEMA.to_string(), TargetResult::Wrote)]
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("schema.yaml"))
+            .ok()
+            .as_deref(),
+        Some(schema)
+    );
+    assert_eq!(fixture.read(SCHEMA), None);
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert!(fixture.shadows_left().is_empty());
+
+    std::fs::write(folder.join("schema.yaml"), "version: 1\n# theirs\n").expect("an edit");
+    let refused = refused(fixture.apply(stale));
+    assert_eq!(
+        refused.checks,
+        vec![RefusedCheck::drifted(
+            path(SCHEMA),
+            present("version: 1\n# theirs\n")
+        )]
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("schema.yaml"))
+            .ok()
+            .as_deref(),
+        Some("version: 1\n# theirs\n")
+    );
+}
+
+/// **A schema write lands at a source inside the vault**, at the source's
+/// own path, recorded as an own write there; the default path is left as it
+/// stands.
+#[test]
+fn a_schema_write_lands_at_a_source_inside_the_vault() {
+    let source = "schemas/notes.yaml";
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    fixture.write(source, "version: 1\n");
+    fixture.exclusions.push(source.into());
+    fixture.schema = SchemaPlace::InVault(source.into());
+    let schema = "version: 1\n# inside\n";
+    let plan = fixture.plan(vec![writing(ControlFile::Schema, schema)]);
+    let applied = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&applied),
+        vec![(SCHEMA.to_string(), TargetResult::Wrote)]
+    );
+    assert_eq!(fixture.read(source).as_deref(), Some(schema));
+    assert_eq!(fixture.read(SCHEMA), None);
+    assert_eq!(
+        *fixture.recorded.calls.borrow(),
+        vec![(std::path::PathBuf::from(source), true)]
+    );
 }

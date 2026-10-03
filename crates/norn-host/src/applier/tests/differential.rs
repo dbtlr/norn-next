@@ -20,6 +20,7 @@ use norn_wire::{
 use super::{Fixture, moving, path};
 use crate::apply::PlanSnapshot;
 use crate::derivation::document_links;
+use crate::planner::control::SchemaPlace;
 use crate::planner::expand::resolve_expanding;
 use crate::planner::links::{EntryKey, LinkIndex, address, entry_key, family_name, wire_family};
 use crate::planner::view::TreeView;
@@ -336,7 +337,8 @@ fn trial(seed: u64, failures: &mut Vec<String>) -> bool {
                 .collect();
             before.insert(holder.clone(), held);
         }
-        let view = TreeView::open(&fixture.vault, &fixture.exclusions).expect("a vault");
+        let view = TreeView::open(&fixture.vault, &fixture.exclusions, &SchemaPlace::default())
+            .expect("a vault");
         resolve_expanding(
             AuthoredPlan::new(crate::planner::links::testing::vault(), operations),
             fixture.root_identity(),

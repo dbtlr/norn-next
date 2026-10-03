@@ -8,6 +8,7 @@ use norn_wire::{
 };
 
 use super::{Fixture, applied, path};
+use crate::planner::control::SchemaPlace;
 use crate::planner::expand::resolve_expanding;
 use crate::planner::resolve::Resolution;
 use crate::planner::view::TreeView;
@@ -28,7 +29,8 @@ impl Fixture {
     /// `where` target expanded first, on the store as it stands, every
     /// operation resolving.
     fn expanded(&self, operations: Vec<Operation>) -> Resolution {
-        let view = TreeView::open(&self.vault, &self.exclusions).expect("a vault");
+        let view = TreeView::open(&self.vault, &self.exclusions, &SchemaPlace::default())
+            .expect("a vault");
         let links = self.links();
         let index = links.index();
         let resolution = resolve_expanding(

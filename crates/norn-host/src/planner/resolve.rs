@@ -2092,6 +2092,7 @@ mod tests {
 
     #[test]
     fn a_plan_over_a_tree_on_disk_reads_it_through_the_vault_s_own_descent() {
+        use super::super::control::SchemaPlace;
         use super::super::view::TreeView;
         let scratch = norn_testkit::scratch::Scratch::new("planner-tree");
         #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case plans over.
@@ -2103,7 +2104,7 @@ mod tests {
         place("inbox/a.md", "A");
         place("b.md", "B");
         place("folder/x.md", "X");
-        let view = TreeView::open(scratch.root(), &[]).expect("a vault");
+        let view = TreeView::open(scratch.root(), &[], &SchemaPlace::default()).expect("a vault");
         let operations = vec![
             moving("inbox/a.md", "archive/a.md"),
             Operation::new(OperationKind::str_replace(path("b.md"), "B", "b")),

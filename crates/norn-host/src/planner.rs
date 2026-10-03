@@ -83,8 +83,10 @@
 //!
 //! **A control file is planned, never as a document.** A
 //! `write_control_file` names the vault schema or the vault config by role,
-//! and [`control`] maps the role to the in-vault path the host reads it at.
-//! The target is read through
+//! and [`control`] maps the role to the path a transition names it at: the
+//! in-vault path the host reads it at, which for the schema stands for the
+//! file the registration reads it from, a `schema_source` included (ADR
+//! 0034). The target is read through
 //! [`VaultView::control_entry`](view::VaultView::control_entry) — the vault's
 //! walk does not enter the schema's path, so reading it as a document would
 //! find a place no document can be — and composed as the whole content the

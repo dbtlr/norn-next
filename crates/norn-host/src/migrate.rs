@@ -8,9 +8,12 @@
 //! on disk now, and walks each up its ladder ([`norn_config::migration`]).
 //! A file at the version this build reads plans nothing, and so does a file
 //! that is not there: a migration never creates one. Each file behind is one
-//! `write_control_file` of its rewritten text, and the rewrites of both files
-//! are one plan, previewed through the one `apply` seam as an apply would
-//! plan and judge it. Where no file is behind, the vault is already current.
+//! `write_control_file` of its rewritten text, which lands where the file was
+//! read, a `schema_source` outside the vault included (ADR 0034), and where
+//! the vault's shadow home cannot publish into that source's folder the plan
+//! does not resolve, naming why. The rewrites of both files are one plan,
+//! previewed through the one `apply` seam as an apply would plan and judge
+//! it. Where no file is behind, the vault is already current.
 //! A file whose version cannot be read, one ahead of this build or with no
 //! step from its version, and a rewrite that would lose a comment are refused
 //! `vault/migration-refused`, naming the file, before anything is planned.
@@ -314,7 +317,7 @@ fn in_vault(
     ground: &PlanGround,
     file: ControlFile,
 ) -> Result<Option<Standing>, ErrorEnvelope> {
-    let view = TreeView::open(&ground.root, &ground.exclusions)
+    let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
         .map_err(|error| unreadable(name, error))?;
     let path = control_path(file);
     let Ok(identity) = view.normalizer().normalize(Path::new(path.as_str())) else {

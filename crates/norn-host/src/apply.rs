@@ -75,6 +75,7 @@ use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadRefusal, ReadSource,
     ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
 };
+use crate::planner::control::SchemaPlace;
 use crate::planner::expand::{
     ExpandingFailure, Matched, MatchedDocument, Matcher, listed, resolve_expanding,
 };
@@ -102,6 +103,9 @@ pub struct PlanGround {
     pub(crate) identity: norn_fs::Identity,
     /// The roots, relative to the vault root, its walk does not enter.
     pub(crate) exclusions: Vec<PathBuf>,
+    /// Where the vault schema the registration reads lives, which a schema
+    /// write lands at (ADR 0034).
+    pub(crate) schema: SchemaPlace,
     /// The declaration the coverage's store pins, which a composed result is
     /// judged under.
     pub(crate) declared: Arc<Declared>,
@@ -114,6 +118,7 @@ impl std::fmt::Debug for PlanGround {
             .field("root", &self.root)
             .field("identity", &self.identity)
             .field("exclusions", &self.exclusions)
+            .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
 }
@@ -163,7 +168,7 @@ pub(crate) fn resolve_on(
     name: &VaultName,
     snapshot: &PlanSnapshot<'_>,
 ) -> Result<Resolution, PageRefused> {
-    let view = TreeView::open(&ground.root, &ground.exclusions)
+    let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
         .map_err(|error| PageRefused::Answered(unreadable(name, error)))?;
     // The creation rules are the pinned schema's, the declaration the
     // applier's schema check judges the plan's results under, and the clock
@@ -503,6 +508,7 @@ fn preview_resolved(
         &ground.root,
         ground.identity,
         &ground.exclusions,
+        &ground.schema,
         &ground.declared,
         snapshot,
     ) {
@@ -703,6 +709,7 @@ mod tests {
                 .unwrap()
                 .expect("the root stands"),
             exclusions: Vec::new(),
+            schema: SchemaPlace::default(),
             declared: Arc::new(Declared::unpinned()),
         }
     }

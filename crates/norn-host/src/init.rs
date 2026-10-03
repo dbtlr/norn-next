@@ -2,9 +2,10 @@
 //! none, planned and applied through the one planner and the one applier.
 //!
 //! **What init plans, and when.** A registration naming a `schema_source` —
-//! inside the vault or out — reads its schema from a file init does not
-//! write, so init answers that the schema lives elsewhere, naming the source,
-//! and plans nothing. Otherwise the vault reads its schema from the default
+//! inside the vault or out — reads its schema from a file an operator named,
+//! which init never writes, though a schema write lands there (ADR 0034): init
+//! answers that the schema lives elsewhere, naming the source, and plans
+//! nothing. Otherwise the vault reads its schema from the default
 //! `.norn/schema.yaml`, and init plans one `write_control_file` of the starter
 //! there. A schema already standing there would be replaced, which init never
 //! does: it answers that the vault is already set up and writes nothing.
@@ -386,7 +387,7 @@ fn schema_standing(
         return Ok(None);
     };
     ground.standing(name)?;
-    let view = TreeView::open(&ground.root, &ground.exclusions)
+    let view = TreeView::open(&ground.root, &ground.exclusions, &ground.schema)
         .map_err(|error| unreadable(name, error))?;
     let schema = control_path(ControlFile::Schema);
     let Ok(identity) = view.normalizer().normalize(Path::new(schema.as_str())) else {

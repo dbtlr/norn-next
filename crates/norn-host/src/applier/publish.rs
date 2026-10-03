@@ -10,7 +10,11 @@ use norn_wire::{DocumentPath, FileState, ResolvedPlan, TargetResult};
 
 use super::OwnWriteLedger;
 use super::observe::Unit;
-use super::stage::{Classified, Held, Phase, StagedPlan, classify, discard_all, kernel_hash};
+use super::place::{Ground, Landing};
+use super::stage::{
+    Classified, Held, Phase, StagedPlan, classify, discard_all, folder_replaced, kernel_hash,
+    staged_path,
+};
 use crate::production::PlanEffect;
 
 /// What publication did, as far as it went.
@@ -45,8 +49,7 @@ pub(super) enum Stopped {
 
 /// What the publishing phase needs of the vault.
 pub(super) struct Publisher<'a> {
-    pub(super) anchor: &'a Path,
-    pub(super) root: norn_fs::Identity,
+    pub(super) ground: Ground<'a>,
     pub(super) shadows: &'a ShadowHome,
     pub(super) own_writes: &'a dyn OwnWriteLedger,
 }
@@ -82,7 +85,7 @@ impl Publisher<'_> {
                 unit,
             };
             if let Err(stopped) = self.publish_one(&publishing, target.held, &mut progress) {
-                discard_all(self.anchor, self.shadows, remaining);
+                discard_all(&self.ground, self.shadows, plan, remaining);
                 return (progress, Some(stopped));
             }
             if phase == Phase::Remove {
@@ -110,25 +113,32 @@ impl Publisher<'_> {
             Unit::Respell { new, .. } => new,
         };
         let written_path = &plan.transitions[written].path;
+        // Staging resolved this landing, so it resolves again here.
+        let landing = self
+            .ground
+            .landing(staged_path(plan, unit))
+            .map_err(Stopped::Io)?;
+        let stop = |refusal: &norn_fs::Refusal| stopped(refusal, written_path, &landing);
         let staged = match held {
             Held::Nothing => {
                 progress.results.push((written, TargetResult::Found));
                 return Ok(());
             }
             Held::Landed(landed) => {
-                let confirmed = norn_fs::confirm_landed(self.anchor, &landed)
-                    .map_err(|refusal| stopped(&refusal, written_path))?;
+                let confirmed = norn_fs::confirm_landed(landing.anchor, &landed)
+                    .map_err(|refusal| stop(&refusal))?;
                 publishing.landed_whole(TargetResult::Found, progress);
                 return durable(confirmed.durability, written_path);
             }
             Held::Staged(staged) => staged,
         };
-        match norn_fs::publish(self.anchor, staged, self.shadows)
-            .map_err(|refusal| stopped(&refusal, written_path))?
+        match norn_fs::publish(landing.anchor, staged, self.shadows)
+            .map_err(|refusal| stop(&refusal))?
         {
             Publication::Wrote(published) => {
-                self.own_writes
-                    .published(Path::new(written_path.as_str()), &published);
+                if !landing.outside {
+                    self.own_writes.published(landing.relative, &published);
+                }
                 progress
                     .folders_made
                     .extend(published.made_folders.iter().cloned());
@@ -186,7 +196,9 @@ impl Publisher<'_> {
             .collect();
         folders.sort_by_key(|folder| std::cmp::Reverse(folder.components().count()));
         for folder in folders {
-            if let Ok(emptied) = norn_fs::remove_empty_folders(self.anchor, self.root, &folder) {
+            if let Ok(emptied) =
+                norn_fs::remove_empty_folders(self.ground.vault, self.ground.root, &folder)
+            {
                 progress.folders_removed.extend(emptied.removed);
             }
         }
@@ -229,14 +241,16 @@ fn durable(durability: Durability, path: &DocumentPath) -> Result<(), Stopped> {
     }
 }
 
-/// Why a kernel refusal about `path` stops publication.
-fn stopped(refusal: &norn_fs::Refusal, path: &DocumentPath) -> Stopped {
+/// Why a kernel refusal about `path`, landing at `landing`, stops
+/// publication.
+fn stopped(refusal: &norn_fs::Refusal, path: &DocumentPath, landing: &Landing<'_>) -> Stopped {
     match classify(refusal) {
         Classified::Drift(holds) => Stopped::ForeignEdit {
             path: path.clone(),
             holds,
         },
         Classified::NameTaken => Stopped::NameTaken { path: path.clone() },
+        Classified::RootReplaced if landing.outside => Stopped::Io(folder_replaced(landing)),
         Classified::RootReplaced => Stopped::RootReplaced,
         Classified::Io(detail) => Stopped::Io(detail),
     }

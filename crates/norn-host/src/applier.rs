@@ -70,6 +70,7 @@
 
 mod observe;
 mod outcome;
+mod place;
 mod publish;
 mod recompose;
 mod refresh;
@@ -91,10 +92,11 @@ use norn_wire::{
 pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 
 use crate::derivation::Declared;
-use crate::planner::control::role_at;
+use crate::planner::control::{SchemaPlace, role_at};
 use crate::planner::forecast::forecast;
 use crate::planner::view::TreeView;
 use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
+use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 pub(crate) use stage::Links;
 use stage::{Stop, Unfit};
@@ -133,6 +135,9 @@ pub(crate) struct Applier<'a> {
     pub(crate) root: norn_fs::Identity,
     /// The roots the vault's walk does not enter.
     pub(crate) exclusions: &'a [PathBuf],
+    /// Where the vault schema the registration reads lives, which a schema
+    /// write lands at (ADR 0034).
+    pub(crate) schema: &'a SchemaPlace,
     /// Where written targets are staged.
     pub(crate) shadows: &'a ShadowHome,
     /// Where each publication is recorded.
@@ -171,7 +176,7 @@ impl Applier<'_> {
                 found,
             };
         }
-        let view = match TreeView::open(self.anchor, self.exclusions) {
+        let view = match TreeView::open(self.anchor, self.exclusions, self.schema) {
             Ok(view) => view,
             Err(error) => return write_failed(plan, error.to_string()),
         };
@@ -180,8 +185,7 @@ impl Applier<'_> {
             Err(failure) => return write_failed(plan, format!("{failure:?}")),
         };
         let mut staged = match stage::check_and_stage(
-            self.anchor,
-            self.root,
+            &self.ground(),
             self.shadows,
             &plan,
             &view,
@@ -198,12 +202,11 @@ impl Applier<'_> {
         drop(view);
         let forced = std::mem::take(&mut staged.forced);
         if !(self.publishing)() {
-            stage::discard_all(self.anchor, self.shadows, staged.targets);
+            stage::discard_all(&self.ground(), self.shadows, &plan, staged.targets);
             return ApplyOutcome::StoodDown;
         }
         let publisher = Publisher {
-            anchor: self.anchor,
-            root: self.root,
+            ground: self.ground(),
             shadows: self.shadows,
             own_writes: self.own_writes,
         };
@@ -323,7 +326,7 @@ impl Applier<'_> {
         declared: &Declared,
         checks: Vec<RefusedCheck>,
     ) -> ApplyOutcome {
-        match TreeView::open(self.anchor, self.exclusions) {
+        match TreeView::open(self.anchor, self.exclusions, self.schema) {
             Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks, self.links),
             Err(error) => write_failed(plan, error.to_string()),
         }
@@ -338,6 +341,15 @@ impl Applier<'_> {
                 found: RootIdentity::from_device_and_inode(now.dev, now.ino),
             },
             _ => write_failed(plan, "the vault root was replaced".to_string()),
+        }
+    }
+
+    /// The ground the plan's targets land on.
+    fn ground(&self) -> Ground<'_> {
+        Ground {
+            vault: self.anchor,
+            root: self.root,
+            schema: self.schema,
         }
     }
 
@@ -367,6 +379,7 @@ pub(crate) fn preview(
     anchor: &Path,
     root: norn_fs::Identity,
     exclusions: &[PathBuf],
+    schema: &SchemaPlace,
     declared: &Declared,
     links: Links<'_>,
 ) -> Result<(ResolvedPlan, Forecast), Box<ApplyOutcome>> {
@@ -377,7 +390,7 @@ pub(crate) fn preview(
             found,
         }));
     }
-    let view = match TreeView::open(anchor, exclusions) {
+    let view = match TreeView::open(anchor, exclusions, schema) {
         Ok(view) => view,
         Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
     };
