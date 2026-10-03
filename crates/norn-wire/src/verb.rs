@@ -241,6 +241,8 @@ pub enum Verb {
     VaultStatus,
     /// Re-read one vault's control files and apply what changed.
     VaultReload,
+    /// Bring one vault's control files up to the versions this build reads.
+    VaultMigrate,
     /// The findings standing over the registry itself.
     DoctorRegistry,
 }
@@ -251,7 +253,7 @@ impl Verb {
     /// Reading a verb back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [Verb; 22] = [
+    pub const ALL: [Verb; 23] = [
         Verb::Find,
         Verb::Search,
         Verb::Get,
@@ -273,6 +275,7 @@ impl Verb {
         Verb::VaultResolve,
         Verb::VaultStatus,
         Verb::VaultReload,
+        Verb::VaultMigrate,
         Verb::DoctorRegistry,
     ];
 
@@ -300,6 +303,7 @@ impl Verb {
             Verb::VaultResolve => "vault_resolve",
             Verb::VaultStatus => "vault_status",
             Verb::VaultReload => "vault_reload",
+            Verb::VaultMigrate => "vault_migrate",
             Verb::DoctorRegistry => "doctor_registry",
         }
     }
@@ -330,7 +334,8 @@ impl Verb {
             | Verb::Delete
             | Verb::RewriteWikilink
             | Verb::Init
-            | Verb::VaultReload => Addressing::Required,
+            | Verb::VaultReload
+            | Verb::VaultMigrate => Addressing::Required,
             // No vault address is carried; the request is answered from the
             // serving set and the registry, naming no entry to be held.
             Verb::VaultRegister

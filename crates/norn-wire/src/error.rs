@@ -76,9 +76,10 @@ use crate::plan::outcome::{
 };
 use crate::plan::root::RootIdentity;
 use crate::reading::Rung;
-use crate::reload::ReloadFailure;
+use crate::reload::{ControlFile, ReloadFailure};
 use crate::target::ResolutionTarget;
 use crate::trust::{NotReady, UntrustedReason};
+use crate::vault::migrate::MigrationRefusal;
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -436,6 +437,13 @@ pub enum ReasonCode {
     /// resolved plan and the failure.
     #[serde(rename = "vault/write-failed")]
     VaultWriteFailed,
+    /// `vault/migration-refused` — a control file of the vault cannot be
+    /// migrated as it stands: its version cannot be read, it is ahead of
+    /// this build or at a version no step migrates from, its rewrite would
+    /// lose a comment, or another writer changed it while the migration ran.
+    /// Nothing was planned or written. The detail is the file and why.
+    #[serde(rename = "vault/migration-refused")]
+    VaultMigrationRefused,
     /// `request/out-of-bound` — a count the request names on its own shape is
     /// outside the range that count's bound holds it to — a page limit
     /// outside 1 to the maximum, or too many values in one membership part —
@@ -844,6 +852,16 @@ pub enum ErrorDetail {
         /// Clients never match on it.
         detail: String,
     },
+    /// The detail of `vault/migration-refused`: the control file, and why it
+    /// was not migrated.
+    #[serde(rename = "vault/migration-refused")]
+    #[non_exhaustive]
+    MigrationRefused {
+        /// The control file, by its role.
+        file: ControlFile,
+        /// Why it was not migrated.
+        reason: MigrationRefusal,
+    },
     /// The detail of `request/out-of-bound`: which bound, the count the
     /// request named and the most it may be, and the key a membership part
     /// is on.
@@ -1118,6 +1136,12 @@ impl ErrorDetail {
         ErrorDetail::CursorNotTaken { cursor, paged }
     }
 
+    /// The detail of `vault/migration-refused`, for the control `file` and
+    /// the `reason` it was not migrated.
+    pub const fn migration_refused(file: ControlFile, reason: MigrationRefusal) -> Self {
+        ErrorDetail::MigrationRefused { file, reason }
+    }
+
     /// The detail of `request/plan-invalid`, for the `fault`.
     pub const fn plan_invalid(fault: PlanFault) -> Self {
         ErrorDetail::PlanInvalid { fault }
@@ -1175,6 +1199,7 @@ impl ErrorDetail {
             ErrorDetail::RootChanged { .. } => ReasonCode::VaultRootChanged,
             ErrorDetail::PlanInterrupted { .. } => ReasonCode::VaultPlanInterrupted,
             ErrorDetail::WriteFailed { .. } => ReasonCode::VaultWriteFailed,
+            ErrorDetail::MigrationRefused { .. } => ReasonCode::VaultMigrationRefused,
             ErrorDetail::OutOfBound { .. } => ReasonCode::RequestOutOfBound,
             ErrorDetail::PartNotTaken { .. } => ReasonCode::RequestPartNotTaken,
             ErrorDetail::CursorNotTaken { .. } => ReasonCode::RequestCursorNotTaken,
@@ -1354,6 +1379,7 @@ mod tests {
             ReasonCode::VaultRootChanged => "vault/root-changed",
             ReasonCode::VaultPlanInterrupted => "vault/plan-interrupted",
             ReasonCode::VaultWriteFailed => "vault/write-failed",
+            ReasonCode::VaultMigrationRefused => "vault/migration-refused",
             ReasonCode::RequestOutOfBound => "request/out-of-bound",
             ReasonCode::RequestPartNotTaken => "request/part-not-taken",
             ReasonCode::RequestCursorNotTaken => "request/cursor-not-taken",
@@ -1443,6 +1469,10 @@ mod tests {
                 Vec::new(),
             ),
             ReasonCode::VaultWriteFailed => ErrorDetail::write_failed(a_plan(), "the disk is full"),
+            ReasonCode::VaultMigrationRefused => ErrorDetail::migration_refused(
+                ControlFile::Schema,
+                MigrationRefusal::version_ahead(2, 1),
+            ),
             ReasonCode::RequestOutOfBound => {
                 ErrorDetail::out_of_bound(RequestBound::page_rows(5_000, 1_024))
             }
