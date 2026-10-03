@@ -19,6 +19,11 @@
 //! unless the condition is `always()` or `!cancelled()`, which only widen when
 //! a step runs. Any other condition vouches for nothing, which is the strict
 //! side: a condition that would have held is refused with one that would not.
+//! Nor does a step whose environment sets a key cargo, rustc or rustup reads —
+//! a runner, wrapper, compiler or flags named there decide what the command
+//! builds and runs — unless the key is one that cannot keep a test from
+//! running, nor a step whose `env`, or its job's or workflow's, cannot be read
+//! whole.
 //!
 //! **A command is read whole or not at all.** It is one line, holding no shell
 //! metacharacter anywhere — no pipe, list operator, redirection, comment,
@@ -69,7 +74,9 @@ pub(crate) struct Step {
     /// The parsed value of the step's `run`, or `None` where it runs no
     /// command of its own.
     pub(crate) run: Option<String>,
-    /// The workflow's, the job's and the step's `env`, the nearer winning.
+    /// The workflow's, the job's and the step's `env`, the nearer winning, or
+    /// empty where one of them cannot be read — and then the step does not
+    /// vouch.
     pub(crate) env: BTreeMap<String, String>,
     /// Whether the step vouches for what its command runs: nothing around the
     /// command may skip it, tolerate its failure, or change what it runs.
@@ -204,7 +211,7 @@ pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
 fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
     let document: Value =
         serde_yaml::from_str(workflow).map_err(|e| format!("not a YAML document: {e}"))?;
-    let workflow_env = env_of(document.get("env"));
+    let workflow_env = layered(Some(&BTreeMap::new()), document.get("env"));
     let workflow_shell = Shell::defaulted_by(&document);
     let Some(jobs) = document.get("jobs") else {
         return Ok(Vec::new());
@@ -220,8 +227,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
         }
         let job_conditional = is_conditional(job);
         let job_shell = workflow_shell.under(Shell::defaulted_by(job));
-        let mut job_env = workflow_env.clone();
-        job_env.extend(env_of(job.get("env")));
+        let job_env = layered(workflow_env.as_ref(), job.get("env"));
         let Some(declared) = job.get("steps") else {
             continue;
         };
@@ -232,13 +238,16 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             if !step.is_mapping() {
                 return Err(format!("a step of job `{name}` is not a mapping"));
             }
-            let mut env = job_env.clone();
-            env.extend(env_of(step.get("env")));
+            let env = layered(job_env.as_ref(), step.get("env"));
+            let env_reads = env
+                .as_ref()
+                .is_some_and(|env| !env.keys().any(|key| steers_the_toolchain(key)));
             steps.push(Step {
                 run: step.get("run").and_then(Value::as_str).map(str::to_string),
-                env,
+                env: env.unwrap_or_default(),
                 vouches: !(job_conditional || is_conditional(step))
-                    && job_shell.under(Shell::named_by(step)).runs_one_process(),
+                    && job_shell.under(Shell::named_by(step)).runs_one_process()
+                    && env_reads,
             });
         }
     }
@@ -333,25 +342,50 @@ fn unwrapped(condition: &str) -> &str {
         .map_or(condition, str::trim)
 }
 
-/// The scalar entries of an `env` mapping, each as the string the runner
-/// exports. Anything else — an expression standing for the whole map, a
-/// nested value — names nothing this can read.
-fn env_of(env: Option<&Value>) -> BTreeMap<String, String> {
-    let Some(map) = env.and_then(Value::as_mapping) else {
-        return BTreeMap::new();
+/// `outer` with the entries of the `env` mapping `inner` over it, each as the
+/// string the runner exports, or `None` where either cannot be read whole.
+///
+/// An `env` that is anything but a mapping of names to scalars — an
+/// expression standing for the whole map, a nested value, a key that is not a
+/// name — may export anything, so it is read as nothing rather than as
+/// exporting nothing.
+fn layered(
+    outer: Option<&BTreeMap<String, String>>,
+    inner: Option<&Value>,
+) -> Option<BTreeMap<String, String>> {
+    let mut env = outer?.clone();
+    let Some(inner) = inner else {
+        return Some(env);
     };
-    map.iter()
-        .filter_map(|(key, value)| {
-            let value = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(flag) => flag.to_string(),
-                _ => return None,
-            };
-            Some((key.as_str()?.to_string(), value))
-        })
-        .collect()
+    for (key, value) in inner.as_mapping()? {
+        let value = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            Value::Bool(flag) => flag.to_string(),
+            _ => return None,
+        };
+        env.insert(key.as_str()?.to_string(), value);
+    }
+    Some(env)
 }
+
+/// Whether an environment key is one cargo, rustc or rustup may read, in any
+/// case, other than one of [`INERT_TOOLCHAIN_KEYS`]. Cargo takes a runner, a
+/// wrapper, a compiler, a target, its whole configuration and its flags from
+/// keys spelled so, and any of them can leave the test binaries unbuilt,
+/// unrun, or run by something other than the harness.
+fn steers_the_toolchain(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    (key.starts_with("CARGO") || key.starts_with("RUST"))
+        && !INERT_TOOLCHAIN_KEYS.contains(&key.as_str())
+}
+
+/// The toolchain keys a vouching step may set: each must be one that cannot
+/// keep a test binary from being built and run by its harness, and each
+/// names the reason beside it. No vouching step in this repository's
+/// workflows sets a toolchain key, so none is listed; a key joins only when a
+/// workflow needs it and that reason holds for it.
+const INERT_TOOLCHAIN_KEYS: &[&str] = &[];
 
 /// The features an environment value names, split the way the lane script
 /// hands them to cargo.
@@ -879,6 +913,72 @@ mod tests {
         ] {
             assert_eq!(vouching(&read), vec![true], "{read}");
         }
+    }
+
+    /// **A step whose environment sets a key cargo or rustc reads vouches for
+    /// nothing**, at the step, its job or its workflow, in any case: a runner,
+    /// a wrapper, a compiler, a target or a flag cargo takes from there can
+    /// leave the test binaries unbuilt, unrun, or run by something else. An
+    /// `env` this cannot read whole may set any of them, so it fails closed
+    /// too.
+    #[test]
+    fn a_toolchain_environment_key_vouches_for_nothing() {
+        for key in [
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+            "cargo_target_x86_64_unknown_linux_gnu_runner",
+            "CARGO_BUILD_TARGET",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_HOME",
+            "CARGO",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTFLAGS",
+            "RUSTDOCFLAGS",
+            "RUSTUP_TOOLCHAIN",
+        ] {
+            for (placement, workflow) in [
+                (
+                    "step",
+                    one_step(
+                        &[],
+                        &[],
+                        &["        env:", &format!("          {key}: 'true'")],
+                    ),
+                ),
+                (
+                    "job",
+                    one_step(&[], &["    env:", &format!("      {key}: 'true'")], &[]),
+                ),
+                (
+                    "workflow",
+                    one_step(&["env:", &format!("  {key}: 'true'")], &[], &[]),
+                ),
+            ] {
+                assert_eq!(
+                    vouching(&workflow),
+                    vec![false],
+                    "a step under a {placement} `{key}` vouched\n{workflow}"
+                );
+            }
+        }
+        for unreadable in [
+            one_step(&["env: ${{ fromJSON(vars.ENV) }}"], &[], &[]),
+            one_step(&[], &["    env: [RUSTC_WRAPPER]"], &[]),
+            one_step(
+                &[],
+                &[],
+                &["        env:", "          RUSTC_WRAPPER: [a, list]"],
+            ),
+            one_step(&[], &[], &["        env:", "          1: one"]),
+        ] {
+            assert_eq!(vouching(&unreadable), vec![false], "{unreadable}");
+        }
+        let unrelated = one_step(
+            &["env:", "  NORN_CERTIFICATION_LOGS: logs"],
+            &["    env:", "      RUN_CARGO: x"],
+            &["        env:", "          LANE_FEATURES: induced-failure"],
+        );
+        assert_eq!(vouching(&unrelated), vec![true], "{unrelated}");
     }
 
     /// **A workflow that is not one is an error**, never an empty answer.
