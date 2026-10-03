@@ -73,6 +73,80 @@ fn a_stem_changing_move_rewrites_a_bare_backlink() {
     );
 }
 
+/// **A stem-changing move rewrites a block-reference backlink and keeps all
+/// but its name**: `[[a#^block-id|alias]]` and `![[a#^block-id]]` name `b`
+/// where `a` lands, each keeping its `#^block-id`, the one its alias and the
+/// other its embed marker.
+#[test]
+fn a_stem_changing_move_rewrites_a_block_reference_keeping_its_anchor_alias_and_embed() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A paragraph ^block-id\n"),
+        ("h.md", "See [[a#^block-id|alias]].\n\n![[a#^block-id]]\n"),
+    ]);
+    let cascades = fixture.moved(vec![moving("a.md", "x/b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "a", "b")]]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("See [[b#^block-id|alias]].\n\n![[b#^block-id]]\n")
+    );
+}
+
+/// **A cascade rewrites every occurrence of a backlink, not the first it
+/// matches**: one holder names `a` three times under three aliases — once in
+/// a double-quoted frontmatter value and twice in its body — and the one
+/// rewrite of its key respells all three.
+#[test]
+fn a_cascade_rewrites_every_occurrence_of_a_backlink_in_its_holder() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        (
+            "h.md",
+            "---\nsee: \"[[a|first]]\"\n---\n[[a|second]] and later [[a|third]]\n",
+        ),
+    ]);
+    let cascades = fixture.moved(vec![moving("a.md", "b.md")]);
+    assert_eq!(cascades, [vec![wikilink("h.md", "a", "b")]]);
+    assert_eq!(
+        fixture.read("h.md").as_deref(),
+        Some("---\nsee: \"[[b|first]]\"\n---\n[[b|second]] and later [[b|third]]\n")
+    );
+}
+
+/// **Every cascade rewrite publishes before the move removes its source**:
+/// the own writes the applier records, in the order they land, put each
+/// holder the cascade respells after the moved document's destination and
+/// before the removal of the name it left, so a crash between any two leaves
+/// every link naming a document that stands.
+#[test]
+fn a_moves_cascade_rewrites_publish_before_its_source_is_removed() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("h.md", "[[a]]\n"),
+        ("deep/k.md", "![[a#Part]]\n"),
+    ]);
+    let plan = fixture.plan(vec![moving("a.md", "x/b.md")]);
+    assert_eq!(
+        plan.operations[0].cascade,
+        [wikilink("deep/k.md", "a", "b"), wikilink("h.md", "a", "b")]
+    );
+    applied(fixture.apply(plan));
+    let recorded = fixture.recorded.calls.borrow();
+    let landed = |at: &str| {
+        recorded
+            .iter()
+            .position(|(published, holds)| *holds && published == std::path::Path::new(at))
+            .unwrap_or_else(|| panic!("`{at}` is recorded landing: {recorded:?}"))
+    };
+    let removed = landed("a.md");
+    for holder in ["deep/k.md", "h.md"] {
+        assert!(
+            landed("x/b.md") < landed(holder) && landed(holder) < removed,
+            "`{holder}` lands between the destination and the source's removal: {recorded:?}"
+        );
+    }
+    assert_eq!(recorded.len(), 4, "{recorded:?}");
+}
+
 /// **A move keeping its document's stem leaves a backlink naming it alone as
 /// written**: `[[a]]` names it where it lands, so nothing is rewritten, and
 /// the change of what the link names is recorded and not advised on.

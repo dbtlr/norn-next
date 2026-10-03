@@ -24,7 +24,10 @@ use norn_host::{
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::scratch::Scratch;
 use norn_testkit::wait::{Observed, wait_until};
-use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
+use norn_wire::{
+    ApplyMode, ApplyReport, AuthoredValue, ErrorEnvelope, FieldChange, Predicate, ReasonCode,
+    SetParams, TrustState, VaultAddress, VaultName, WriteTarget,
+};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
 
@@ -176,6 +179,151 @@ fn run_probe() {
     report_the_measurement(baseline, one_document_delta, large_vault_delta);
 }
 
+const APPLY_PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_APPLY_PROBE";
+
+/// How many documents the apply probe's `where` target matches.
+const FLAGGED_DOCUMENTS: usize = 8;
+
+/// How many applies the apply probe runs after its first.
+const LATER_APPLIES: usize = 3;
+
+/// **An apply that mints its own reader stays inside the descriptor budget
+/// and accumulates nothing.** A `set` whose target is a `where`, sent
+/// straight to apply, has its match run inside the apply job on one
+/// short-lived read connection the store mints for that job. After the
+/// apply is answered and the entry has settled, the descriptors the process
+/// holds fit the budget an attachment is held to, every later such apply
+/// settles at that same count, and detaching gives back every descriptor.
+///
+/// **The count is not held to what the attachment alone held**, because it
+/// does not return there: on Linux it was measured settling one above it
+/// after the first apply, the extra descriptor on the store's database file.
+/// SQLite's unix layer keeps a closed connection's descriptor open while
+/// another connection of the process holds a lock on the same file, and
+/// reuses it at the next open, so later mints add nothing to it — which is
+/// what this holds — and it goes with the detach.
+#[test]
+fn an_apply_minting_a_reader_stays_in_budget_and_accumulates_no_descriptor() {
+    if std::env::var_os(APPLY_PROBE_ENV).is_some() {
+        run_apply_probe();
+        return;
+    }
+
+    // Isolated as the attachment probe is, for the same reason.
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "an_apply_minting_a_reader_stays_in_budget_and_accumulates_no_descriptor",
+            "--nocapture",
+        ])
+        .env(APPLY_PROBE_ENV, "1")
+        .output()
+        .expect("run descriptor probe subprocess");
+    assert!(
+        output.status.success(),
+        "apply descriptor probe failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn run_apply_probe() {
+    let fixture = Fixture::new();
+    fixture.write_flagged_documents(FLAGGED_DOCUMENTS);
+    let baseline = open_fd_count();
+
+    let host = fixture.host();
+    let lease = attach_and_wait(&host, &fixture.name);
+    let attached = open_fd_count();
+    assert!(
+        attached >= baseline,
+        "ready descriptor count {attached} fell below baseline {baseline}"
+    );
+
+    let mut wave = String::from("flip");
+    let mut flip = |round: usize| {
+        let next = format!("flip-{round}");
+        let answered = host
+            .set(SetParams::new(
+                VaultAddress::name(fixture.name.clone()),
+                ApplyMode::Apply,
+                WriteTarget::matching([Predicate::equal_to("wave", wave.as_str())]),
+                vec![FieldChange::set(
+                    "wave",
+                    AuthoredValue::string(next.as_str()),
+                )],
+            ))
+            .expect("the apply is admitted")
+            .wait()
+            .expect("the apply lands");
+        let ApplyReport::Applied { targets, .. } = answered.report else {
+            panic!("the apply answered {:?}", answered.report);
+        };
+        assert_eq!(
+            targets.len(),
+            FLAGGED_DOCUMENTS,
+            "round {round}: {targets:?}"
+        );
+        wave = next;
+    };
+
+    flip(0);
+    let settled = settled_fd_count();
+    let settled_delta = settled - baseline;
+    assert!(
+        baselines::fits(settled_delta, baselines::FD_BUDGET),
+        "an attachment that applied holds {settled_delta} descriptors; budget is {}",
+        baselines::FD_BUDGET
+    );
+    for round in 1..=LATER_APPLIES {
+        flip(round);
+        assert_eq!(
+            settled_fd_count(),
+            settled,
+            "apply {round} left the descriptor count other than the first apply did"
+        );
+    }
+
+    drop(lease);
+    detach_and_wait(&host, &fixture.name);
+    assert_eq!(
+        open_fd_count(),
+        baseline,
+        "detach after the applies retained descriptors"
+    );
+}
+
+/// The descriptor count once it has held still for a moment.
+///
+/// The own writes an apply landed reach the watcher after the answer, and
+/// what the entry does with them may hold a descriptor briefly, so a reading
+/// is taken once the count has stopped moving rather than at the answer.
+fn settled_fd_count() -> usize {
+    const STILL_FOR: Duration = Duration::from_millis(500);
+    let mut last = open_fd_count();
+    let mut still_since = Instant::now();
+    wait_until(
+        "the descriptor count to hold still after an apply",
+        attach::state_budget(WAIT_LIMIT),
+        || {
+            let count = open_fd_count();
+            if count != last {
+                last = count;
+                still_since = Instant::now();
+            }
+            if still_since.elapsed() >= STILL_FOR {
+                Observed::Met(count)
+            } else {
+                Observed::pending(format!(
+                    "{count} descriptors, still for {:?}",
+                    still_since.elapsed()
+                ))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
 /// What the probe hands its parent: the counts behind the bars above.
 ///
 /// Printed last, so a line reaching the parent is a measurement of a probe that
@@ -305,6 +453,16 @@ impl Fixture {
             },
         )
         .expect("host")
+    }
+
+    /// Write `count` documents each carrying `wave: flip`, which the apply
+    /// probe's `where` target matches.
+    fn write_flagged_documents(&self, count: usize) {
+        for index in 0..count {
+            let path = self.vault.join(format!("flagged-{index:04}.md"));
+            fs::write(path, format!("---\nwave: flip\n---\n# Flagged {index}\n"))
+                .expect("write document");
+        }
     }
 
     fn write_documents(&self, count: usize) {

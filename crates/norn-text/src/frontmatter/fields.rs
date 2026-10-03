@@ -431,7 +431,7 @@ fn validate_value_span(
     }
 }
 
-fn is_null_token(text: &str) -> bool {
+pub(crate) fn is_null_token(text: &str) -> bool {
     matches!(text, "null" | "Null" | "NULL" | "~")
 }
 

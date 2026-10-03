@@ -298,6 +298,63 @@ fn an_empty_block_accepts_its_first_field() {
     );
 }
 
+/// A block that spells its null out — `~`, `null` in any case — reads as null
+/// exactly as an empty block does, so it takes its first field the same way:
+/// the null gives way to the entry and the block reads back as a mapping
+/// holding that field alone. Appending below the null instead left `~` above
+/// the entry, a block that is no mapping. A standing comment in the block is
+/// the document's and stays where it was.
+#[test]
+fn a_null_block_in_any_spelling_promotes_to_a_mapping_holding_its_first_field() {
+    let title = || Value::String("t".into());
+    for (source, promoted) in [
+        ("---\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        ("---\n~\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        ("---\nnull\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        ("---\nNull\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        ("---\nNULL\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        (
+            "---\r\n~\r\n---\r\nbody\r\n",
+            "---\r\ntitle: t\r\n---\r\nbody\r\n",
+        ),
+        (
+            "---\n# kept\n~\n\n---\nbody\n",
+            "---\n# kept\ntitle: t\n\n---\nbody\n",
+        ),
+    ] {
+        let edited = set(source, "title", title());
+        assert_eq!(edited, Ok(promoted.to_string()), "for {source:?}");
+        assert_eq!(
+            Document::parse(promoted).frontmatter(),
+            Some(&Value::Map([("title", "t")].into_iter().collect())),
+            "for {source:?}"
+        );
+    }
+    // A push into the null block is the same promotion, by way of the set
+    // that writes the list's first item.
+    assert_eq!(
+        Document::parse("---\n~\n---\n").push_to_list("tags", &"a".into()),
+        Ok("---\ntags:\n  - a\n---\n".to_string())
+    );
+}
+
+/// A comment on the null's own line goes wherever the null goes, and the
+/// null is what the first field replaces, so the set refuses rather than drop
+/// the comment silently, as a whole-entry rewrite does.
+#[test]
+fn a_comment_on_a_null_blocks_line_refuses_the_first_field() {
+    assert_eq!(
+        set(
+            "---\n~ # empty for now\n---\n",
+            "title",
+            Value::String("t".into())
+        ),
+        Err(EditError::CommentWouldBeLost {
+            field: "title".to_string()
+        })
+    );
+}
+
 #[test]
 fn removing_the_only_field_leaves_an_empty_block_that_is_still_mutable() {
     let emptied = remove("---\ntitle: t\n---\nbody\n", "title").expect("a removal");

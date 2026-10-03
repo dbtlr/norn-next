@@ -18,9 +18,9 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
-    DocumentPath, ErrorDetail, FindingKind, FolderPath, Forecast, GetParams, GetReport, Operation,
-    OperationId, OperationKind, PlanDocument, PlanFault, ReasonCode, RefusedCheck,
-    ResolutionTarget, ResolvedPlan, TargetResult, Transition, VaultAddress,
+    DocumentPath, ErrorDetail, ErrorEnvelope, FindingKind, FolderPath, Forecast, GetParams,
+    GetReport, Operation, OperationId, OperationKind, PlanDocument, PlanFault, ReasonCode,
+    RefusedCheck, ResolutionTarget, ResolvedPlan, TargetResult, Transition, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -297,6 +297,112 @@ fn a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses() {
     );
 }
 
+/// **A resolved plan aimed through a folder since linked out of the vault
+/// previews as its apply refuses.** Four plans are previewed while `linked`
+/// is a folder in the vault: a create inside it, an edit and a delete of the
+/// document it holds, and a move of the subject into it. Then the folder is
+/// moved out and a symbolic link to it stands in its place. Each plan's
+/// preview answers exactly the refusal its apply does — the same checks,
+/// each the target drifted to absent, and the same drifted forecast — never
+/// the plan with a forecast of folders that stand already, as a link. The
+/// folder outside holds what it held, and the subject stays where it was.
+#[test]
+fn a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses() {
+    let (sandbox, vault) = a_vault("host-applies-preview-linked-folder");
+    let held = "# Held\n\nstatus draft\n";
+    std::fs::create_dir(vault.path().join("linked")).expect("make the folder");
+    std::fs::write(vault.path().join("linked/held.md"), held).expect("write the held document");
+    let outside = sandbox.work_dir().join("outside");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let document = |text: &str| DocumentPath::new(text).expect("a document path");
+    let shapes = [
+        (
+            OperationKind::create_document(document("linked/fresh.md"), "# Fresh\n"),
+            "linked/fresh.md",
+        ),
+        (
+            OperationKind::str_replace(document("linked/held.md"), "draft", "final"),
+            "linked/held.md",
+        ),
+        (
+            OperationKind::move_document(document(SUBJECT), document("linked/moved.md")),
+            "linked/moved.md",
+        ),
+        (
+            OperationKind::delete_document(document("linked/held.md")),
+            "linked/held.md",
+        ),
+    ];
+    let plans: Vec<(ResolvedPlan, &str)> = shapes
+        .into_iter()
+        .map(|(kind, at)| {
+            let operations = PlanDocument::operations(AuthoredPlan::new(
+                VaultAddress::name(vault.name().clone()),
+                vec![Operation::new(kind)],
+            ));
+            (previewed(&host, operations).0, at)
+        })
+        .collect();
+    std::fs::rename(vault.path().join("linked"), &outside).expect("the folder moves out");
+    std::os::unix::fs::symlink(&outside, vault.path().join("linked"))
+        .expect("a link in the folder's place");
+
+    for (plan, at) in plans {
+        let answer = |mode| {
+            host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone())))
+                .expect("the request is answered")
+                .wait()
+                .expect_err("a plan aimed through a link is refused")
+        };
+        let previewed = answer(ApplyMode::Preview);
+        let applied = answer(ApplyMode::Apply);
+        let refusal = |answered: &ErrorEnvelope| {
+            assert_eq!(answered.code(), &ReasonCode::VaultPlanRefused, "{at}");
+            let ErrorDetail::PlanRefused {
+                checks, forecast, ..
+            } = answered.detail()
+            else {
+                panic!("{at}: the refusal carries {:?}", answered.detail());
+            };
+            (checks.clone(), forecast.drifted.clone())
+        };
+        let previewed = refusal(&previewed);
+        assert_eq!(previewed, refusal(&applied), "{at}");
+        assert_eq!(
+            previewed,
+            (
+                vec![RefusedCheck::drifted(
+                    document(at),
+                    norn_wire::FileState::absent()
+                )],
+                vec![document(at)],
+            ),
+            "{at}"
+        );
+    }
+    let mut outside_entries: Vec<String> = std::fs::read_dir(&outside)
+        .expect("the folder outside lists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    outside_entries.sort();
+    assert_eq!(outside_entries, vec!["held.md".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("held.md")).unwrap(),
+        held
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
 /// **A resolved plan whose transitions are not what its operations do
 /// previews as its apply answers it.** The subject's transition is carried
 /// twice: the preview answers `request/plan-invalid` naming the subject, with
@@ -386,10 +492,18 @@ fn a_resolved_plan_with_a_transition_for_an_untouched_file_previews_as_plan_inva
 /// A document no plan here touches.
 const UNTOUCHED: &str = "apply-untouched.md";
 
-/// Every entry under `root`, with its inode and modification time.
+/// `root` and every entry under it, with its inode and modification time.
+///
+/// The root is an entry too: a file made and removed again directly under it
+/// leaves no entry behind, only the root's own modification time moved.
 fn tree_state(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
     use std::os::unix::fs::MetadataExt;
-    let mut found = Vec::new();
+    let metadata = std::fs::symlink_metadata(root).expect("the root's metadata");
+    let mut found = vec![(
+        root.to_owned(),
+        metadata.ino(),
+        metadata.modified().expect("an mtime"),
+    )];
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).expect("a listing") {
@@ -420,6 +534,191 @@ fn a_preview_leaves_every_entry_of_the_vault_as_it_was() {
 
     assert_eq!(
         tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
+}
+
+/// A registered vault holding exactly `files`, with no schema unless one of
+/// them is it.
+fn an_adopted_vault(label: &str, files: &[(&str, &str)]) -> (Sandbox, attach::Vault) {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let root = sandbox.work_dir().join("attached");
+    std::fs::create_dir_all(root.join("vault")).expect("the vault root");
+    for (at, content) in files {
+        let path = root.join("vault").join(at);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("make the parent");
+        std::fs::write(path, content).expect("write a file");
+    }
+    (sandbox, attach::Vault::adopt(&root))
+}
+
+/// The plan a verb's preview answered, which must plan something.
+fn previewed_something(answered: Result<norn_host::PendingApply, ErrorEnvelope>) {
+    let answered = answered
+        .expect("a preview is answered")
+        .wait()
+        .expect("the verb previews");
+    let ApplyReport::Previewed { plan, .. } = answered.report else {
+        panic!("a preview answered {:?}", answered.report);
+    };
+    assert!(!plan.operations.is_empty(), "the preview planned nothing");
+}
+
+/// **Every write verb's preview leaves every entry of the vault as it was.**
+/// Over a registered vault with no schema, a preview of `set` by path and by
+/// `where`, `edit`, `new`, `move` of a document and of a folder, a rewriting
+/// `delete`, `rewrite-wikilink`, `init` and `vault migrate` — each planning
+/// something, but for the migration, which the shipped ladders leave already
+/// current — and over a vault declaring a creation rule, a preview of
+/// `new --as` (and, behind `induced-failure`, of a migration over a ladder
+/// that rewrites its schema) leave every file and folder at the inode and
+/// modification time it had.
+#[test]
+fn every_verbs_preview_leaves_every_entry_of_the_vault_as_it_was() {
+    use norn_wire::{
+        AuthoredValue, DeleteParams, DocumentEdit, EditParams, FieldChange, InitParams, InitReport,
+        MigrateParams, MigrateReport, MoveParams, MoveSubject, NewParams, NewSubject, Predicate,
+        RewriteWikilinkParams, SetParams, ValueMap, Variables, WriteTarget,
+    };
+
+    let (_sandbox, vault) = an_adopted_vault(
+        "host-applies-every-preview",
+        &[
+            ("subject.md", "---\nstatus: draft\n---\n# Subject\n"),
+            ("holder.md", "See [[subject]] and [[gone]].\n"),
+            ("gone.md", "# Gone\n"),
+            ("target.md", "# Target\n"),
+            ("folder/one.md", "# One\n[[two]]\n"),
+            ("folder/two.md", "# Two\n"),
+        ],
+    );
+    let host = vault.host();
+    let lease = attach::attach_and_wait(&host, vault.name());
+    let address = || VaultAddress::name(vault.name().clone());
+    let at = |text: &str| DocumentPath::new(text).expect("a document path");
+    let folder = |text: &str| FolderPath::new(text).expect("a folder path");
+    let named = |text: &str| ResolutionTarget::new(text).expect("a target");
+    let preview = ApplyMode::Preview;
+    let shelving = || vec![FieldChange::set("status", AuthoredValue::string("shelved"))];
+    let before = tree_state(vault.path());
+
+    previewed_something(host.set(SetParams::new(
+        address(),
+        preview,
+        WriteTarget::path(at("subject.md")),
+        shelving(),
+    )));
+    previewed_something(host.set(SetParams::new(
+        address(),
+        preview,
+        WriteTarget::matching([Predicate::equal_to("status", "draft")]),
+        shelving(),
+    )));
+    previewed_something(host.edit(EditParams::new(
+        address(),
+        preview,
+        at("subject.md"),
+        vec![DocumentEdit::replace_body("# Rewritten\n")],
+    )));
+    previewed_something(host.new_document(NewParams::new(
+        address(),
+        preview,
+        at("fresh/new.md"),
+        "# New\n",
+    )));
+    previewed_something(host.move_path(MoveParams::new(
+        address(),
+        preview,
+        MoveSubject::document(at("subject.md"), at("moved/renamed.md")),
+    )));
+    previewed_something(host.move_path(MoveParams::new(
+        address(),
+        preview,
+        MoveSubject::folder(folder("folder"), folder("moved/folder")),
+    )));
+    previewed_something(host.delete(
+        DeleteParams::new(address(), preview, at("gone.md")).rewriting_to(named("target")),
+    ));
+    previewed_something(host.rewrite_wikilink(RewriteWikilinkParams::new(
+        address(),
+        preview,
+        named("subject"),
+        named("target"),
+    )));
+    let init = host
+        .init(&InitParams::new(address(), preview))
+        .expect("an init preview answers");
+    assert!(
+        matches!(init, InitReport::Scaffolded { .. }),
+        "init planned no starter: {init:?}"
+    );
+    assert_eq!(
+        host.vault_migrate(&MigrateParams::new(address(), preview))
+            .expect("a migrate preview answers"),
+        MigrateReport::already_current()
+    );
+    assert_eq!(
+        tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
+    // The real-watcher lease is the host's and is not reentrant, so the
+    // first host lets go before the second is built.
+    drop(lease);
+    drop(host);
+
+    let (_ruled_sandbox, ruled) = an_adopted_vault(
+        "host-applies-every-preview-ruled",
+        &[
+            (
+                ".norn/schema.yaml",
+                "version: 1\ncreatable:\n  task:\n    target: \"tasks/{{seq}}.md\"\n",
+            ),
+            ("a.md", "# A\n"),
+        ],
+    );
+    let ruled_host = ruled.host();
+    let _ruled_lease = attach::attach_and_wait(&ruled_host, ruled.name());
+    let ruled_address = || VaultAddress::name(ruled.name().clone());
+    let before = tree_state(ruled.path());
+
+    previewed_something(ruled_host.new_document(NewParams::for_subject(
+        ruled_address(),
+        preview,
+        NewSubject::by_rule(
+            "task",
+            Variables::default(),
+            ValueMap::default(),
+            Some("Body.\n".to_string()),
+        ),
+    )));
+    #[cfg(feature = "induced-failure")]
+    {
+        use norn_config::migration::{Format, Ladder, Step};
+        let schema = Ladder {
+            format: Format::Yaml,
+            current: 2,
+            version_of: |text| Ok(if text.contains("# migrated\n") { 2 } else { 1 }),
+            steps: vec![Step {
+                from: 1,
+                rewrite: |text| format!("{text}# migrated\n"),
+            }],
+        };
+        let migrated = ruled_host
+            .vault_migrate_with_ladders(
+                &MigrateParams::new(ruled_address(), preview),
+                &schema,
+                &Ladder::config(),
+            )
+            .expect("a migrate preview answers");
+        assert!(
+            matches!(migrated, MigrateReport::Migrated { .. }),
+            "the migration planned no rewrite: {migrated:?}"
+        );
+    }
+    assert_eq!(
+        tree_state(ruled.path()),
         before,
         "a preview wrote to the vault"
     );
@@ -715,7 +1014,8 @@ fn a_delete_of_a_linked_document_previews_the_link_it_leaves_broken() {
 /// names the two documents of that stem before the move and two after, one
 /// of them at the moved path: which it names is not known, so the cascade
 /// leaves it as written and the forecast says why; several on both sides is
-/// no change the set records. The plan applies as previewed.
+/// no change the set records. The plan applies as previewed, and the link it
+/// skipped stands as written.
 #[test]
 fn a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link() {
     let (_sandbox, vault) = a_vault("host-applies-retargeted");
@@ -773,6 +1073,12 @@ fn a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link() 
         panic!("an apply answered {:?}", applied.report);
     };
     assert_eq!(applied_plan, plan, "the apply answered another plan");
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("apply-twin-linker.md"))
+            .expect("the linker reads"),
+        "See [[apply-twin]].\n",
+        "the apply rewrote the link its forecast skipped"
+    );
 }
 
 /// Bytes that do not decode as a vault document: the host quarantines a file

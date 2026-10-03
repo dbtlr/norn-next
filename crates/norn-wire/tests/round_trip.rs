@@ -10630,7 +10630,7 @@ fn a_delete_request_compiles_to_one_delete_saying_what_becomes_of_its_links() {
 
 /// **A `rewrite_wikilink` compiles to one `rewrite_wikilink`**, its `old`
 /// free to name a document no vault holds, and neither end carrying an
-/// anchor.
+/// anchor. A request naming no mode is refused.
 #[test]
 fn a_rewrite_wikilink_request_compiles_to_one_rewrite() {
     let json = r#"{"vault":{"by":"name","name":"notes"},"mode":"preview","old":"gone/never-was","new":"plans/2026"}"#;
@@ -10662,6 +10662,7 @@ fn a_rewrite_wikilink_request_compiles_to_one_rewrite() {
         )
     );
     for refused in [
+        json.replace(r#""mode":"preview","#, ""),
         json.replace(r#""old":"gone/never-was""#, r##""old":"gone#Heading""##),
         json.replace(r#""new":"plans/2026""#, r##""new":"plans/2026#^a1""##),
         json.replace(r#""old":"gone/never-was","#, ""),

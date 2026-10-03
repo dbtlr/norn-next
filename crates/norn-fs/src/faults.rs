@@ -73,8 +73,15 @@
 //!   `check` call takes its record away, which is what makes a bypassed hook
 //!   fail the case it was supposed to carry.
 //!
+//! - `NORN_FS_UNVERIFIED_PUBLICATION` — present, it switches off
+//!   publication's second reading of a replace's or a removal's target
+//!   before-state, so a target another writer changed after staging is
+//!   published over rather than refused as drift. It is an adequacy seam, not
+//!   a fault: a suite shows that a refusal is that reading's, and no other
+//!   check's, by applying the same plan once with it and once without.
+//!
 //! Nothing outside this crate arms anything without the feature, and a shipped
-//! build has no reader for either variable.
+//! build has no reader for any of these variables.
 //!
 //! Two sibling seams carry the effect surfaces this one does not: the watcher's,
 //! widened once at watch establishment, and the walk's, widened once at a walk's
@@ -99,6 +106,19 @@ pub(crate) const ARMED_STAGES: &str = "NORN_FS_ARMED_STAGES";
 /// The environment variable naming the file fired arms record themselves in.
 #[cfg(feature = "induced-failure")]
 pub(crate) const ARM_HITS: &str = "NORN_FS_ARM_HITS";
+
+/// The environment variable that switches publication's second reading of a
+/// target's before-state off.
+#[cfg(feature = "induced-failure")]
+const UNVERIFIED_PUBLICATION: &str = "NORN_FS_UNVERIFIED_PUBLICATION";
+
+/// Whether this process was started with publication's second reading of a
+/// target's before-state switched off: read once, as the arm is.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn publication_unverified() -> bool {
+    static UNVERIFIED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNVERIFIED.get_or_init(|| std::env::var_os(UNVERIFIED_PUBLICATION).is_some())
+}
 
 /// The seam a record written by the write protocol names itself under.
 #[cfg(feature = "induced-failure")]

@@ -10,15 +10,21 @@ publish.workspace = true
 # `induced-failure` is this crate's harness-reachable surface, and it carries
 # two things. It forwards to the feature of the same name in both effect crates:
 # `norn-store`'s, which is the fenced seam a suite reaches a rung or a refusal
-# through from outside, and `norn-fs`'s, whose watcher half is what makes a
-# refused registration, a stream that fails and a stream that reports its path
-# set lost reachable by a host attached over a real backend. And it gates the
+# through from outside, and `norn-fs`'s, whose every seam a host's suites
+# reach: the write protocol's arms, which an apply in a child process fails or
+# dies at, and its publication re-verify switch, which shows a drift refusal is
+# that reading's; the watcher's, which makes a refused registration, a stream
+# that fails and a stream that reports its path set lost reachable by a host
+# attached over a real backend; and the walk's. And it gates the
 # readers of what a host's own jobs did — `JobEvidence`, `EvidenceReading`,
 # `ProductionEntryOps::account`, `Host::classifications`,
 # `Host::recovery_demands` and `Host::work_in_flight` — and it opens
 # `Host::vault_migrate_with_ladders`, which migrates over a suite's own ladders,
 # since the ladders this build ships hold no step a suite could reach a rewrite
-# through. The accounts are
+# through. It also holds the applier's adequacy seam: a process started with
+# `NORN_HOST_UNCHECKED_RECOMPOSITION` in its environment publishes what a
+# plan's operations compose without holding it to the transition's
+# after-state, so a suite can show a refusal is that check's. The accounts are
 # *written* on every build, because that is how a job's cost stops being
 # discarded, and the in-flight holds are kept on every build because the
 # lifecycle runs on them; nothing in the shipped artifact reads either back,

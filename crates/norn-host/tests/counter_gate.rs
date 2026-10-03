@@ -1127,9 +1127,11 @@ fn moved_hub_path() -> String {
 /// A preview of the move through the host plans a cascade of one rewrite
 /// per in-link and records one written entry per rewritten link, and the
 /// calling thread, where a preview plans and judges its plan, reads the same
-/// documents through `norn-fs` at both scales: the hub and its twenty
-/// holders, each once while planning and once while the applier judges the
-/// plan. What the preview's judgments on the store's resolution door cost is
+/// documents through `norn-fs` at both scales: two counted opens per planned
+/// file, the hub and its twenty holders each opened once while planning and
+/// once while the applier judges the plan; the kernel's staging look opens
+/// each written target that already stands once more, outside this tally.
+/// What the preview's judgments on the store's resolution door cost is
 /// read off the host's read account, as the preview really ran them — the
 /// cascade's backlink pass and spelling probe, the planning's change set and
 /// the applier's computation of it again: the same judgments, links

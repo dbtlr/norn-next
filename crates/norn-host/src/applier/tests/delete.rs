@@ -256,6 +256,43 @@ fn a_delete_rewriting_its_links_respells_each_backlink_in_its_own_form() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **Every cascade rewrite of a rewriting delete publishes before the
+/// document is removed**: the own writes the applier records, in the order
+/// they land, put each holder the delete respells ahead of the removal, so a
+/// crash between any two leaves no link naming a document already gone.
+#[test]
+fn a_rewriting_deletes_cascade_publishes_before_its_document_is_removed() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "A\n"),
+        ("c.md", "C\n"),
+        ("h.md", "[[a]]\n"),
+        ("deep/k.md", "[k](../a.md)\n"),
+    ]);
+    let plan = fixture.plan(vec![rewriting("a.md", "c")]);
+    assert_eq!(
+        plan.operations[0].cascade,
+        [
+            markdown("deep/k.md", "../a.md", "../c.md"),
+            wikilink("h.md", "a", "c")
+        ]
+    );
+    applied(fixture.apply(plan));
+    let recorded = fixture.recorded.calls.borrow();
+    let landed = |at: &str| {
+        recorded
+            .iter()
+            .position(|(published, holds)| *holds && published == std::path::Path::new(at))
+            .unwrap_or_else(|| panic!("`{at}` is recorded landing: {recorded:?}"))
+    };
+    for holder in ["deep/k.md", "h.md"] {
+        assert!(
+            landed(holder) < landed("a.md"),
+            "`{holder}` lands before the removal: {recorded:?}"
+        );
+    }
+    assert_eq!(recorded.len(), 3, "{recorded:?}");
+}
+
 /// **A delete's `rewrite_to` must name one document where the plan leaves
 /// the vault.** Naming none, naming the very document the delete removes, or
 /// naming one another operation of the plan removes leaves the delete

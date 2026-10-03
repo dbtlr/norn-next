@@ -200,8 +200,10 @@ fn one<V: VaultView>(transition: &Transition, view: &V) -> Result<TargetState, V
         } => return Ok(TargetState::Unplaced),
         // Something that is no document stands in the way — a folder, or an
         // entry at or above the name that is not a folder — which another
-        // writer can take away: a create's name is left for staging to judge,
-        // which refuses it as taken; for any other transition it is drift.
+        // writer can take away: a create's name is left for the kernel's
+        // staging judgment, which refuses it as taken — or, beneath a link,
+        // as drift — in a preview as in an apply; for any other transition
+        // it is drift.
         Entry::Folder
         | Entry::Blocked {
             barrier: Barrier::Occupied,

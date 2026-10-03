@@ -81,7 +81,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 113;
+const CASE_TOTAL: usize = 117;
 
 /// The whole registry's contract, as one value.
 ///
@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "5e4a32aa3e02c17bb35cdb8ed47710c5bfa4653d747b31f03c3d991e3eceb736";
+const CONTRACT_DIGEST: &str = "cf697830c40c7f62cfb0253605c1ff42d03ac39557429164a7d38254af1973d8";
 
 /// The cases carried by tests today, by name.
 ///
@@ -108,30 +108,44 @@ const BOUND_CASES: &[&str] = &[
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
+    "cascade-preserves-link-syntax",
     "comparison-semantics-are-one-rule",
+    "containment-is-checked-once-for-every-operation",
     "cost-is-independent-of-vault-size",
+    "created-documents-are-mutable",
     "derived-findings-are-materialized-and-maintained",
+    "destructive-ordering-is-gated",
     "encoding-prefix-transparency",
+    "every-filesystem-effect-is-planned-and-forecast",
     "existence-probes-and-per-request-allocation-are-bounded",
     "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
+    "forecast-and-apply-are-one-classifier",
+    "format-never-implies-consent",
     "frontmatter-roundtrip-or-refuse",
     "guard-binds-executed-sql",
     "harness-condition-waits-have-deadlines",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
+    "mutation-honors-its-planned-flags",
     "narrowing-arguments-narrow-work",
     "no-in-memory-query-layer",
     "one-field-edit-is-a-one-field-diff",
+    "one-snapshot-per-request",
+    "one-verdict-and-one-coercion-basis-per-post-state",
     "parse-failure-is-not-absence",
     "per-file-atomicity-and-durability",
+    "plan-level-atomicity-and-truthful-partial-reporting",
+    "preconditions-come-from-plan-time",
     "predicate-filtering-in-sql-is-the-known-good-shape",
     "reads-are-not-blocked-by-writes",
+    "resolved-path-gates-resolved-path-reports",
     "set-valued-answers-are-pushed-down",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
     "vault-root-containment",
+    "write-verification-gate-covers-the-whole-contract",
 ];
 
 /// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
@@ -172,15 +186,14 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
-    "each-file-is-read-once-per-build",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
-    "maintenance-touches-the-affected-set-only",
     "output-parity-cannot-certify-structure",
     "present-but-unusable-config-refuses-loudly",
     "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
+    "vault-wide-work-is-a-declared-roster",
 ];
 
 fn workspace_root() -> PathBuf {

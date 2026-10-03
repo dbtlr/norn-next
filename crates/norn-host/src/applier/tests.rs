@@ -414,6 +414,42 @@ fn a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **The folders an apply makes and removes are the folders its forecast
+/// named.** A plan creating two folders deep under a missing folder and
+/// removing the last document of a nested folder is forecast at planning,
+/// then applied: the applied outcome's folders made and removed are compared
+/// with the forecast's as values, so neither side can drift from the other,
+/// and the targets it wrote are exactly the transitions the forecast came
+/// with.
+#[test]
+fn the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named() {
+    let mut fixture = Fixture::new(&[("keep.md", "# Keep\n"), ("old/sub/last.md", "# Last\n")]);
+    let resolution = fixture.resolution(vec![
+        creating("fresh/deep/c.md", "# C\n"),
+        deleting("old/sub/last.md"),
+    ]);
+    assert!(
+        !resolution.forecast.folders_made.is_empty()
+            && !resolution.forecast.folders_removed.is_empty(),
+        "the case forecasts a folder both ways: {:?}",
+        resolution.forecast
+    );
+    let planned: Vec<(String, TargetResult)> = resolution
+        .plan
+        .transitions
+        .iter()
+        .map(|transition| (transition.path.as_str().to_string(), TargetResult::Wrote))
+        .collect();
+    let applied = applied(fixture.apply(resolution.plan));
+    assert_eq!(results(&applied), planned);
+    assert_eq!(applied.folders_made, resolution.forecast.folders_made);
+    assert_eq!(applied.folders_removed, resolution.forecast.folders_removed);
+    assert_eq!(
+        fixture.tree(),
+        vec!["fresh", "fresh/deep", "fresh/deep/c.md", "keep.md"]
+    );
+}
+
 impl Fixture {
     /// The names in the shadow home: every shadow a stage left behind.
     pub(super) fn shadows_left(&self) -> Vec<String> {
@@ -527,6 +563,36 @@ fn a_refused_plan_answers_a_fresh_plan_that_applies() {
     assert_eq!(fixture.read("b.md").as_deref(), Some("# B\nnew\nforeign\n"));
     assert_eq!(fixture.read("c.md").as_deref(), Some("# C\ndone\n"));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **Every drifted target is named, not the first.** Foreign edits to two
+/// targets of one plan refuse it naming both, sorted, each with the state it
+/// now holds; the forecast marks both as possibly carrying the plan's change
+/// already, and nothing is published, the third target included.
+#[test]
+fn a_plan_drifted_at_two_targets_names_and_marks_both() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "status draft\n"),
+        ("b.md", "# B\nold\n"),
+        ("c.md", "# C\ndraft\n"),
+    ]);
+    let plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        editing("b.md", "old", "new"),
+        editing("c.md", "draft", "done"),
+    ]);
+    fixture.foreign("b.md", "# B\nold\nforeign\n");
+    fixture.foreign("a.md", "status draft\nforeign\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![
+            norn_wire::RefusedCheck::drifted(path("a.md"), present("status draft\nforeign\n")),
+            norn_wire::RefusedCheck::drifted(path("b.md"), present("# B\nold\nforeign\n")),
+        ]
+    );
+    assert_eq!(refused.forecast.drifted, vec![path("a.md"), path("b.md")]);
+    assert_eq!(fixture.read("c.md").as_deref(), Some("# C\ndraft\n"));
 }
 
 /// A resolved plan applied to another root is refused with no plan.
@@ -1433,6 +1499,44 @@ fn a_plan_missing_a_transition_is_refused() {
     plan.transitions
         .retain(|transition| transition.path != path("n.md"));
     assert_eq!(fixture.refuses_disagreeing(plan), vec![path("n.md")]);
+}
+
+/// **The after-state check compares bytes, not meaning.** A transition
+/// recording bytes that read as the very document its operation composes — a
+/// comment added, a space more, other line terminators, the last one gone — is
+/// refused all the same, naming the file, and the file is untouched: what the
+/// write contract keeps byte for byte, the gate checks byte for byte.
+#[test]
+fn an_after_state_differing_from_the_composed_bytes_only_where_meaning_is_kept_is_refused() {
+    let source = "---\nstatus: draft\n---\n# A\n";
+    for recorded in [
+        "---\nstatus: final # kept\n---\n# A\n",
+        "---\nstatus:  final\n---\n# A\n",
+        "---\r\nstatus: final\r\n---\r\n# A\r\n",
+        "---\nstatus: final\n---\n# A",
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", source)]);
+        let mut plan = fixture.plan(vec![setting(
+            "a.md",
+            "status",
+            norn_wire::AuthoredValue::string("final"),
+        )]);
+        assert_eq!(
+            plan.transitions[0].after,
+            present("---\nstatus: final\n---\n# A\n")
+        );
+        plan.transitions[0].after = present(recorded);
+        assert_eq!(
+            fixture.refuses_disagreeing(plan),
+            vec![path("a.md")],
+            "{recorded:?}"
+        );
+        assert_eq!(
+            fixture.read("a.md").as_deref(),
+            Some(source),
+            "{recorded:?}"
+        );
+    }
 }
 
 /// An edit whose after-state is changed to its before-state would answer

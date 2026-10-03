@@ -78,6 +78,19 @@ fn run_child_pinned(
     armed: &str,
     schema: Option<&str>,
 ) -> Child {
+    run_child_switched(fixture, plan, armed, schema, &[])
+}
+
+/// What a child applying `plan` over `fixture` under `armed` came to, with
+/// `schema` pinned in its store where one is given and each of `switches`
+/// set in its environment.
+fn run_child_switched(
+    fixture: &Fixture,
+    plan: &ResolvedPlan,
+    armed: &str,
+    schema: Option<&str>,
+    switches: &[&str],
+) -> Child {
     let dir = fixture
         .data
         .join(norn_testkit::scratch::unique_name("child"));
@@ -92,6 +105,9 @@ fn run_child_pinned(
     let mut command = Command::new(std::env::current_exe().expect("this test binary"));
     if let Some(schema) = schema {
         command.env(SCHEMA, schema);
+    }
+    for switch in switches {
+        command.env(switch, "1");
     }
     let output = command
         .args(["--exact", "applier::induced::applier_child", "--nocapture"])
@@ -392,7 +408,8 @@ fn a_staging_failure_writes_nothing_and_answers_write_failed() {
 /// each followed by a folder sync. For each step the process ends there; the
 /// re-send lands what did not, and the store equals a build from zero over
 /// the vault it leaves, every holder naming the target and the document
-/// gone.
+/// gone. An ordinal counts publications of every kind, so the unlink armed at
+/// the third firing is the removal publishing after both rewrites.
 #[test]
 fn a_rewriting_delete_cut_short_in_its_cascade_is_finished_by_sending_it_again() {
     let mut fired = 0;
@@ -652,4 +669,113 @@ fn a_quarantined_files_delete_or_move_cut_short_is_finished_by_sending_it_again(
     // Each plan publishes twice — a rename, then the removal's unlink — and
     // syncs after each.
     assert_eq!(fired, 2 * 4, "every position was reached");
+}
+
+use super::recompose::unchecked::UNCHECKED_RECOMPOSITION;
+
+/// The switch that has the write kernel publish without reading a target's
+/// before-state again (`norn-fs`'s, spelled as that crate reads it).
+const UNVERIFIED_PUBLICATION: &str = "NORN_FS_UNVERIFIED_PUBLICATION";
+
+/// What a foreign writer the kernel's seam arms puts at a target's name.
+const FOREIGN_BYTES: &str = "bytes a foreign writer put here\n";
+
+/// **The recomposition's after-state check is what refuses a plan whose
+/// operations compose bytes its transitions do not record.** A plan whose
+/// edit is doctored to write `doctored` while its transition still records
+/// the hash of `final` is refused as `request/plan-invalid`, naming the file,
+/// and the file is untouched; the same plan applied by the same child with
+/// only the after-state check switched off lands the doctored bytes. So the
+/// refusal is that check's, and no other check of the applier's catches the
+/// plan.
+#[test]
+fn a_plan_composing_bytes_it_does_not_record_lands_them_only_with_the_after_state_check_off() {
+    let doctored = || {
+        let fixture = Fixture::new(&[("a.md", "status draft\n")]);
+        let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
+        plan.operations[0] = editing("a.md", "draft", "doctored");
+        (fixture, plan)
+    };
+
+    let (fixture, plan) = doctored();
+    let child = run_child(&fixture, &plan, "");
+    assert!(child.lived);
+    let refused = envelope(&child);
+    assert_eq!(refused.code(), &norn_wire::ReasonCode::RequestPlanInvalid);
+    assert!(
+        matches!(
+            refused.detail(),
+            ErrorDetail::PlanInvalid {
+                fault: norn_wire::PlanFault::TransitionsDisagree { paths, .. },
+                ..
+            } if *paths == vec![path("a.md")]
+        ),
+        "{:?}",
+        refused.detail()
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("status draft\n"));
+
+    let (fixture, plan) = doctored();
+    let child = run_child_switched(&fixture, &plan, "", None, &[UNCHECKED_RECOMPOSITION]);
+    assert!(child.lived);
+    assert!(
+        matches!(child.outcome, Some(Ok(ApplyReport::Applied { .. }))),
+        "{:?}",
+        child.outcome
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some("status doctored\n"));
+}
+
+/// **Publication's second reading of a target's before-state is what
+/// refuses a foreign edit landing after staging.** A foreign writer edits the
+/// target inside its publication, after staging: with the re-verify on, the
+/// apply is refused as drift and the foreign bytes stand; the same plan
+/// applied by the same child with only that re-verify switched off lands
+/// over them, and the foreign bytes are lost. So the refusal is that
+/// check's.
+#[test]
+fn a_foreign_edit_after_staging_is_overwritten_only_with_publications_reverify_off() {
+    let edited = || {
+        let fixture = Fixture::new(&[("e.md", "status draft\n")]);
+        let plan = fixture.plan(vec![editing("e.md", "draft", "final")]);
+        (fixture, plan)
+    };
+
+    let (fixture, plan) = edited();
+    let child = run_child(&fixture, &plan, "foreign@1=edit");
+    assert!(child.lived);
+    let ErrorDetail::PlanRefused { checks, .. } = envelope(&child).detail() else {
+        panic!("the apply is refused: {:?}", child.outcome);
+    };
+    assert_eq!(
+        *checks,
+        vec![norn_wire::RefusedCheck::drifted(
+            path("e.md"),
+            norn_wire::FileState::present(crate::planner::compose::content_hash(
+                FOREIGN_BYTES.as_bytes()
+            ))
+        )]
+    );
+    assert_eq!(fixture.read("e.md").as_deref(), Some(FOREIGN_BYTES));
+
+    let (fixture, plan) = edited();
+    let child = run_child_switched(
+        &fixture,
+        &plan,
+        "foreign@1=edit",
+        None,
+        &[UNVERIFIED_PUBLICATION],
+    );
+    assert!(child.lived);
+    assert!(
+        child.hits.contains("stage=foreign"),
+        "the foreign writer acted: {}",
+        child.hits
+    );
+    assert!(
+        matches!(child.outcome, Some(Ok(ApplyReport::Applied { .. }))),
+        "{:?}",
+        child.outcome
+    );
+    assert_eq!(fixture.read("e.md").as_deref(), Some("status final\n"));
 }

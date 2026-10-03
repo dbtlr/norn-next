@@ -226,9 +226,12 @@ pub(super) struct Checked {
 /// schema violation, a taken name, a replaced root and an I/O failure each
 /// answer as themselves.
 ///
-/// **This is the one judgment of a resolved plan.** An apply stages what it
-/// passes, and a preview of a resolved plan answers from it, so what a caller
-/// previewed is what an apply of the same plan over the same files does.
+/// **With [`judge`], this is the one judgment of a resolved plan.** An apply
+/// stages what it passes, where the kernel judges each target again as it
+/// stages it; a preview of a resolved plan answers from it and from
+/// [`judge`], which asks the kernel that same judgment and stages nothing. So
+/// what a caller previewed is what an apply of the same plan over the same
+/// files does.
 pub(super) fn check(
     plan: &ResolvedPlan,
     view: &TreeView,
@@ -676,7 +679,103 @@ fn stage_one(
     unit: Unit,
     content: Option<&[u8]>,
 ) -> Result<Held, Stop> {
-    let (path, transition) = match unit {
+    let staged = through_kernel(
+        ground,
+        plan,
+        unit,
+        content,
+        |anchor, root, relative, transition| {
+            norn_fs::stage(anchor, root, relative, transition, shadows)
+        },
+    )?;
+    Ok(match staged {
+        Some(Staging::Staged(staged)) => Held::Staged(staged),
+        Some(Staging::Landed(landed)) => Held::Landed(landed),
+        None => Held::Nothing,
+    })
+}
+
+/// Judge every written target of the plan `checked` passed as [`stage`]
+/// would stage it, in the order they publish, and stage nothing: the first
+/// target the kernel refuses stops the plan as it would stop staging it.
+///
+/// **This is the rest of an apply's judgment that [`check`] leaves to
+/// staging**, which a preview answers from: the kernel's own descent to each
+/// target through no link — so a target beneath a folder since swapped for a
+/// link refuses as drift to absent — and what stands at the name, judged by
+/// the kernel against the transition. It reads the vault and writes nothing.
+pub(super) fn judge(
+    ground: &Ground<'_>,
+    plan: &ResolvedPlan,
+    normalizer: &PathNormalizer,
+    checked: &Checked,
+) -> Result<(), Stop> {
+    let order = publication_order(
+        plan,
+        &checked.units,
+        &checked.phases,
+        &checked.lineage,
+        normalizer,
+    );
+    for position in order {
+        let content = checked.contents[position].as_deref();
+        through_kernel(
+            ground,
+            plan,
+            checked.units[position],
+            content,
+            norn_fs::judge,
+        )?;
+    }
+    Ok(())
+}
+
+/// Hand `unit`, with `content`, to the kernel through `kernel` — staging it,
+/// or judging it as staging would — at the place it lands, and answer why
+/// the plan stops where the kernel refuses. `None` for a target whose two
+/// states are absence, which the kernel is not asked about.
+fn through_kernel<T, K>(
+    ground: &Ground<'_>,
+    plan: &ResolvedPlan,
+    unit: Unit,
+    content: Option<&[u8]>,
+    kernel: K,
+) -> Result<Option<T>, Stop>
+where
+    K: FnOnce(&Path, norn_fs::Identity, &Path, norn_fs::Transition<'_>) -> Result<T, Refusal>,
+{
+    let Some((path, transition)) = kernel_transition(plan, unit, content) else {
+        return Ok(None);
+    };
+    let landing = ground.landing(path).map_err(Stop::Failed)?;
+    // A target outside the vault is held to its folder as it stands now:
+    // the kernel records that identity and publication checks it again.
+    let Some(root) = landing.root(ground).map_err(Stop::Failed)? else {
+        return Err(drifted_away(path, &landing, &transition));
+    };
+    match kernel(landing.anchor, root, landing.relative, transition) {
+        Ok(answer) => Ok(Some(answer)),
+        Err(refusal) => Err(match classify(&refusal) {
+            Classified::Drift(holds) => {
+                Stop::Refused(vec![RefusedCheck::drifted(path.clone(), holds)])
+            }
+            Classified::NameTaken => Stop::Refused(vec![RefusedCheck::name_taken(path.clone())]),
+            Classified::RootReplaced => landing
+                .replaced_outside()
+                .map_or(Stop::RootReplaced, Stop::Failed),
+            Classified::Io(detail) => Stop::Failed(detail),
+        }),
+    }
+}
+
+/// The plan path the kernel is asked about for `unit`, and the transition it
+/// is asked for there; `None` for a target whose two states are absence.
+fn kernel_transition<'p>(
+    plan: &'p ResolvedPlan,
+    unit: Unit,
+    content: Option<&'p [u8]>,
+) -> Option<(&'p DocumentPath, norn_fs::Transition<'p>)> {
+    Some(match unit {
         Unit::One(index) => {
             let transition = &plan.transitions[index];
             let kernel = match (&transition.before, &transition.after, content) {
@@ -694,7 +793,7 @@ fn stage_one(
                         before: kernel_hash(hash),
                     }
                 }
-                _ => return Ok(Held::Nothing),
+                _ => return None,
             };
             (&transition.path, kernel)
         }
@@ -717,27 +816,7 @@ fn stage_one(
                 },
             )
         }
-    };
-    let landing = ground.landing(path).map_err(Stop::Failed)?;
-    // A target outside the vault is held to its folder as it stands now:
-    // the kernel records that identity and publication checks it again.
-    let Some(root) = landing.root(ground).map_err(Stop::Failed)? else {
-        return Err(drifted_away(path, &landing, &transition));
-    };
-    match norn_fs::stage(landing.anchor, root, landing.relative, transition, shadows) {
-        Ok(Staging::Staged(staged)) => Ok(Held::Staged(staged)),
-        Ok(Staging::Landed(landed)) => Ok(Held::Landed(landed)),
-        Err(refusal) => Err(match classify(&refusal) {
-            Classified::Drift(holds) => {
-                Stop::Refused(vec![RefusedCheck::drifted(path.clone(), holds)])
-            }
-            Classified::NameTaken => Stop::Refused(vec![RefusedCheck::name_taken(path.clone())]),
-            Classified::RootReplaced => landing
-                .replaced_outside()
-                .map_or(Stop::RootReplaced, Stop::Failed),
-            Classified::Io(detail) => Stop::Failed(detail),
-        }),
-    }
+    })
 }
 
 /// The stop for a target outside the vault whose folder is gone before it
