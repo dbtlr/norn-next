@@ -21,11 +21,11 @@
 //! side: a condition that would have held is refused with one that would not.
 //! Nor does any step of a workflow holding a YAML merge key, `<<`, anywhere:
 //! the parser does not apply it, so what it merges in would go unseen. Nor
-//! does a step whose environment sets a key cargo, rustc or rustup reads —
-//! a runner, wrapper, compiler or flags named there decide what the command
-//! builds and runs — unless the key is one that cannot keep a test from
-//! running, nor a step whose `env`, or its job's or workflow's, cannot be read
-//! whole.
+//! does a step whose environment — its own, its job's and its workflow's —
+//! sets any key but the project's own, `LANE_FEATURES` and those beginning
+//! `NORN_`: a runner, wrapper, compiler, search path or preloaded library
+//! named by any other may decide what the command builds and runs. Nor does a
+//! step whose `env`, or its job's or workflow's, cannot be read whole.
 //!
 //! **A command is read whole or not at all.** It is one line, holding no shell
 //! metacharacter anywhere — no pipe, list operator, redirection, comment,
@@ -250,7 +250,7 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             let env = layered(job_env.as_ref(), step.get("env"));
             let env_reads = env
                 .as_ref()
-                .is_some_and(|env| !env.keys().any(|key| steers_the_toolchain(key)));
+                .is_some_and(|env| env.keys().all(|key| is_the_projects_own(key)));
             steps.push(Step {
                 run: step.get("run").and_then(Value::as_str).map(str::to_string),
                 env: env.unwrap_or_default(),
@@ -397,23 +397,18 @@ fn layered(
     Some(env)
 }
 
-/// Whether an environment key is one cargo, rustc or rustup may read, in any
-/// case, other than one of [`INERT_TOOLCHAIN_KEYS`]. Cargo takes a runner, a
-/// wrapper, a compiler, a target, its whole configuration and its flags from
-/// keys spelled so, and any of them can leave the test binaries unbuilt,
-/// unrun, or run by something other than the harness.
-fn steers_the_toolchain(key: &str) -> bool {
-    let key = key.to_ascii_uppercase();
-    (key.starts_with("CARGO") || key.starts_with("RUST"))
-        && !INERT_TOOLCHAIN_KEYS.contains(&key.as_str())
+/// Whether an environment key is one of the project's own: [`LANE_FEATURES`],
+/// or one beginning `NORN_`.
+///
+/// Only norn's harness, scripts and tests read these, so none can replace
+/// cargo, rustc or the binaries they build. Every other key may: cargo and
+/// rustc take a runner, a wrapper, a compiler and flags from their own keys,
+/// the shell finds `cargo` through `PATH`, and the loader preloads whatever
+/// `LD_PRELOAD` names — so the rule is the short list that cannot, not the
+/// open one that can.
+fn is_the_projects_own(key: &str) -> bool {
+    key == LANE_FEATURES || key.starts_with("NORN_")
 }
-
-/// The toolchain keys a vouching step may set: each must be one that cannot
-/// keep a test binary from being built and run by its harness, and each
-/// names the reason beside it. No vouching step in this repository's
-/// workflows sets a toolchain key, so none is listed; a key joins only when a
-/// workflow needs it and that reason holds for it.
-const INERT_TOOLCHAIN_KEYS: &[&str] = &[];
 
 /// The features an environment value names, split the way the lane script
 /// hands them to cargo.
@@ -946,28 +941,16 @@ mod tests {
         }
     }
 
-    /// **A step whose environment sets a key cargo or rustc reads vouches for
-    /// nothing**, at the step, its job or its workflow, in any case: a runner,
-    /// a wrapper, a compiler, a target or a flag cargo takes from there can
-    /// leave the test binaries unbuilt, unrun, or run by something else. An
-    /// `env` this cannot read whole may set any of them, so it fails closed
-    /// too.
+    /// **A step whose environment sets any key but the project's own vouches
+    /// for nothing**, at the step, its job or its workflow: a runner, a
+    /// wrapper, a compiler, a search path or a preloaded library named there
+    /// can leave the test binaries unbuilt, unrun, or run by something else.
+    /// An `env` this cannot read whole may set any of them, so it fails
+    /// closed too.
     #[test]
-    fn a_toolchain_environment_key_vouches_for_nothing() {
-        for key in [
-            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
-            "cargo_target_x86_64_unknown_linux_gnu_runner",
-            "CARGO_BUILD_TARGET",
-            "CARGO_BUILD_RUSTC_WRAPPER",
-            "CARGO_HOME",
-            "CARGO",
-            "RUSTC",
-            "RUSTC_WRAPPER",
-            "RUSTFLAGS",
-            "RUSTDOCFLAGS",
-            "RUSTUP_TOOLCHAIN",
-        ] {
-            for (placement, workflow) in [
+    fn a_step_whose_environment_sets_a_key_not_the_projects_own_vouches_for_nothing() {
+        let at_each_level = |key: &str| {
+            [
                 (
                     "step",
                     one_step(
@@ -984,7 +967,19 @@ mod tests {
                     "workflow",
                     one_step(&["env:", &format!("  {key}: 'true'")], &[], &[]),
                 ),
-            ] {
+            ]
+        };
+        for key in [
+            "PATH",
+            "LD_PRELOAD",
+            "RUSTC_WRAPPER",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+            "FOO",
+            // The project's spellings in another case are other keys.
+            "lane_features",
+            "norn_x",
+        ] {
+            for (placement, workflow) in at_each_level(key) {
                 assert_eq!(
                     vouching(&workflow),
                     vec![false],
@@ -992,24 +987,23 @@ mod tests {
                 );
             }
         }
+        for key in [LANE_FEATURES, "NORN_X"] {
+            for (placement, workflow) in at_each_level(key) {
+                assert_eq!(
+                    vouching(&workflow),
+                    vec![true],
+                    "a step under a {placement} `{key}` was refused\n{workflow}"
+                );
+            }
+        }
         for unreadable in [
             one_step(&["env: ${{ fromJSON(vars.ENV) }}"], &[], &[]),
-            one_step(&[], &["    env: [RUSTC_WRAPPER]"], &[]),
-            one_step(
-                &[],
-                &[],
-                &["        env:", "          RUSTC_WRAPPER: [a, list]"],
-            ),
+            one_step(&[], &["    env: [NORN_X]"], &[]),
+            one_step(&[], &[], &["        env:", "          NORN_X: [a, list]"]),
             one_step(&[], &[], &["        env:", "          1: one"]),
         ] {
             assert_eq!(vouching(&unreadable), vec![false], "{unreadable}");
         }
-        let unrelated = one_step(
-            &["env:", "  NORN_CERTIFICATION_LOGS: logs"],
-            &["    env:", "      RUN_CARGO: x"],
-            &["        env:", "          LANE_FEATURES: induced-failure"],
-        );
-        assert_eq!(vouching(&unrelated), vec![true], "{unrelated}");
     }
 
     /// **A workflow carrying a YAML merge key anywhere vouches for nothing**:
