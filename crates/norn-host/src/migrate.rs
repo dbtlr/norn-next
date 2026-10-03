@@ -24,10 +24,13 @@
 //! is refused as changed rather than planned over: its rewrite was composed
 //! from bytes the file no longer holds. An apply plans afresh within the one
 //! call, as a preview does, and sends that resolved plan; a file changed
-//! after that refuses the apply by drift, which a migration answers as
-//! changed too, never with the refusal's fresh plan, whose whole-file
-//! content was composed from the bytes that drifted and would replace the
-//! other writer's edit with it.
+//! after that, before anything landed, refuses the apply by drift, which a
+//! migration answers as changed too, never with the refusal's fresh plan,
+//! whose whole-file content was composed from the bytes that drifted and
+//! would replace the other writer's edit with it. A file changed after the
+//! other file's rewrite landed is no refusal: the apply is answered as the
+//! applier answers it, `vault/plan-interrupted` naming what landed, since a
+//! migration refusal would hide a rewrite that stands on disk.
 //!
 //! **The vault is reloaded under what landed**, as `init` reloads it: the
 //! watcher's control-file facts are discarded by design, and the migration is
@@ -106,9 +109,10 @@ fn refused(file: ControlFile, reason: MigrationRefusal) -> ErrorEnvelope {
 }
 
 /// The refusal an apply of a migration's own plan answers where `refusal`
-/// says a control file drifted after it was planned: the file changed, and
-/// the migration composed from what it held is not sent on. Any other
-/// refusal is answered as it is.
+/// says a control file drifted after it was planned and before anything
+/// landed: the file changed, and the migration composed from what it held
+/// is not sent on. Any other answer is given as it is — an interruption
+/// after a rewrite landed included, which names what landed.
 fn changed_since(refusal: ErrorEnvelope) -> ErrorEnvelope {
     let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
         return refusal;

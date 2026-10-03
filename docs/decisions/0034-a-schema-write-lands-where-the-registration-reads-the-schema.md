@@ -53,6 +53,15 @@ The ruling has these costs:
   between a preview and its apply moves the target. The before-state hash guards it: a
   source holding other bytes refuses the plan as drift, and the plan lands only over the
   bytes it was composed from.
+- **What the caller previewed applies, except where the schema lands.** [ADR
+  0032](0032-a-file-state-says-whether-its-bytes-are-a-document.md) takes a resolved plan's
+  preconditions from planning time, so what the caller previewed is what applies, and it
+  guards the plan with the vault root's identity, which the plan carries. For the schema's
+  role, the file the bytes land at is resolved when the plan is applied. An out-of-vault
+  anchor's identity is read at staging, because the plan carries none. The guards there are
+  the before-state hash and that staging-time identity. A folder replaced between staging and
+  publication is answered as a write that failed, naming the folder, never as the vault root
+  changing.
 - **A write across filesystems is refused**, rather than published by another means.
 - **An out-of-vault landing records no own write.** The own-write ledger names vault paths
   only. The watcher's control-file facts are discarded before they reach the lifecycle, so

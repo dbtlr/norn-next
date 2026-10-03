@@ -22,7 +22,11 @@
 //! folders take the root's `(device, inode)` the plan was made against, and
 //! publication and confirming a landing take it from what staging recorded; a
 //! root whose spelling now names another directory refuses as
-//! [`Refusal::RootReplaced`].
+//! [`Refusal::RootReplaced`]. The one anchor that is no vault root is the
+//! folder of a `schema_source` outside the vault, which a schema write is
+//! anchored at (ADR 0034): its caller reads that folder's `(device, inode)`
+//! when it stages, since no plan carries it, and the kernel holds the call
+//! to it exactly as it holds one to a root.
 //!
 //! **On a root that folds case, a name is the spelling its folder lists.** A
 //! target the volume resolves under another spelling is not this target: a
@@ -477,8 +481,11 @@ pub struct RemovedFolders {
 /// See the [module documentation](self) for what staging asks and what it
 /// leaves behind. `anchor` is the vault root, resolved as it is spelled, and
 /// `root` is the `(device, inode)` the plan was made against: an anchor that
-/// names another directory refuses. `path` is relative to it and names a file
-/// below it, never a parent, a root or a prefix.
+/// names another directory refuses. For the one target outside the vault, a
+/// schema write to a `schema_source` there (ADR 0034), `anchor` is the
+/// source's folder, resolved as it is spelled, and `root` is that folder's
+/// `(device, inode)` as its caller read it when staging. `path` is relative
+/// to `anchor` and names a file below it, never a parent, a root or a prefix.
 ///
 /// **Its caller is the one applier** (`norn-host`'s `applier`, Layer 4
 /// plan-apply), which stages every target of a plan before it publishes any.

@@ -1625,7 +1625,13 @@ against it:
   name inside it, so it alone is resolved exactly as spelled. Every mutation is anchored
   the same way: staging and publication each descend from the vault root one folder at a
   time with `O_NOFOLLOW`, a linked folder refuses, and the check, the rename, the unlink
-  and a create's `mkdirat` all act through the folder handle the descent reached. What
+  and a create's `mkdirat` all act through the folder handle the descent reached. The one
+  exception is a schema write to a `schema_source` outside the vault
+  ([ADR 0034](decisions/0034-a-schema-write-lands-where-the-registration-reads-the-schema.md)):
+  it is anchored at the source's folder, opened as spelled, and that folder's identity is
+  read when the write is staged rather than carried from planning; publication holds the
+  write to it as it holds every other target to the root's, and the descent below it is
+  the same. What
   that cannot close is stated rather than claimed away: a folder another writer moves
   after the descent receives the publication at its new place, inside the vault and
   through no link, and the watcher reports where the document landed. The one descent is
