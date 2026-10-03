@@ -49,12 +49,11 @@
 //!   [`canonical_spelling`], the one spelling an absolute path is resolved to
 //!   before it is compared with another.
 //! - [`reads`] — what this thread asked the filesystem for while a caller's
-//!   window stood over it: the opens, stats and directory entries that module
-//!   names, counted where they happen. Evidence a caller folds into its own
-//!   account, and nothing that decides anything.
-//! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
-//!   concludes, the one act that produces one from a file, and the identity a
-//!   published write reports.
+//!   window stood over it: the reads of a file's content, stats and directory
+//!   entries that module names, counted where they happen. Evidence a caller
+//!   folds into its own account, and nothing that decides anything.
+//! - [`ContentHash`] and [`PostState`] — the hash that concludes and the
+//!   identity a published write reports.
 //!
 //! **A vault's own mechanism files are part of that.** Norn keeps two per
 //! [maintainership](MaintainershipKey) — the maintainer lock file and the shadow
@@ -117,7 +116,7 @@ mod scratch;
 
 pub use exclusion::{Excluded, ExclusionError, Exclusions};
 pub use gitignore::fallback_ignored;
-pub use hash::{ContentHash, hashed_from};
+pub use hash::ContentHash;
 pub use identity::{Identity, PostState, path_identity, readable_directory};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{

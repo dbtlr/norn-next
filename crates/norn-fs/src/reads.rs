@@ -23,8 +23,8 @@
 //!
 //! A count says how many reads a thread took and not of what. A build with
 //! `induced-failure` also records, per counted read, the act that took it and
-//! the path it read ([`FileRead`]), while a [`FileRecording`] is armed and a
-//! window stands on the thread; [`ReadWindow::finish_with_files`] hands both
+//! the path it read (`FileRead`), while a `FileRecording` is armed and a
+//! window stands on the thread; `ReadWindow::finish_with_files` hands both
 //! back together. A build without the feature carries none of it: no type,
 //! no storage and no code at a read site.
 //!

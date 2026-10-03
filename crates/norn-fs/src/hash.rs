@@ -6,10 +6,14 @@
 //! false "changed" costs a re-derivation.
 //!
 //! Reading and hashing a file is **one act against one file descriptor**, so
-//! the bytes hashed are provably the bytes read. [`hashed_from`] is the
-//! streaming form for a caller holding a handle. [`crate::read_and_hash`] is
-//! the configured-path form which returns both the bytes and their hash from
-//! one opening.
+//! the bytes hashed are provably the bytes read. The streaming form, for a
+//! caller holding a handle, is private to this module and reached only by
+//! name: the write kernel's reads of a target and of a shadow through
+//! [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
+//! and the watcher's echo check through [`uncounted_echo_hashed_from`], which
+//! says in its name that it is not counted. [`crate::read_and_hash`] is the
+//! configured-path form which returns both the bytes and their hash from one
+//! opening.
 //!
 //! [`ContentHash::of`] is the same guarantee arrived at from the other side — a
 //! caller that already holds the bytes hashes those bytes, and the write kernel
@@ -134,27 +138,15 @@ impl fmt::Debug for ContentHash {
 /// weight of the document. A read interrupted by a signal is retried, because
 /// `EINTR` is not a failure to read and half a hash is not a smaller hash.
 ///
-/// **This form is not counted** in any [`crate::reads::ReadTally`] field: the
-/// write kernel's reads of a target and of a shadow go through
-/// [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
-/// and the one caller in this crate that hashes through this form is the
-/// watcher's echo check, which runs on the watcher's thread outside every
-/// job's account.
+/// **This form is not counted** in any [`crate::reads::ReadTally`] field, so
+/// it is private: a caller hashes through a wrapper whose name says whether
+/// it counts, and a new uncounted hash is a call review can see.
 ///
 /// What this cannot promise is anything about the *name* the handle came from.
 /// The bytes hashed are the bytes of the file this descriptor refers to; whether
 /// some path still resolves to that file is a separate question, asked with a
 /// stat comparison by whoever needs the answer.
-///
-/// ```
-/// use norn_fs::{ContentHash, hashed_from};
-///
-/// let mut handle = std::io::Cursor::new(b"the bytes a reader read".to_vec());
-/// let (hash, len) = hashed_from(&mut handle).expect("hashing a handle");
-/// assert_eq!(hash, ContentHash::of(b"the bytes a reader read"));
-/// assert_eq!(len, 23);
-/// ```
-pub fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, u64)> {
+fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, u64)> {
     handle.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; CHUNK];
@@ -174,7 +166,7 @@ pub fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHa
     Ok((ContentHash(hasher.finalize().into()), len))
 }
 
-/// The write kernel's read of the target at `full`: [`hashed_from`] over its
+/// The write kernel's read of the target at `full`: the stream hash over its
 /// descriptor, counted as one [`crate::reads::ReadTally::target_reads`] by
 /// the act itself, so a target hashed twice counts twice.
 pub(crate) fn target_hashed_from<H: Read + Seek>(
@@ -185,7 +177,7 @@ pub(crate) fn target_hashed_from<H: Read + Seek>(
     hashed_from(handle)
 }
 
-/// The write kernel's read of the staged shadow at `path`: [`hashed_from`]
+/// The write kernel's read of the staged shadow at `path`: the stream hash
 /// over its descriptor, counted as one
 /// [`crate::reads::ReadTally::shadow_reads`] by the act itself.
 pub(crate) fn shadow_hashed_from<H: Read + Seek>(
@@ -193,6 +185,16 @@ pub(crate) fn shadow_hashed_from<H: Read + Seek>(
     path: &std::path::Path,
 ) -> std::io::Result<(ContentHash, u64)> {
     crate::reads::count_shadow_read(path);
+    hashed_from(handle)
+}
+
+/// The watcher's echo check: the stream hash over a file it opened itself,
+/// **counted in no [`crate::reads::ReadTally`] field**. The check runs on the
+/// watcher's thread, outside every job's account, so there is no window its
+/// read could be counted in; nothing else calls this.
+pub(crate) fn uncounted_echo_hashed_from<H: Read + Seek>(
+    handle: &mut H,
+) -> std::io::Result<(ContentHash, u64)> {
     hashed_from(handle)
 }
 
