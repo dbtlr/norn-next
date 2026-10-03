@@ -1755,9 +1755,10 @@
           "crates/norn-host/src/planner/rule.rs::a_filled_path_the_document_grammar_refuses_is_unresolved_naming_it",
           "crates/norn-wire/tests/round_trip.rs::a_document_path_refuses_what_no_vault_holds_a_document_at",
           "crates/norn-host/src/planner/rule.rs::a_filled_path_beneath_a_control_file_is_unresolved_by_the_control_file_gate",
+          "crates/norn-host/src/planner/rule.rs::an_unsafe_value_is_unresolved_naming_the_token",
+          "crates/norn-host/tests/verbs.rs::a_creation_by_rule_filling_into_a_folder_linked_out_of_the_vault_is_refused",
           "crates/norn-host/src/planner/rule.rs::a_creation_by_rule_expands_into_the_document_its_rule_makes",
-          "crates/norn-host/tests/verbs.rs::a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it",
-          "crates/norn-host/tests/verbs.rs::a_creation_by_rule_is_made_by_the_pinned_schema_not_the_bytes_on_disk"
+          "crates/norn-host/tests/verbs.rs::a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it"
         ]
       }
     },

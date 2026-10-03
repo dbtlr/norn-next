@@ -623,6 +623,57 @@ fn a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it() {
     assert_eq!(read(&vault, "tasks/NORN-1.md"), content);
 }
 
+/// **A creation rule whose filled target lands in a folder that is a symbolic
+/// link out of the vault is refused, and nothing is written outside.** The
+/// rule's template names `tasks/`, which is a link to a folder beside the
+/// vault: previewed and applied, the creation is refused at planning, which
+/// judges the filled path and does not follow the link, and the folder
+/// outside stays empty.
+#[test]
+fn a_creation_by_rule_filling_into_a_folder_linked_out_of_the_vault_is_refused() {
+    let (sandbox, vault, host) = a_schema_vault("host-verbs-rule-linked", RULE_SCHEMA, &[]);
+    let outside = sandbox.work_dir().join("outside");
+    std::fs::create_dir(&outside).expect("a folder outside the vault");
+    std::os::unix::fs::symlink(&outside, vault.path().join("tasks"))
+        .expect("a link where the rule files its documents");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let creating = |mode| {
+        NewParams::for_subject(
+            address(&vault),
+            mode,
+            NewSubject::by_rule(
+                "task",
+                variables(&[("project", "NORN"), ("title", "Ship it")]),
+                ValueMap::default(),
+                None,
+            ),
+        )
+    };
+
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        let refusal = refused(host.new_document(creating(mode)));
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused, "{mode:?}");
+        let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+            panic!("the refusal carries {:?}", refusal.detail());
+        };
+        let [left] = unresolved.as_slice() else {
+            panic!("one operation is unresolved: {unresolved:?}");
+        };
+        assert!(
+            format!("{:?}", left.reason).contains("`tasks` is a symbolic link"),
+            "{mode:?}: {:?}",
+            left.reason
+        );
+    }
+    assert!(
+        std::fs::read_dir(&outside)
+            .expect("the folder outside lists")
+            .next()
+            .is_none(),
+        "something was written through the link"
+    );
+}
+
 /// **A document `new` creates is mutable end to end through the verbs.** One
 /// created at a path with an empty body and no frontmatter takes a field from
 /// a `set`, then a body from an `edit`, each applying; and one a creation
