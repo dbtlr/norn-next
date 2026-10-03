@@ -15595,13 +15595,16 @@ mod tests {
     }
 
     /// **A send a full queue refuses gives its slot back outside the job
-    /// sender's lock**, so a gate poisoned between the slot's take and its
-    /// give-back panics that give-back without poisoning the sender, and the
-    /// host's destruction still takes the sender.
+    /// sender's lock, and reads through a poisoned gate to do it**, so a gate
+    /// poisoned between the slot's take and its give-back neither unwinds the
+    /// send nor poisons the sender, and the host's destruction still takes the
+    /// sender.
     ///
     /// The one worker is inside an attach and the one channel slot holds the
-    /// next job, so the send is refused as full; the send runs under
-    /// `catch_unwind`, which catches the give-back's panic on the poison.
+    /// next job, so the send is refused as full. The give-back is left for the
+    /// gate's next hold where it cannot take the gate at once, and that route
+    /// reads through a poison as a drop's does: what it writes there no later
+    /// holder reads, since every ordinary take still panics on the poison.
     #[test]
     fn a_send_refused_over_a_poisoned_gate_leaves_the_job_sender_unpoisoned() {
         let ops = Arc::new(FakeOps::default());
@@ -15637,12 +15640,12 @@ mod tests {
         }));
 
         assert!(
-            sent.is_err(),
-            "the give-back of the refused send's slot did not meet the poison"
+            matches!(sent, Ok(Ok(()))),
+            "a send a full queue refused over a poisoned gate did not answer as refused"
         );
         assert!(
             !host.shared.jobs.is_poisoned(),
-            "the give-back panicked under the job sender's lock"
+            "the give-back poisoned the job sender"
         );
         ops.block_attach.store(false, Ordering::SeqCst);
         ops.attach_release.store(true, Ordering::SeqCst);
