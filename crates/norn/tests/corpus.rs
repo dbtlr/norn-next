@@ -401,7 +401,7 @@ const RESERVED_MACHINE_LOCAL_VERBS: [&str; 4] =
 
 /// The commands the top-level ruling names as decided and not in the wire
 /// registry, spelled as the registry would spell them.
-const DECIDED_NOT_REGISTERED: [&str; 2] = ["vault_migrate", "model_fetch"];
+const DECIDED_NOT_REGISTERED: [&str; 1] = ["model_fetch"];
 
 /// Whether `docs/architecture.md` marks `verb` reserved on a `norn-client`
 /// row: the client that owns the machine-local verbs is not written yet.
