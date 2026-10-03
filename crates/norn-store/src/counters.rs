@@ -192,12 +192,42 @@ impl DerivationCounters {
         self.values.iter().all(|value| *value == 0)
     }
 
+    /// Findings this request wrote: the ones its caller handed it and the
+    /// link-health findings its re-decision filed.
+    pub fn findings_written(&self) -> u64 {
+        self.value(Counter::FindingsWritten)
+    }
+
+    /// Links this request re-decided the link health of, each once however
+    /// many ways it was reached.
+    pub fn links_redecided(&self) -> u64 {
+        self.value(Counter::LinksRedecided)
+    }
+
+    /// Keys this request's re-decision resolved.
+    pub fn link_health_keys_resolved(&self) -> u64 {
+        self.value(Counter::LinkHealthKeysResolved)
+    }
+
+    /// Candidates this request's re-decision read.
+    pub fn link_health_candidates_read(&self) -> u64 {
+        self.value(Counter::LinkHealthCandidatesRead)
+    }
+
     pub(crate) fn add(&mut self, counter: Counter, amount: u64) {
-        let index = Counter::ALL
+        let index = Self::index(counter);
+        self.values[index] = self.values[index].saturating_add(amount);
+    }
+
+    fn value(&self, counter: Counter) -> u64 {
+        self.values[Self::index(counter)]
+    }
+
+    fn index(counter: Counter) -> usize {
+        Counter::ALL
             .iter()
             .position(|candidate| *candidate == counter)
-            .expect("every counter is in the reading order");
-        self.values[index] = self.values[index].saturating_add(amount);
+            .expect("every counter is in the reading order")
     }
 }
 

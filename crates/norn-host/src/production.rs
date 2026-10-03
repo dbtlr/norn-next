@@ -28,7 +28,7 @@ use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
-use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
+use crate::evidence::{JobEvidence, count_changeset, count_document_derived, count_increment_work};
 use crate::planner::control::{SchemaPlace, SchemaSite};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
@@ -3919,9 +3919,12 @@ impl<'s> Pending<'s> {
         // is recorded rather than dropped: the job that applied it is the only
         // place the tallies are ever visible, since a changeset that landed
         // leaves the same rows behind however many entries it held. A flush
-        // carrying findings alone applied no changeset and counts none.
+        // carrying findings alone applied no changeset and counts none, but
+        // its request wrote those findings and read the store, which the job
+        // did either way.
+        count_increment_work(&self.counters, request.read_steps());
         if applied {
-            count_changeset(&outcome, &self.counters, request.read_steps());
+            count_changeset(&outcome);
         }
         Ok(())
     }
@@ -5318,6 +5321,35 @@ mod tests {
             Ok(crate::AuthoredDrift::Current)
         );
         assert!(receiver.seen.lock().unwrap().len() > delivered);
+    }
+
+    /// **A flush carrying findings alone is its job's work too.** A vault
+    /// holding nothing but a name the directory grammar quarantines derives
+    /// no row, so its attach's one flush carries the finding at the place the
+    /// name renders onto and no changeset: the account counts no changeset
+    /// applied, and counts the finding that flush's request wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_flush_carrying_findings_alone_counts_what_its_request_wrote() {
+        let f = Fixture::new("findings-only-flush");
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let ops = fixture_ops(&f);
+        let evidence = Arc::clone(&ops.evidence);
+        let (_host, _name, _lease) = ready_host(&f, ops);
+        let spent = evidence.read();
+        assert_eq!(
+            (spent.changesets_applied, spent.documents_upserted),
+            (0, 0),
+            "the quarantined name derived a row, so no flush here carries findings alone: \
+             {spent:?}"
+        );
+        assert!(
+            spent.findings_written >= 1,
+            "the attach filed the quarantined name's finding in a flush of its own, and the \
+             account counts none of it: {spent:?}"
+        );
     }
 
     /// **A dry run of a schema edit answers what the activation then does, and

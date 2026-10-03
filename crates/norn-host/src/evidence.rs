@@ -139,22 +139,23 @@ pub struct EvidenceReading {
     pub tombstones_recorded: u64,
     /// Findings the changesets discarded, on both maintenance axes.
     pub findings_discarded: u64,
-    /// Findings the changesets wrote, the link-health findings their
-    /// re-decision filed among them.
+    /// Findings the jobs' increments wrote, the link-health findings their
+    /// re-decision filed among them — an increment carrying findings alone
+    /// and no changeset included, since its request writes them all the same.
     pub findings_written: u64,
-    /// Links the changesets re-decided the link health of, each once per
-    /// changeset however many ways it was reached
-    /// ([`norn_store::DerivationCounters`]' `links_redecided`).
+    /// Links the increments re-decided the link health of, each once per
+    /// increment however many ways it was reached
+    /// ([`norn_store::DerivationCounters::links_redecided`]).
     pub links_redecided: u64,
-    /// Keys the changesets' re-decisions resolved.
+    /// Keys the increments' re-decisions resolved.
     pub link_health_keys_resolved: u64,
-    /// Candidates the changesets' re-decisions read.
+    /// Candidates the increments' re-decisions read.
     pub link_health_candidates_read: u64,
-    /// Virtual-machine steps the changesets' multi-row reads took, as the
+    /// Virtual-machine steps the increments' multi-row reads took, as the
     /// store's request reads them ([`norn_store::Request::read_steps`]): the
     /// re-decision's reads of the classes and paths a changeset names among
-    /// them. Harness evidence about execution cost, never a derivation
-    /// counter.
+    /// them, and whatever an increment carrying findings alone read. Harness
+    /// evidence about execution cost, never a derivation counter.
     pub changeset_read_steps: u64,
     /// Recovery rungs run: how many times a job re-established coverage over an
     /// attachment that still held its resources.
@@ -550,24 +551,15 @@ thread_local! {
     }) };
 }
 
-/// Record what one applied changeset did: the store's `outcome`, the
-/// derivation `counters` its request read, and the `read_steps` its
-/// multi-row reads took.
+/// Record what one applied changeset did: the store's `outcome` for it.
 ///
 /// The store answers every increment with an outcome, and this is where that
 /// answer stops being dropped on the floor: the job that applied the changeset
 /// records it on its own thread, and the entry point that job runs under folds
-/// the thread's tally into the host's account.
-pub(crate) fn count_changeset(
-    outcome: &IncrementOutcome,
-    counters: &DerivationCounters,
-    read_steps: u64,
-) {
-    let counted = |name: &str| {
-        counters
-            .get(name)
-            .expect("the derivation vocabulary carries every counter this account folds")
-    };
+/// the thread's tally into the host's account. An increment carrying findings
+/// alone applied no changeset and is not one; what its request did is
+/// [`count_increment_work`]'s.
+pub(crate) fn count_changeset(outcome: &IncrementOutcome) {
     CHANGESETS.with(|cell| {
         let mut tally = cell.get();
         tally.applied += 1;
@@ -575,10 +567,26 @@ pub(crate) fn count_changeset(
         tally.documents_deleted += outcome.documents_deleted;
         tally.tombstones_recorded += outcome.tombstones_recorded;
         tally.findings_discarded += outcome.invalidated.findings_discarded;
-        tally.findings_written += counted("findings_written");
-        tally.links_redecided += counted("links_redecided");
-        tally.link_health_keys_resolved += counted("link_health_keys_resolved");
-        tally.link_health_candidates_read += counted("link_health_candidates_read");
+        cell.set(tally);
+    });
+}
+
+/// Record what one increment's request did, whether or not it carried a
+/// changeset: the findings it wrote and the re-decision it ran, read off the
+/// derivation `counters` the request kept, and the `read_steps` its multi-row
+/// reads took.
+///
+/// Every increment a job runs is counted here, a flush carrying findings
+/// alone among them: its request writes those findings and reads the store
+/// like any other, so leaving it out would leave work the job did out of the
+/// job's account.
+pub(crate) fn count_increment_work(counters: &DerivationCounters, read_steps: u64) {
+    CHANGESETS.with(|cell| {
+        let mut tally = cell.get();
+        tally.findings_written += counters.findings_written();
+        tally.links_redecided += counters.links_redecided();
+        tally.link_health_keys_resolved += counters.link_health_keys_resolved();
+        tally.link_health_candidates_read += counters.link_health_candidates_read();
         tally.read_steps += read_steps;
         cell.set(tally);
     });
@@ -628,8 +636,8 @@ mod tests {
         let evidence = Arc::new(JobEvidence::default());
         {
             let _job = evidence.attributing();
-            count_changeset(&outcome(), &DerivationCounters::default(), 0);
-            count_changeset(&outcome(), &DerivationCounters::default(), 0);
+            count_changeset(&outcome());
+            count_changeset(&outcome());
             assert_eq!(
                 evidence.read(),
                 EvidenceReading::default(),
@@ -651,10 +659,10 @@ mod tests {
         let evidence = Arc::new(JobEvidence::default());
         drop(evidence.attributing());
         let before = evidence.read();
-        count_changeset(&outcome(), &DerivationCounters::default(), 0);
+        count_changeset(&outcome());
         {
             let _job = evidence.attributing();
-            count_changeset(&outcome(), &DerivationCounters::default(), 0);
+            count_changeset(&outcome());
         }
         assert_eq!(evidence.read().since(before).changesets_applied, 1);
     }
@@ -706,7 +714,8 @@ mod tests {
         let evidence = Arc::new(JobEvidence::default());
         {
             let _job = evidence.attributing();
-            count_changeset(&outcome(), &DerivationCounters::default(), 40);
+            count_changeset(&outcome());
+            count_increment_work(&DerivationCounters::default(), 40);
         }
         evidence.count_apply_snapshot(SnapshotWork {
             snapshots_opened: 1,
