@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "5e4a32aa3e02c17bb35cdb8ed47710c5bfa4653d747b31f03c3d991e3eceb736";
+const CONTRACT_DIGEST: &str = "17a70c9d3efd4ff486ba6f2fa05f66719f57a0f9ed9ac1ec26e084ea931cd773";
 
 /// The cases carried by tests today, by name.
 ///
@@ -172,10 +172,8 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
-    "each-file-is-read-once-per-build",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
-    "maintenance-touches-the-affected-set-only",
     "output-parity-cannot-certify-structure",
     "present-but-unusable-config-refuses-loudly",
     "steps-report-their-own-outcome",

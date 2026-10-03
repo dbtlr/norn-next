@@ -211,7 +211,7 @@
       "sources": ["NRN-a59", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the counters exist and every one of them is consumed: crates/norn-store/src/counters.rs declares the vocabulary and every reading carries all of it, and crates/norn-host/tests/counter_gate.rs records each counter by name at the value a request finished on. Two halves have no subject. Nothing fails a build for a metric computed and dropped, because no guard reads the vocabulary against its consumers; and the process-harness half is narrower than the property, because the reader of a host's own account is crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature — a build without it writes the account and carries no reader. Two residues, then: the guard with no settled home, and the feature-gated reader — no file is decided on to hold the vocabulary-against-consumers scan, and what the process-harness half waits on is the `induced-failure` selection cargo would compile crates/norn-host/src/evidence.rs under, which no path and no declaration names.",
+        "reason": "the counters exist and every one of them is consumed: crates/norn-store/src/counters.rs declares the vocabulary and every reading carries all of it, and crates/norn-host/tests/counter_gate.rs records each counter by name at the value a request finished on. The process-harness half holds: the counters reach a harness on every read's answer in any build, debug or not, and the host's own account, which crates/norn-host/src/evidence.rs keeps and states is not a derivation counter, is read by name behind the `induced-failure` feature, a cargo feature the counter lane builds rather than a debug build. What keeps the case dormant is the first half: nothing fails a build for a metric computed and dropped, because no guard reads the vocabulary against its consumers. The residue is the guard with no settled home: no file is decided on to hold that scan.",
         "grounds": [
           { "present": "crates/norn-store/src/counters.rs" },
           { "present": "crates/norn-host/tests/counter_gate.rs" },
@@ -518,11 +518,13 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the build exists and one clause is carried at its seam: crates/norn-fs/src/hash.rs reads and hashes a file in one act against one descriptor, so hashing buys no second read, and crates/norn-fs/src/reads.rs counts the opens a build performs. The equality clause has no carrier this file can name: the tally is read through crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature, and a carrier here is held to what cargo compiled with no feature turned on. The residue is the feature-gated reader: crates/norn-host/src/evidence.rs is claimed present above and declares the reader, and what is absent is the `induced-failure` selection cargo would compile it under, which no path and no declaration names.",
+        "reason": "the build exists and one clause is carried at its seam: crates/norn-fs/src/hash.rs reads and hashes a file in one act against one descriptor, so hashing buys no second read, and crates/norn-fs/src/reads.rs counts the opens a build performs into the host's account. That account is read through crates/norn-host/src/evidence.rs behind the `induced-failure` feature, a build a carrier may be compiled under because a CI step runs the host's suites with it on, and the counter lane, crates/norn-host/tests/counter_gate.rs, reads it by name. What is missing is the bar itself: no test holds a build's document opens equal to the files it derived. It is pre-committed as crates/norn-host/tests/counter_gate.rs::a_build_from_zero_opens_each_document_once, in the lane that already reads the account.",
         "grounds": [
           { "present": "crates/norn-fs/src/hash.rs" },
           { "present": "crates/norn-fs/src/reads.rs" },
-          { "present": "crates/norn-host/src/evidence.rs" }
+          { "present": "crates/norn-host/src/evidence.rs" },
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "symbol-absent": "crates/norn-host/tests/counter_gate.rs::a_build_from_zero_opens_each_document_once" }
         ]
       }
     },
@@ -550,11 +552,12 @@
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the warm read exists and derives nothing: crates/norn-host/tests/counter_gate.rs reads every reader the store offers over an attached vault and finishes with every counter at zero, and trust is asserted by coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read. The stat half has no bar: crates/norn-fs/src/reads.rs counts filesystem acts per thread and its reader is behind the `induced-failure` feature, so nothing holds a warm read to zero stats and zero freshness-baseline rows, and what the mechanism itself costs waits on the request path crates/norn-serve owns.",
+        "reason": "the warm read exists and reads nothing off the vault: crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread holds every read verb to no document opened, no stat and no directory entry on its thread, through the per-thread count crates/norn-fs/src/reads.rs keeps in every build, and crates/norn-host/tests/counter_gate.rs holds a warm request, with the attachment gone and with it still live, to every derivation counter at zero. Trust is asserted by the coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read, and no freshness baseline exists to load. What keeps the case dormant is the last clause: what the mechanism itself costs is stated over the request path crates/norn-serve owns, which is not in the workspace.",
         "grounds": [
+          { "symbol-present": "crates/norn-host/tests/reads.rs::every_read_verb_answers_with_no_file_read_on_its_thread" },
+          { "present": "crates/norn-fs/src/reads.rs" },
           { "present": "crates/norn-host/tests/counter_gate.rs" },
           { "present": "crates/norn-host/src/lifecycle.rs" },
-          { "present": "crates/norn-fs/src/reads.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -642,11 +645,12 @@
       "sources": ["NRN-a62", "NRN-a63", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the increment exists and is scoped: crates/norn-store/src/increment.rs writes every derived table over the changeset's own paths and classes, with no table exempt, and crates/norn-host/tests/churn.rs brackets what one seeded edit costs a live attachment above and below. That bracket is the carrier this case wants and it cannot be named here: it reads the host's account through crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature, while a carrier here is held to what cargo compiled with no feature turned on. The residue is the feature-gated reader: crates/norn-host/src/evidence.rs is claimed present above and declares the reader, and what is absent is the `induced-failure` selection cargo would compile it under, which no path and no declaration names.",
+        "reason": "the increment exists and is scoped: crates/norn-store/src/increment.rs writes every derived table over the changeset's own paths and classes, with no table exempt. The first clause has its carrier: crates/norn-host/tests/churn.rs brackets what one seeded edit costs a live attachment, its document opens and its document rows upserted, under a ceiling stated over the changed set and above what a changed set of nothing would read, through the host's account that crates/norn-host/src/evidence.rs reads behind the `induced-failure` feature, the build a CI step runs the host's suites in. The second clause has none: nothing reads how many rows each derived table's write touched, so a table rewritten wholesale beside correctly scoped ones moves neither counter the bracket reads. It is pre-committed as crates/norn-store/tests/store/increments.rs::every_derived_table_a_changeset_writes_is_scoped_to_its_paths_and_classes, beside the suite that already holds the increment's findings discard to the changeset's paths and classes.",
         "grounds": [
           { "present": "crates/norn-store/src/increment.rs" },
           { "present": "crates/norn-host/tests/churn.rs" },
-          { "present": "crates/norn-host/src/evidence.rs" }
+          { "present": "crates/norn-host/src/evidence.rs" },
+          { "symbol-absent": "crates/norn-store/tests/store/increments.rs::every_derived_table_a_changeset_writes_is_scoped_to_its_paths_and_classes" }
         ]
       }
     },
@@ -990,8 +994,8 @@
         "status": "dormant",
         "reason": "the plan and forecast halves have their subject: every file an apply writes is a transition of the resolved plan it answers with, and every folder it makes or removes is named by that plan's forecast, which crates/norn-host/src/planner/forecast.rs computes and the applier, crates/norn-host/src/applier.rs, reports again as the folders it made and removed. What keeps the case dormant is the audit stream the rest of the property is about: no mutation is recorded to an audit sink, no trace id is carried, and the write path writes no log line, so nothing can be asserted of audit records surviving a failure, of sinks, of trace ids or of time correlation.",
         "grounds": [
-          {"present": "crates/norn-host/src/planner/forecast.rs"},
-          {"present": "crates/norn-host/src/applier.rs"}
+          { "present": "crates/norn-host/src/planner/forecast.rs" },
+          { "present": "crates/norn-host/src/applier.rs" }
         ]
       }
     },
@@ -1131,8 +1135,8 @@
         "status": "dormant",
         "reason": "restated per ADR 0032, docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md, which governs where the case as mined disagreed with it: two operations on one path compose in order into one transition rather than being rejected, and no per-operation report persists — the host keeps no record of an attempt, an interrupted answer names every landed target, and re-sending the resolved plan is the recovery — so those clauses, and the report fields accumulating across passes, are replaced. The subject is built: the applier, crates/norn-host/src/applier.rs, checks and stages every target before its first publication, and its suite states the clauses — a_staging_refusal_publishes_nothing_creates_and_removals_included, a_refused_plan_answers_a_fresh_plan_that_applies, a_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again, a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_after, re_sending_a_resolved_plan_finishes_it, a_plan_missing_a_transition_is_refused and a_plan_dropping_its_operations_condition_is_refused. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
         "grounds": [
-          {"present": "docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md"},
-          {"present": "crates/norn-host/src/applier.rs"}
+          { "present": "docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md" },
+          { "present": "crates/norn-host/src/applier.rs" }
         ]
       }
     },
@@ -1197,9 +1201,9 @@
         "status": "dormant",
         "reason": "the check is the kernel's own: crates/norn-fs/src/open.rs descends into the vault root one component at a time and refuses what leaves it, once per operation the kernel runs. The layer above it is reached: every write runs as the apply job whose handle is crates/norn-host/src/lifecycle.rs::PendingApply, which hands every resolved plan to the host's single applier, crates/norn-host/src/applier.rs, which stages and publishes every target through that kernel. What keeps the case dormant is that the `apply` verb is the one verb reaching it: the write verbs that would each inherit containment from it — set, edit, new, move, delete and rewrite-wikilink — are not built, so no test can show a verb added later inheriting it.",
         "grounds": [
-          {"present": "crates/norn-fs/src/open.rs"},
-          {"present": "crates/norn-host/src/applier.rs"},
-          {"symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply"}
+          { "present": "crates/norn-fs/src/open.rs" },
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply" }
         ]
       }
     },
@@ -1515,9 +1519,9 @@
         "status": "dormant",
         "reason": "a resolved plan's preview and its apply are one classifier: the applier, crates/norn-host/src/applier.rs, judges a previewed resolved plan through the check an apply stages behind and answers the same plan or the refusal its apply would, as an_interrupted_plan_previews_as_the_same_plan_and_then_applies and a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses in crates/norn-host/tests/applies.rs state; and the planner, crates/norn-host/src/planner/resolve.rs, classifies each operation on its own, resolving an edit only where its text occurs exactly once and leaving any other unresolved rather than rewriting a first match. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The skips-with-reasons clause waits for Layer 5's repair plans, and the generator's ambiguous-stem and dangling-link trees wait for the link-cascading write verbs, which are not built.",
         "grounds": [
-          {"present": "crates/norn-host/src/applier.rs"},
-          {"present": "crates/norn-host/tests/applies.rs"},
-          {"present": "crates/norn-host/src/planner/resolve.rs"}
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "present": "crates/norn-host/tests/applies.rs" },
+          { "present": "crates/norn-host/src/planner/resolve.rs" }
         ]
       }
     },
@@ -1554,8 +1558,8 @@
         "status": "dormant",
         "reason": "the applier, crates/norn-host/src/applier.rs, publishes only the plan's transitions and the folders its forecast names, and a staging refusal leaves the tree as it found it, as a_staging_refusal_publishes_nothing_creates_and_removals_included states; a preview writes nothing, every entry of the vault keeping its inode and modification time, as a_preview_leaves_every_entry_of_the_vault_as_it_was in crates/norn-host/tests/applies.rs states. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The move-with-parents-disabled clause waits for the move verb, which is not built.",
         "grounds": [
-          {"present": "crates/norn-host/src/applier.rs"},
-          {"present": "crates/norn-host/tests/applies.rs"}
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "present": "crates/norn-host/tests/applies.rs" }
         ]
       }
     },
@@ -1569,9 +1573,9 @@
         "status": "dormant",
         "reason": "the apply's half has its subject: the apply job whose handle is crates/norn-host/src/lifecycle.rs::PendingApply takes its one snapshot while it holds the entry's claim, after its intake derived the facts delivered before it, and no commit lands between it and the changeset because the claim holds the store's one writer; the applier, crates/norn-host/src/applier.rs, checks a resolved plan's states and conditions against the files, and operations are planned inside that claim. A read's half is carried by crates/norn-store/src/store.rs::SnapshotReader, which establishes one snapshot per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. What keeps the case dormant is the counter: an apply's snapshot is the store's reading on its writer connection under the claim rather than a reader's establishment, so snapshots_opened does not count it, and nothing yet reads one snapshot per apply request.",
         "grounds": [
-          {"symbol-present": "crates/norn-store/src/store.rs::SnapshotReader"},
-          {"present": "crates/norn-host/src/applier.rs"},
-          {"symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply"}
+          { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply" }
         ]
       }
     },
@@ -1585,7 +1589,7 @@
         "status": "dormant",
         "reason": "the write path exists and judges a composed result by the derivation's own judge: the applier's schema check, crates/norn-host/src/applier/schema.rs, runs the derivation's plan_document over the post-state bytes under the pinned declaration — the one judgment the validator's findings come from — so the verdict an apply refuses on is the one the store would file for that post-state. What keeps the case dormant is the rest: the apply verb is the one write path, so there are not several to hold to one verdict; an applied answer reports no warnings to compare with the validator's findings; and no type-changing write exists to coerce under the incoming type. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
         "grounds": [
-          {"present": "crates/norn-host/src/applier/schema.rs"}
+          { "present": "crates/norn-host/src/applier/schema.rs" }
         ]
       }
     },
@@ -1632,9 +1636,9 @@
         "status": "dormant",
         "reason": "the recompose check is the gate: before anything is staged, crates/norn-host/src/applier/recompose.rs runs the plan's operations again from its before-states and the applier, crates/norn-host/src/applier.rs, refuses unless each result hashes to its transition's after-state — every byte of the composed file, never a projection of it — so a str_replace splice is confirmed against the whole document before it is committed, and the kernel, crates/norn-fs/src/write.rs, verifies each staged target again as it publishes. The adequacy clause — mutating the gate and requiring the suite to go red — has no harness that runs it, and it stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
         "grounds": [
-          {"present": "crates/norn-host/src/applier/recompose.rs"},
-          {"present": "crates/norn-host/src/applier.rs"},
-          {"present": "crates/norn-fs/src/write.rs"}
+          { "present": "crates/norn-host/src/applier/recompose.rs" },
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "present": "crates/norn-fs/src/write.rs" }
         ]
       }
     },
