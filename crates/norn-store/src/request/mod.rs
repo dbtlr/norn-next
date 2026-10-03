@@ -2099,8 +2099,10 @@ pub(crate) const PATH_DISCARD_SQL: &str = "DELETE FROM findings WHERE id IN (
 
 /// The statement that discards every finding recorded **about** one path.
 ///
-/// The subject axis of findings maintenance, run once per changed path by
-/// [`Request::apply_increment`]. It seeks `findings_path`, which is the index
+/// The subject axis of findings maintenance, run whole once per path
+/// [`Request::apply_increment`] writes a row to or kills; a
+/// [`crate::Change::Vacated`] place takes it narrowed by kind through
+/// [`subject_discard_sql`]. It seeks `findings_path`, which is the index
 /// that keeps the discard costing the path's own findings rather than the table.
 pub(crate) const SUBJECT_DISCARD_SQL: &str = "DELETE FROM findings WHERE path = ?1";
 

@@ -444,8 +444,10 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::findings_in_class`].
     FindingsInClass(&'a SuffixProbe),
     /// The subject-scoped discard: [`Request::apply_increment`] runs it whole
-    /// once per changed path, and [`Request::discard_findings_about`] runs it
-    /// over the kinds a caller is re-deriving.
+    /// once per path it writes a row to or kills, and narrowed to
+    /// [`FindingKind::BodyBytesNotUtf8`] once per [`crate::Change::Vacated`]
+    /// place; [`Request::discard_findings_about`] runs it over the kinds a
+    /// caller is re-deriving.
     SubjectDiscard(&'a DocumentPath, DiscardScope<'a>),
     /// The clear [`Request::pin_vault_schema`] runs over the field pillar's
     /// typed values, in the pin's transaction.
