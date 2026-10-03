@@ -6,6 +6,12 @@
 //! also which packages a step tests with the carrier feature on. Both answers
 //! are claims about what CI runs, so both come from this one reader.
 //!
+//! **What it guards against is an accident**: an edit to a workflow that stops
+//! a cited test from running without anyone meaning it to. So it vouches only
+//! for a step written in the one closed shape below and fails closed on every
+//! construct it does not read; it does not try to defeat a workflow written to
+//! deceive it, and review of the workflow's diff is the backstop for that.
+//!
 //! **A workflow is read as the YAML it is.** A step is the mapping under a
 //! job's `steps`, its command is the parsed value of its `run` key, and its
 //! environment is the parsed `env` maps of the workflow, the job and the step,
@@ -25,29 +31,37 @@
 //! sets any key but the project's own, `LANE_FEATURES` and those beginning
 //! `NORN_`: a runner, wrapper, compiler, search path or preloaded library
 //! named by any other may decide what the command builds and runs. Nor does a
-//! step whose `env`, or its job's or workflow's, cannot be read whole.
+//! step whose `env`, or its job's or workflow's, cannot be read whole. Nor,
+//! last, does a step holding a key other than those this reads — `name`,
+//! `id`, `run`, `env`, `if`, `shell`, `timeout-minutes`, `working-directory`
+//! and `continue-on-error` — nor any step of a job holding one other than
+//! `name`, `runs-on`, `steps`, `env`, `if`, `timeout-minutes`, `permissions`,
+//! `defaults` and `continue-on-error`: a `needs` skips the job with the job it
+//! waits on, a `container` decides what `cargo` is, and a `uses` runs an
+//! action beside the command.
 //!
-//! **A command is read whole or not at all.** It is one line, holding no shell
-//! metacharacter anywhere — no pipe, list operator, redirection, comment,
-//! expansion, brace, wildcard, tilde, escape, quote or subshell — and it runs
-//! under `bash` or `sh`, named or left as the runner's default, so it is one
-//! process with the arguments it spells: each of those shells splits such a
-//! line on whitespace and does nothing else to it. Any other `shell:`, on the
-//! step or as a job's or the workflow's `defaults.run.shell`, is a template
-//! the runner hands the command to, and the template decides what runs —
-//! `true {0}` runs nothing. The arguments are then held to a grammar:
-//! optionally the flake tripwire in front, then either the lane script with a
-//! package, a target and harness arguments that select nothing, or
-//! `cargo test` with the flags that name a package, a feature and one target
-//! and the few that change nothing about which tests run. A command outside that
-//! grammar runs nothing, so a step this cannot read fails whatever needed it
-//! rather than vouching for a test it may not run.
+//! **A command is read whole or not at all.** It is one line of printable
+//! ASCII words parted by spaces, holding no shell metacharacter anywhere — no
+//! pipe, list operator, redirection, comment, expansion, brace, wildcard,
+//! tilde, escape, quote or subshell — and it runs under `bash` or `sh`, named
+//! or left as the runner's default, so it is one process with the arguments it
+//! spells: each of those shells splits such a line at its spaces and does
+//! nothing else to it. Any other `shell:`, on the step or as a job's or the
+//! workflow's `defaults.run.shell`, is a template the runner hands the command
+//! to, and the template decides what runs — `true {0}` runs nothing. The
+//! arguments are then held to a grammar: optionally the flake tripwire in
+//! front, then either the lane script with a package, a target and harness
+//! arguments that select nothing, or `cargo test` with the flags that name a
+//! package, a feature and one target and the few that change nothing about
+//! which tests run. A command outside that grammar runs nothing, so a step this
+//! cannot read fails whatever needed it rather than vouching for a test it may
+//! not run.
 //!
-//! **When a workflow runs is not judged here.** Its triggers and their path
-//! filters, and a step's `working-directory`, are read by no rule above, on
-//! purpose: they decide whether and where CI runs a workflow, the same for a
-//! lane step as for a `cargo test` step, not what a step that runs vouches
-//! for.
+//! **When and where a workflow runs is not judged here.** Its triggers and
+//! their path filters, a job's `runs-on` and the runner image it names, and a
+//! step's `working-directory` are read by no rule above, on purpose: they
+//! decide whether and where CI runs a workflow, the same for a lane step as for
+//! a `cargo test` step, not what a step that runs vouches for.
 //!
 //! **Nor is what earlier steps leave behind.** A step is judged by its own
 //! text and the mappings above it, not by the state earlier steps in its job
@@ -78,8 +92,8 @@ pub(crate) const LANE_FEATURES: &str = "LANE_FEATURES";
 /// the braces, wildcards and tilde `bash` and `sh` expand a word holding them
 /// into other words.
 const SHELL_METACHARACTERS: &[char] = &[
-    '|', '&', ';', '<', '>', '#', '$', '\\', '\'', '"', '(', ')', '`', '\n', '{', '}', '*', '?',
-    '[', ']', '~',
+    '|', '&', ';', '<', '>', '#', '$', '\\', '\'', '"', '(', ')', '`', '{', '}', '*', '?', '[',
+    ']', '~',
 ];
 
 /// One step of one job, as the workflow declares it.
@@ -240,7 +254,9 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
         if !job.is_mapping() {
             return Err(format!("job `{name}` is not a mapping"));
         }
-        let job_conditional = is_conditional(job);
+        // A job that may be skipped, may fail unnoticed, or holds a key this
+        // does not read vouches for none of its steps.
+        let job_refuses = is_conditional(job) || !holds_only(job, JOB_KEYS);
         let job_shell = workflow_shell.under(Shell::defaulted_by(job));
         let job_env = layered(workflow_env.as_ref(), job.get("env"));
         let Some(declared) = job.get("steps") else {
@@ -260,7 +276,8 @@ fn steps_in(workflow: &str) -> Result<Vec<Step>, String> {
             steps.push(Step {
                 run: step.get("run").and_then(Value::as_str).map(str::to_string),
                 env: env.unwrap_or_default(),
-                vouches: !(job_conditional || is_conditional(step))
+                vouches: !(job_refuses || is_conditional(step))
+                    && holds_only(step, STEP_KEYS)
                     && job_shell.under(Shell::named_by(step)).runs_one_process()
                     && env_reads
                     && !merged,
@@ -349,6 +366,46 @@ impl<'a> Shell<'a> {
     }
 }
 
+/// The keys a job whose steps vouch may hold: each is one this reads, or one
+/// that decides nothing about what a step runs. Any other — `needs`, which
+/// skips the job with the job it waits on, `container`, whose `cargo` is any
+/// program, `strategy`, `services`, `uses` and the rest, or a key spelled in
+/// another case — leaves every step of the job vouching for nothing.
+const JOB_KEYS: &[&str] = &[
+    "name",
+    "runs-on",
+    "steps",
+    "env",
+    "if",
+    "timeout-minutes",
+    "permissions",
+    "defaults",
+    "continue-on-error",
+];
+
+/// The keys a vouching step may hold, on the same terms as [`JOB_KEYS`]: a
+/// step holding `uses`, `with` or any other key does not vouch.
+const STEP_KEYS: &[&str] = &[
+    "name",
+    "id",
+    "run",
+    "env",
+    "if",
+    "shell",
+    "timeout-minutes",
+    "working-directory",
+    "continue-on-error",
+];
+
+/// Whether every key of the mapping `node` is one of `keys`.
+fn holds_only(node: &Value, keys: &[&str]) -> bool {
+    node.as_mapping().is_some_and(|mapping| {
+        mapping
+            .keys()
+            .all(|key| key.as_str().is_some_and(|key| keys.contains(&key)))
+    })
+}
+
 /// Whether a job or step carries a key that lets it be skipped or fail
 /// without failing the run: any `continue-on-error:`, and any `if:` other
 /// than one of [`WIDENING_CONDITIONS`].
@@ -435,10 +492,16 @@ fn features_named(value: Option<&String>) -> BTreeSet<String> {
 fn invocation(run: &str) -> Option<Invocation> {
     // A block scalar's one line ends in a newline, which is not a second line.
     let line = run.trim_end_matches('\n');
-    if line.contains(SHELL_METACHARACTERS) {
+    // Printable ASCII alone, split on the space alone: any other character —
+    // a tab, a second line, a space-like character outside ASCII — is either
+    // a word boundary or part of a word to the shell, and either way not what
+    // this reads it as.
+    if !line.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        || line.contains(SHELL_METACHARACTERS)
+    {
         return None;
     }
-    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let tokens: Vec<&str> = line.split(' ').filter(|token| !token.is_empty()).collect();
     let command = match tokens.as_slice() {
         [FLAKE_TRIPWIRE, command @ ..] => command,
         command => command,
@@ -646,6 +709,10 @@ mod tests {
                 )],
             ),
             ("cargo test --locked -p norn-host", vec![]),
+            (
+                "cargo test  --locked  -p norn-host -F induced-failure ",
+                vec![run("norn-host", None, "induced-failure")],
+            ),
         ] {
             let read = invocation(command).map(|read| match read {
                 Invocation::Test(mut runs) => {
@@ -706,6 +773,16 @@ mod tests {
             "cargo clippy --locked -p norn-host --all-targets --features induced-failure"
                 .to_string(),
         ]);
+        // A character that is not printable ASCII: the shell splits words on
+        // the ASCII space and tab alone, so any other space-like character is
+        // part of a word — standing alone, a name filter that matches no test.
+        for character in [
+            '\t', '\u{0b}', '\u{0c}', '\r', '\u{85}', '\u{a0}', '\u{2003}', '\u{2028}', '\u{7f}',
+            '\u{0}', 'é',
+        ] {
+            commands.push(format!("{build} {character}"));
+            commands.push(format!("{build}{character}a_filter"));
+        }
         for command in commands {
             assert_eq!(invocation(&command), None, "`{command}` was read");
         }
@@ -1010,6 +1087,79 @@ mod tests {
         ] {
             assert_eq!(vouching(&unreadable), vec![false], "{unreadable}");
         }
+    }
+
+    /// **A step or job holding a key this does not read vouches for
+    /// nothing.** A job may wait on another that is skipped, run in a
+    /// container whose `cargo` is any program, or fan out over a matrix; a
+    /// step may run an action as well as its command; and a key spelled in
+    /// another case is not the one the runner reads. Every key the reader
+    /// does read, together, leaves a step vouching.
+    #[test]
+    fn a_step_or_job_holding_a_key_this_does_not_read_vouches_for_nothing() {
+        for step_key in [
+            "        uses: actions/checkout@v7",
+            "        with: {a: b}",
+            "        Continue-On-Error: true",
+            "        continue_on_error: true",
+            "        timeout: 5",
+            "        1: one",
+        ] {
+            let workflow = one_step(&[], &[], &[step_key]);
+            assert_eq!(vouching(&workflow), vec![false], "{workflow}");
+        }
+        for job_key in [
+            "    needs: gate",
+            "    container: rust:latest",
+            "    services: {db: {image: postgres}}",
+            "    strategy: {matrix: {os: [a, b]}}",
+            "    outputs: {a: b}",
+            "    concurrency: one",
+            "    environment: production",
+            "    uses: ./.github/workflows/other.yml",
+            "    with: {a: b}",
+            "    secrets: inherit",
+            "    Continue-On-Error: true",
+        ] {
+            let workflow = one_step(&[], &[job_key], &[]);
+            assert_eq!(vouching(&workflow), vec![false], "{workflow}");
+        }
+        // The skipped gate: GitHub skips a job whose need was skipped.
+        let gated = [
+            "jobs:",
+            "  gate:",
+            "    if: 'false'",
+            "    steps:",
+            "      - run: x",
+            "  build:",
+            "    needs: gate",
+            "    steps:",
+            "      - run: x",
+        ]
+        .join("\n");
+        assert_eq!(vouching(&gated), vec![false, false], "{gated}");
+        let every_read_key = one_step(
+            &[],
+            &[
+                "    name: Build",
+                "    runs-on: ubuntu-latest",
+                "    timeout-minutes: 30",
+                "    permissions: {contents: read}",
+                "    env: {NORN_X: x}",
+                "    if: always()",
+                "    defaults: {run: {shell: bash}}",
+            ],
+            &[
+                "        name: Test",
+                "        id: test",
+                "        env: {LANE_FEATURES: induced-failure}",
+                "        if: '!cancelled()'",
+                "        shell: sh",
+                "        timeout-minutes: 10",
+                "        working-directory: crates",
+            ],
+        );
+        assert_eq!(vouching(&every_read_key), vec![true], "{every_read_key}");
     }
 
     /// **A workflow carrying a YAML merge key anywhere vouches for nothing**:
