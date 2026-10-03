@@ -1559,12 +1559,14 @@
       "name": "created-documents-are-mutable",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every document the system can produce it can subsequently address and mutate. Empty or null frontmatter promotes to an empty mapping, an absent block is synthesized, and a present-but-empty key is a valid target; refusal is reserved for frontmatter that genuinely is not a mapping.",
+      "property": "Every document the system can produce it can subsequently address and mutate. Empty or null frontmatter, the null spelled out or not, promotes to a mapping holding the field written into it, an absent block is synthesized, and a present-but-empty key is a valid target; refusal is reserved for frontmatter that genuinely is not a mapping, and for a null whose own line carries a comment the promotion would drop.",
       "sources": ["NRN-114", "NRN-120", "NRN-371", "NRN-435", "norn-legacy annoyances log"],
       "binding": {
         "status": "bound",
         "tests": [
           "crates/norn-text/tests/editing.rs::an_empty_block_accepts_its_first_field",
+          "crates/norn-text/tests/editing.rs::a_null_block_in_any_spelling_promotes_to_a_mapping_holding_its_first_field",
+          "crates/norn-text/tests/editing.rs::a_comment_on_a_null_blocks_line_refuses_the_first_field",
           "crates/norn-text/tests/editing.rs::removing_the_only_field_leaves_an_empty_block_that_is_still_mutable",
           "crates/norn-text/tests/editing.rs::a_stubbed_field_is_settable",
           "crates/norn-text/tests/editing.rs::a_synthesized_block_lands_after_the_byte_order_mark",

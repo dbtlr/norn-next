@@ -9,7 +9,7 @@ use crate::frontmatter::extract::{
     BOM, BlockRefusal, FRONTMATTER_MAX_BYTES, closed_block, extract,
 };
 use crate::frontmatter::fields::{
-    Field, SplitRefusal, ValueStyle, classify_value, field_spans, reparse,
+    Field, SplitRefusal, ValueStyle, classify_value, field_spans, is_null_token, reparse,
 };
 use crate::frontmatter::list::{
     BlockItem, block_item_lines, entry_carries_comment, key_line_value_point,
@@ -630,8 +630,10 @@ impl<'a> Document<'a> {
     /// Write `value` at `field`, returning the whole edited document.
     ///
     /// Only the field's own bytes move. An absent field is appended before the
-    /// closing delimiter; a document with no block at all gets one, placed
-    /// after any byte-order mark. The result is re-read before it is returned,
+    /// closing delimiter; a null block's first field takes the place of the
+    /// null, refusing with [`EditError::CommentWouldBeLost`] where the null's
+    /// line carries a comment; a document with no block at all gets one,
+    /// placed after any byte-order mark. The result is re-read before it is returned,
     /// and an edit that does not read back as intended refuses.
     ///
     /// `value` may be any shape the model holds, over whatever the field
@@ -1247,9 +1249,19 @@ impl<'a> Document<'a> {
         let entry = render_entry(field, value, self.line_ending)?;
         let terminator = self.line_ending.as_str();
         match &self.frontmatter_range {
-            // Append before the closing delimiter. A null block — `---\n---\n`
-            // — has an empty range there, so writing a field into it promotes
-            // it to a mapping.
+            // A null block's first field takes the null's place, which
+            // promotes the block to a mapping: an empty block — `---\n---\n`
+            // — has nothing there, so the entry lands before the closing
+            // delimiter, and a spelled-out null gives its line to the entry.
+            Some(range) if self.frontmatter == Some(Value::Null) => {
+                let at = null_line(self.source, range.clone()).ok_or_else(|| {
+                    EditError::CommentWouldBeLost {
+                        field: field.to_string(),
+                    }
+                })?;
+                Ok(splice(self.source, at, &entry))
+            }
+            // Append before the closing delimiter.
             Some(range) => Ok(splice(self.source, range.end..range.end, &entry)),
             // No block at all. It lands after any byte-order mark, never above
             // it, so the mark stays the document's first bytes.
@@ -1493,6 +1505,36 @@ fn refuse_past_bound(edited: &str) -> Result<(), EditError> {
         }
         _ => Ok(()),
     }
+}
+
+/// Where a null block's first field goes: the line spelling the null — `~`,
+/// `null` in any of its cases — terminator included, or the end of a block
+/// holding no such line. Blank lines and standing comments are the
+/// document's and are left where they are. `None` where the null's line
+/// carries a comment, which replacing the line would drop.
+///
+/// A null spelled any other way — tagged, say — is not looked for: the entry
+/// lands at the end of the block, and the re-read refuses the result.
+fn null_line(source: &str, block: Range<usize>) -> Option<Range<usize>> {
+    let mut at = block.start;
+    let mut spelled = None;
+    for line in split_lines_inclusive(&source[block.clone()]) {
+        let start = at;
+        at += line.len();
+        let text = line.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        let (token, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+        if spelled.is_some() || !is_null_token(token) {
+            return Some(block.end..block.end);
+        }
+        if !rest.trim_start().is_empty() {
+            return None;
+        }
+        spelled = Some(start..at);
+    }
+    Some(spelled.unwrap_or(block.end..block.end))
 }
 
 /// `source` with `range` replaced by `replacement`, allocated once at the size
