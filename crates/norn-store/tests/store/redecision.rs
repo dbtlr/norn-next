@@ -17,6 +17,7 @@ use norn_store::{
     IncrementProvenance, OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
 };
 use norn_testkit::equivalence::{DerivedRows, StoreProjection};
+use norn_testkit::work::STEPS_PER_EMPTY_KEY;
 use norn_wire::{
     FindParams, FindingKind, Pattern, Predicate, ResolutionTarget, VaultAddress, VaultName,
 };
@@ -1747,10 +1748,6 @@ fn a_mass_delete_no_link_reaches_costs_a_constant_per_key() {
         "the links the deaths reach cost nothing: {busy_steps} against {quiet_steps}"
     );
 }
-
-/// The steps a class or a path a changeset names, which no link and no
-/// finding is held under, costs its re-decision at most.
-const STEPS_PER_EMPTY_KEY: u64 = 20;
 
 // ---- a tear inside the re-decision ----
 
