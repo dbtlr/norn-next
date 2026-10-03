@@ -10,9 +10,12 @@ publish.workspace = true
 # `induced-failure` is this crate's harness-reachable surface, and it carries
 # two things. It forwards to the feature of the same name in both effect crates:
 # `norn-store`'s, which is the fenced seam a suite reaches a rung or a refusal
-# through from outside, and `norn-fs`'s, whose watcher half is what makes a
-# refused registration, a stream that fails and a stream that reports its path
-# set lost reachable by a host attached over a real backend. And it gates the
+# through from outside, and `norn-fs`'s, whose every seam a host's suites
+# reach: the write protocol's arms, which an apply in a child process fails or
+# dies at, and its publication re-verify switch, which shows a drift refusal is
+# that reading's; the watcher's, which makes a refused registration, a stream
+# that fails and a stream that reports its path set lost reachable by a host
+# attached over a real backend; and the walk's. And it gates the
 # readers of what a host's own jobs did — `JobEvidence`, `EvidenceReading`,
 # `ProductionEntryOps::account`, `Host::classifications`,
 # `Host::recovery_demands` and `Host::work_in_flight` — and it opens
