@@ -269,7 +269,8 @@ where
     /// Each control file of `name` as it stands now — its bytes and their
     /// hash, or `None` where nothing stands — the schema where the
     /// registration reads it, on a hold of the entry and the ground its
-    /// coverage stands on.
+    /// coverage stands on, as the gate hold that established the hold read
+    /// it, so the read takes the gate no second time.
     ///
     /// The default schema and the config are read as the planner reads a
     /// control target ([`VaultView::control_entry`]); a `schema_source` is
@@ -284,7 +285,7 @@ where
             .begin_read(name)
             .map_err(|refusal| refusal.answer(name))?;
         hold.reading().answer_reading(name)?;
-        let ground = self.plan_ground(name).ok_or_else(|| {
+        let ground = hold.plan_ground().ok_or_else(|| {
             ErrorEnvelope::new(
                 "the entry records no ground to plan against, so the migration was not planned",
                 ErrorDetail::reader_unavailable(
@@ -301,10 +302,10 @@ where
             .as_ref()
             .filter(|registration| registration.schema_source.is_some())
         {
-            Some(registration) => Some(source_read(registration, &ground)?),
-            None => in_vault(name, &ground, ControlFile::Schema)?,
+            Some(registration) => Some(source_read(registration, ground)?),
+            None => in_vault(name, ground, ControlFile::Schema)?,
         };
-        let config = in_vault(name, &ground, ControlFile::Config)?;
+        let config = in_vault(name, ground, ControlFile::Config)?;
         drop(hold);
         Ok([(ControlFile::Schema, schema), (ControlFile::Config, config)])
     }
