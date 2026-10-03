@@ -1130,12 +1130,17 @@ full-scan steps of every statement run on its snapshot, and holds them equal acr
 pair. These statement counters do not see work a virtual table does inside a statement, so a
 full-text match's posting-list walk is not among them; a search's page cost is read off the
 matches the module hands back instead. Each pair has a control that grows with the vault and
-reads more at the larger scale. In the memory lane, three `read-` bars hold one process that
-attached a per-PR profile and ran the read mix through the host's read verbs: a find under a
-predicate, sorted and paged; a count by field; a get with suffix resolve; links-to and
-backlinks; a validate narrowed by a path part, which is findings-for-path; lexical search;
-and describe. Two bars hold the ~2k-document profile's process to an absolute peak ceiling
-and to a ratio over the peak of the same attach without the reads. The kernel reports one
+reads more at the larger scale. The counter lane bars writes through the host as well: an
+apply reads each file it touches the per-target read budget for what its plan does to that
+file and no other file, commits one changeset, and mints at most one reader; a `set --where`'s
+selector costs the same at 300 documents as at 2000; and a mass delete through the host holds
+the Layer 3 per-key limit the store's own bar holds. In the memory lane, three `read-` bars
+hold one process that attached a per-PR profile and ran the read mix through the host's
+read verbs: a find under a predicate, sorted and paged; a count by field; a get with suffix
+resolve; links-to and backlinks; a validate narrowed by a path part, which is
+findings-for-path; lexical search; and describe. Two bars hold the ~2k-document profile's
+process to an absolute peak ceiling and to a ratio over the peak of the same attach
+without the reads. The kernel reports one
 peak per process, so they hold the highest peak any shape reached rather than each shape's
 own. The third reads the most the shapes raised the live heap above the attached host,
 counted by the process's own allocator, at the 300-document and ~2k-document profiles, and
@@ -3094,7 +3099,12 @@ Four contracts inside that flow carry weight:
   counters whether it is marked derived or composed. The one counter that names a
   computation is the canonical-JSON projection of supplied frontmatter, which is storage
   encoding rather than recomputation and runs the identical code path under both marks — so
-  the bar binds on the counters that could differ.
+  the bar binds on the counters that could differ. The counter lane holds the write-through
+  to a **per-target read budget** as well: each file a plan touches is read a pinned number
+  of times by each protocol that reads it — planning, the recomposition and the read-back
+  through the anchored read, staging and publication through the write kernel — for what the
+  plan does to it, each staged shadow is read once, and no file the plan does not touch is
+  read.
 - **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
   forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
   drops operations whose targets all landed and re-resolves only operations none of whose
