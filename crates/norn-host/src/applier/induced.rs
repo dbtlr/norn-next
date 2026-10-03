@@ -408,7 +408,8 @@ fn a_staging_failure_writes_nothing_and_answers_write_failed() {
 /// each followed by a folder sync. For each step the process ends there; the
 /// re-send lands what did not, and the store equals a build from zero over
 /// the vault it leaves, every holder naming the target and the document
-/// gone.
+/// gone. An ordinal counts publications of every kind, so the unlink armed at
+/// the third firing is the removal publishing after both rewrites.
 #[test]
 fn a_rewriting_delete_cut_short_in_its_cascade_is_finished_by_sending_it_again() {
     let mut fired = 0;
