@@ -2147,8 +2147,8 @@ impl Touched {
 ///   not touch is read, and each staged shadow is read once;
 /// - one changeset, deriving and upserting exactly the written targets and
 ///   killing and tombstoning exactly the removed ones;
-/// - at most one snapshot opened, with a mint behind it exactly where one is
-///   opened, and no table or index stepped end to end on it.
+/// - at most one read handle minted, and exactly one snapshot opened on each
+///   handle minted, with no table or index stepped end to end on it.
 #[cfg(feature = "induced-failure")]
 fn one_apply(
     profile: &norn_fixtures::Profile,
@@ -2228,13 +2228,15 @@ fn one_apply(
         );
     }
     assert!(
-        spent.apply_snapshots_opened <= 1
-            && (spent.apply_snapshots_opened == 0) == (spent.apply_mint_statements == 0),
-        "{what} over `{}` opened {} snapshots over mints that ran {} statements: an apply opens \
-         at most one, on the one handle it mints",
+        spent.apply_mints <= 1
+            && spent.apply_snapshots_opened == spent.apply_mints
+            && (spent.apply_mints == 0) == (spent.apply_mint_statements == 0),
+        "{what} over `{}` minted {} read handles running {} statements and opened {} snapshots \
+         on them: an apply opens at most one, on the one handle it mints",
         profile.name,
-        spent.apply_snapshots_opened,
-        spent.apply_mint_statements
+        spent.apply_mints,
+        spent.apply_mint_statements,
+        spent.apply_snapshots_opened
     );
     [
         ("replaced", touched.replaced),
@@ -2259,6 +2261,7 @@ fn one_apply(
             spent.link_health_candidates_read,
         ),
         ("changeset_read_steps", spent.changeset_read_steps),
+        ("mints", spent.apply_mints),
         ("mint_statements", spent.apply_mint_statements),
         ("snapshots_opened", spent.apply_snapshots_opened),
         ("statements", spent.apply_statements),

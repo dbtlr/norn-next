@@ -5941,7 +5941,7 @@ mod tests {
         .expect("a set by path applies");
         let spent = evidence.read().since(before);
         assert_eq!(
-            (spent.apply_mint_statements, spent.apply_snapshots_opened),
+            (spent.apply_mints, spent.apply_snapshots_opened),
             (0, 0),
             "an apply naming no `where` target minted a read handle"
         );
@@ -5959,7 +5959,8 @@ mod tests {
             "the apply's mint is missing from the job account"
         );
         assert_eq!(
-            spent.apply_snapshots_opened, 1,
+            (spent.apply_mints, spent.apply_snapshots_opened),
+            (1, 1),
             "the refused apply's one snapshot is missing from the job account"
         );
         assert!(
@@ -5984,8 +5985,12 @@ mod tests {
         .expect("a delete applies");
         let spent = evidence.read().since(before);
         assert_eq!(
-            (spent.apply_mint_statements, spent.apply_snapshots_opened),
-            (2, 1),
+            (
+                spent.apply_mints,
+                spent.apply_mint_statements,
+                spent.apply_snapshots_opened
+            ),
+            (1, 2, 1),
             "a delete's planning and check minted other than one read handle"
         );
     }

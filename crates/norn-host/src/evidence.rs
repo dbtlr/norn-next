@@ -90,6 +90,7 @@ pub struct JobEvidence {
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
     apply_mint_statements: AtomicU64,
+    apply_mints: AtomicU64,
     apply_snapshots_opened: AtomicU64,
     apply_statements: AtomicU64,
     apply_vm_steps: AtomicU64,
@@ -210,6 +211,10 @@ pub struct EvidenceReading {
     /// it ran before it refused**; an apply that reads neither mints nothing
     /// and adds nothing.
     pub apply_mint_statements: u64,
+    /// Read handles the apply jobs minted, counted at each mint whichever
+    /// way it ended: one for an apply that read the store, and none for one
+    /// that did not.
+    pub apply_mints: u64,
     /// Snapshots the apply jobs established on the read handles they
     /// minted: one for an apply that read the store, and none for one that
     /// did not.
@@ -288,6 +293,7 @@ impl EvidenceReading {
             apply_mint_statements: self
                 .apply_mint_statements
                 .saturating_sub(earlier.apply_mint_statements),
+            apply_mints: self.apply_mints.saturating_sub(earlier.apply_mints),
             apply_snapshots_opened: self
                 .apply_snapshots_opened
                 .saturating_sub(earlier.apply_snapshots_opened),
@@ -330,6 +336,7 @@ impl JobEvidence {
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
             apply_mint_statements: get(&self.apply_mint_statements),
+            apply_mints: get(&self.apply_mints),
             apply_snapshots_opened: get(&self.apply_snapshots_opened),
             apply_statements: get(&self.apply_statements),
             apply_vm_steps: get(&self.apply_vm_steps),
@@ -371,6 +378,7 @@ impl JobEvidence {
     /// Record what one apply job's reader mint ran, counted at the act where
     /// the mint returns, as a leg's mint is.
     pub(crate) fn count_apply_mint(&self, statements: u64) {
+        self.apply_mints.fetch_add(1, Ordering::Relaxed);
         self.apply_mint_statements
             .fetch_add(statements, Ordering::Relaxed);
     }
