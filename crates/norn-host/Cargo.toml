@@ -15,7 +15,10 @@ publish.workspace = true
 # set lost reachable by a host attached over a real backend. And it gates the
 # readers of what a host's own jobs did — `JobEvidence`, `EvidenceReading`,
 # `ProductionEntryOps::account`, `Host::classifications`,
-# `Host::recovery_demands` and `Host::work_in_flight`. The accounts are
+# `Host::recovery_demands` and `Host::work_in_flight` — and it opens
+# `Host::vault_migrate_with_ladders`, which migrates over a suite's own ladders,
+# since the ladders this build ships hold no step a suite could reach a rewrite
+# through. The accounts are
 # *written* on every build, because that is how a job's cost stops being
 # discarded, and the in-flight holds are kept on every build because the
 # lifecycle runs on them; nothing in the shipped artifact reads either back,

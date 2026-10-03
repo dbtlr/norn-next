@@ -415,7 +415,9 @@ impl ReloadCandidate {
     }
 }
 
-fn schema_anchor_at(
+/// Where the schema `registration` reads lives, from the root `covered_root`
+/// covers: the folder a read anchors at, and the file's name beneath it.
+pub(crate) fn schema_anchor_at(
     registration: &Registration,
     covered_root: &Path,
 ) -> Result<(PathBuf, PathBuf), ReloadError> {
