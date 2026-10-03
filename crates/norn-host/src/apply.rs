@@ -71,7 +71,7 @@ use norn_wire::{
 use crate::address::registered_name;
 use crate::applier;
 use crate::derivation::Declared;
-use crate::evidence::LinkJudgmentCost;
+use crate::evidence::{LinkJudgmentCost, SnapshotWork};
 use crate::lifecycle::{
     ApplyAnswer, Demand, EntryOps, Host, MintedReader, PendingApply, ReadRefusal, ReadSource,
     ReaderUnavailable, SnapshotSource, not_run, watcher_lost,
@@ -241,6 +241,10 @@ enum ReadOn<'a> {
     Job {
         mint: &'a dyn Fn() -> Result<Snapshot, ReaderUnavailable>,
         established: RefCell<Option<Snapshot>>,
+        /// What the snapshots released so far ran, kept past their release
+        /// so the job's account reads what every snapshot it established
+        /// ran ([`PlanSnapshot::job_snapshot_work`]).
+        released: Cell<SnapshotWork>,
     },
 }
 
@@ -272,6 +276,7 @@ impl<'a> PlanSnapshot<'a> {
             on: ReadOn::Job {
                 mint,
                 established: RefCell::new(None),
+                released: Cell::new(SnapshotWork::NONE),
             },
             judged: Cell::new(LinkJudgmentCost::NONE),
         }
@@ -283,13 +288,41 @@ impl<'a> PlanSnapshot<'a> {
         self.judged.get()
     }
 
+    /// What every snapshot this job established has run so far — released
+    /// or still standing — read off each snapshot's own counters: none for a
+    /// held snapshot, which is its read hold's, nor for a job that read
+    /// nothing of the store.
+    ///
+    /// It never panics, so the job's account can be read while the job
+    /// unwinds: a snapshot still borrowed for a read is left out, which only
+    /// a read cut short by that unwind leaves it.
+    pub(crate) fn job_snapshot_work(&self) -> SnapshotWork {
+        match &self.on {
+            ReadOn::Held(_) => SnapshotWork::NONE,
+            ReadOn::Job {
+                established,
+                released,
+                ..
+            } => {
+                let standing = established.try_borrow().ok().and_then(|standing| {
+                    standing
+                        .as_ref()
+                        .map(|snapshot| SnapshotWork::of(snapshot.counters()))
+                });
+                standing.map_or(released.get(), |standing| released.get().plus(standing))
+            }
+        }
+    }
+
     /// `read` over the snapshot. **A handle that cannot be minted refuses as
     /// a read over an unavailable read seam does**, `host/reader-unavailable`:
     /// a failed mint changes no trust label.
     fn reading<T>(&self, read: impl FnOnce(&Snapshot) -> T) -> Result<T, PageRefused> {
         match &self.on {
             ReadOn::Held(snapshot) => Ok(read(snapshot)),
-            ReadOn::Job { mint, established } => {
+            ReadOn::Job {
+                mint, established, ..
+            } => {
                 let mut established = established.borrow_mut();
                 if established.is_none() {
                     *established = Some(mint().map_err(|unavailable| {
@@ -425,8 +458,14 @@ impl LinkIndex for PlanSnapshot<'_> {
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
     /// its read hold's, and stays.
     fn release(&self) {
-        if let ReadOn::Job { established, .. } = &self.on {
-            established.borrow_mut().take();
+        if let ReadOn::Job {
+            established,
+            released,
+            ..
+        } = &self.on
+            && let Some(snapshot) = established.borrow_mut().take()
+        {
+            released.set(released.get().plus(SnapshotWork::of(snapshot.counters())));
         }
     }
 }

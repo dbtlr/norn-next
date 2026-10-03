@@ -39,6 +39,11 @@
 //! outcome, after the entry point has returned, and what the mint ran is added
 //! to this account where the mint returns.
 //!
+//! An apply job's snapshot is counted at the act the same way: what the one
+//! snapshot it minted ran — its `where` matching and its link judgments — is
+//! read off the snapshot's own counters where the job's planning and applying
+//! are done with it, beside the mint that opened it.
+//!
 //! [window]: norn_fs::reads::ReadWindow
 //!
 //! # The read account is beside it, and is not the same subject
@@ -55,7 +60,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_fs::reads::ReadWindow;
-use norn_store::IncrementOutcome;
+use norn_store::{DerivationCounters, IncrementOutcome, SnapshotCounters};
 
 /// One host's cumulative account of what its jobs spent and did.
 ///
@@ -66,18 +71,29 @@ pub struct JobEvidence {
     document_opens: AtomicU64,
     stats: AtomicU64,
     walk_dirents: AtomicU64,
+    target_reads: AtomicU64,
+    shadow_reads: AtomicU64,
     documents_derived: AtomicU64,
     changesets_applied: AtomicU64,
     documents_upserted: AtomicU64,
     documents_deleted: AtomicU64,
     tombstones_recorded: AtomicU64,
     findings_discarded: AtomicU64,
+    findings_written: AtomicU64,
+    links_redecided: AtomicU64,
+    link_health_keys_resolved: AtomicU64,
+    link_health_candidates_read: AtomicU64,
+    changeset_read_steps: AtomicU64,
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
     watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
     mint_statements_under_the_gate: AtomicU64,
     apply_mint_statements: AtomicU64,
+    apply_snapshots_opened: AtomicU64,
+    apply_statements: AtomicU64,
+    apply_vm_steps: AtomicU64,
+    apply_full_scan_steps: AtomicU64,
 }
 
 /// One reading of a host's account.
@@ -95,6 +111,13 @@ pub struct EvidenceReading {
     pub stats: u64,
     /// Directory entries taken off a directory stream.
     pub walk_dirents: u64,
+    /// Targets the write kernel read and hashed to judge their state, by
+    /// staging, by publication's verification and by a landing's
+    /// confirmation ([`norn_fs::reads::ReadTally::target_reads`]).
+    pub target_reads: u64,
+    /// Staged shadows the write kernel read and hashed to confirm before
+    /// publishing them ([`norn_fs::reads::ReadTally::shadow_reads`]).
+    pub shadow_reads: u64,
     /// Vault documents whose bytes a job handed to derivation: one per
     /// document read and derived, whatever the derivation concluded — facts,
     /// a quarantine, or a block it could not read.
@@ -115,6 +138,23 @@ pub struct EvidenceReading {
     pub tombstones_recorded: u64,
     /// Findings the changesets discarded, on both maintenance axes.
     pub findings_discarded: u64,
+    /// Findings the changesets wrote, the link-health findings their
+    /// re-decision filed among them.
+    pub findings_written: u64,
+    /// Links the changesets re-decided the link health of, each once per
+    /// changeset however many ways it was reached
+    /// ([`norn_store::DerivationCounters`]' `links_redecided`).
+    pub links_redecided: u64,
+    /// Keys the changesets' re-decisions resolved.
+    pub link_health_keys_resolved: u64,
+    /// Candidates the changesets' re-decisions read.
+    pub link_health_candidates_read: u64,
+    /// Virtual-machine steps the changesets' multi-row reads took, as the
+    /// store's request reads them ([`norn_store::Request::read_steps`]): the
+    /// re-decision's reads of the classes and paths a changeset names among
+    /// them. Harness evidence about execution cost, never a derivation
+    /// counter.
+    pub changeset_read_steps: u64,
     /// Recovery rungs run: how many times a job re-established coverage over an
     /// attachment that still held its resources.
     pub recoveries_run: u64,
@@ -170,6 +210,19 @@ pub struct EvidenceReading {
     /// it ran before it refused**; an apply that reads neither mints nothing
     /// and adds nothing.
     pub apply_mint_statements: u64,
+    /// Snapshots the apply jobs established on the read handles they
+    /// minted: one for an apply that read the store, and none for one that
+    /// did not.
+    pub apply_snapshots_opened: u64,
+    /// Statements the apply jobs ran on those snapshots — a `where` target's
+    /// matching, the link judgments of planning and of the applier's check,
+    /// and the fresh plan a refusal resolves — as each snapshot counted them
+    /// ([`norn_store::SnapshotCounters`]).
+    pub apply_statements: u64,
+    /// Virtual-machine steps those statements took.
+    pub apply_vm_steps: u64,
+    /// Steps those statements took walking a table or an index end to end.
+    pub apply_full_scan_steps: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -190,6 +243,8 @@ impl EvidenceReading {
             document_opens: self.document_opens.saturating_sub(earlier.document_opens),
             stats: self.stats.saturating_sub(earlier.stats),
             walk_dirents: self.walk_dirents.saturating_sub(earlier.walk_dirents),
+            target_reads: self.target_reads.saturating_sub(earlier.target_reads),
+            shadow_reads: self.shadow_reads.saturating_sub(earlier.shadow_reads),
             documents_derived: self
                 .documents_derived
                 .saturating_sub(earlier.documents_derived),
@@ -208,6 +263,19 @@ impl EvidenceReading {
             findings_discarded: self
                 .findings_discarded
                 .saturating_sub(earlier.findings_discarded),
+            findings_written: self
+                .findings_written
+                .saturating_sub(earlier.findings_written),
+            links_redecided: self.links_redecided.saturating_sub(earlier.links_redecided),
+            link_health_keys_resolved: self
+                .link_health_keys_resolved
+                .saturating_sub(earlier.link_health_keys_resolved),
+            link_health_candidates_read: self
+                .link_health_candidates_read
+                .saturating_sub(earlier.link_health_candidates_read),
+            changeset_read_steps: self
+                .changeset_read_steps
+                .saturating_sub(earlier.changeset_read_steps),
             recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
             rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
             watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
@@ -220,6 +288,16 @@ impl EvidenceReading {
             apply_mint_statements: self
                 .apply_mint_statements
                 .saturating_sub(earlier.apply_mint_statements),
+            apply_snapshots_opened: self
+                .apply_snapshots_opened
+                .saturating_sub(earlier.apply_snapshots_opened),
+            apply_statements: self
+                .apply_statements
+                .saturating_sub(earlier.apply_statements),
+            apply_vm_steps: self.apply_vm_steps.saturating_sub(earlier.apply_vm_steps),
+            apply_full_scan_steps: self
+                .apply_full_scan_steps
+                .saturating_sub(earlier.apply_full_scan_steps),
         }
     }
 }
@@ -233,18 +311,29 @@ impl JobEvidence {
             document_opens: get(&self.document_opens),
             stats: get(&self.stats),
             walk_dirents: get(&self.walk_dirents),
+            target_reads: get(&self.target_reads),
+            shadow_reads: get(&self.shadow_reads),
             documents_derived: get(&self.documents_derived),
             changesets_applied: get(&self.changesets_applied),
             documents_upserted: get(&self.documents_upserted),
             documents_deleted: get(&self.documents_deleted),
             tombstones_recorded: get(&self.tombstones_recorded),
             findings_discarded: get(&self.findings_discarded),
+            findings_written: get(&self.findings_written),
+            links_redecided: get(&self.links_redecided),
+            link_health_keys_resolved: get(&self.link_health_keys_resolved),
+            link_health_candidates_read: get(&self.link_health_candidates_read),
+            changeset_read_steps: get(&self.changeset_read_steps),
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
             watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
             mint_statements_under_the_gate: get(&self.mint_statements_under_the_gate),
             apply_mint_statements: get(&self.apply_mint_statements),
+            apply_snapshots_opened: get(&self.apply_snapshots_opened),
+            apply_statements: get(&self.apply_statements),
+            apply_vm_steps: get(&self.apply_vm_steps),
+            apply_full_scan_steps: get(&self.apply_full_scan_steps),
         }
     }
 
@@ -286,6 +375,20 @@ impl JobEvidence {
             .fetch_add(statements, Ordering::Relaxed);
     }
 
+    /// Record what one apply job ran on the snapshots it established, counted
+    /// at the act where the job's planning and applying are done with them,
+    /// as its mint is.
+    pub(crate) fn count_apply_snapshot(&self, work: SnapshotWork) {
+        for (field, value) in [
+            (&self.apply_snapshots_opened, work.snapshots_opened),
+            (&self.apply_statements, work.statements),
+            (&self.apply_vm_steps, work.vm_steps),
+            (&self.apply_full_scan_steps, work.full_scan_steps),
+        ] {
+            field.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
     /// Add what one job's window reported, and what that job's changesets did,
     /// to the account.
     ///
@@ -299,6 +402,10 @@ impl JobEvidence {
         self.stats.fetch_add(reads.stats, Ordering::Relaxed);
         self.walk_dirents
             .fetch_add(reads.walk_dirents, Ordering::Relaxed);
+        self.target_reads
+            .fetch_add(reads.target_reads, Ordering::Relaxed);
+        self.shadow_reads
+            .fetch_add(reads.shadow_reads, Ordering::Relaxed);
 
         self.documents_derived
             .fetch_add(take_documents_derived(), Ordering::Relaxed);
@@ -314,6 +421,16 @@ impl JobEvidence {
             .fetch_add(changesets.tombstones_recorded, Ordering::Relaxed);
         self.findings_discarded
             .fetch_add(changesets.findings_discarded, Ordering::Relaxed);
+        self.findings_written
+            .fetch_add(changesets.findings_written, Ordering::Relaxed);
+        self.links_redecided
+            .fetch_add(changesets.links_redecided, Ordering::Relaxed);
+        self.link_health_keys_resolved
+            .fetch_add(changesets.link_health_keys_resolved, Ordering::Relaxed);
+        self.link_health_candidates_read
+            .fetch_add(changesets.link_health_candidates_read, Ordering::Relaxed);
+        self.changeset_read_steps
+            .fetch_add(changesets.read_steps, Ordering::Relaxed);
     }
 
     /// Open a job's window, and fold what it reports into the account when the
@@ -355,6 +472,46 @@ impl Drop for Attribution {
     }
 }
 
+/// What one apply job ran on the snapshots it established, summed over them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SnapshotWork {
+    snapshots_opened: u64,
+    statements: u64,
+    vm_steps: u64,
+    full_scan_steps: u64,
+}
+
+impl SnapshotWork {
+    /// No snapshot at all.
+    pub(crate) const NONE: SnapshotWork = SnapshotWork {
+        snapshots_opened: 0,
+        statements: 0,
+        vm_steps: 0,
+        full_scan_steps: 0,
+    };
+
+    /// What one snapshot ran, read off its own counters.
+    pub(crate) fn of(counters: SnapshotCounters) -> SnapshotWork {
+        SnapshotWork {
+            snapshots_opened: counters.snapshots_opened(),
+            statements: counters.statements_executed(),
+            vm_steps: counters.vm_steps(),
+            full_scan_steps: counters.full_scan_steps(),
+        }
+    }
+
+    /// This work and `other` together.
+    #[must_use]
+    pub(crate) fn plus(self, other: SnapshotWork) -> SnapshotWork {
+        SnapshotWork {
+            snapshots_opened: self.snapshots_opened + other.snapshots_opened,
+            statements: self.statements + other.statements,
+            vm_steps: self.vm_steps + other.vm_steps,
+            full_scan_steps: self.full_scan_steps + other.full_scan_steps,
+        }
+    }
+}
+
 /// What the changesets this thread applied did.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ChangesetTally {
@@ -363,6 +520,11 @@ struct ChangesetTally {
     documents_deleted: u64,
     tombstones_recorded: u64,
     findings_discarded: u64,
+    findings_written: u64,
+    links_redecided: u64,
+    link_health_keys_resolved: u64,
+    link_health_candidates_read: u64,
+    read_steps: u64,
 }
 
 thread_local! {
@@ -372,16 +534,32 @@ thread_local! {
         documents_deleted: 0,
         tombstones_recorded: 0,
         findings_discarded: 0,
+        findings_written: 0,
+        links_redecided: 0,
+        link_health_keys_resolved: 0,
+        link_health_candidates_read: 0,
+        read_steps: 0,
     }) };
 }
 
-/// Record what one applied changeset did.
+/// Record what one applied changeset did: the store's `outcome`, the
+/// derivation `counters` its request read, and the `read_steps` its
+/// multi-row reads took.
 ///
 /// The store answers every increment with an outcome, and this is where that
 /// answer stops being dropped on the floor: the job that applied the changeset
 /// records it on its own thread, and the entry point that job runs under folds
 /// the thread's tally into the host's account.
-pub(crate) fn count_changeset(outcome: &IncrementOutcome) {
+pub(crate) fn count_changeset(
+    outcome: &IncrementOutcome,
+    counters: &DerivationCounters,
+    read_steps: u64,
+) {
+    let counted = |name: &str| {
+        counters
+            .get(name)
+            .expect("the derivation vocabulary carries every counter this account folds")
+    };
     CHANGESETS.with(|cell| {
         let mut tally = cell.get();
         tally.applied += 1;
@@ -389,6 +567,11 @@ pub(crate) fn count_changeset(outcome: &IncrementOutcome) {
         tally.documents_deleted += outcome.documents_deleted;
         tally.tombstones_recorded += outcome.tombstones_recorded;
         tally.findings_discarded += outcome.invalidated.findings_discarded;
+        tally.findings_written += counted("findings_written");
+        tally.links_redecided += counted("links_redecided");
+        tally.link_health_keys_resolved += counted("link_health_keys_resolved");
+        tally.link_health_candidates_read += counted("link_health_candidates_read");
+        tally.read_steps += read_steps;
         cell.set(tally);
     });
 }
@@ -437,8 +620,8 @@ mod tests {
         let evidence = Arc::new(JobEvidence::default());
         {
             let _job = evidence.attributing();
-            count_changeset(&outcome());
-            count_changeset(&outcome());
+            count_changeset(&outcome(), &DerivationCounters::default(), 0);
+            count_changeset(&outcome(), &DerivationCounters::default(), 0);
             assert_eq!(
                 evidence.read(),
                 EvidenceReading::default(),
@@ -460,10 +643,10 @@ mod tests {
         let evidence = Arc::new(JobEvidence::default());
         drop(evidence.attributing());
         let before = evidence.read();
-        count_changeset(&outcome());
+        count_changeset(&outcome(), &DerivationCounters::default(), 0);
         {
             let _job = evidence.attributing();
-            count_changeset(&outcome());
+            count_changeset(&outcome(), &DerivationCounters::default(), 0);
         }
         assert_eq!(evidence.read().since(before).changesets_applied, 1);
     }
@@ -504,6 +687,35 @@ mod tests {
                 read.watcher_rescans_reported
             ),
             (1, 2, 3, 1)
+        );
+    }
+
+    /// A changeset's re-decision steps reach the account with the job that
+    /// applied it, and an apply's snapshot work where it is counted, with no
+    /// window standing, as a mint's does.
+    #[test]
+    fn a_changesets_steps_and_an_applys_snapshot_reach_the_account() {
+        let evidence = Arc::new(JobEvidence::default());
+        {
+            let _job = evidence.attributing();
+            count_changeset(&outcome(), &DerivationCounters::default(), 40);
+        }
+        evidence.count_apply_snapshot(SnapshotWork {
+            snapshots_opened: 1,
+            statements: 4,
+            vm_steps: 300,
+            full_scan_steps: 0,
+        });
+        let read = evidence.read();
+        assert_eq!(read.changeset_read_steps, 40);
+        assert_eq!(
+            (
+                read.apply_snapshots_opened,
+                read.apply_statements,
+                read.apply_vm_steps,
+                read.apply_full_scan_steps
+            ),
+            (1, 4, 300, 0)
         );
     }
 

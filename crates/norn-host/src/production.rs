@@ -333,6 +333,13 @@ fn apply_over(
         &mint,
         ground.declared.content_model(),
     );
+    // What the job's snapshot ran is the job account's however the apply
+    // ends, as its mint is: counted once, where planning and applying are
+    // done with it, before the snapshot itself goes.
+    let counted = SnapshotCounted {
+        snapshot: &planned_on,
+        evidence,
+    };
     let resolved = match plan {
         PlanDocument::Resolved(resolved) => resolved,
         PlanDocument::Operations(authored) => {
@@ -362,6 +369,7 @@ fn apply_over(
         links: &planned_on,
     }
     .apply(resolved, &store);
+    drop(counted);
     drop(planned_on);
     if let crate::applier::ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) =
         outcome
@@ -383,6 +391,21 @@ fn apply_over(
             None => ApplyEnding::StoodDown,
         },
         heal,
+    }
+}
+
+/// Counts what an apply job's snapshot ran into the job account when it is
+/// dropped, so every way out of [`apply_over`] — an answer, a refusal planning
+/// met, damage — counts it once.
+struct SnapshotCounted<'s, 'a> {
+    snapshot: &'s crate::apply::PlanSnapshot<'a>,
+    evidence: &'s JobEvidence,
+}
+
+impl Drop for SnapshotCounted<'_, '_> {
+    fn drop(&mut self) {
+        self.evidence
+            .count_apply_snapshot(self.snapshot.job_snapshot_work());
     }
 }
 
@@ -3898,7 +3921,7 @@ impl<'s> Pending<'s> {
         // leaves the same rows behind however many entries it held. A flush
         // carrying findings alone applied no changeset and counts none.
         if applied {
-            count_changeset(&outcome);
+            count_changeset(&outcome, &self.counters, request.read_steps());
         }
         Ok(())
     }
@@ -5886,7 +5909,10 @@ mod tests {
     /// reporting two statements, and an apply naming no `where` target that
     /// changes no document's presence mints nothing. A delete mints one
     /// handle too: its planning's resolution change set and the applier's
-    /// check of it read the one snapshot.
+    /// check of it read the one snapshot. **What the one snapshot ran is the
+    /// job account's too**, however the apply ends: the `where` here matches
+    /// a document already holding the value it sets, which the applier
+    /// refuses, and its snapshot is counted all the same.
     #[test]
     fn an_apply_reading_the_store_mints_one_reader_for_its_job_and_accounts_it() {
         let f = Fixture::new("apply-mint-account");
@@ -5913,9 +5939,10 @@ mod tests {
         .expect("a set by path is admitted")
         .wait()
         .expect("a set by path applies");
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            0,
+            (spent.apply_mint_statements, spent.apply_snapshots_opened),
+            (0, 0),
             "an apply naming no `where` target minted a read handle"
         );
 
@@ -5926,10 +5953,18 @@ mod tests {
             ])))
             .expect("a set by `where` is admitted")
             .wait();
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            2,
+            spent.apply_mint_statements, 2,
             "the apply's mint is missing from the job account"
+        );
+        assert_eq!(
+            spent.apply_snapshots_opened, 1,
+            "the refused apply's one snapshot is missing from the job account"
+        );
+        assert!(
+            spent.apply_statements > 0 && spent.apply_vm_steps > 0,
+            "the `where` match ran nothing the job account holds: {spent:?}"
         );
 
         let before = evidence.read();
@@ -5947,9 +5982,10 @@ mod tests {
         .expect("a delete is admitted")
         .wait()
         .expect("a delete applies");
+        let spent = evidence.read().since(before);
         assert_eq!(
-            evidence.read().since(before).apply_mint_statements,
-            2,
+            (spent.apply_mint_statements, spent.apply_snapshots_opened),
+            (2, 1),
             "a delete's planning and check minted other than one read handle"
         );
     }
