@@ -18,9 +18,9 @@ use std::path::Path;
 use norn_testkit::process::Sandbox;
 use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, ChangesetOutcome,
-    DocumentPath, ErrorDetail, FindingKind, FolderPath, Forecast, GetParams, GetReport, Operation,
-    OperationId, OperationKind, PlanDocument, PlanFault, ReasonCode, RefusedCheck,
-    ResolutionTarget, ResolvedPlan, TargetResult, Transition, VaultAddress,
+    DocumentPath, ErrorDetail, ErrorEnvelope, FindingKind, FolderPath, Forecast, GetParams,
+    GetReport, Operation, OperationId, OperationKind, PlanDocument, PlanFault, ReasonCode,
+    RefusedCheck, ResolutionTarget, ResolvedPlan, TargetResult, Transition, VaultAddress,
 };
 
 /// The generated profile every case here attaches.
@@ -420,6 +420,191 @@ fn a_preview_leaves_every_entry_of_the_vault_as_it_was() {
 
     assert_eq!(
         tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
+}
+
+/// A registered vault holding exactly `files`, with no schema unless one of
+/// them is it.
+fn an_adopted_vault(label: &str, files: &[(&str, &str)]) -> (Sandbox, attach::Vault) {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let root = sandbox.work_dir().join("attached");
+    std::fs::create_dir_all(root.join("vault")).expect("the vault root");
+    for (at, content) in files {
+        let path = root.join("vault").join(at);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("make the parent");
+        std::fs::write(path, content).expect("write a file");
+    }
+    (sandbox, attach::Vault::adopt(&root))
+}
+
+/// The plan a verb's preview answered, which must plan something.
+fn previewed_something(answered: Result<norn_host::PendingApply, ErrorEnvelope>) {
+    let answered = answered
+        .expect("a preview is answered")
+        .wait()
+        .expect("the verb previews");
+    let ApplyReport::Previewed { plan, .. } = answered.report else {
+        panic!("a preview answered {:?}", answered.report);
+    };
+    assert!(!plan.operations.is_empty(), "the preview planned nothing");
+}
+
+/// **Every write verb's preview leaves every entry of the vault as it was.**
+/// Over a registered vault with no schema, a preview of `set` by path and by
+/// `where`, `edit`, `new`, `move` of a document and of a folder, a rewriting
+/// `delete`, `rewrite-wikilink`, `init` and `vault migrate` — each planning
+/// something, but for the migration, which the shipped ladders leave already
+/// current — and over a vault declaring a creation rule, a preview of
+/// `new --as` (and, behind `induced-failure`, of a migration over a ladder
+/// that rewrites its schema) leave every file and folder at the inode and
+/// modification time it had.
+#[test]
+fn every_verbs_preview_leaves_every_entry_of_the_vault_as_it_was() {
+    use norn_wire::{
+        AuthoredValue, DeleteParams, DocumentEdit, EditParams, FieldChange, InitParams, InitReport,
+        MigrateParams, MigrateReport, MoveParams, MoveSubject, NewParams, NewSubject, Predicate,
+        RewriteWikilinkParams, SetParams, ValueMap, Variables, WriteTarget,
+    };
+
+    let (_sandbox, vault) = an_adopted_vault(
+        "host-applies-every-preview",
+        &[
+            ("subject.md", "---\nstatus: draft\n---\n# Subject\n"),
+            ("holder.md", "See [[subject]] and [[gone]].\n"),
+            ("gone.md", "# Gone\n"),
+            ("target.md", "# Target\n"),
+            ("folder/one.md", "# One\n[[two]]\n"),
+            ("folder/two.md", "# Two\n"),
+        ],
+    );
+    let host = vault.host();
+    let lease = attach::attach_and_wait(&host, vault.name());
+    let address = || VaultAddress::name(vault.name().clone());
+    let at = |text: &str| DocumentPath::new(text).expect("a document path");
+    let folder = |text: &str| FolderPath::new(text).expect("a folder path");
+    let named = |text: &str| ResolutionTarget::new(text).expect("a target");
+    let preview = ApplyMode::Preview;
+    let shelving = || vec![FieldChange::set("status", AuthoredValue::string("shelved"))];
+    let before = tree_state(vault.path());
+
+    previewed_something(host.set(SetParams::new(
+        address(),
+        preview,
+        WriteTarget::path(at("subject.md")),
+        shelving(),
+    )));
+    previewed_something(host.set(SetParams::new(
+        address(),
+        preview,
+        WriteTarget::matching([Predicate::equal_to("status", "draft")]),
+        shelving(),
+    )));
+    previewed_something(host.edit(EditParams::new(
+        address(),
+        preview,
+        at("subject.md"),
+        vec![DocumentEdit::replace_body("# Rewritten\n")],
+    )));
+    previewed_something(host.new_document(NewParams::new(
+        address(),
+        preview,
+        at("fresh/new.md"),
+        "# New\n",
+    )));
+    previewed_something(host.move_path(MoveParams::new(
+        address(),
+        preview,
+        MoveSubject::document(at("subject.md"), at("moved/renamed.md")),
+    )));
+    previewed_something(host.move_path(MoveParams::new(
+        address(),
+        preview,
+        MoveSubject::folder(folder("folder"), folder("moved/folder")),
+    )));
+    previewed_something(host.delete(
+        DeleteParams::new(address(), preview, at("gone.md")).rewriting_to(named("target")),
+    ));
+    previewed_something(host.rewrite_wikilink(RewriteWikilinkParams::new(
+        address(),
+        preview,
+        named("subject"),
+        named("target"),
+    )));
+    let init = host
+        .init(&InitParams::new(address(), preview))
+        .expect("an init preview answers");
+    assert!(
+        matches!(init, InitReport::Scaffolded { .. }),
+        "init planned no starter: {init:?}"
+    );
+    assert_eq!(
+        host.vault_migrate(&MigrateParams::new(address(), preview))
+            .expect("a migrate preview answers"),
+        MigrateReport::already_current()
+    );
+    assert_eq!(
+        tree_state(vault.path()),
+        before,
+        "a preview wrote to the vault"
+    );
+    // The real-watcher lease is the host's and is not reentrant, so the
+    // first host lets go before the second is built.
+    drop(lease);
+    drop(host);
+
+    let (_ruled_sandbox, ruled) = an_adopted_vault(
+        "host-applies-every-preview-ruled",
+        &[
+            (
+                ".norn/schema.yaml",
+                "version: 1\ncreatable:\n  task:\n    target: \"tasks/{{seq}}.md\"\n",
+            ),
+            ("a.md", "# A\n"),
+        ],
+    );
+    let ruled_host = ruled.host();
+    let _ruled_lease = attach::attach_and_wait(&ruled_host, ruled.name());
+    let ruled_address = || VaultAddress::name(ruled.name().clone());
+    let before = tree_state(ruled.path());
+
+    previewed_something(ruled_host.new_document(NewParams::for_subject(
+        ruled_address(),
+        preview,
+        NewSubject::by_rule(
+            "task",
+            Variables::default(),
+            ValueMap::default(),
+            Some("Body.\n".to_string()),
+        ),
+    )));
+    #[cfg(feature = "induced-failure")]
+    {
+        use norn_config::migration::{Format, Ladder, Step};
+        let schema = Ladder {
+            format: Format::Yaml,
+            current: 2,
+            version_of: |text| Ok(if text.contains("# migrated\n") { 2 } else { 1 }),
+            steps: vec![Step {
+                from: 1,
+                rewrite: |text| format!("{text}# migrated\n"),
+            }],
+        };
+        let migrated = ruled_host
+            .vault_migrate_with_ladders(
+                &MigrateParams::new(ruled_address(), preview),
+                &schema,
+                &Ladder::config(),
+            )
+            .expect("a migrate preview answers");
+        assert!(
+            matches!(migrated, MigrateReport::Migrated { .. }),
+            "the migration planned no rewrite: {migrated:?}"
+        );
+    }
+    assert_eq!(
+        tree_state(ruled.path()),
         before,
         "a preview wrote to the vault"
     );
