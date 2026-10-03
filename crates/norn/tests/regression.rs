@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 117;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "9b63d1d3b98dd6249609fae60a2593e95d3b2560b763236aa17439c216d14803";
+const CONTRACT_DIGEST: &str = "3738c4865b5b4e9b79751fcf39024bd7b5460afee37f72ca6c406da8112461e1";
 
 /// The cases carried by tests today, by name.
 ///
@@ -106,32 +106,46 @@ const BOUND_CASES: &[&str] = &[
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
     "a-page-continues-at-the-successor-of-its-last-row",
     "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
+    "audit-stream-integrity",
     "cache-identity-is-total",
     "cache-is-authoritative-for-content",
+    "cascade-preserves-link-syntax",
     "comparison-semantics-are-one-rule",
+    "containment-is-checked-once-for-every-operation",
     "cost-is-independent-of-vault-size",
+    "created-documents-are-mutable",
     "derived-findings-are-materialized-and-maintained",
+    "destructive-ordering-is-gated",
     "encoding-prefix-transparency",
     "existence-probes-and-per-request-allocation-are-bounded",
     "finding-candidates-are-capped-with-a-total",
     "fixtures-carry-real-content-volume",
+    "forecast-and-apply-are-one-classifier",
+    "format-never-implies-consent",
     "frontmatter-roundtrip-or-refuse",
     "guard-binds-executed-sql",
     "harness-condition-waits-have-deadlines",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
+    "mutation-honors-its-planned-flags",
     "narrowing-arguments-narrow-work",
     "no-in-memory-query-layer",
     "one-field-edit-is-a-one-field-diff",
+    "one-snapshot-per-request",
+    "one-verdict-and-one-coercion-basis-per-post-state",
     "parse-failure-is-not-absence",
     "per-file-atomicity-and-durability",
+    "plan-level-atomicity-and-truthful-partial-reporting",
+    "preconditions-come-from-plan-time",
     "predicate-filtering-in-sql-is-the-known-good-shape",
     "reads-are-not-blocked-by-writes",
+    "resolved-path-gates-resolved-path-reports",
     "set-valued-answers-are-pushed-down",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
     "vault-root-containment",
+    "write-verification-gate-covers-the-whole-contract",
 ];
 
 /// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
@@ -139,7 +153,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is five classes rather than a bag:
+/// residue no subject reaches, and it is six classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -155,6 +169,10 @@ const BOUND_CASES: &[&str] = &[
 /// - **An unwired surface.** The binary is empty and the corpus activation list
 ///   is data; what is absent is an invocation, which is a state of that data
 ///   rather than a name any declaration carries.
+/// - **A carrier a named task authors.** The subject stands and the test that
+///   would carry the case is the deliverable of a task the reason names, which
+///   settles the test's name and home; until it does, no name is pre-committed
+///   for it, and the task closing is what re-derives the reason.
 ///
 /// A reader behind the `induced-failure` feature is not a residue: the audit
 /// lists the feature build where a cited test is missing without it, and holds
@@ -172,6 +190,7 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "comment-claims-are-test-bound",
+    "error-variant-matches-the-operation-reported",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
@@ -180,6 +199,8 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
     "vault-wide-work-is-a-declared-roster",
+    "whole-vault-work-is-declared-and-triggered-deliberately",
+    "write-through-the-composed-post-state",
 ];
 
 fn workspace_root() -> PathBuf {

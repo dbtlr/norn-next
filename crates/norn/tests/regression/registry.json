@@ -991,11 +991,15 @@
       "property": "Every filesystem effect an apply makes appears in its plan and its forecast: every file it writes is a transition of the resolved plan, every folder it makes or removes is one its forecast names, and the applied report names the same folders the forecast did.",
       "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "the plan and forecast halves have their subject: every file an apply writes is a transition of the resolved plan it answers with, and every folder it makes or removes is named by that plan's forecast, which crates/norn-host/src/planner/forecast.rs computes and the applier, crates/norn-host/src/applier.rs, reports again as the folders it made and removed. What keeps the case dormant is the audit stream the rest of the property is about: no mutation is recorded to an audit sink, no trace id is carried, and the write path writes no log line, so nothing can be asserted of audit records surviving a failure, of sinks, of trace ids or of time correlation.",
-        "grounds": [
-          { "present": "crates/norn-host/src/planner/forecast.rs" },
-          { "present": "crates/norn-host/src/applier.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests.rs::the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named",
+          "crates/norn-host/src/applier/tests.rs::a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds",
+          "crates/norn-host/src/planner/forecast.rs::a_create_makes_every_folder_above_it_that_does_not_stand",
+          "crates/norn-host/src/planner/forecast.rs::a_removal_takes_every_folder_above_it_that_it_leaves_empty",
+          "crates/norn-host/src/planner/forecast.rs::a_folder_holding_anything_the_plan_does_not_remove_stays",
+          "crates/norn-host/src/planner/forecast.rs::a_folder_a_create_lands_in_is_not_removed",
+          "crates/norn-host/src/planner/resolve.rs::a_plan_is_forecast_with_the_folders_it_makes_and_removes"
         ]
       }
     },
@@ -1129,10 +1133,11 @@
       "property": "No redirect is committed before the removal it redirects away from: a cascade that rewrites the links into a document orders every rewrite ahead of the destructive step, so no reader reaches a redirect whose target is already gone.",
       "sources": ["NRN-139", "NRN-162", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "the ordering has its carrier and the cascade does not. The host's single applier publishes every replacement ahead of every removal, content-dependency order within them, as crates/norn-host/src/applier/stage.rs orders them, so a cascade's rewrites would land before its destructive step. Nothing composes a cascade yet: the operation vocabulary carries no link rewrite and no verb plans one, which waits on the link-cascading move and delete verbs, and a verb nobody has written is no subject a path or a declaration names.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier/stage.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests/cascade.rs::a_moves_cascade_rewrites_publish_before_its_source_is_removed",
+          "crates/norn-host/src/applier/tests/delete.rs::a_rewriting_deletes_cascade_publishes_before_its_document_is_removed",
+          "crates/norn-host/src/applier/induced.rs::a_rewriting_delete_cut_short_in_its_cascade_is_finished_by_sending_it_again"
         ]
       }
     },
@@ -1143,11 +1148,21 @@
       "property": "The whole plan is checked and staged before the first publication — containment, every target's state, every condition, the recomposed result, the schema — and operations on one path compose in order into one transition per file rather than colliding. A refusal names every drifted target and every operation left unresolved, by name, beside a fresh plan; a publication stopped part-way answers interrupted, naming every target that landed; the resolved plan is the recovery, and re-sending it finishes it with no journal the host keeps; and every field of a resolved plan that states what the apply does — its root, operations, transitions and conditions — is checked by the applier rather than trusted.",
       "sources": ["NRN-147", "NRN-148", "NRN-149", "NRN-107", "NRN-153", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "restated per ADR 0032, docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md, which governs where the case as mined disagreed with it: two operations on one path compose in order into one transition rather than being rejected, and no per-operation report persists — the host keeps no record of an attempt, an interrupted answer names every landed target, and re-sending the resolved plan is the recovery — so those clauses, and the report fields accumulating across passes, are replaced. The subject is built: the applier, crates/norn-host/src/applier.rs, checks and stages every target before its first publication, and its suite states the clauses — a_staging_refusal_publishes_nothing_creates_and_removals_included, a_refused_plan_answers_a_fresh_plan_that_applies, a_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again, a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_after, re_sending_a_resolved_plan_finishes_it, a_plan_missing_a_transition_is_refused and a_plan_dropping_its_operations_condition_is_refused. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
-        "grounds": [
-          { "present": "docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md" },
-          { "present": "crates/norn-host/src/applier.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests.rs::a_staging_refusal_publishes_nothing_creates_and_removals_included",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses",
+          "crates/norn-host/src/applier/tests.rs::a_plan_refuses_the_schema_violations_it_introduces",
+          "crates/norn-host/src/planner/compose.rs::operations_on_one_file_compose_in_order",
+          "crates/norn-host/src/applier/tests.rs::a_refused_plan_answers_a_fresh_plan_that_applies",
+          "crates/norn-host/src/applier/tests.rs::a_move_whose_source_another_writer_removed_is_unresolved",
+          "crates/norn-host/src/applier/tests.rs::a_plan_disagreeing_at_several_files_names_every_one",
+          "crates/norn-host/src/applier/induced.rs::a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_after",
+          "crates/norn-host/src/applier/induced.rs::a_plan_a_crash_cut_short_at_any_publication_is_finished_by_sending_it_again",
+          "crates/norn-host/src/applier/tests.rs::re_sending_a_resolved_plan_finishes_it",
+          "crates/norn-host/src/applier/tests.rs::a_plan_for_another_root_is_refused_with_no_plan",
+          "crates/norn-host/src/applier/tests.rs::a_plan_missing_a_transition_is_refused",
+          "crates/norn-host/src/applier/tests.rs::a_plan_dropping_its_operations_condition_is_refused"
         ]
       }
     },
@@ -1175,8 +1190,22 @@
       "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses. A resolved plan applies only while every before-state and condition it records still holds; operations carry no anchor beyond their own conditions, and re-sending them is a new change. The planner owns no comparison rule: a `where` selector is judged by the query layer's comparison rule, and an expected value is an exact compare of the field's value tree with no coercion.",
       "sources": ["NRN-151", "NRN-398", "NRN-443", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "no planner captures a precondition."
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/planner/resolve.rs::an_expected_value_is_judged_before_the_plan_and_says_so",
+          "crates/norn-host/src/planner/resolve.rs::an_author_condition_a_written_file_no_longer_meets_leaves_the_operation_unresolved",
+          "crates/norn-host/src/applier/tests.rs::a_plan_carrying_expected_values_applies_and_refuses_once_the_observed_document_changes",
+          "crates/norn-host/src/applier/tests.rs::a_plan_condition_another_writer_broke_refuses",
+          "crates/norn-host/src/applier/tests.rs::a_changed_before_state_on_a_touched_file_is_drift",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses",
+          "crates/norn-host/tests/verbs.rs::a_previewed_creation_lands_as_previewed_after_the_clock_moves",
+          "crates/norn-host/src/applier/tests.rs::re_sending_conditioned_operations_is_refused_rather_than_repeated",
+          "crates/norn-host/tests/verbs.rs::a_set_where_writes_exactly_the_matched_documents_in_one_changeset",
+          "crates/norn-host/tests/verbs.rs::a_set_where_naming_an_unknown_key_is_unresolved_naming_it",
+          "crates/norn-host/src/planner/resolve.rs::an_expected_value_holds_only_for_exactly_that_value",
+          "crates/norn-host/src/planner/resolve.rs::a_nested_expected_value_is_judged_by_equality",
+          "crates/norn-host/tests/verbs.rs::a_set_guarded_by_an_absent_field_writes_only_where_it_is_absent"
+        ]
       }
     },
     {
@@ -1209,12 +1238,19 @@
       "property": "Every document target is contained under the canonical vault root by the write kernel, once per operation, in the one layer every verb applies through, so a verb inherits containment rather than re-deriving it. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
-        "status": "dormant",
-        "reason": "the check is the kernel's own: crates/norn-fs/src/open.rs descends into the vault root one component at a time and refuses what leaves it, once per operation the kernel runs. The layer above it is reached: every write runs as the apply job whose handle is crates/norn-host/src/lifecycle.rs::PendingApply, which hands every resolved plan to the host's single applier, crates/norn-host/src/applier.rs, which stages and publishes every target through that kernel. What keeps the case dormant is that the `apply` verb is the one verb reaching it: the write verbs that would each inherit containment from it — set, edit, new, move, delete and rewrite-wikilink — are not built, so no test can show a verb added later inheriting it.",
-        "grounds": [
-          { "present": "crates/norn-fs/src/open.rs" },
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-fs/tests/kernel/anchoring.rs::a_linked_folder_refuses_staging_for_every_kind",
+          "crates/norn-fs/tests/kernel/anchoring.rs::a_folder_swapped_for_a_link_refuses_publication_for_every_kind",
+          "crates/norn-fs/tests/kernel/anchoring.rs::a_path_that_leaves_the_root_is_refused",
+          "crates/norn-host/tests/verbs.rs::a_verb_aimed_through_a_folder_linked_out_of_the_vault_is_refused_and_writes_nothing_outside",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses",
+          "crates/norn-host/tests/migrate.rs::a_schema_source_outside_the_vault_is_rewritten_where_it_lives",
+          "crates/norn-host/src/applier/place.rs::the_schema_lands_where_the_registration_reads_it",
+          "crates/norn-host/src/applier/tests/control.rs::a_schema_write_lands_at_a_source_outside_the_vault",
+          "crates/norn-host/src/applier/tests/control.rs::a_source_folder_replaced_before_publication_publishes_nothing",
+          "crates/norn-host/src/applier/tests/control.rs::a_schema_write_outside_the_vault_does_not_resolve_from_the_fallback_home",
+          "crates/norn-fs/src/shadow.rs::a_home_publishes_outside_the_vault_only_where_a_rename_reaches"
         ]
       }
     },
@@ -1492,8 +1528,19 @@
       "property": "A rewritten link preserves every syntactic component except the target — embed marker, alias, anchor, block reference. Every occurrence is rewritten, none by first match, and only unambiguously resolving occurrences are rewritten; the rest are skipped and named. A raw prefix strip is the shape this forbids: one prefix miss turns a transclusion with an alias into a plain link while the report claims three backlinks rewritten.",
       "sources": ["NRN-431", "NRN-484", "NRN-129", "NRN-249"],
       "binding": {
-        "status": "dormant",
-        "reason": "no cascade rewriter exists."
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests/cascade.rs::a_stem_changing_move_rewrites_a_bare_backlink",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_stem_changing_move_rewrites_a_block_reference_keeping_its_anchor_alias_and_embed",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_vault_protocol_backlink_keeps_its_protocol",
+          "crates/norn-host/src/applier/tests/delete.rs::a_delete_rewriting_its_links_respells_each_backlink_in_its_own_form",
+          "crates/norn-text/tests/rewrite_fidelity.rs::every_byte_outside_the_stem_survives_a_rewrite",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_cascade_rewrites_every_occurrence_of_a_backlink_in_its_holder",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax",
+          "crates/norn-host/src/applier/tests/cascade.rs::an_ambiguous_backlink_is_skipped_ambiguous",
+          "crates/norn-host/src/applier/tests/delete.rs::an_ambiguous_link_is_skipped_ambiguous_by_a_rewriting_delete",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_backlink_the_text_layer_cannot_respell_is_left_with_its_reason"
+        ]
       }
     },
     {
@@ -1503,8 +1550,16 @@
       "property": "Every document the system can produce it can subsequently address and mutate. Empty or null frontmatter promotes to an empty mapping, an absent block is synthesized, and a present-but-empty key is a valid target; refusal is reserved for frontmatter that genuinely is not a mapping.",
       "sources": ["NRN-114", "NRN-120", "NRN-371", "NRN-435", "norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "no creation verb and no field editor exist."
+        "status": "bound",
+        "tests": [
+          "crates/norn-text/tests/editing.rs::an_empty_block_accepts_its_first_field",
+          "crates/norn-text/tests/editing.rs::removing_the_only_field_leaves_an_empty_block_that_is_still_mutable",
+          "crates/norn-text/tests/editing.rs::a_stubbed_field_is_settable",
+          "crates/norn-text/tests/editing.rs::a_synthesized_block_lands_after_the_byte_order_mark",
+          "crates/norn-text/tests/editing.rs::a_block_that_is_not_a_mapping_has_no_fields_to_edit",
+          "crates/norn-host/src/planner/compose.rs::document_local_edits_compose_over_what_the_plan_left",
+          "crates/norn-host/tests/verbs.rs::a_created_document_takes_a_set_and_an_edit_through_the_verbs"
+        ]
       }
     },
     {
@@ -1516,7 +1571,12 @@
       "sources": ["NRN-s8", "NRN-387", "NRN-436", "NRN-131", "NRN-414"],
       "binding": {
         "status": "dormant",
-        "reason": "no operation exists to fail, and no error taxonomy to draw a code from."
+        "reason": "the subjects exist: every write runs through the host's single applier, crates/norn-host/src/applier.rs, which answers each outcome under a code from the taxonomy crates/norn-wire/src/error.rs declares, and crates/norn-fs/src/faults.rs injects a failure at every stage of the write protocol behind the `induced-failure` feature. What is missing is the table the property is falsified by: no test crosses every operation kind with every injected failure point and asserts the code each answers, nor that no user-controlled input reaches an internal-error code. Task NORN-342 authors that table and settles where it lives, and it blocks the Layer 4 exit.",
+        "grounds": [
+          { "present": "crates/norn-host/src/applier.rs" },
+          { "present": "crates/norn-wire/src/error.rs" },
+          { "present": "crates/norn-fs/src/faults.rs" }
+        ]
       }
     },
     {
@@ -1542,12 +1602,19 @@
       "property": "Forecast and apply are one classifier over the same bytes. What apply touches is a subset of what the forecast reported, and under no concurrent drift the two are equal set-wise and count-wise, including skips with their reasons. Every occurrence is classified individually rather than by first raw match, and an unresolved or ambiguous match is never rewritten silently, but refused or reported under the same classification apply will use.",
       "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
       "binding": {
-        "status": "dormant",
-        "reason": "a resolved plan's preview and its apply are one classifier: the applier, crates/norn-host/src/applier.rs, judges a previewed resolved plan through the check an apply stages behind and answers the same plan or the refusal its apply would, as an_interrupted_plan_previews_as_the_same_plan_and_then_applies and a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses in crates/norn-host/tests/applies.rs state; and the planner, crates/norn-host/src/planner/resolve.rs, classifies each operation on its own, resolving an edit only where its text occurs exactly once and leaving any other unresolved rather than rewriting a first match. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The skips-with-reasons clause waits for Layer 5's repair plans, and the generator's ambiguous-stem and dangling-link trees wait for the link-cascading write verbs, which are not built.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "present": "crates/norn-host/tests/applies.rs" },
-          { "present": "crates/norn-host/src/planner/resolve.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/applies.rs::an_interrupted_plan_previews_as_the_same_plan_and_then_applies",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses",
+          "crates/norn-host/src/applier/tests.rs::each_document_local_kind_previews_as_it_applies_and_a_re_send_is_found",
+          "crates/norn-host/tests/applies.rs::a_previewed_move_records_the_link_it_moves_and_applies_as_previewed",
+          "crates/norn-host/src/applier/tests/differential.rs::every_planned_move_leaves_each_link_naming_what_it_named_or_says_why",
+          "crates/norn-host/tests/applies.rs::a_move_among_an_ambiguous_links_members_advises_its_cascade_skips_the_link",
+          "crates/norn-host/src/applier/tests/cascade.rs::an_ambiguous_backlink_is_skipped_ambiguous",
+          "crates/norn-host/src/applier/tests/delete.rs::an_ambiguous_link_is_skipped_ambiguous_by_a_rewriting_delete",
+          "crates/norn-host/src/applier/tests/cascade.rs::a_candidate_spelled_alike_in_two_syntaxes_is_judged_once_per_syntax",
+          "crates/norn-host/src/planner/compose.rs::a_str_replace_whose_text_occurs_twice_does_not_resolve"
         ]
       }
     },
@@ -1573,8 +1640,15 @@
       "property": "Writing requires an explicit preview or apply mode on every write request, with no default: a write request naming no mode does not read, and a preview leaves the vault as it was.",
       "sources": ["NRN-212"],
       "binding": {
-        "status": "dormant",
-        "reason": "no verb writes, and no format flag exists."
+        "status": "bound",
+        "tests": [
+          "crates/norn-wire/tests/schema.rs::every_write_request_advertises_what_it_carries_and_admits_no_other",
+          "crates/norn-wire/tests/round_trip.rs::an_apply_request_states_its_mode",
+          "crates/norn-wire/tests/round_trip.rs::the_applier_decides_every_mode_and_document_without_a_default",
+          "crates/norn-wire/tests/round_trip.rs::an_init_request_names_its_vault_and_states_its_mode",
+          "crates/norn-wire/tests/round_trip.rs::a_migrate_request_names_its_vault_and_states_its_mode",
+          "crates/norn-host/tests/applies.rs::every_verbs_preview_leaves_every_entry_of_the_vault_as_it_was"
+        ]
       }
     },
     {
@@ -1599,11 +1673,18 @@
       "property": "The applier's filesystem effect set is exactly the plan's declared effect set. No directory, file or temp survives that the plan did not declare and the forecast did not report; a dry run of any verb leaves the tree unchanged, inode and mtime included; and one missing-parent policy governs every creation: a create makes every folder it needs, the forecast names each, and no site creates ahead of the applier.",
       "sources": ["NRN-s7", "NRN-234", "norn-legacy annoyances log"],
       "binding": {
-        "status": "dormant",
-        "reason": "the applier, crates/norn-host/src/applier.rs, publishes only the plan's transitions and the folders its forecast names, and a staging refusal leaves the tree as it found it, as a_staging_refusal_publishes_nothing_creates_and_removals_included states; a preview writes nothing, every entry of the vault keeping its inode and modification time, as a_preview_leaves_every_entry_of_the_vault_as_it_was in crates/norn-host/tests/applies.rs states. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands. The move-with-parents-disabled clause waits for the move verb, which is not built.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "present": "crates/norn-host/tests/applies.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests.rs::a_plan_lands_every_target_and_commits_what_a_build_from_zero_holds",
+          "crates/norn-host/src/applier/tests.rs::the_folders_an_apply_makes_and_removes_are_the_ones_its_forecast_named",
+          "crates/norn-host/src/applier/tests.rs::a_staging_refusal_publishes_nothing_creates_and_removals_included",
+          "crates/norn-host/src/applier/tests.rs::an_apply_stood_down_before_publication_removes_its_shadows_and_publishes_nothing",
+          "crates/norn-fs/tests/kernel/shadows.rs::a_landed_publication_leaves_no_shadow",
+          "crates/norn-fs/tests/kernel/shadows.rs::a_discarded_target_leaves_no_shadow_and_publishes_nothing",
+          "crates/norn-fs/tests/kernel/folders.rs::a_create_whose_missing_folder_became_a_file_refuses_and_leaves_nothing",
+          "crates/norn-host/tests/applies.rs::a_preview_leaves_every_entry_of_the_vault_as_it_was",
+          "crates/norn-host/tests/applies.rs::every_verbs_preview_leaves_every_entry_of_the_vault_as_it_was",
+          "crates/norn-host/src/planner/forecast.rs::a_create_makes_every_folder_above_it_that_does_not_stand"
         ]
       }
     },
@@ -1614,12 +1695,16 @@
       "property": "A request reads the store at exactly one state. A read establishes one snapshot, and `snapshots_opened` reads one. An apply reads the state its claim holds: every store read in its job — the writer's own reading and at most one reader it opens, for a `where` target, a link resolution, the applier's check or a refused plan's fresh plan — sees that state, and no commit lands in its registration's store between that state and the apply's changeset. The reader an apply opens is given back before its commit, and its descriptors stay within the host's budget, accumulating none across applies. The states and conditions the applier checks come from planning: for operations, the ones that state showed; for a resolved plan, the ones its preview recorded.",
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
-        "status": "dormant",
-        "reason": "the apply's half has its subject: the apply job whose handle is crates/norn-host/src/lifecycle.rs::PendingApply takes its one snapshot while it holds the entry's claim, after its intake derived the facts delivered before it, and no commit lands between it and the changeset because the claim holds the store's one writer; the applier, crates/norn-host/src/applier.rs, checks a resolved plan's states and conditions against the files, and operations are planned inside that claim. A read's half is carried by crates/norn-store/src/store.rs::SnapshotReader, which establishes one snapshot per read hold, by the one statement that establishes it, and counts it on that snapshot's own counters. What keeps the case dormant is the counter: an apply's snapshot is the store's reading on its writer connection under the claim rather than a reader's establishment, so snapshots_opened does not count it, and nothing yet reads one snapshot per apply request.",
-        "grounds": [
-          { "symbol-present": "crates/norn-store/src/store.rs::SnapshotReader" },
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/readers.rs::establishing_a_snapshot_costs_one_snapshot_and_one_statement",
+          "crates/norn-host/tests/reads.rs::a_count_answers_under_the_reading_of_its_snapshot",
+          "crates/norn-host/src/production.rs::an_apply_reading_the_store_mints_one_reader_for_its_job_and_accounts_it",
+          "crates/norn-host/src/lifecycle/tests/applies.rs::a_fact_delivered_during_an_apply_waits_for_its_changeset_and_hands_on_to_the_reconcile",
+          "crates/norn-host/src/lifecycle/tests/applies.rs::an_apply_arriving_during_a_reconcile_takes_the_claim_before_the_next_turn_and_maintenance",
+          "crates/norn-host/tests/verbs.rs::a_matching_document_the_intake_derived_is_matched_by_the_next_apply",
+          "crates/norn-host/tests/fd_budget.rs::an_apply_minting_a_reader_stays_in_budget_and_accumulates_no_descriptor",
+          "crates/norn-host/src/applier/tests.rs::a_changed_before_state_on_a_touched_file_is_drift"
         ]
       }
     },
@@ -1630,10 +1715,16 @@
       "property": "One constraint engine answers for the intended post-state: for a given declaration, document and intended post-state, every write path returns the same verdict, judged by the derivation's own judge over the post-state's bytes; a plan refuses the violations it introduces on what it writes, and under force the `forced` list names exactly the findings its apply adds to what the validator held before. The write path coerces no value: a value is written exactly as authored and judged as written.",
       "sources": ["NRN-430", "NRN-474", "NRN-475", "NRN-37", "NRN-390", "NRN-119"],
       "binding": {
-        "status": "dormant",
-        "reason": "the write path exists and judges a composed result by the derivation's own judge: the applier's schema check, crates/norn-host/src/applier/schema.rs, runs the derivation's plan_document over the post-state bytes under the pinned declaration — the one judgment the validator's findings come from — so the verdict an apply refuses on is the one the store would file for that post-state. What keeps the case dormant is the rest: the apply verb is the one write path, so there are not several to hold to one verdict; an applied answer reports no warnings to compare with the validator's findings; and no type-changing write exists to coerce under the incoming type. It stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier/schema.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests.rs::a_plan_refuses_the_schema_violations_it_introduces",
+          "crates/norn-host/tests/applies.rs::an_operations_preview_introducing_a_schema_violation_refuses_as_its_apply_does",
+          "crates/norn-host/tests/verbs.rs::a_set_breaking_the_schema_is_refused_and_forced_lists_the_violation",
+          "crates/norn-host/src/applier/tests.rs::a_forced_plan_previews_the_violation_it_lets_through_and_applies_the_same",
+          "crates/norn-host/tests/verbs.rs::a_forced_sets_violations_are_exactly_the_findings_its_apply_added",
+          "crates/norn-text/tests/quoting.rs::hostile_block_values_read_back_as_themselves",
+          "crates/norn-text/tests/quoting.rs::the_non_string_scalars_read_back_as_their_own_shapes",
+          "crates/norn-host/tests/verbs.rs::a_set_of_a_nested_value_lands_and_reads_back_as_that_value"
         ]
       }
     },
@@ -1644,8 +1735,14 @@
       "property": "Every path gate — the document-path grammar, containment, and the control-file gate — judges the resolved path after template resolution, never an unresolved template; every operation's report names that operation's own resolved target.",
       "sources": ["NRN-138", "NRN-104", "NRN-425", "NRN-101"],
       "binding": {
-        "status": "dormant",
-        "reason": "no path template is resolved and no gate reads one."
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/planner/rule.rs::a_filled_path_the_document_grammar_refuses_is_unresolved_naming_it",
+          "crates/norn-host/src/planner/rule.rs::a_filled_path_beneath_a_control_file_is_unresolved_by_the_control_file_gate",
+          "crates/norn-host/src/planner/rule.rs::a_creation_by_rule_expands_into_the_document_its_rule_makes",
+          "crates/norn-host/tests/verbs.rs::a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it",
+          "crates/norn-host/tests/verbs.rs::a_creation_by_rule_is_made_by_the_pinned_schema_not_the_bytes_on_disk"
+        ]
       }
     },
     {
@@ -1656,7 +1753,11 @@
       "sources": ["NRN-a63", "NRN-a59", "NORN-a15", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no roster to declare and no mutation request path to keep clear; the read path's derivation-free claim is stated at venue 2 by warm-requests-derive-nothing."
+        "reason": "the subjects exist: a mutation plans and applies in its apply job and reaches no full derivation, a `where` target is matched through the find builder in crates/norn-host/src/planner/expand.rs, and crates/norn-host/tests/counter_gate.rs holds a one-document changeset's counters flat across vault scale and a hub's link work to its in-links. What is missing is the measurement: no counter-lane workload runs a real apply or a `set --where` end to end and holds its row-touch counters to its declared affected set and its precondition statements to one per selector. PR 3 of task NORN-299 lands those workloads in crates/norn-host/tests/counter_gate.rs, which settles their names, and binds this case to them.",
+        "grounds": [
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "present": "crates/norn-host/src/planner/expand.rs" }
+        ]
       }
     },
     {
@@ -1681,7 +1782,10 @@
       "sources": ["NRN-a59", "NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing composes a post-state to write through."
+        "reason": "the commit is built: crates/norn-host/src/production.rs::commit_plan_changeset reads each file a plan left present back once through the anchored read, which hashes it as it reads, so the composed state reaches the store without the applier holding its bytes. What is missing is the bar: no counter-lane workload holds an apply's file reads per target to a fixed number at two vault sizes and two plan sizes. PR 3 of task NORN-299 lands that per-target read budget in the counter lane, which settles its name, and binds this case to it.",
+        "grounds": [
+          { "symbol-present": "crates/norn-host/src/production.rs::commit_plan_changeset" }
+        ]
       }
     },
     {
@@ -1691,12 +1795,18 @@
       "property": "The verification gate's coverage equals the contract's promises: where the contract preserves comments, ordering and terminators, the gate compares those bytes rather than a semantic projection of them. Every splice is re-parsed and confirmed before commit rather than trusted on a scanner's proposed span, and the gate's adequacy is itself tested: with each of its two checks switched off, a doctored plan or a foreign edit lands, so the suite's refusals are shown to come from those checks.",
       "sources": ["NRN-141", "NRN-434", "NRN-142", "NRN-140"],
       "binding": {
-        "status": "dormant",
-        "reason": "the recompose check is the gate: before anything is staged, crates/norn-host/src/applier/recompose.rs runs the plan's operations again from its before-states and the applier, crates/norn-host/src/applier.rs, refuses unless each result hashes to its transition's after-state — every byte of the composed file, never a projection of it — so a str_replace splice is confirmed against the whole document before it is committed, and the kernel, crates/norn-fs/src/write.rs, verifies each staged target again as it publishes. The adequacy clause — mutating the gate and requiring the suite to go red — has no harness that runs it, and it stays dormant because its venue, layer 4, is above the layer the registry binds cases at, so the tests named here carry it when that layer lands.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier/recompose.rs" },
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "present": "crates/norn-fs/src/write.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/applier/tests.rs::a_plan_missing_a_transition_is_refused",
+          "crates/norn-host/src/applier/tests.rs::a_plan_disagreeing_at_several_files_names_every_one",
+          "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_transitions_disagree_previews_as_its_apply_answers",
+          "crates/norn-host/src/planner/compose.rs::a_str_replace_whose_text_occurs_twice_does_not_resolve",
+          "crates/norn-text/tests/editing.rs::a_push_that_would_drop_a_comment_refuses",
+          "crates/norn-text/tests/editing.rs::an_edit_moves_only_the_bytes_of_the_construct_it_addresses",
+          "crates/norn-text/tests/editing.rs::a_key_the_scanner_decodes_differently_refuses_the_whole_block",
+          "crates/norn-fs/tests/kernel/publication.rs::a_foreign_edit_after_staging_refuses_at_publication",
+          "crates/norn-host/src/applier/induced.rs::a_plan_composing_bytes_it_does_not_record_lands_them_only_with_the_after_state_check_off",
+          "crates/norn-host/src/applier/induced.rs::a_foreign_edit_after_staging_is_overwritten_only_with_publications_reverify_off"
         ]
       }
     },

@@ -104,7 +104,7 @@ pub const MANDATORY_CASES: &[&str] = &[
 /// requires every dormant case at or below this layer to say why. Raising it is
 /// a reviewed edit made when the next layer starts landing, and it raises the
 /// bar on every case that was already sitting there.
-pub const LAYER_LANDING: u8 = 3;
+pub const LAYER_LANDING: u8 = 4;
 
 /// The layers a case's venue names, indexed by layer number.
 ///
@@ -2853,13 +2853,13 @@ fn a_carrier() {}
     }
 
     /// A registry that audits clean against [`scratch`] and [`index`]: the
-    /// pinned venue scale, the mandatory cases, one bound case, and one
-    /// dormant layer-0 case with its reason.
+    /// pinned venue scale, the mandatory cases dormant above the landing
+    /// layer, one bound case, and one dormant layer-0 case with its reason.
     fn sound() -> Registry {
         let mut cases: Vec<Case> = MANDATORY_CASES
             .iter()
             .map(|name| {
-                let mut case = case(name, 4, dormant(None));
+                let mut case = case(name, LAYER_LANDING + 1, dormant(None));
                 case.mandatory = true;
                 case
             })
