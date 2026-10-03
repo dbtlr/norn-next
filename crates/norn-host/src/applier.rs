@@ -94,12 +94,12 @@ pub(crate) use outcome::{Applied, ApplyOutcome, Interrupted};
 use crate::derivation::Declared;
 use crate::planner::control::{SchemaPlace, role_at};
 use crate::planner::forecast::forecast;
-use crate::planner::view::TreeView;
+use crate::planner::view::{TreeView, VaultView};
 use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 pub(crate) use stage::Links;
-use stage::{Stop, Unfit};
+use stage::Stop;
 
 /// Where a publication is recorded so the watcher's echo of it is known as
 /// the applier's own.
@@ -335,13 +335,7 @@ impl Applier<'_> {
     /// The answer when the root the plan was staged under is no longer the
     /// directory the root's spelling names.
     fn root_replaced(&self, plan: ResolvedPlan) -> ApplyOutcome {
-        match norn_fs::path_identity(self.anchor) {
-            Ok(Some(now)) => ApplyOutcome::RootChanged {
-                expected: plan.root,
-                found: RootIdentity::from_device_and_inode(now.dev, now.ino),
-            },
-            _ => write_failed(plan, "the vault root was replaced".to_string()),
-        }
+        root_replaced(self.anchor, plan)
     }
 
     /// The ground the plan's targets land on.
@@ -364,16 +358,19 @@ impl Applier<'_> {
 ///
 /// **The judgment is the apply's own**: the root identity, then every check
 /// [`stage::check`] runs — each target at its before- or after-state, every
-/// condition, the operations recomposed from the before-states, the schema.
-/// Where an apply would go on to stage, the answer is the same plan with its
-/// forecast from what the vault holds, the advisories on its links read off
-/// its resolution change set computed again through `links`; where it would
-/// not, the answer is the
-/// outcome an apply of the plan over the same files ends in — a refusal with
-/// its fresh plan, a fault in the plan's shape, or a vault that could not be
-/// read, which an apply answers as a write that failed before anything
-/// landed. So what a caller previewed is what applies, and a plan an
-/// interruption left part-landed previews as itself.
+/// condition, the operations recomposed from the before-states, the schema —
+/// then the write kernel's own judgment of every written target in the order
+/// it publishes, as staging would meet it ([`stage::judge`]): its descent to
+/// the target through no link and what stands at the name, staging nothing.
+/// Where an apply would go on to stage a shadow, the answer is the same plan
+/// with its forecast from what the vault holds, the advisories on its links
+/// read off its resolution change set computed again through `links`; where
+/// it would not, the answer is the outcome an apply of the plan over the same
+/// files ends in — a refusal with its fresh plan, a fault in the plan's
+/// shape, a root replaced, or a vault that could not be read, which an apply
+/// answers as a write that failed before anything landed. So what a caller
+/// previewed is what applies, and a plan an interruption left part-landed
+/// previews as itself.
 pub(crate) fn preview(
     plan: ResolvedPlan,
     anchor: &Path,
@@ -394,26 +391,47 @@ pub(crate) fn preview(
         Ok(view) => view,
         Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
     };
-    let outcome = match stage::check(&plan, &view, declared, links) {
-        Ok(checked) => match forecast(&plan.transitions, &view) {
-            Ok(forecast) => {
-                return Ok((
-                    plan,
-                    forecast
-                        .with_forced(checked.forced)
-                        .with_links(checked.links),
-                ));
-            }
-            Err(error) => write_failed(plan, error.to_string()),
-        },
-        Err(Unfit::Refused(checks)) => {
-            refresh::refuse_and_refresh(plan, &view, declared, checks, links)
-        }
-        Err(Unfit::Invalid(fault)) => ApplyOutcome::Invalid(fault),
-        Err(Unfit::Failed(detail)) => write_failed(plan, detail),
-        Err(Unfit::Unread(refused)) => ApplyOutcome::Unread(refused),
+    let ground = Ground {
+        vault: anchor,
+        root,
+        schema,
     };
-    Err(Box::new(outcome))
+    let stop = match stage::check(&plan, &view, declared, links) {
+        Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
+            Ok(()) => {
+                return match forecast(&plan.transitions, &view) {
+                    Ok(forecast) => Ok((
+                        plan,
+                        forecast
+                            .with_forced(checked.forced)
+                            .with_links(checked.links),
+                    )),
+                    Err(error) => Err(Box::new(write_failed(plan, error.to_string()))),
+                };
+            }
+            Err(stop) => stop,
+        },
+        Err(unfit) => Stop::from(unfit),
+    };
+    Err(Box::new(match stop {
+        Stop::Refused(checks) => refresh::refuse_and_refresh(plan, &view, declared, checks, links),
+        Stop::Invalid(fault) => ApplyOutcome::Invalid(fault),
+        Stop::RootReplaced => root_replaced(anchor, plan),
+        Stop::Failed(detail) => write_failed(plan, detail),
+        Stop::Unread(refused) => ApplyOutcome::Unread(refused),
+    }))
+}
+
+/// The answer when the root at `anchor` the plan was judged under is no
+/// longer the directory the root's spelling names.
+fn root_replaced(anchor: &Path, plan: ResolvedPlan) -> ApplyOutcome {
+    match norn_fs::path_identity(anchor) {
+        Ok(Some(now)) => ApplyOutcome::RootChanged {
+            expected: plan.root,
+            found: RootIdentity::from_device_and_inode(now.dev, now.ino),
+        },
+        _ => write_failed(plan, "the vault root was replaced".to_string()),
+    }
 }
 
 fn write_failed(plan: ResolvedPlan, detail: String) -> ApplyOutcome {

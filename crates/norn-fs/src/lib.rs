@@ -142,5 +142,5 @@ pub use watch::{
 };
 pub use write::{
     AfterState, Confirmed, Durability, Landed, Publication, Published, RemovedFolders, Staged,
-    Staging, Transition, confirm_landed, discard, publish, remove_empty_folders, stage,
+    Staging, Transition, confirm_landed, discard, judge, publish, remove_empty_folders, stage,
 };

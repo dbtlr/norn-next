@@ -31,8 +31,9 @@
 //! operations sent as a plan do.
 //!
 //! **A resolved plan previews as the apply's own judgment of it.** The
-//! applier's checks run over it, reading the vault and writing nothing, and
-//! the preview answers the same plan where an apply would go on to stage it,
+//! applier's checks run over it, then the write kernel's judgment of each
+//! target as staging would meet it, reading the vault and writing nothing,
+//! and the preview answers the same plan where an apply would go on to stage it,
 //! or what an apply of it would end in otherwise — a vault the checks could
 //! not read included, which answers `vault/write-failed` with the plan, as
 //! the apply does. So what a caller previewed is what applies (ADR 0032),

@@ -297,6 +297,112 @@ fn a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses() {
     );
 }
 
+/// **A resolved plan aimed through a folder since linked out of the vault
+/// previews as its apply refuses.** Four plans are previewed while `linked`
+/// is a folder in the vault: a create inside it, an edit and a delete of the
+/// document it holds, and a move of the subject into it. Then the folder is
+/// moved out and a symbolic link to it stands in its place. Each plan's
+/// preview answers exactly the refusal its apply does — the same checks,
+/// each the target drifted to absent, and the same drifted forecast — never
+/// the plan with a forecast of folders that stand already, as a link. The
+/// folder outside holds what it held, and the subject stays where it was.
+#[test]
+fn a_resolved_plan_aimed_through_a_folder_since_linked_out_previews_as_its_apply_refuses() {
+    let (sandbox, vault) = a_vault("host-applies-preview-linked-folder");
+    let held = "# Held\n\nstatus draft\n";
+    std::fs::create_dir(vault.path().join("linked")).expect("make the folder");
+    std::fs::write(vault.path().join("linked/held.md"), held).expect("write the held document");
+    let outside = sandbox.work_dir().join("outside");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let document = |text: &str| DocumentPath::new(text).expect("a document path");
+    let shapes = [
+        (
+            OperationKind::create_document(document("linked/fresh.md"), "# Fresh\n"),
+            "linked/fresh.md",
+        ),
+        (
+            OperationKind::str_replace(document("linked/held.md"), "draft", "final"),
+            "linked/held.md",
+        ),
+        (
+            OperationKind::move_document(document(SUBJECT), document("linked/moved.md")),
+            "linked/moved.md",
+        ),
+        (
+            OperationKind::delete_document(document("linked/held.md")),
+            "linked/held.md",
+        ),
+    ];
+    let plans: Vec<(ResolvedPlan, &str)> = shapes
+        .into_iter()
+        .map(|(kind, at)| {
+            let operations = PlanDocument::operations(AuthoredPlan::new(
+                VaultAddress::name(vault.name().clone()),
+                vec![Operation::new(kind)],
+            ));
+            (previewed(&host, operations).0, at)
+        })
+        .collect();
+    std::fs::rename(vault.path().join("linked"), &outside).expect("the folder moves out");
+    std::os::unix::fs::symlink(&outside, vault.path().join("linked"))
+        .expect("a link in the folder's place");
+
+    for (plan, at) in plans {
+        let answer = |mode| {
+            host.apply(ApplyParams::new(mode, PlanDocument::resolved(plan.clone())))
+                .expect("the request is answered")
+                .wait()
+                .expect_err("a plan aimed through a link is refused")
+        };
+        let previewed = answer(ApplyMode::Preview);
+        let applied = answer(ApplyMode::Apply);
+        let refusal = |answered: &ErrorEnvelope| {
+            assert_eq!(answered.code(), &ReasonCode::VaultPlanRefused, "{at}");
+            let ErrorDetail::PlanRefused {
+                checks, forecast, ..
+            } = answered.detail()
+            else {
+                panic!("{at}: the refusal carries {:?}", answered.detail());
+            };
+            (checks.clone(), forecast.drifted.clone())
+        };
+        let previewed = refusal(&previewed);
+        assert_eq!(previewed, refusal(&applied), "{at}");
+        assert_eq!(
+            previewed,
+            (
+                vec![RefusedCheck::drifted(
+                    document(at),
+                    norn_wire::FileState::absent()
+                )],
+                vec![document(at)],
+            ),
+            "{at}"
+        );
+    }
+    let mut outside_entries: Vec<String> = std::fs::read_dir(&outside)
+        .expect("the folder outside lists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    outside_entries.sort();
+    assert_eq!(outside_entries, vec!["held.md".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("held.md")).unwrap(),
+        held
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        BEFORE
+    );
+}
+
 /// **A resolved plan whose transitions are not what its operations do
 /// previews as its apply answers it.** The subject's transition is carried
 /// twice: the preview answers `request/plan-invalid` naming the subject, with

@@ -58,6 +58,10 @@
 //!
 //! A staging refusal leaves no shadow behind.
 //!
+//! [`judge`] is the first three steps alone: staging's own judgment of a
+//! target, reaching the refusal [`stage`] would and writing nothing, which a
+//! preview of a plan answers from.
+//!
 //! # Publication
 //!
 //! [`publish`] asks every question again, because the world had the whole
@@ -505,6 +509,29 @@ pub fn stage(
     stage_where(anchor, root, path, transition, shadows, Faults::entry())
 }
 
+/// Judge `transition` at `path` below `anchor` exactly as [`stage`] judges
+/// it, and stage nothing.
+///
+/// **This is staging's own judgment, not a second one**: the request's shape,
+/// the root held to `root`, the anchored descent through no link — so a target
+/// beneath a linked folder refuses as [`Refusal::LinkedAncestor`] — and what
+/// stands at the name judged against the transition, each refusing as
+/// [`stage`] would. What it does not reach is the shadow itself, its home and
+/// the bytes written into it, which are the write. It reads and opens, and
+/// changes nothing.
+///
+/// **Its caller is the one applier's preview** (`norn-host`'s `applier`,
+/// Layer 4 plan-apply), which judges a resolved plan as an apply of it would
+/// and answers the refusal staging would meet, or the plan.
+pub fn judge(
+    anchor: &Path,
+    root: Identity,
+    path: &Path,
+    transition: Transition<'_>,
+) -> Result<(), Refusal> {
+    look(anchor, root, path, &anchor.join(path), &transition).map(drop)
+}
+
 /// Publish what [`stage`] staged.
 ///
 /// See the [module documentation](self) for what publication asks again, the
@@ -618,38 +645,29 @@ fn stage_where(
 ) -> Result<Staging, Refusal> {
     let faults = Faulted { faults, path };
     let full = anchor.join(path);
-    let target = Target::of(path, &full)?;
-    let respelled = match &transition {
-        Transition::Respell { to, .. } => Some(respelled_name(&target, to, &full)?),
-        _ => None,
-    };
-    let root_fd = open_staged_root(anchor, root)?;
-    let folder = descend(root_fd.as_fd(), &target, anchor, &full)?;
+    let (root_fd, looked) = look(anchor, root, path, &full, &transition)?;
+    // Every descriptor the look opened is closed by here, the root's aside:
+    // what staging hands back holds none.
     let after = after_of(&transition);
     let at = StageAt {
         anchor,
         root,
         root_fd: root_fd.as_fd(),
         path,
-        full: &full,
         shadows,
         faults,
     };
-    if let (
-        Some(to),
-        Transition::Respell {
-            before, content, ..
-        },
-    ) = (respelled, transition)
-    {
-        return stage_respell(&at, &folder, &target, to, before, content);
-    }
-    let found = observe_target(&folder, &target, &full, &mut |_| {})?;
-    drop(folder);
-    // Every descriptor the look opened is closed by here, the root's aside:
-    // what staging hands back holds none.
-    let mode = match judge_staging(&transition, after, found, &full)? {
-        Judged::Landed => {
+    let mode = match looked {
+        Looked::Respell { to, standing } => {
+            let Transition::Respell {
+                before, content, ..
+            } = transition
+            else {
+                unreachable!("only a respell is looked at as one");
+            };
+            return stage_respell(&at, to, standing, before, content);
+        }
+        Looked::One(Judged::Landed) => {
             return Ok(Staging::Landed(Landed {
                 root,
                 path: path.to_path_buf(),
@@ -662,7 +680,7 @@ fn stage_where(
                 },
             }));
         }
-        Judged::Proceed { mode } => mode,
+        Looked::One(Judged::Proceed { mode }) => mode,
     };
     let pending = match (transition, after) {
         (Transition::Create { content }, Some(after)) => Pending::Create {
@@ -689,13 +707,55 @@ fn stage_where(
     }))
 }
 
+/// What staging's look at a target concluded, before any shadow is made.
+enum Looked {
+    /// A create, a replace or a remove, judged.
+    One(Judged),
+    /// A respell, where it stands, and the new spelling of its final name.
+    Respell { to: OsString, standing: Respelled },
+}
+
+/// Everything staging asks of a target before it writes anything: the
+/// request's shape, the root, the anchored descent to the target's folder,
+/// and what stands at the name judged against `transition`. The root is
+/// handed back open, since a shadow in a home under it is reached from it,
+/// and every other descriptor the look opened is closed.
+fn look(
+    anchor: &Path,
+    root: Identity,
+    path: &Path,
+    full: &Path,
+    transition: &Transition<'_>,
+) -> Result<(OwnedFd, Looked), Refusal> {
+    let target = Target::of(path, full)?;
+    let respelled = match transition {
+        Transition::Respell { to, .. } => Some(respelled_name(&target, to, full)?),
+        _ => None,
+    };
+    let root_fd = open_staged_root(anchor, root)?;
+    let folder = descend(root_fd.as_fd(), &target, anchor, full)?;
+    let after = after_of(transition);
+    let looked = match (respelled, transition) {
+        (Some(to), Transition::Respell { before, .. }) => {
+            let after = after.expect("a respell's after-state is a hash");
+            let standing = look_respell(&folder, &target, &to, *before, after, full)?;
+            Looked::Respell { to, standing }
+        }
+        _ => {
+            let found = observe_target(&folder, &target, full, &mut |_| {})?;
+            Looked::One(judge_staging(transition, after, found, full)?)
+        }
+    };
+    drop(folder);
+    Ok((root_fd, looked))
+}
+
 /// Where a staging acts: the root, the target, the home and the faults.
 struct StageAt<'a> {
     anchor: &'a Path,
     root: Identity,
     root_fd: BorrowedFd<'a>,
     path: &'a Path,
-    full: &'a Path,
     shadows: &'a ShadowHome,
     faults: Faulted<'a>,
 }
@@ -806,26 +866,36 @@ fn respelled_name(target: &Target<'_>, to: &Path, full: &Path) -> Result<OsStrin
     Ok(respelled.name.to_owned())
 }
 
-/// Stage a respell: judge the three states through the listed spelling, and
-/// stage a shadow only where the content still has to change.
-fn stage_respell(
-    at: &StageAt<'_>,
+/// Where a respell stands, judged through the spelling its folder lists.
+fn look_respell(
     folder: &Folder<'_>,
     target: &Target<'_>,
+    to: &OsStr,
+    before: ContentHash,
+    after: ContentHash,
+    full: &Path,
+) -> Result<Respelled, Refusal> {
+    let Folder::Reached(chain) = folder else {
+        return Err(drifted(full, before, None));
+    };
+    let Some((spelling, found)) = observe_spelling(chain.last(), target.name, full, &mut |_| {})?
+    else {
+        return Err(drifted(full, before, None));
+    };
+    judge_respell(&spelling, found, target.name, to, before, after, full)
+}
+
+/// Stage a respell standing as `standing`: a shadow only where the content
+/// still has to change.
+fn stage_respell(
+    at: &StageAt<'_>,
     to: OsString,
+    standing: Respelled,
     before: ContentHash,
     content: Option<&[u8]>,
 ) -> Result<Staging, Refusal> {
     let after = content.map_or(before, ContentHash::of);
-    let Folder::Reached(chain) = folder else {
-        return Err(drifted(at.full, before, None));
-    };
-    let Some((spelling, found)) =
-        observe_spelling(chain.last(), target.name, at.full, &mut |_| {})?
-    else {
-        return Err(drifted(at.full, before, None));
-    };
-    let shadow = match judge_respell(&spelling, found, target.name, &to, before, after, at.full)? {
+    let shadow = match standing {
         Respelled::Landed { .. } => {
             return Ok(Staging::Landed(Landed {
                 root: at.root,
@@ -3027,6 +3097,59 @@ mod tests {
             "something was made through the link"
         );
         assert!(scratch.shadow_names().is_empty());
+    }
+
+    /// **Judging a target is staging's own judgment, writing nothing.** A
+    /// create below a folder that is a link, a replace at a name holding
+    /// other bytes, and a replace at its before-state each judge as staging
+    /// them does — the first two refusing with staging's own refusal, the
+    /// last passing — and judging stages no shadow and writes nothing
+    /// through the link.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    fn judging_a_target_answers_as_staging_it_does_and_writes_nothing() {
+        let scratch = Scratch::new("write-judge");
+        let outside = scratch.directory("outside");
+        std::os::unix::fs::symlink(&outside, scratch.at("linked")).expect("a linked folder");
+        scratch.place("drifted.md", b"theirs");
+        scratch.place("ready.md", b"old");
+        let replace = Transition::Replace {
+            before: ContentHash::of(b"old"),
+            content: b"new",
+        };
+        let judged = |relative: &str, transition| {
+            judge(
+                &scratch.at(""),
+                root_of(&scratch),
+                Path::new(relative),
+                transition,
+            )
+        };
+
+        for (relative, transition) in [
+            ("linked/fresh.md", Transition::Create { content: b"ours" }),
+            ("drifted.md", replace),
+        ] {
+            let refusal = judged(relative, transition).expect_err("a refused target");
+            assert_eq!(
+                Err(refusal),
+                stage_in(&scratch, relative, transition, Faults::NONE),
+                "{relative}"
+            );
+        }
+        assert_eq!(judged("ready.md", replace), Ok(()));
+        assert!(scratch.shadow_names().is_empty(), "judging staged a shadow");
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("outside")
+                .next()
+                .is_none(),
+            "something was made through the link"
+        );
+        assert!(matches!(
+            stage_in(&scratch, "ready.md", replace, Faults::NONE),
+            Ok(Staging::Staged(_))
+        ));
     }
 
     /// **The bar on a create's shadow confirmation.** A shadow swapped for a
