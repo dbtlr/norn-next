@@ -357,8 +357,9 @@ impl<O: EntryOps> Host<O> {
 /// registration whose root became a file or lost its permissions is named.
 ///
 /// **A schema file two or more registrations use is one
-/// [`RegistryProblem::SharedSchema`]** naming them all, unless they share a
-/// root, which the duplicate root names once. The problems come in name order
+/// [`RegistryProblem::SharedSchema`]** naming them all, unless it is the
+/// default schema file of a root they share, which the duplicate root names
+/// once. The problems come in name order
 /// for the roots, then the shared schema files in the order their identities
 /// sort. The cost is one stat of every root and, for each that resolves, one
 /// stat and one listing more, and one stat and resolution of every schema file.
@@ -403,14 +404,22 @@ pub(crate) fn sanity<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Regist
         }
     }
     // Names sharing one root share its default schema file, and that is the
-    // duplicate root's to name: one cause is named once.
-    let duplicate_roots: Vec<&BTreeSet<VaultName>> = groups
-        .values()
-        .copied()
-        .filter(|group| group.len() > 1)
+    // duplicate root's to name: one cause is named once. A source they share
+    // is a cause of its own, which a fix of the root leaves standing.
+    let sourced: BTreeSet<&VaultName> = entries
+        .iter()
+        .filter(|entry| entry.schema_source.is_some())
+        .map(|entry| &entry.name)
         .collect();
+    let defaults_of_one_root = |aliases: &BTreeSet<VaultName>| {
+        aliases
+            .first()
+            .and_then(|first| groups.get(first))
+            .is_some_and(|root| aliases.is_subset(root))
+            && aliases.iter().all(|alias| !sourced.contains(alias))
+    };
     for aliases in schema_groups(entries.iter().copied()).into_values() {
-        if duplicate_roots.contains(&&aliases) {
+        if defaults_of_one_root(&aliases) {
             continue;
         }
         if let Ok(conflict) = AliasConflict::new(aliases) {
@@ -1218,6 +1227,64 @@ mod tests {
         );
     }
 
+    /// **Names sharing a root leave to the duplicate root only the default
+    /// schema file the root gives them**: sources they also share are a second
+    /// cause and named, and defaults shared with no root in common are named.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_default_schema_shared_through_one_root_is_the_duplicate_roots_to_name() {
+        let tree = Tree::new("sanity-duplicate-root-schema");
+        let shared = tree.dir("shared");
+        let alias = tree.link("alias", &shared);
+        let third = tree.path("third.yaml");
+        let duplicate = || {
+            RegistryProblem::duplicate_root(NameSet::new([name("alpha"), name("beta")]).unwrap())
+        };
+
+        let both_sourced = [
+            sourced("alpha", &shared, &third),
+            sourced("beta", &alias, &third),
+        ];
+        assert_eq!(
+            sanity_over(&both_sourced),
+            RegistrySanity::problems([
+                duplicate(),
+                RegistryProblem::shared_schema(
+                    NameSet::new([name("alpha"), name("beta")]).unwrap()
+                ),
+            ])
+            .unwrap(),
+            "a source both name outlives a fix of their root"
+        );
+
+        let one_sourced_apart = [
+            served("alpha", &shared),
+            served("beta", &alias),
+            sourced("gamma", &alias, &tree.path("gamma.yaml")),
+        ];
+        assert_eq!(
+            sanity_over(&one_sourced_apart),
+            RegistrySanity::problems([RegistryProblem::duplicate_root(
+                NameSet::new([name("alpha"), name("beta"), name("gamma")]).unwrap()
+            )])
+            .unwrap(),
+            "the defaults two of three names share are the root's"
+        );
+
+        let norn = tree.dir("common/.norn");
+        let (delta, epsilon) = (tree.dir("delta"), tree.dir("epsilon"));
+        std::os::unix::fs::symlink(&norn, delta.join(".norn")).unwrap();
+        std::os::unix::fs::symlink(&norn, epsilon.join(".norn")).unwrap();
+        assert_eq!(
+            sanity_over(&[served("delta", &delta), served("epsilon", &epsilon)]),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("delta"), name("epsilon")]).unwrap()
+            )])
+            .unwrap(),
+            "defaults shared through a linked .norn share no root"
+        );
+    }
+
     /// **A hard link is the one spelling no path resolution unifies**, so only
     /// the file's identity names it one file with its original.
     #[cfg(unix)]
@@ -1268,6 +1335,18 @@ mod tests {
         let link = tree.link("link", &alpha.join(".norn"));
         let candidate = sourced("beta", &beta, &link.join("schema.yaml"));
         assert!(unshared_schema(&[served("alpha", &alpha)], &candidate).is_err());
+
+        std::fs::create_dir_all(alpha.join(".norn")).unwrap();
+        let file_link = tree.link("file-link.yaml", &alpha.join(".norn/schema.yaml"));
+        let registrations = [served("alpha", &alpha), sourced("beta", &beta, &file_link)];
+        assert_eq!(
+            sanity_over(&registrations),
+            RegistrySanity::problems([RegistryProblem::shared_schema(
+                NameSet::new([name("alpha"), name("beta")]).unwrap()
+            )])
+            .unwrap(),
+            "a source that is itself a dangling link to another vault's absent default"
+        );
     }
 
     /// Only a change of the file a registration is served under is a move of
