@@ -2112,7 +2112,7 @@ pub(crate) const SUBJECT_DISCARD_SQL: &str = "DELETE FROM findings WHERE path = 
 /// subject pays what a producer that re-derives all of it pays. A scope naming
 /// no kind renders the empty list SQLite reads as matching nothing, which is
 /// what re-deriving nothing takes.
-fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
+pub(crate) fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
     let DiscardScope::Kinds(kinds) = scope else {
         return SUBJECT_DISCARD_SQL.to_string();
     };
@@ -2359,7 +2359,10 @@ fn finding_subject_parameters(
 }
 
 /// The subject and the kinds in the order [`subject_discard_sql`] numbers them.
-fn subject_discard_parameters<'a>(path: &'a DocumentPath, scope: DiscardScope<'a>) -> Vec<&'a str> {
+pub(crate) fn subject_discard_parameters<'a>(
+    path: &'a DocumentPath,
+    scope: DiscardScope<'a>,
+) -> Vec<&'a str> {
     let kinds = match scope {
         DiscardScope::EveryKind => [].as_slice(),
         DiscardScope::Kinds(kinds) => kinds,

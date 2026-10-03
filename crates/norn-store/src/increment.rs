@@ -8,7 +8,9 @@
 
 use std::collections::BTreeSet;
 
-use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
+use norn_db::rusqlite::{
+    CachedStatement, OptionalExtension, Transaction, params, params_from_iter,
+};
 use norn_wire::{FindingKind, fold_tag};
 
 use crate::counters::{Counter, DerivationCounters};
@@ -587,7 +589,7 @@ impl<'t> Statements<'t> {
                 "preparing a path key's findings discard",
             )?,
             discard_vacated: prepared(
-                &format!("{} AND kind = ?2", request::SUBJECT_DISCARD_SQL),
+                &request::subject_discard_sql(VACATED_DISCARD),
                 "preparing a vacated place's findings discard",
             )?,
             row_at: prepared(
@@ -946,6 +948,13 @@ fn discard_the_subject(
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
 }
 
+/// What a vacated place's discard takes: the content findings its emptied bytes
+/// left, and no finding about the path's spelling ([`Change::Vacated`]). It is
+/// the subject discard narrowed by kind, so it is the statement
+/// [`crate::ExplainedStatement::SubjectDiscard`] reads back for this scope.
+const VACATED_DISCARD: DiscardScope<'static> =
+    DiscardScope::Kinds(&[FindingKind::BodyBytesNotUtf8]);
+
 /// End the content findings at a place the changeset empties, and report how
 /// many went.
 ///
@@ -963,10 +972,10 @@ fn vacate(statements: &mut Statements<'_>, path: &DocumentPath) -> Result<u64, S
     }
     Ok(statements
         .discard_vacated
-        .execute(params![
-            path.as_str(),
-            FindingKind::BodyBytesNotUtf8.as_str()
-        ])
+        .execute(params_from_iter(request::subject_discard_parameters(
+            path,
+            VACATED_DISCARD,
+        )))
         .map_err(|error| error::sql("discarding a vacated place's findings", error))? as u64)
 }
 

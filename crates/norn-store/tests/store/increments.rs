@@ -2176,7 +2176,7 @@ const SPILLED_WAL_FLOOR: u64 = 128 * 1024;
 /// finding stands at a path no row was ever derived at; the entry takes it in
 /// the changeset's own transaction, and unlike a death leaves no tombstone and
 /// no document counted, so the store is what a build from zero over the
-/// emptied place holds.
+/// emptied place holds. A finding about another place stands.
 #[test]
 fn a_vacated_place_discards_its_findings_and_records_no_tombstone() {
     let scratch = Scratch::new("vacated-place");
@@ -2185,6 +2185,9 @@ fn a_vacated_place_discards_its_findings_and_records_no_tombstone() {
     request
         .record_finding(&violation("held/quarantined.md"))
         .expect("recording a finding");
+    request
+        .record_finding(&violation("held/other.md"))
+        .expect("recording a finding at another place");
     assert_eq!(
         request
             .stored_findings(&path("held/quarantined.md"))
@@ -2218,6 +2221,14 @@ fn a_vacated_place_discards_its_findings_and_records_no_tombstone() {
             .stored_tombstone(&path("held/quarantined.md"))
             .expect("a tombstone read"),
         None
+    );
+    assert_eq!(
+        request
+            .stored_findings(&path("held/other.md"))
+            .expect("findings")
+            .len(),
+        1,
+        "the vacated discard reached a finding about another place"
     );
 }
 
