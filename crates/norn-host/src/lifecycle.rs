@@ -22265,9 +22265,12 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
-    /// The bound a read whose way out meets a held gate is held to: what it
-    /// waited stays far inside the ten seconds the holder keeps the gate.
-    const WITHIN_A_READS_BOUND: Duration = Duration::from_secs(2);
+    /// The read bound of the host a held-gate case runs on, and what a read
+    /// whose way out meets a held gate is held to: a read that waited for the
+    /// gate at all would wait out the ten seconds the holder keeps it, and one
+    /// that waited up to any bound of its own past the read's would cross
+    /// this.
+    const A_READS_BOUND: Duration = Duration::from_millis(300);
 
     /// **A read's hold dropped while its gate is held gives its pin back
     /// without waiting for the gate.** Another holder keeps the gate far past
@@ -22276,7 +22279,7 @@ mod tests {
     #[test]
     fn a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::from_millis(300));
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let hold = host
@@ -22290,7 +22293,7 @@ mod tests {
         let waited = started.elapsed();
         drop(held);
         assert!(
-            waited < WITHIN_A_READS_BOUND,
+            waited < A_READS_BOUND,
             "a read's hold waited {waited:?} for a held gate to give its pin back"
         );
         assert_eq!(
@@ -22310,7 +22313,7 @@ mod tests {
     #[test]
     fn a_read_that_schedules_and_refuses_under_a_held_gate_leaves_the_dispatch_to_the_retry() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::from_millis(300));
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
         let (taken, held) = mpsc::channel::<GateHeldElsewhere>();
         let hook_entry = Arc::clone(&entry);
@@ -22327,7 +22330,7 @@ mod tests {
         let waited = started.elapsed();
         drop(held.recv().expect("the read let the gate go"));
         assert!(
-            waited < WITHIN_A_READS_BOUND,
+            waited < A_READS_BOUND,
             "the read waited {waited:?} for a held gate to send the attach it scheduled"
         );
         assert_eq!(
@@ -22364,7 +22367,7 @@ mod tests {
     #[test]
     fn a_queue_slot_given_back_under_a_held_gate_is_free_at_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::from_millis(300));
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
         let entry = host.shared.entries.get(&name).expect("the entry is served");
         let epoch = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -22382,7 +22385,7 @@ mod tests {
         let waited = started.elapsed();
         drop(held);
         assert!(
-            waited < WITHIN_A_READS_BOUND,
+            waited < A_READS_BOUND,
             "the slot's give-back waited {waited:?} for a held gate"
         );
         assert!(
@@ -22408,7 +22411,7 @@ mod tests {
     #[test]
     fn a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_settling_within(Arc::clone(&ops), Duration::from_millis(300));
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
         let _lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_rebuild.store(true, Ordering::SeqCst);
@@ -22424,7 +22427,7 @@ mod tests {
         drop(held);
         drop(hold);
         assert!(
-            waited < WITHIN_A_READS_BOUND,
+            waited < A_READS_BOUND,
             "a read that met damage waited {waited:?} for a held gate"
         );
         assert!(
