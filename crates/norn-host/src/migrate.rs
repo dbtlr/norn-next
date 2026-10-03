@@ -54,9 +54,8 @@ use norn_wire::{
 use crate::address::registered_name;
 use crate::apply::{PlanGround, unreadable};
 use crate::lifecycle::{EntryOps, Host, ReadSource, SnapshotSource};
-use crate::planner::control::{control_path, role_at};
+use crate::planner::control::{SchemaPlace, control_path, role_at};
 use crate::planner::view::{Entry, TreeView, VaultView, wire_hash};
-use crate::reload::schema_anchor_at;
 
 /// The ladder each control file is walked up.
 struct Ladders<'a> {
@@ -267,11 +266,14 @@ where
     }
 
     /// Each control file of `name` as it stands now — its bytes and their
-    /// hash, or `None` where nothing stands — the schema where the
-    /// registration reads it, on a hold of the entry and the ground its
-    /// coverage stands on, as the gate hold that established the hold read
-    /// it, so the read takes the gate no second time.
+    /// hash, or `None` where nothing stands — on a hold of the entry and the
+    /// ground its coverage stands on, as the gate hold that established the
+    /// hold read it, so the read takes the gate no second time.
     ///
+    /// The schema is read where a plan over that ground reads it
+    /// ([`PlanGround::schema`]), never by the registry's record, which may
+    /// name a file the coverage has not taken in yet: the bytes a rewrite is
+    /// composed from and the before-state its plan names are one file's.
     /// The default schema and the config are read as the planner reads a
     /// control target ([`VaultView::control_entry`]); a `schema_source` is
     /// read as a reload reads it, which refuses a source naming nothing.
@@ -294,17 +296,7 @@ where
             )
         })?;
         ground.standing(name)?;
-        let registration = self
-            .registrations()
-            .into_iter()
-            .find(|registration| registration.name == *name);
-        let schema = match registration
-            .as_ref()
-            .filter(|registration| registration.schema_source.is_some())
-        {
-            Some(registration) => Some(source_read(registration, ground)?),
-            None => in_vault(name, ground, ControlFile::Schema)?,
-        };
+        let schema = schema_standing(name, ground)?;
         let config = in_vault(name, ground, ControlFile::Config)?;
         drop(hold);
         Ok([(ControlFile::Schema, schema), (ControlFile::Config, config)])
@@ -344,24 +336,38 @@ fn in_vault(
     }
 }
 
-/// The schema a registration naming a `schema_source` reads, as a reload
-/// reads it, from the root `ground` covers.
-fn source_read(
-    registration: &crate::Registration,
+/// The schema of the vault on `ground`, read where a plan over that ground
+/// reads and writes it ([`PlanGround::schema`]): the default as the planner
+/// reads a control target, nothing where none stands; a `schema_source`,
+/// inside the vault or outside it, as a reload reads one, refused where it
+/// names nothing.
+fn schema_standing(
+    name: &VaultName,
     ground: &PlanGround,
-) -> Result<Standing, ErrorEnvelope> {
+) -> Result<Option<Standing>, ErrorEnvelope> {
     let unreadable_source =
         |detail: String| refused(ControlFile::Schema, MigrationRefusal::unreadable(detail));
-    let (anchor, file) = schema_anchor_at(registration, &ground.root)
-        .map_err(|error| unreadable_source(error.to_string()))?;
-    let read = norn_fs::read_and_hash(&anchor, &file).map_err(|refusal| {
+    let (anchor, file) = match &ground.schema {
+        place if *place == SchemaPlace::default() => {
+            return in_vault(name, ground, ControlFile::Schema);
+        }
+        SchemaPlace::InVault(relative) => (ground.root.as_path(), relative.as_path()),
+        SchemaPlace::Outside { folder, name, .. } => (folder.as_path(), name.as_path()),
+        SchemaPlace::NoFile(source) => {
+            return Err(unreadable_source(format!(
+                "the schema source `{}` names no file",
+                source.display()
+            )));
+        }
+    };
+    let read = norn_fs::read_and_hash(anchor, file).map_err(|refusal| {
         unreadable_source(format!("the schema source cannot be read: {refusal}"))
     })?;
     let (bytes, hash) = read.into_parts();
-    Ok(Standing {
+    Ok(Some(Standing {
         bytes,
         hash: wire_hash(hash),
-    })
+    }))
 }
 
 #[cfg(test)]

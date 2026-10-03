@@ -29,7 +29,7 @@ use crate::derivation::{
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
 use crate::evidence::{JobEvidence, count_changeset, count_document_derived};
-use crate::planner::control::SchemaPlace;
+use crate::planner::control::{SchemaPlace, SchemaSite};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
     ApplyEnd, ApplyEnding, ApplyProgress, AttachmentAdvisory, EntryOps, Established, Healing,
@@ -946,19 +946,7 @@ impl ProductionEntryOps {
     }
 
     fn schema_path_at(registration: &Registration, covered_root: &Path) -> PathBuf {
-        registration
-            .schema_source
-            .as_ref()
-            .map(|source| {
-                source
-                    .as_path()
-                    .strip_prefix(registration.root.as_path())
-                    .map_or_else(
-                        |_| source.as_path().to_owned(),
-                        |relative| covered_root.join(relative),
-                    )
-            })
-            .unwrap_or_else(|| covered_root.join(IN_VAULT_SCHEMA_PATH))
+        SchemaSite::of(registration).file_at(covered_root)
     }
 
     /// Read the reload candidate the attachment's covered root holds and judge

@@ -4,7 +4,7 @@
 //! rewrite would lose a comment.
 
 use norn_config::migration::{Format, Ladder, Step};
-use norn_wire::{ControlFile, MigrationRefusal};
+use norn_wire::MigrationRefusal;
 
 /// A ladder over YAML text whose version is its `version` key, at version 3,
 /// with a step from each of 1 and 2.
@@ -84,11 +84,6 @@ fn a_file_at_the_version_this_build_reads_is_current() {
             "{config:?}"
         );
     }
-    assert_eq!(
-        Ladder::of(ControlFile::Schema).current,
-        Ladder::schema().current
-    );
-    assert_eq!(Ladder::of(ControlFile::Config).format, Format::Toml);
 }
 
 /// **Both shipped ladders are empty**: the schema has had one grammar version

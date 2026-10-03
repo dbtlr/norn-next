@@ -43,7 +43,7 @@
 
 mod comments;
 
-use norn_wire::{ControlFile, MigrationRefusal};
+use norn_wire::MigrationRefusal;
 
 use crate::schema::{SCHEMA_VERSION, stated_version};
 use crate::vault::VaultConfig;
@@ -112,14 +112,6 @@ impl Ladder {
                     .map_err(|error| error.to_string())
             },
             steps: Vec::new(),
-        }
-    }
-
-    /// The ladder of the control file `file`.
-    pub fn of(file: ControlFile) -> Ladder {
-        match file {
-            ControlFile::Schema => Ladder::schema(),
-            ControlFile::Config => Ladder::config(),
         }
     }
 

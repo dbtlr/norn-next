@@ -29,7 +29,7 @@
 //!
 //! [ADR 0034]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0034-a-schema-write-lands-where-the-registration-reads-the-schema.md
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use norn_config::schema::VaultSchema;
@@ -80,25 +80,61 @@ impl Default for SchemaPlace {
 }
 
 impl SchemaPlace {
-    /// Where `registration`'s schema lives, staged through `shadows` where
-    /// it lies outside the vault: its `schema_source`, relative to the root
-    /// where it lies beneath the registered root, as the host excludes it
-    /// from the walk, or the default. Does no I/O.
+    /// Where `registration`'s schema lives ([`SchemaSite::of`]), staged
+    /// through `shadows` where it lies outside the vault. Does no I/O.
     pub(crate) fn of(registration: &Registration, shadows: &ShadowHome) -> Self {
+        match SchemaSite::of(registration) {
+            SchemaSite::Default => SchemaPlace::default(),
+            SchemaSite::InVault(relative) => SchemaPlace::InVault(relative.to_owned()),
+            SchemaSite::Outside(source) => match (source.parent(), source.file_name()) {
+                (Some(folder), Some(name)) => SchemaPlace::Outside {
+                    folder: folder.to_owned(),
+                    name: PathBuf::from(name),
+                    shadows: shadows.clone(),
+                },
+                _ => SchemaPlace::NoFile(source.to_owned()),
+            },
+        }
+    }
+}
+
+/// Where a registration names its schema file, before any root is joined
+/// to it: the one reading of a `schema_source` against the registered root,
+/// which every resolution of the schema's file — the plan's
+/// [`SchemaPlace`], the reload's read and the watcher's path — projects
+/// from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SchemaSite<'a> {
+    /// No `schema_source`: the default, [`IN_VAULT_SCHEMA_PATH`] beneath the
+    /// vault root.
+    Default,
+    /// A `schema_source` beneath the registered root, relative to it, as
+    /// the host excludes it from the walk.
+    InVault(&'a Path),
+    /// A `schema_source` outside the registered root, as it is spelled.
+    Outside(&'a Path),
+}
+
+impl<'a> SchemaSite<'a> {
+    /// Where `registration` names its schema file. Does no I/O.
+    pub(crate) fn of(registration: &'a Registration) -> Self {
         let Some(source) = registration.schema_source.as_ref() else {
-            return SchemaPlace::default();
+            return SchemaSite::Default;
         };
         let source = source.as_path();
-        if let Ok(relative) = source.strip_prefix(registration.root.as_path()) {
-            return SchemaPlace::InVault(relative.to_owned());
+        match source.strip_prefix(registration.root.as_path()) {
+            Ok(relative) => SchemaSite::InVault(relative),
+            Err(_) => SchemaSite::Outside(source),
         }
-        match (source.parent(), source.file_name()) {
-            (Some(folder), Some(name)) => SchemaPlace::Outside {
-                folder: folder.to_owned(),
-                name: PathBuf::from(name),
-                shadows: shadows.clone(),
-            },
-            _ => SchemaPlace::NoFile(source.to_owned()),
+    }
+
+    /// The schema file at this site, for a vault whose root is spelled
+    /// `covered_root`.
+    pub(crate) fn file_at(self, covered_root: &Path) -> PathBuf {
+        match self {
+            SchemaSite::Default => covered_root.join(IN_VAULT_SCHEMA_PATH),
+            SchemaSite::InVault(relative) => covered_root.join(relative),
+            SchemaSite::Outside(source) => source.to_owned(),
         }
     }
 }
