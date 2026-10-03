@@ -41,8 +41,7 @@
 use norn_db::meta::{NEXT_GENERATION_SQL, PUT_META_SQL};
 
 /// Declares [`WriteStatement`] and its census from one list of variants, so a
-/// statement the enum names is in [`WriteStatement::all`] by construction and
-/// [`WriteStatement::slot`] is its position there.
+/// statement the enum names is in [`WriteStatement::all`] by construction.
 macro_rules! registry {
     ($($(#[$doc:meta])* $variant:ident),+ $(,)?) => {
         /// One statement the write path prepares or executes.
@@ -55,7 +54,7 @@ macro_rules! registry {
         pub const WRITE_STATEMENTS: usize = [$(WriteStatement::$variant),+].len();
 
         impl WriteStatement {
-            /// Every statement the write path registers, in slot order.
+            /// Every statement the write path registers, in declaration order.
             pub fn all() -> [Self; WRITE_STATEMENTS] {
                 [$(Self::$variant),+]
             }
@@ -118,14 +117,6 @@ impl WriteStatement {
         Self::DiscardTags,
         Self::DiscardFields,
     ];
-
-    /// Where this statement stands in [`Self::all`].
-    pub fn slot(self) -> usize {
-        Self::all()
-            .iter()
-            .position(|registered| *registered == self)
-            .expect("the registry macro puts every variant in the census")
-    }
 
     /// The statement's text: the one spelling the write path prepares and the
     /// plan seam explains.
@@ -271,13 +262,5 @@ mod tests {
         assert_eq!(WriteStatement::InsertLink.parameter_count(), 15);
         assert_eq!(WriteStatement::DiscardStaleFindings.parameter_count(), 1);
         assert_eq!(WriteStatement::PutMeta.parameter_count(), 2);
-    }
-
-    #[test]
-    fn the_registry_holds_every_statement_once_in_slot_order() {
-        let all = WriteStatement::all();
-        for (position, statement) in all.iter().enumerate() {
-            assert_eq!(statement.slot(), position, "{statement:?}");
-        }
     }
 }

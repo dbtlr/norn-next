@@ -3998,20 +3998,20 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
 }
 
 /// **No statement the write path runs scans a table, and each keyed one seeks
-/// its table by the constraint it binds.** An increment runs these once per document, per fact row or
-/// per finding, so a statement that read a table end to end would make a
-/// changeset cost the store's size on top of its own. The census is
-/// [`WriteStatement::all`], the registry the increment prepares from, so a
-/// statement is judged because it is prepared and not because a list remembers
-/// it; a plan taken of any statement that binds a different number of values
-/// than its text names is an error here.
+/// its table by the constraint it binds.** An increment runs these once per
+/// document, per fact row or per finding, so a statement that read a table end
+/// to end would make a changeset cost the store's size on top of its own. The
+/// census is [`WriteStatement::all`], the registry the increment prepares from,
+/// so a statement is judged because it is prepared and not because a list
+/// remembers it; a plan taken of any statement that binds a different number of
+/// values than its text names is an error here.
 ///
 /// Controls: the index each keyed statement seeks is dropped, and the same bar
 /// fails — for the two statements that seek a primary key, whose index cannot
 /// be dropped, a plan that scans the table is handed to the same judgment. The
-/// no-scan half has its own control: with the index a foreign-key action
-/// seeks dropped, the plan keeps the seek the bar names and adds a scan, and the
-/// bar still fails.
+/// no-scan half has its own control: with the index a foreign-key action seeks
+/// dropped, the plan keeps the seek the bar names and adds a scan, and the bar
+/// still fails.
 #[test]
 fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
     let scratch = Scratch::new("write-plans");
