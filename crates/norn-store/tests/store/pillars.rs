@@ -15,7 +15,7 @@ use crate::common::{
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
-    StoreError, induced_failure, suffix_probe,
+    StoreError, WriteStatement, induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
 
@@ -819,6 +819,7 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthOccupied => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
+        ExplainedStatement::Write(_) => "every_write_path_statement_reaches_its_rows_by_a_seek",
     }
 }
 
@@ -1158,6 +1159,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
     .chain(FINDING_DETAIL.iter().map(|detail| detail(width)))
+    // The write registry is one slot here, and its own census is the bar's.
+    .chain([ExplainedStatement::Write(WriteStatement::all()[0])])
     .collect();
     let mut slots: Vec<usize> = judged.iter().map(|statement| statement.slot()).collect();
     slots.sort_unstable();
@@ -1179,6 +1182,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+            "every_write_path_statement_reaches_its_rows_by_a_seek",
             "the_link_health_judgment_seeks_every_row_it_reads",
             "the_path_discard_seeks_finding_paths_path_key",
         ]
@@ -1488,7 +1492,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard
-        | ExplainedStatement::LinkHealthOccupied => None,
+        | ExplainedStatement::LinkHealthOccupied
+        | ExplainedStatement::Write(_) => None,
     }
 }
 
@@ -3894,4 +3899,186 @@ fn the_feed_reads_the_last_write_generation_whichever_write_took_it() {
         pin.generation,
         "a write that took no generation moved the reading"
     );
+}
+
+/// What the write-path bar demands of one registered statement: each seek the
+/// plan must report, as the table, what it runs through and the equality or
+/// range constraint it prints. Every statement is also judged to scan no table.
+struct WriteBar {
+    seeks: &'static [(&'static str, Access<'static>, &'static str)],
+}
+
+/// The bar for one write-path statement. Exhaustive over [`WriteStatement`], so
+/// a statement added to the registry has to say here what its plan must show.
+///
+/// An `INSERT` reaches its row by no search: its uniqueness checks and the
+/// triggers it fires are not in a plan, so its bar is the universal one, that
+/// the plan reports no scan. The foreign-key actions SQLite does report beside a
+/// statement are not asserted either way: what a cascade costs is not what these
+/// bars judge, and the bar would otherwise be pinned to how the driver chooses to
+/// describe one.
+fn write_bar(statement: WriteStatement) -> WriteBar {
+    use WriteStatement::*;
+    let seeks: &'static [(&'static str, Access<'static>, &'static str)] = match statement {
+        DiscardLinks => &[(
+            "links",
+            Access::Index("links_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardHeadings => &[(
+            "headings",
+            Access::Index("headings_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardBlocks => &[(
+            "blocks",
+            Access::Index("blocks_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardTags => &[(
+            "document_tags",
+            Access::Index("document_tags_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardFields => &[("document_fields", Access::PrimaryKey, "(document=?)")],
+        DeleteDocument | RowAt => &[("documents", Access::Index("documents_path"), "(path=?)")],
+        // Two open ranges over the fingerprint rather than an inequality.
+        DiscardStaleFindings => &[
+            (
+                "findings",
+                Access::Index("findings_fingerprint_kind_nocase"),
+                "(vault_schema_fingerprint<?)",
+            ),
+            (
+                "findings",
+                Access::Index("findings_fingerprint_kind_nocase"),
+                "(vault_schema_fingerprint>?)",
+            ),
+        ],
+        NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
+        UpsertDocument
+        | InsertLink
+        | InsertLinkKey
+        | InsertHeading
+        | InsertBlock
+        | InsertTag
+        | InsertField
+        | RecordTombstone
+        | InsertFinding
+        | InsertFindingCandidate
+        | InsertFindingClass
+        | InsertFindingPath
+        | PutMeta => &[],
+    };
+    WriteBar { seeks }
+}
+
+/// Whether a plan meets a write bar: no table scan, and every seek it names.
+fn meets_write_bar(read: &QueryPlan, bar: &WriteBar) -> bool {
+    read.table_scans().is_empty()
+        && read.unbounded_steps().is_empty()
+        && bar.seeks.iter().all(|(table, access, constraint)| {
+            read.searches_of(table)
+                .iter()
+                .any(|row| row.access() == Some(*access) && row.constraint() == Some(*constraint))
+        })
+}
+
+fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
+    plan(
+        store
+            .begin_request()
+            .emitted_plan(ExplainedStatement::Write(statement))
+            .unwrap_or_else(|problem| panic!("a query plan for {statement:?}: {problem}")),
+    )
+}
+
+/// **Every statement the write path runs reaches its rows by a seek, and none
+/// scans a table.** An increment runs these once per document, per fact row or
+/// per finding, so a statement that read a table end to end would make a
+/// changeset cost the store's size on top of its own. The census is
+/// [`WriteStatement::all`], the registry the increment prepares from, so a
+/// statement is judged because it is prepared and not because a list remembers
+/// it; a plan taken of any statement that binds a different number of values
+/// than its text names is an error here.
+///
+/// Controls: the index each keyed statement seeks is dropped, and the same bar
+/// fails — for the two statements that seek a primary key, whose index cannot
+/// be dropped, a plan that scans the table is handed to the same judgment.
+#[test]
+fn every_write_path_statement_reaches_its_rows_by_a_seek() {
+    let scratch = Scratch::new("write-plans");
+    let mut store = scratch.open();
+
+    for statement in WriteStatement::all() {
+        let read = write_plan(&mut store, statement);
+        assert!(
+            meets_write_bar(&read, &write_bar(statement)),
+            "{statement:?} does not reach its rows by a seek: {:?}\nemitted SQL: {}",
+            read.rows(),
+            read.sql()
+        );
+    }
+
+    // A primary key cannot be dropped, so the same judgment is handed the plan
+    // a scan of the table would report.
+    for (statement, table) in [
+        (WriteStatement::DiscardFields, "document_fields"),
+        (WriteStatement::NextGeneration, "meta"),
+    ] {
+        let scanning = QueryPlan::new(
+            "scanning",
+            vec![PlanRow::new(2, 0, format!("SCAN {table}"))],
+        );
+        assert!(
+            !meets_write_bar(&scanning, &write_bar(statement)),
+            "the bar for {statement:?} holds a plan that scans {table}"
+        );
+    }
+
+    for (statements, indexes) in [
+        (
+            &[WriteStatement::DiscardLinks][..],
+            &["links_document_ordinal"][..],
+        ),
+        (
+            &[WriteStatement::DiscardHeadings],
+            &["headings_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DiscardBlocks],
+            &["blocks_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DiscardTags],
+            &["document_tags_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DeleteDocument, WriteStatement::RowAt],
+            &["documents_path"],
+        ),
+        // Two indexes lead with the fingerprint, so both go.
+        (
+            &[WriteStatement::DiscardStaleFindings],
+            &[
+                "findings_fingerprint_kind_nocase",
+                "findings_fingerprint_kind_severity_nocase",
+            ],
+        ),
+    ] {
+        let scratch = Scratch::new("write-plans-control");
+        let mut store = scratch.open();
+        for index in indexes {
+            induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {index}"))
+                .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
+        }
+        for statement in statements {
+            let read = write_plan(&mut store, *statement);
+            assert!(
+                !meets_write_bar(&read, &write_bar(*statement)),
+                "the bar for {statement:?} held with {indexes:?} dropped: {:?}",
+                read.rows()
+            );
+        }
+    }
 }

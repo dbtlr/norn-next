@@ -91,14 +91,22 @@ pub const WRITE_GENERATION: &str = "write_generation";
 /// rebuild from zero a new epoch.
 pub const STORE_EPOCH: &str = "store_epoch";
 
+/// The statement [`put_meta`] emits, public for the reason [`META_READ_SQL`] is:
+/// the plan a client hands out of its pinned-scalar write is a plan of this
+/// text. The conflict target is `meta`'s primary key, so the upsert is one seek
+/// of the key b-tree.
+pub const PUT_META_SQL: &str = "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+
+/// The statement [`next_generation`] emits, public for the reason
+/// [`META_READ_SQL`] is.
+pub const NEXT_GENERATION_SQL: &str =
+    "UPDATE meta SET value = value + 1 WHERE key = ?1 RETURNING value";
+
 /// Write one pinned scalar.
 pub fn put_meta(connection: &Connection, key: &str, value: impl ToSql) -> Result<(), DbError> {
     connection
-        .execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![key, value],
-        )
+        .execute(PUT_META_SQL, rusqlite::params![key, value])
         .map_err(|error| error::sql("writing a pinned value", error))?;
     Ok(())
 }
@@ -149,7 +157,7 @@ pub fn read_meta<T: rusqlite::types::FromSql>(
 pub fn next_generation(connection: &Connection) -> Result<i64, DbError> {
     connection
         .query_row(
-            "UPDATE meta SET value = value + 1 WHERE key = ?1 RETURNING value",
+            NEXT_GENERATION_SQL,
             rusqlite::params![WRITE_GENERATION],
             |row| row.get(0),
         )

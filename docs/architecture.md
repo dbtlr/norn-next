@@ -694,7 +694,7 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
 database, and beside the plan every column the statement reads, which SQLite's authorizer
 reports while the explain is prepared and a plan never names — and, beside the statements
-the read builders below name, forty named statements carry a plan bar through it:
+the read builders below name, forty-one named statements carry a plan bar through it:
 suffix candidates, findings in a class, the path- and subject-scoped findings
 discards — the path discard an equality seek of the path-key index, and the subject discard
 in both the whole form and the form narrowed to the kinds a producer re-derives — the clear a schema pin runs over the field projection's typed values, the page
@@ -723,7 +723,20 @@ changed classes and path keys a link or a finding is held under, a page of the f
 standing under a class beside the link each was about, and the discard of such a page by
 finding id. Each chunked read is barred at every chunk width a read emits, as an equality
 seek of its table's primary key on the finding id, with no full scan and no sorter, taken of
-the statement that binds exactly that many ids.
+the statement that binds exactly that many ids. The forty-first name carries the write path:
+a registry of the statements the write path prepares — the increment's document upsert, fact
+discards and inserts, document delete, tombstone record and row probe, the findings writes,
+the write generation's increment, the pinned-scalar upsert and the discard a schema pin runs
+over findings stamped under another fingerprint — which is the one place those statements'
+text is spelled, so a write statement absent from it cannot be prepared and the census a bar
+walks is the set the increment runs. Each is barred to scan no table, and each keyed one
+(the fact discards, the document delete and probe, the generation increment, the stale-finding
+discard as two open ranges over the fingerprint) to seek its table by the constraint it
+binds, with a negative control. The inserts have no search to report, so theirs is the
+universal bar alone. A plan does not report trigger work, and what it shows of a foreign-key
+action is not judged: the cost of a cascade or a trigger is not covered. The verification
+reads that scan by design (the integrity check and the derived-rows digest) are not write-path
+statements and carry no bar.
 
 A point read is barred harder than a page, because a search is not a point read on its
 own: a range over the same index reports the same step, so each of the twelve is judged on

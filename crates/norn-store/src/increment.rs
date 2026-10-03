@@ -25,6 +25,7 @@ use crate::link::{address_kind, link_keys};
 use crate::path::{ClassKey, DocumentPath, PathKey, SuffixKey};
 use crate::request::{self, DiscardScope, ReadWork};
 use crate::store::Store;
+use crate::write_path::WriteStatement;
 
 /// One entry in a changeset.
 ///
@@ -461,7 +462,7 @@ struct Tally {
 /// the iterator hands one over at a time and nothing here keeps it.
 struct Statements<'t> {
     upsert_document: CachedStatement<'t>,
-    /// One per fact table, in the order [`FACT_DISCARDS`] names them.
+    /// One per fact table, in the order [`WriteStatement::FACT_DISCARDS`] names them.
     discard_facts: Vec<CachedStatement<'t>>,
     insert_link: CachedStatement<'t>,
     insert_link_key: CachedStatement<'t>,
@@ -482,22 +483,19 @@ struct Statements<'t> {
     row_at: CachedStatement<'t>,
 }
 
-/// The fact rows a re-derivation replaces, one statement per table.
-///
-/// Nothing diffs and nothing merges: the text layer's output for a document is
-/// the complete answer for that document, so replacing is both correct and the
-/// only shape in which a fact row's ordinal means what it says.
-const FACT_DISCARDS: &[&str] = &[
-    "DELETE FROM links WHERE document = ?1",
-    "DELETE FROM headings WHERE document = ?1",
-    "DELETE FROM blocks WHERE document = ?1",
-    "DELETE FROM document_tags WHERE document = ?1",
-    "DELETE FROM document_fields WHERE document = ?1",
-];
-
 impl<'t> Statements<'t> {
     fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
-        let prepared = |sql: &str, what: &'static str| {
+        // Every statement but the three findings discards is taken from the
+        // registry, which is the one place a write statement's text is spelled:
+        // see [`crate::write_path`]. The discards are the plan seam's own
+        // statements, [`crate::ExplainedStatement::SubjectDiscard`] and
+        // [`crate::ExplainedStatement::PathDiscard`].
+        let registered = |statement: WriteStatement, what: &'static str| {
+            transaction
+                .prepare_cached(statement.sql())
+                .map_err(move |error| error::sql(what, error))
+        };
+        let discard = |sql: &str, what: &'static str| {
             transaction
                 .prepare_cached(sql)
                 .map_err(move |error| error::sql(what, error))
@@ -506,110 +504,44 @@ impl<'t> Statements<'t> {
             // The document row keeps its identity across a re-derivation: it is
             // updated rather than replaced, so a deleted row means a death and
             // the cascade fires only for one.
-            upsert_document: prepared(
-                "INSERT INTO documents (
-                     path, suffix_key, folded_suffix_key, admitting_segments, content_hash,
-                     byte_length, body, body_hash, body_offset, frontmatter,
-                     frontmatter_projection_hash, frontmatter_diagnostic_count, generation,
-                     derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                 ON CONFLICT(path) DO UPDATE SET
-                     suffix_key                   = excluded.suffix_key,
-                     folded_suffix_key            = excluded.folded_suffix_key,
-                     admitting_segments           = excluded.admitting_segments,
-                     content_hash                 = excluded.content_hash,
-                     byte_length                  = excluded.byte_length,
-                     body                         = excluded.body,
-                     body_hash                    = excluded.body_hash,
-                     body_offset                  = excluded.body_offset,
-                     frontmatter                  = excluded.frontmatter,
-                     frontmatter_projection_hash  = excluded.frontmatter_projection_hash,
-                     frontmatter_diagnostic_count = excluded.frontmatter_diagnostic_count,
-                     generation                   = excluded.generation,
-                     derived_at                   = excluded.derived_at
-                 RETURNING id",
+            upsert_document: registered(
+                WriteStatement::UpsertDocument,
                 "preparing a document write",
             )?,
-            discard_facts: FACT_DISCARDS
-                .iter()
-                .map(|sql| prepared(sql, "preparing a fact-row discard"))
+            discard_facts: WriteStatement::FACT_DISCARDS
+                .into_iter()
+                .map(|statement| registered(statement, "preparing a fact-row discard"))
                 .collect::<Result<Vec<CachedStatement<'t>>, StoreError>>()?,
-            insert_link: prepared(
-                "INSERT INTO links (
-                     document, ordinal, family, embed, protocol, target, title, anchor,
-                     anchor_text, anchor_marked, block_ref, address, span_line, span_column,
-                     span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                 RETURNING id",
-                "preparing a link write",
-            )?,
-            insert_link_key: prepared(
-                "INSERT INTO link_keys (link, document, key, folded_key, segments)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            insert_link: registered(WriteStatement::InsertLink, "preparing a link write")?,
+            insert_link_key: registered(
+                WriteStatement::InsertLinkKey,
                 "preparing a link key write",
             )?,
-            insert_heading: prepared(
-                "INSERT INTO headings (
-                     document, ordinal, text, reading, slug, level, span_line, span_column,
-                     span_offset, body_offset, inside_container
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                "preparing a heading write",
-            )?,
-            insert_block: prepared(
-                "INSERT INTO blocks (
-                     document, ordinal, block_id, span_line, span_column, span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                "preparing a block write",
-            )?,
-            insert_tag: prepared(
-                "INSERT INTO document_tags (
-                     document, ordinal, name, folded_name, source, span_line, span_column,
-                     span_offset
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                "preparing a tag write",
-            )?,
-            insert_field: prepared(
-                "INSERT INTO document_fields (
-                     document, key, ordinal, path, container, raw, typed, least_raw,
-                     least_typed, offset_stated
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                "preparing a field write",
-            )?,
-            // The hash the tombstone carries comes back from the row this
-            // removes, so the delete and the record read one value between them.
-            delete_document: prepared(
-                "DELETE FROM documents WHERE path = ?1 RETURNING content_hash",
+            insert_heading: registered(WriteStatement::InsertHeading, "preparing a heading write")?,
+            insert_block: registered(WriteStatement::InsertBlock, "preparing a block write")?,
+            insert_tag: registered(WriteStatement::InsertTag, "preparing a tag write")?,
+            insert_field: registered(WriteStatement::InsertField, "preparing a field write")?,
+            delete_document: registered(
+                WriteStatement::DeleteDocument,
                 "preparing a document delete",
             )?,
-            record_tombstone: prepared(
-                "INSERT INTO tombstones (
-                     path, last_content_hash, provenance, generation, recorded_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(path) DO UPDATE SET
-                     last_content_hash = COALESCE(
-                         excluded.last_content_hash, tombstones.last_content_hash
-                     ),
-                     provenance        = excluded.provenance,
-                     generation        = excluded.generation,
-                     recorded_at       = excluded.recorded_at",
+            record_tombstone: registered(
+                WriteStatement::RecordTombstone,
                 "preparing a tombstone write",
             )?,
-            discard_subject: prepared(
+            discard_subject: discard(
                 request::SUBJECT_DISCARD_SQL,
                 "preparing a path's findings discard",
             )?,
-            discard_path: prepared(
+            discard_path: discard(
                 request::PATH_DISCARD_SQL,
                 "preparing a path key's findings discard",
             )?,
-            discard_vacated: prepared(
+            discard_vacated: discard(
                 &request::subject_discard_sql(VACATED_DISCARD),
                 "preparing a vacated place's findings discard",
             )?,
-            row_at: prepared(
-                "SELECT EXISTS (SELECT 1 FROM documents WHERE path = ?1)",
-                "preparing a row probe",
-            )?,
+            row_at: registered(WriteStatement::RowAt, "preparing a row probe")?,
         })
     }
 }
