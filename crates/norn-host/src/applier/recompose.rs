@@ -180,6 +180,10 @@ fn transitions_differ<V>(
         if after == transition.after {
             continue;
         }
+        #[cfg(feature = "induced-failure")]
+        if unchecked::recomposition() {
+            continue;
+        }
         let drawn_from_unseen = before.identities[index]
             .as_ref()
             .and_then(|file| lineage.source(file))
@@ -189,6 +193,30 @@ fn transitions_differ<V>(
         }
     }
     differing
+}
+
+/// **The adequacy seam over the after-state check**, behind
+/// `induced-failure` and absent from a build without it.
+///
+/// A suite that wants to show a refusal is [`transitions_differ`]'s
+/// comparison of a recomposed result with its transition's after-state, and
+/// no other check's, applies the same plan once with the comparison on and
+/// once with it off: off, the bytes the operations compose land whatever the
+/// transition records. A process switches it off by carrying
+/// [`unchecked::UNCHECKED_RECOMPOSITION`] in its environment, read once.
+#[cfg(feature = "induced-failure")]
+pub(super) mod unchecked {
+    use std::sync::OnceLock;
+
+    /// The environment variable that switches the comparison off.
+    pub(in crate::applier) const UNCHECKED_RECOMPOSITION: &str =
+        "NORN_HOST_UNCHECKED_RECOMPOSITION";
+
+    /// Whether this process was started with the comparison switched off.
+    pub(super) fn recomposition() -> bool {
+        static UNCHECKED: OnceLock<bool> = OnceLock::new();
+        *UNCHECKED.get_or_init(|| std::env::var_os(UNCHECKED_RECOMPOSITION).is_some())
+    }
 }
 
 /// Every file an author condition the operations carry names that the plan

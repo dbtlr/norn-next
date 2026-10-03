@@ -18,7 +18,10 @@ publish.workspace = true
 # `Host::recovery_demands` and `Host::work_in_flight` — and it opens
 # `Host::vault_migrate_with_ladders`, which migrates over a suite's own ladders,
 # since the ladders this build ships hold no step a suite could reach a rewrite
-# through. The accounts are
+# through. It also holds the applier's adequacy seam: a process started with
+# `NORN_HOST_UNCHECKED_RECOMPOSITION` in its environment publishes what a
+# plan's operations compose without holding it to the transition's
+# after-state, so a suite can show a refusal is that check's. The accounts are
 # *written* on every build, because that is how a job's cost stops being
 # discarded, and the in-flight holds are kept on every build because the
 # lifecycle runs on them; nothing in the shipped artifact reads either back,

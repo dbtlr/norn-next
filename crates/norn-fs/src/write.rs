@@ -1238,7 +1238,7 @@ fn publish_replace(
     if let Some(landed) = at_after(&observed, after) {
         return Ok(found(landed, sync_folder(folder, at.faults)));
     }
-    judge_before(observed, before, at.full)?;
+    reverify_before(observed, before, at.full)?;
     let (home, state) = at.confirm(shadow, after)?;
     disturb(Window::Publishing);
     rename_shadow(
@@ -1279,7 +1279,7 @@ fn publish_remove(
     if matches!(observed, Found::Absent) {
         return Ok(found(AfterState::Absent, sync_folder(folder, at.faults)));
     }
-    judge_before(observed, before, at.full)?;
+    reverify_before(observed, before, at.full)?;
     disturb(Window::Publishing);
     at.faults
         .check(Stage::Unlink)
@@ -1400,6 +1400,20 @@ fn judge_absent(found: Found, full: &Path) -> Result<(), Refusal> {
             Err(destination_exists(full))
         }
     }
+}
+
+/// Refuse unless the target still holds `before`: publication's second
+/// reading of a replace's or a removal's target.
+///
+/// Behind `induced-failure` a harness can switch the reading off (see
+/// [`crate::faults`]), so a suite can show a refusal is this reading's; a
+/// build without the feature holds no such switch.
+fn reverify_before(found: Found, before: ContentHash, full: &Path) -> Result<(), Refusal> {
+    #[cfg(feature = "induced-failure")]
+    if crate::faults::publication_unverified() {
+        return Ok(());
+    }
+    judge_before(found, before, full)
 }
 
 /// Refuse unless the target still holds `before`.

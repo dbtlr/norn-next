@@ -34,8 +34,10 @@ publish.workspace = true
 # because refused coverage, a failed stream, and a boundary that never arrives
 # are stated about a process the platform does not cooperate with. It also
 # gives a subscription a look at its delivery slot that leaves the batch there,
-# for a suite ordering a change against what a heal window takes. Off by
-# default, so a shipped build reads no arm variable and carries no arm.
+# for a suite ordering a change against what a heal window takes, and a
+# switch that turns publication's second reading of a target's before-state
+# off, so a suite can show a drift refusal is that reading's. Off by default,
+# so a shipped build reads no arm variable and carries no arm or switch.
 [features]
 induced-failure = []
 # `test-support` gates `PathNormalizer::for_sensitivity`, a normalizer under a
