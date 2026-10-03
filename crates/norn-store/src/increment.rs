@@ -483,21 +483,45 @@ struct Statements<'t> {
     row_at: CachedStatement<'t>,
 }
 
+/// The findings discards an increment prepares, each the text of a plan-seam
+/// statement. A closed set, so a statement the plan seam does not explain has
+/// no way into the increment through the discard preparer.
+#[derive(Clone, Copy)]
+enum FindingsDiscard {
+    /// [`crate::ExplainedStatement::SubjectDiscard`] over every kind.
+    Subject,
+    /// [`crate::ExplainedStatement::PathDiscard`].
+    Path,
+    /// [`crate::ExplainedStatement::SubjectDiscard`] over [`VACATED_DISCARD`].
+    Vacated,
+}
+
+impl FindingsDiscard {
+    fn sql(self) -> String {
+        match self {
+            Self::Subject => request::SUBJECT_DISCARD_SQL.to_string(),
+            Self::Path => request::PATH_DISCARD_SQL.to_string(),
+            Self::Vacated => request::subject_discard_sql(VACATED_DISCARD),
+        }
+    }
+}
+
 impl<'t> Statements<'t> {
     fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
         // Every statement but the three findings discards is taken from the
         // registry, which is the one place a write statement's text is spelled:
         // see [`crate::write_path`]. The discards are the plan seam's own
         // statements, [`crate::ExplainedStatement::SubjectDiscard`] and
-        // [`crate::ExplainedStatement::PathDiscard`].
+        // [`crate::ExplainedStatement::PathDiscard`], and are named by a closed
+        // set, so no text reaches the preparer that is not one of them.
         let registered = |statement: WriteStatement, what: &'static str| {
             transaction
                 .prepare_cached(statement.sql())
                 .map_err(move |error| error::sql(what, error))
         };
-        let discard = |sql: &str, what: &'static str| {
+        let discard = |statement: FindingsDiscard, what: &'static str| {
             transaction
-                .prepare_cached(sql)
+                .prepare_cached(&statement.sql())
                 .map_err(move |error| error::sql(what, error))
         };
         Ok(Statements {
@@ -530,15 +554,15 @@ impl<'t> Statements<'t> {
                 "preparing a tombstone write",
             )?,
             discard_subject: discard(
-                request::SUBJECT_DISCARD_SQL,
+                FindingsDiscard::Subject,
                 "preparing a path's findings discard",
             )?,
             discard_path: discard(
-                request::PATH_DISCARD_SQL,
+                FindingsDiscard::Path,
                 "preparing a path key's findings discard",
             )?,
             discard_vacated: discard(
-                &request::subject_discard_sql(VACATED_DISCARD),
+                FindingsDiscard::Vacated,
                 "preparing a vacated place's findings discard",
             )?,
             row_at: registered(WriteStatement::RowAt, "preparing a row probe")?,

@@ -819,7 +819,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthOccupied => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
-        ExplainedStatement::Write(_) => "every_write_path_statement_reaches_its_rows_by_a_seek",
+        ExplainedStatement::Write(_) => {
+            "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks"
+        }
     }
 }
 
@@ -1182,7 +1184,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
-            "every_write_path_statement_reaches_its_rows_by_a_seek",
+            "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks",
             "the_link_health_judgment_seeks_every_row_it_reads",
             "the_path_discard_seeks_finding_paths_path_key",
         ]
@@ -3911,12 +3913,14 @@ struct WriteBar {
 /// The bar for one write-path statement. Exhaustive over [`WriteStatement`], so
 /// a statement added to the registry has to say here what its plan must show.
 ///
-/// An `INSERT` reaches its row by no search: its uniqueness checks and the
-/// triggers it fires are not in a plan, so its bar is the universal one, that
-/// the plan reports no scan. The foreign-key actions SQLite does report beside a
-/// statement are not asserted either way: what a cascade costs is not what these
-/// bars judge, and the bar would otherwise be pinned to how the driver chooses to
-/// describe one.
+/// An `INSERT` reports no search of its own table, so for most inserts the plan
+/// is empty and its bar, that no step reads a table end to end, cannot fail: it
+/// is stated as the universal bar and not as a judgment. The foreign-key actions
+/// SQLite reports beside a statement are first-level searches of the child
+/// tables, and they sit under that same universal bar: a cascade that fell to
+/// reading a child table end to end fails it. Their seeks are not asserted
+/// positively, and the triggers a write fires and any cascade below the first
+/// level are not in a plan at all.
 fn write_bar(statement: WriteStatement) -> WriteBar {
     use WriteStatement::*;
     let seeks: &'static [(&'static str, Access<'static>, &'static str)] = match statement {
@@ -3993,8 +3997,8 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
     )
 }
 
-/// **Every statement the write path runs reaches its rows by a seek, and none
-/// scans a table.** An increment runs these once per document, per fact row or
+/// **No statement the write path runs scans a table, and each keyed one seeks
+/// its table by the constraint it binds.** An increment runs these once per document, per fact row or
 /// per finding, so a statement that read a table end to end would make a
 /// changeset cost the store's size on top of its own. The census is
 /// [`WriteStatement::all`], the registry the increment prepares from, so a
@@ -4004,9 +4008,12 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
 ///
 /// Controls: the index each keyed statement seeks is dropped, and the same bar
 /// fails — for the two statements that seek a primary key, whose index cannot
-/// be dropped, a plan that scans the table is handed to the same judgment.
+/// be dropped, a plan that scans the table is handed to the same judgment. The
+/// no-scan half has its own control: with the index a foreign-key action
+/// seeks dropped, the plan keeps the seek the bar names and adds a scan, and the
+/// bar still fails.
 #[test]
-fn every_write_path_statement_reaches_its_rows_by_a_seek() {
+fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
     let scratch = Scratch::new("write-plans");
     let mut store = scratch.open();
 
@@ -4014,7 +4021,7 @@ fn every_write_path_statement_reaches_its_rows_by_a_seek() {
         let read = write_plan(&mut store, statement);
         assert!(
             meets_write_bar(&read, &write_bar(statement)),
-            "{statement:?} does not reach its rows by a seek: {:?}\nemitted SQL: {}",
+            "{statement:?} scans a table or misses its seek: {:?}\nemitted SQL: {}",
             read.rows(),
             read.sql()
         );
@@ -4034,6 +4041,62 @@ fn every_write_path_statement_reaches_its_rows_by_a_seek() {
             !meets_write_bar(&scanning, &write_bar(statement)),
             "the bar for {statement:?} holds a plan that scans {table}"
         );
+    }
+
+    // The no-scan half alone: a plan that keeps every seek the bar names and
+    // adds a scan of another table must fail.
+    for statement in WriteStatement::all() {
+        let bar = write_bar(statement);
+        let mut rows: Vec<PlanRow> = bar
+            .seeks
+            .iter()
+            .enumerate()
+            .map(|(at, (table, access, constraint))| {
+                let index = match access {
+                    Access::PrimaryKey => "PRIMARY KEY".to_string(),
+                    Access::Index(name) => format!("INDEX {name}"),
+                    _ => unreachable!("a write bar names a primary key or an index"),
+                };
+                PlanRow::new(
+                    at as i64 + 2,
+                    0,
+                    format!("SEARCH {table} USING {index} {constraint}"),
+                )
+            })
+            .collect();
+        let seeking = QueryPlan::new("seeking", rows.clone());
+        assert!(
+            meets_write_bar(&seeking, &bar),
+            "the synthetic plan for {statement:?} does not meet its bar: {:?}",
+            seeking.rows()
+        );
+        rows.push(PlanRow::new(99, 0, "SCAN link_keys".to_string()));
+        assert!(
+            !meets_write_bar(&QueryPlan::new("scanning", rows), &bar),
+            "the bar for {statement:?} holds a plan that keeps its seeks and scans a table"
+        );
+    }
+
+    // The same half on a real plan: with the index a link discard's foreign-key
+    // action seeks dropped, the plan falls to scanning `link_keys`.
+    {
+        let scratch = Scratch::new("write-plans-cascade-control");
+        let mut store = scratch.open();
+        induced_failure::execute_out_of_band(&mut store, "DROP INDEX link_keys_link")
+            .expect("dropping link_keys_link");
+        for statement in [WriteStatement::DiscardLinks, WriteStatement::InsertLink] {
+            let read = write_plan(&mut store, statement);
+            assert!(
+                !read.unbounded_steps().is_empty(),
+                "{statement:?} no longer reads unbounded with link_keys_link dropped: {:?}",
+                read.rows()
+            );
+            assert!(
+                !meets_write_bar(&read, &write_bar(statement)),
+                "the bar for {statement:?} held with link_keys_link dropped: {:?}",
+                read.rows()
+            );
+        }
     }
 
     for (statements, indexes) in [

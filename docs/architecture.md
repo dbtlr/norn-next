@@ -728,14 +728,20 @@ a registry of the statements the write path prepares — the increment's documen
 discards and inserts, document delete, tombstone record and row probe, the findings writes,
 the write generation's increment, the pinned-scalar upsert and the discard a schema pin runs
 over findings stamped under another fingerprint — which is the one place those statements'
-text is spelled, so a write statement absent from it cannot be prepared and the census a bar
-walks is the set the increment runs. Each is barred to scan no table, and each keyed one
-(the fact discards, the document delete and probe, the generation increment, the stale-finding
-discard as two open ranges over the fingerprint) to seek its table by the constraint it
-binds, with a negative control. The inserts have no search to report, so theirs is the
-universal bar alone. A plan does not report trigger work, and what it shows of a foreign-key
-action is not judged: the cost of a cascade or a trigger is not covered. The verification
-reads that scan by design (the integrity check and the derived-rows digest) are not write-path
+text is spelled, so a bar over one is a plan of the SQL the increment executes, and the census
+a bar walks is declared with the enum, so a variant cannot be left out of it. The registry holds
+the write statements no other explained statement names; the increment's remaining statements
+(the findings discards, the pinned-scalar read, the link-health re-decision statements) are
+explained through their own variants, and the increment prepares its findings discards from a
+closed set rather than from text. Each is barred to scan no table, and each keyed one (the fact
+discards, the document delete and probe, the generation increment, the stale-finding discard
+as two open ranges over the fingerprint) to seek its table by the constraint it binds, with a
+negative control for each half. The first-level foreign-key actions a plan reports are searches
+of the child tables and sit under the no-scan bar, so a cascade that falls to reading a child
+table end to end fails it; their seeks are not asserted positively. Most inserts report no
+search, so for them the bar is the universal one and cannot fail. A plan does not report
+trigger work or a cascade below the first level, so neither is covered. The verification reads
+that scan by design (the integrity check and the derived-rows digest) are not write-path
 statements and carry no bar.
 
 A point read is barred harder than a page, because a search is not a point read on its

@@ -1,14 +1,17 @@
 //! The statements the write path runs: one registry, read by the code that
 //! prepares them and by the plan seam that explains them.
 //!
-//! **A statement the write path runs is a variant here, or it is not prepared.**
-//! [`WriteStatement::sql`] is the only place a write statement's text is spelled,
-//! and [`crate::increment`]'s preparation and [`crate::Request::emitted_plan`]
-//! both take it from there, so a plan bar over one of these is a plan of the SQL
-//! the increment executes and a statement added without a registry entry has no
-//! way to be prepared. [`WriteStatement::all`] is the census the plan bar walks,
-//! and [`WriteStatement::slot`] is exhaustive, so an entry without a place in it
-//! does not compile.
+//! **A write statement is spelled here once.** [`WriteStatement::sql`] is the
+//! only place these statements' text is written, and [`crate::increment`]'s
+//! preparation and [`crate::Request::emitted_plan`] both take it from there, so
+//! a plan bar over one of these is a plan of the SQL the increment executes.
+//! [`WriteStatement::all`] is the census the plan bar walks, and it is declared
+//! with the enum by one macro, so a variant cannot be left out of it.
+//!
+//! The registry holds the write statements no other
+//! [`crate::ExplainedStatement`] names. The increment's remaining statements
+//! are explained through their own variants, and the increment prepares them
+//! from a closed set rather than from text it is handed.
 //!
 //! # What is registered
 //!
@@ -21,21 +24,46 @@
 //! [`crate::ExplainedStatement::PathDiscard`], which carry their own bars, and the
 //! pin's typed-value clear is [`crate::ExplainedStatement::TypedValueDiscard`].
 //!
-//! # What a plan here does not cover
+//! # What a plan here covers
 //!
-//! A plan reports how a statement reaches its rows. It does not report the
-//! triggers a write fires — the full-text maintenance on `documents` and the
-//! tombstone clear — and what it shows of a foreign-key action is the driver's
-//! description rather than the cascade's cost, so the bars neither assert nor
-//! rely on it. An `INSERT` has no search to report beyond its conflict target. The verification reads that scan by design
-//! (`Store::verify_integrity` and the derived-rows digest) are not write-path
-//! statements and are not registered.
+//! A plan reports how a statement reaches its rows, and it reports the
+//! first-level foreign-key actions beside it as searches of the child tables.
+//! The bar reads every step a plan shows, those included: none may read a table
+//! end to end. A seek by a foreign-key action is not asserted positively, so a
+//! cascade that is missing from a plan is not noticed. A plan does not report
+//! the triggers a write fires — the full-text maintenance on `documents` and the
+//! tombstone clear — or a cascade below the first level, so neither is covered.
+//! An `INSERT` reports no search of its own table; for most inserts the plan is
+//! empty, and the bar over an empty plan cannot fail. The verification reads
+//! that scan by design (`Store::verify_integrity` and the derived-rows digest)
+//! are not write-path statements and are not registered.
 
 use norn_db::meta::{NEXT_GENERATION_SQL, PUT_META_SQL};
 
-/// One statement the write path prepares or executes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WriteStatement {
+/// Declares [`WriteStatement`] and its census from one list of variants, so a
+/// statement the enum names is in [`WriteStatement::all`] by construction and
+/// [`WriteStatement::slot`] is its position there.
+macro_rules! registry {
+    ($($(#[$doc:meta])* $variant:ident),+ $(,)?) => {
+        /// One statement the write path prepares or executes.
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum WriteStatement {
+            $($(#[$doc])* $variant,)+
+        }
+
+        /// How many statements [`WriteStatement::all`] holds.
+        pub const WRITE_STATEMENTS: usize = [$(WriteStatement::$variant),+].len();
+
+        impl WriteStatement {
+            /// Every statement the write path registers, in slot order.
+            pub fn all() -> [Self; WRITE_STATEMENTS] {
+                [$(Self::$variant),+]
+            }
+        }
+    };
+}
+
+registry! {
     /// The document row's upsert: updated on a path conflict, so the row keeps
     /// its identity across a re-derivation.
     UpsertDocument,
@@ -80,9 +108,6 @@ pub enum WriteStatement {
     PutMeta,
 }
 
-/// How many statements [`WriteStatement::all`] holds.
-pub const WRITE_STATEMENTS: usize = 22;
-
 impl WriteStatement {
     /// The fact discards, one per fact table, in the order the increment runs
     /// them.
@@ -94,67 +119,12 @@ impl WriteStatement {
         Self::DiscardFields,
     ];
 
-    /// Every statement the write path registers, in slot order.
-    pub fn all() -> [Self; WRITE_STATEMENTS] {
-        [
-            Self::UpsertDocument,
-            Self::DiscardLinks,
-            Self::DiscardHeadings,
-            Self::DiscardBlocks,
-            Self::DiscardTags,
-            Self::DiscardFields,
-            Self::InsertLink,
-            Self::InsertLinkKey,
-            Self::InsertHeading,
-            Self::InsertBlock,
-            Self::InsertTag,
-            Self::InsertField,
-            Self::DeleteDocument,
-            Self::RecordTombstone,
-            Self::RowAt,
-            Self::InsertFinding,
-            Self::InsertFindingCandidate,
-            Self::InsertFindingClass,
-            Self::InsertFindingPath,
-            Self::DiscardStaleFindings,
-            Self::NextGeneration,
-            Self::PutMeta,
-        ]
-    }
-
-    /// Where this statement stands in [`Self::all`]. Exhaustive, so a statement
-    /// added to the enum has to take a slot.
+    /// Where this statement stands in [`Self::all`].
     pub fn slot(self) -> usize {
-        let slot = match self {
-            Self::UpsertDocument => 0,
-            Self::DiscardLinks => 1,
-            Self::DiscardHeadings => 2,
-            Self::DiscardBlocks => 3,
-            Self::DiscardTags => 4,
-            Self::DiscardFields => 5,
-            Self::InsertLink => 6,
-            Self::InsertLinkKey => 7,
-            Self::InsertHeading => 8,
-            Self::InsertBlock => 9,
-            Self::InsertTag => 10,
-            Self::InsertField => 11,
-            Self::DeleteDocument => 12,
-            Self::RecordTombstone => 13,
-            Self::RowAt => 14,
-            Self::InsertFinding => 15,
-            Self::InsertFindingCandidate => 16,
-            Self::InsertFindingClass => 17,
-            Self::InsertFindingPath => 18,
-            Self::DiscardStaleFindings => 19,
-            Self::NextGeneration => 20,
-            Self::PutMeta => 21,
-        };
-        assert!(
-            slot < WRITE_STATEMENTS,
-            "slot {slot} is outside the enumeration: grow `all` and `WRITE_STATEMENTS` with the \
-             statement that took it"
-        );
-        slot
+        Self::all()
+            .iter()
+            .position(|registered| *registered == self)
+            .expect("the registry macro puts every variant in the census")
     }
 
     /// The statement's text: the one spelling the write path prepares and the
