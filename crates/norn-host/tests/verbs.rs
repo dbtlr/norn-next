@@ -404,6 +404,102 @@ fn a_new_document_at_an_occupied_name_is_refused() {
     assert_eq!(read(&vault, "taken.md"), "other\n");
 }
 
+/// **A verb aimed through a folder in the vault that is a symbolic link out
+/// of it is refused, and nothing is written outside the vault.** `linked` is
+/// a link to a folder beside the vault holding a document. A `set` of that
+/// document and a `new` beside it, each previewed and applied, are refused at
+/// planning, which does not follow the link. The plans the same two verbs
+/// previewed while `linked` was a folder in the vault, applied once that
+/// folder is swapped for the link, are refused as drift to absent: the set by
+/// the applier's check of where its target stands, and the create — whose
+/// absent name that check accepts — by the write kernel's anchoring, which
+/// refuses to stage below a linked folder and surfaces through the verb as
+/// that drift. The folder outside holds exactly what it held throughout.
+#[test]
+fn a_verb_aimed_through_a_folder_linked_out_of_the_vault_is_refused_and_writes_nothing_outside() {
+    let held = "---\nstatus: draft\n---\n# Outside\n";
+    let (sandbox, vault) = a_vault("host-verbs-linked-folder", &[("linked/note.md", held)]);
+    let outside = sandbox.work_dir().join("outside");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let setting = |mode| {
+        SetParams::new(
+            address(&vault),
+            mode,
+            WriteTarget::path(path("linked/note.md")),
+            vec![FieldChange::set("status", AuthoredValue::string("escaped"))],
+        )
+    };
+    let creating =
+        |mode| NewParams::new(address(&vault), mode, path("linked/fresh.md"), "# Fresh\n");
+    let previewed_set = previewed(host.set(setting(ApplyMode::Preview)));
+    let previewed_new = previewed(host.new_document(creating(ApplyMode::Preview)));
+    std::fs::rename(vault.path().join("linked"), &outside).expect("the folder moves out");
+    std::os::unix::fs::symlink(&outside, vault.path().join("linked"))
+        .expect("a link in the folder's place");
+    let outside_entries = || {
+        let mut names: Vec<String> = std::fs::read_dir(&outside)
+            .expect("the folder outside lists")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    };
+
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        for refusal in [
+            refused(host.set(setting(mode))),
+            refused(host.new_document(creating(mode))),
+        ] {
+            assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+            let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+                panic!("the refusal carries {:?}", refusal.detail());
+            };
+            let [left] = unresolved.as_slice() else {
+                panic!("one operation is unresolved: {unresolved:?}");
+            };
+            let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+                panic!("left out for {:?}", left.reason);
+            };
+            assert!(
+                detail.contains("`linked` is a symbolic link"),
+                "{mode:?}: {detail}"
+            );
+        }
+    }
+    for (plan, at) in [
+        (previewed_set, "linked/note.md"),
+        (previewed_new, "linked/fresh.md"),
+    ] {
+        let refusal = refused(host.apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan),
+        )));
+        assert_eq!(refusal.code(), &ReasonCode::VaultPlanRefused);
+        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+            panic!("the refusal carries {:?}", refusal.detail());
+        };
+        assert_eq!(
+            *checks,
+            vec![RefusedCheck::drifted(
+                path(at),
+                norn_wire::FileState::absent()
+            )]
+        );
+    }
+    assert_eq!(outside_entries(), vec!["note.md".to_string()]);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("note.md")).expect("the document outside"),
+        held
+    );
+}
+
 /// A vault schema declaring a numbered rule, a rule numbering nothing, and
 /// the inbox.
 const RULE_SCHEMA: &str = "version: 1
@@ -525,6 +621,58 @@ fn a_new_document_by_rule_previews_the_create_its_rule_makes_then_lands_it() {
     assert_eq!(landed, plan);
     assert_eq!(targets, wrote(&["tasks/NORN-1.md"]));
     assert_eq!(read(&vault, "tasks/NORN-1.md"), content);
+}
+
+/// **A document `new` creates is mutable end to end through the verbs.** One
+/// created at a path with an empty body and no frontmatter takes a field from
+/// a `set`, then a body from an `edit`, each applying; and one a creation
+/// rule made takes a field from a `set` addressed to the path the rule gave
+/// it.
+#[test]
+fn a_created_document_takes_a_set_and_an_edit_through_the_verbs() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-created-mutable", RULE_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let setting = |at: &str, value: &str| {
+        SetParams::new(
+            address(&vault),
+            ApplyMode::Apply,
+            WriteTarget::path(path(at)),
+            vec![FieldChange::set("status", AuthoredValue::string(value))],
+        )
+    };
+
+    let (_, _, targets) = applied(host.new_document(NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("blank.md"),
+        "",
+    )));
+    assert_eq!(targets, wrote(&["blank.md"]));
+    assert_eq!(read(&vault, "blank.md"), "");
+    let (_, _, targets) = applied(host.set(setting("blank.md", "draft")));
+    assert_eq!(targets, wrote(&["blank.md"]));
+    assert_eq!(read(&vault, "blank.md"), "---\nstatus: draft\n---\n");
+    let (_, _, targets) = applied(host.edit(EditParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("blank.md"),
+        vec![DocumentEdit::replace_body("Now with a body.\n")],
+    )));
+    assert_eq!(targets, wrote(&["blank.md"]));
+    assert_eq!(
+        read(&vault, "blank.md"),
+        "---\nstatus: draft\n---\nNow with a body.\n"
+    );
+
+    let (plan, _, _) =
+        applied(host.new_document(new_task(&vault, ApplyMode::Apply, "Ship it", None)));
+    let (at, content) = the_create(&plan);
+    let (_, _, targets) = applied(host.set(setting(&at, "done")));
+    assert_eq!(targets, wrote(&[at.as_str()]));
+    assert_eq!(
+        read(&vault, &at),
+        content.replacen("status: todo", "status: done", 1)
+    );
 }
 
 /// Wait until the wall clock reads another second than it read on entry,
@@ -1060,6 +1208,90 @@ fn a_set_breaking_the_schema_is_refused_and_forced_lists_the_violation() {
         read(&vault, "subject.md"),
         "---\ntags: [project, stray]\n---\n# Subject\n"
     );
+}
+
+/// The undeclared-tag findings the store holds for `at` now, as the path,
+/// kind and target a forced violation names them by.
+fn undeclared_tags_at(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    at: &str,
+) -> Vec<(String, FindingKind, Option<String>)> {
+    let answered = host
+        .validate(
+            &norn_wire::ValidateParams::new(address(vault))
+                .with_kinds([FindingKind::UndeclaredTag])
+                .with_limit(1000),
+        )
+        .expect("a served vault answers a validate");
+    let norn_wire::ValidateReport::Findings { page, .. } = answered.answer.report else {
+        panic!("a validate answered {:?}", answered.answer.report);
+    };
+    page.rows
+        .into_iter()
+        .filter(|row| row.path.as_str() == at)
+        .map(|row| (row.path.as_str().to_string(), row.kind, row.target))
+        .collect()
+}
+
+/// **A forced set lists exactly the violations it introduced: its `forced`
+/// equals the store's findings for the document after the apply, less the
+/// findings that stood there before.** The subject already carries the
+/// undeclared body tag `#legacy`; a forced set pushes the undeclared `stray`
+/// onto its `tags` field. The comparison is by path, kind and target, the
+/// fields a violation and a finding share; `forced` holds `stray` alone, and
+/// `legacy` — a violation the plan neither made nor wrote — is in neither.
+#[test]
+fn a_forced_sets_violations_are_exactly_the_findings_its_apply_added() {
+    let subject = "---\ntags: [project]\n---\n# Subject\n#legacy\n";
+    let (_sandbox, vault) = a_vault("host-verbs-set-forced-delta", &[("subject.md", subject)]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), TAG_SCHEMA).expect("write the schema");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = undeclared_tags_at(&host, &vault, "subject.md");
+    assert_eq!(
+        before,
+        [(
+            "subject.md".to_string(),
+            FindingKind::UndeclaredTag,
+            Some("legacy".to_string())
+        )],
+        "the case starts with one violation standing"
+    );
+
+    let answered = host
+        .set(
+            SetParams::new(
+                address(&vault),
+                ApplyMode::Apply,
+                WriteTarget::path(path("subject.md")),
+                vec![FieldChange::push("tags", AuthoredValue::string("stray"))],
+            )
+            .with_force(true),
+        )
+        .expect("a forced set is admitted")
+        .wait()
+        .expect("a forced set applies");
+    let ApplyReport::Applied { forced, .. } = answered.report else {
+        panic!("a forced set answered {:?}", answered.report);
+    };
+    let forced: Vec<(String, FindingKind, Option<String>)> = forced
+        .into_iter()
+        .map(|violation| {
+            (
+                violation.path.as_str().to_string(),
+                violation.kind,
+                violation.target,
+            )
+        })
+        .collect();
+    let after = undeclared_tags_at(&host, &vault, "subject.md");
+    let introduced: Vec<_> = after
+        .into_iter()
+        .filter(|finding| !before.contains(finding))
+        .collect();
+    assert_eq!(forced, introduced);
+    assert_eq!(forced.len(), 1, "{forced:?}");
 }
 
 /// **A set guarded by an expected-absent field writes where the field is
