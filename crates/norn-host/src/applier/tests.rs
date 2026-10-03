@@ -556,6 +556,36 @@ fn a_refused_plan_answers_a_fresh_plan_that_applies() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
+/// **Every drifted target is named, not the first.** Foreign edits to two
+/// targets of one plan refuse it naming both, sorted, each with the state it
+/// now holds; the forecast marks both as possibly carrying the plan's change
+/// already, and nothing is published, the third target included.
+#[test]
+fn a_plan_drifted_at_two_targets_names_and_marks_both() {
+    let mut fixture = Fixture::new(&[
+        ("a.md", "status draft\n"),
+        ("b.md", "# B\nold\n"),
+        ("c.md", "# C\ndraft\n"),
+    ]);
+    let plan = fixture.plan(vec![
+        editing("a.md", "draft", "final"),
+        editing("b.md", "old", "new"),
+        editing("c.md", "draft", "done"),
+    ]);
+    fixture.foreign("b.md", "# B\nold\nforeign\n");
+    fixture.foreign("a.md", "status draft\nforeign\n");
+    let refused = refused(fixture.apply(plan));
+    assert_eq!(
+        refused.checks,
+        vec![
+            norn_wire::RefusedCheck::drifted(path("a.md"), present("status draft\nforeign\n")),
+            norn_wire::RefusedCheck::drifted(path("b.md"), present("# B\nold\nforeign\n")),
+        ]
+    );
+    assert_eq!(refused.forecast.drifted, vec![path("a.md"), path("b.md")]);
+    assert_eq!(fixture.read("c.md").as_deref(), Some("# C\ndraft\n"));
+}
+
 /// A resolved plan applied to another root is refused with no plan.
 #[test]
 fn a_plan_for_another_root_is_refused_with_no_plan() {

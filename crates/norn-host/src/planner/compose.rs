@@ -1318,6 +1318,12 @@ mod tests {
         let composition =
             compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
         assert!(composition.unresolvable.is_empty());
+        // Three operations over two files compose into one target per file,
+        // which the plan writes as one transition each.
+        assert_eq!(
+            composition.targets.keys().collect::<Vec<_>>(),
+            vec![&path("a.md"), &path("b.md")]
+        );
         assert_eq!(after_text(&composition, "a.md"), None);
         assert_eq!(after_text(&composition, "b.md").as_deref(), Some("four"));
     }
