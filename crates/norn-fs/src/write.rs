@@ -3107,7 +3107,7 @@ mod tests {
     /// the link, and leaves the vault root and the shadow home unmodified, so
     /// not even a file made and removed again passes unseen.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: playing the foreign writer, and backdating the folders it watches.
     fn judging_a_target_answers_as_staging_it_does_and_writes_nothing() {
         let scratch = Scratch::new("write-judge");
         let outside = scratch.directory("outside");
