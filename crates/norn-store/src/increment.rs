@@ -69,8 +69,10 @@ pub enum Change {
     /// A path nothing had derived still gets a tombstone. The ordering it
     /// carries is the point, and it is worth most exactly when a derivation
     /// never happened: a late event then has something to compare against
-    /// instead of guessing. The one place that is not killed is a quarantined
-    /// one, which the heal never tombstones; [`Change::Vacated`] ends it.
+    /// instead of guessing. The one place no death is entered for is a place no
+    /// row ever stood at, whose bytes never decoded: the heal never tombstones
+    /// one, and [`Change::Vacated`] ends its quarantine. A row whose bytes stop
+    /// decoding does die, as a [`Provenance::Quarantine`].
     Death {
         path: DocumentPath,
         provenance: Provenance,
