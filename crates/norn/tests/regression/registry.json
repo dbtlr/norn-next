@@ -988,7 +988,7 @@
       "name": "audit-stream-integrity",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every filesystem effect appears in the plan, in the forecast, and in the audit stream; audit records survive failure paths; every mutation on every surface lands in a real sink rather than a discard; trace ids are real or absent, never fabricated from a seeded generator; and every log line is time-correlatable.",
+      "property": "Every filesystem effect an apply makes appears in its plan and its forecast: every file it writes is a transition of the resolved plan, every folder it makes or removes is one its forecast names, and the applied report names the same folders the forecast did.",
       "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
@@ -997,6 +997,17 @@
           { "present": "crates/norn-host/src/planner/forecast.rs" },
           { "present": "crates/norn-host/src/applier.rs" }
         ]
+      }
+    },
+    {
+      "name": "every-mutation-reaches-a-durable-audit-record",
+      "kind": "defect-class",
+      "venue": 6,
+      "property": "Every mutation on every surface reaches a durable audit record in a real sink rather than a discard, and the record survives the mutation's failure paths. Every operation's audit span names that operation's own resolved target, a trace id is real or absent and never fabricated from a seeded generator, and every log line is time-correlatable.",
+      "sources": ["NRN-234", "NRN-104", "NRN-148", "NRN-488", "NRN-479", "NRN-395", "norn-legacy engineering learnings", "NRN-138", "NRN-425", "NRN-101"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing records a mutation to an audit sink: no write path carries a trace id, opens an audit span or writes a log line, so nothing can be asserted of records, sinks, spans, trace ids or time correlation. The Layer 4 charter defers audit to task NORN-301, which is parked with its layer still open; the venue states that it lands no earlier than the surfaces whose mutations it records."
       }
     },
     {
@@ -1161,7 +1172,7 @@
       "name": "preconditions-come-from-plan-time",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses; a confirmation is accepted only against a still-valid anchor the caller observed; and precondition comparison uses the query layer's typing rules rather than its own coercion.",
+      "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses. A resolved plan applies only while every before-state and condition it records still holds; operations carry no anchor beyond their own conditions, and re-sending them is a new change. The planner owns no comparison rule: a `where` selector is judged by the query layer's comparison rule, and an expected value is an exact compare of the field's value tree with no coercion.",
       "sources": ["NRN-151", "NRN-398", "NRN-443", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
@@ -1195,7 +1206,7 @@
       "name": "containment-is-checked-once-for-every-operation",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every operation target's parent canonicalizes under the canonical vault root once, in the layer every verb applies through, so a verb added later inherits containment instead of re-deriving it.",
+      "property": "Every document target is contained under the canonical vault root by the write kernel, once per operation, in the one layer every verb applies through, so a verb inherits containment rather than re-deriving it. The one target outside the root, the `schema_source` vault migrate rewrites where it lives (ADR 0034), is anchored at its configured place, staged in the vault's shadow home, and refused across filesystems.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "dormant",
@@ -1478,7 +1489,7 @@
       "name": "cascade-preserves-link-syntax",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A rewritten link preserves every syntactic component except the target — embed marker, alias, anchor, block reference. Rewriting is occurrence-addressed rather than first-match, and only unambiguously resolving occurrences are rewritten; the rest are skipped and named. A raw prefix strip is the shape this forbids: one prefix miss turns a transclusion with an alias into a plain link while the report claims three backlinks rewritten.",
+      "property": "A rewritten link preserves every syntactic component except the target — embed marker, alias, anchor, block reference. Every occurrence is rewritten, none by first match, and only unambiguously resolving occurrences are rewritten; the rest are skipped and named. A raw prefix strip is the shape this forbids: one prefix miss turns a transclusion with an alias into a plain link while the report claims three backlinks rewritten.",
       "sources": ["NRN-431", "NRN-484", "NRN-129", "NRN-249"],
       "binding": {
         "status": "dormant",
@@ -1501,7 +1512,7 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 4,
-      "property": "Every failure carries a code drawn from the semantic domain of the operation actually attempted, and the code's fault class agrees with the exit code. Falsifiable as a total table: operation kind crossed with injected failure point maps to a code, asserted exhaustively under fault injection, with no code from another operation's domain reachable and no internal-error code reachable from any user-controlled input.",
+      "property": "Every failure carries a code drawn from the semantic domain of the operation actually attempted. Falsifiable as a total table: operation kind crossed with injected failure point maps to a code, asserted exhaustively under fault injection, with no code from another operation's domain reachable and no internal-error code reachable from any user-controlled input.",
       "sources": ["NRN-s8", "NRN-387", "NRN-436", "NRN-131", "NRN-414"],
       "binding": {
         "status": "dormant",
@@ -1509,11 +1520,26 @@
       }
     },
     {
+      "name": "exit-code-agrees-with-the-failure-codes-fault-class",
+      "kind": "defect-class",
+      "mandatory": true,
+      "venue": 6,
+      "property": "A failure's code belongs to one fault class, and the exit code a surface ends with agrees with that class for every code, so a caller reading only the exit status learns the class of fault the code names.",
+      "sources": ["NRN-s8", "NRN-387", "NRN-436", "NRN-131", "NRN-414"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing exits with an outcome: exit codes belong to the command-line surface, and crates/norn-client is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-client" }
+        ]
+      }
+    },
+    {
       "name": "forecast-and-apply-are-one-classifier",
       "kind": "defect-class",
       "mandatory": true,
       "venue": 4,
-      "property": "Forecast and apply are one classifier over the same bytes. What apply touches is a subset of what the forecast reported, and under no concurrent drift the two are equal set-wise and count-wise, including skips with their reasons. Every occurrence is classified individually rather than by first raw match; an unresolved or ambiguous match is never rewritten silently, but refused or reported under the same classification apply will use; and a forecast is labelled a forecast in every format.",
+      "property": "Forecast and apply are one classifier over the same bytes. What apply touches is a subset of what the forecast reported, and under no concurrent drift the two are equal set-wise and count-wise, including skips with their reasons. Every occurrence is classified individually rather than by first raw match, and an unresolved or ambiguous match is never rewritten silently, but refused or reported under the same classification apply will use.",
       "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
       "binding": {
         "status": "dormant",
@@ -1526,10 +1552,25 @@
       }
     },
     {
+      "name": "a-forecast-is-labelled-a-forecast-in-every-format",
+      "kind": "defect-class",
+      "mandatory": true,
+      "venue": 6,
+      "property": "A forecast is labelled a forecast in every format a surface renders it in, human and machine alike, so a preview is never read as a plan that applied.",
+      "sources": ["NRN-s20", "NRN-161", "NRN-468", "NRN-499", "NRN-484", "NRN-430"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing renders a forecast: output formats belong to the surfaces, and crates/norn-client is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-client" }
+        ]
+      }
+    },
+    {
       "name": "format-never-implies-consent",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Output format is a presentation choice with zero consent semantics. Writing requires explicit confirmation on every verb, uniformly, so asking for structured output never applies a plan.",
+      "property": "Writing requires an explicit preview or apply mode on every write request, with no default: a write request naming no mode does not read, and a preview leaves the vault as it was.",
       "sources": ["NRN-212"],
       "binding": {
         "status": "dormant",
@@ -1537,14 +1578,17 @@
       }
     },
     {
-      "name": "integrity-fingerprints-are-scoped-and-computed-once",
+      "name": "output-format-carries-no-consent",
       "kind": "defect-class",
-      "venue": 4,
-      "property": "Integrity verification for a mutation is O(affected set) and is computed at most once per commit. A whole-tree fingerprint recomputed twice per confirmed mutation measures the vault, not the change.",
-      "sources": ["NRN-a62", "NRN-a63"],
+      "venue": 6,
+      "property": "Output format is a presentation choice with zero consent semantics: asking for structured output never applies a plan, and the mode a request states is the one thing that decides whether it writes.",
+      "sources": ["NRN-212"],
       "binding": {
         "status": "dormant",
-        "reason": "no commit computes a fingerprint."
+        "reason": "no format flag exists: an output format is chosen at a surface, and crates/norn-client is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-client" }
+        ]
       }
     },
     {
@@ -1552,7 +1596,7 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 4,
-      "property": "The applier's filesystem effect set is exactly the plan's declared effect set. No directory, file or temp survives that the plan did not declare and the forecast did not report; a move with parents disabled onto a missing parent refuses and leaves the directory set unchanged; a dry run of any verb leaves the tree unchanged, inode and mtime included; and one deterministic missing-parent policy governs every creation call site, so no site creates ahead of the applier.",
+      "property": "The applier's filesystem effect set is exactly the plan's declared effect set. No directory, file or temp survives that the plan did not declare and the forecast did not report; a dry run of any verb leaves the tree unchanged, inode and mtime included; and one missing-parent policy governs every creation: a create makes every folder it needs, the forecast names each, and no site creates ahead of the applier.",
       "sources": ["NRN-s7", "NRN-234", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
@@ -1567,7 +1611,7 @@
       "name": "one-snapshot-per-request",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A request acquires exactly one substrate snapshot, and snapshots_opened reads one. An apply takes that snapshot while it holds its entry's claim, after the facts delivered before it are derived. No commit lands in its registration's store between that snapshot and the apply's changeset, so the changeset builds on exactly the state the verb planned or checked against. The states and conditions the applier checks come from planning, and are never re-derived at apply: for operations, the ones that snapshot showed; for a resolved plan, the ones its preview recorded, which the applier checks against that snapshot and the files.",
+      "property": "A request reads the store at exactly one state. A read establishes one snapshot, and `snapshots_opened` reads one. An apply reads the state its claim holds: every store read in its job — the writer's own reading and at most one reader it opens, for a `where` target, a link resolution, the applier's check or a refused plan's fresh plan — sees that state, and no commit lands in its registration's store between that state and the apply's changeset. The reader an apply opens is given back before its commit, and its descriptors stay within the host's budget, accumulating none across applies. The states and conditions the applier checks come from planning: for operations, the ones that state showed; for a resolved plan, the ones its preview recorded.",
       "sources": ["NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
@@ -1583,7 +1627,7 @@
       "name": "one-verdict-and-one-coercion-basis-per-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "One constraint engine answers for the intended post-state: for a given configuration, document and intended post-state, every write path returns the same verdict, and reported warnings equal the validator's finding set for that post-state. Every type and coercion decision resolves against the post-state's applicable rules, not the outgoing state's, so one atomic call that changes a document's type coerces its other fields under the incoming type.",
+      "property": "One constraint engine answers for the intended post-state: for a given declaration, document and intended post-state, every write path returns the same verdict, judged by the derivation's own judge over the post-state's bytes; a plan refuses the violations it introduces on what it writes, and under force the `forced` list names exactly the findings its apply adds to what the validator held before. The write path coerces no value: a value is written exactly as authored and judged as written.",
       "sources": ["NRN-430", "NRN-474", "NRN-475", "NRN-37", "NRN-390", "NRN-119"],
       "binding": {
         "status": "dormant",
@@ -1597,7 +1641,7 @@
       "name": "resolved-path-gates-resolved-path-reports",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Every path gate applies to the resolved path and is re-checked after resolution, so a pattern constraining a resolved filename is never evaluated against an unresolved template. Every operation's report and audit span names that operation's own resolved target.",
+      "property": "Every path gate — the document-path grammar, containment, and the control-file gate — judges the resolved path after template resolution, never an unresolved template; every operation's report names that operation's own resolved target.",
       "sources": ["NRN-138", "NRN-104", "NRN-425", "NRN-101"],
       "binding": {
         "status": "dormant",
@@ -1608,19 +1652,33 @@
       "name": "whole-vault-work-is-declared-and-triggered-deliberately",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Vault-wide work happens only where it is declared, and the declared set is a fixed enumerable roster asserted by test; row-touch counters on undeclared paths are bounded by the declared affected set. Full derivation is reached only at attach, at recovery after coverage was lost, at a watcher overflow the lifecycle re-heals on its own dispatch, at a schema change through the explicit reload, at integrity failure, or at a scheduled health scan — never from the request path — and precondition evaluation is one indexed statement per selector.",
-      "sources": ["NRN-a63", "NRN-a59", "NORN-a15"],
+      "property": "Full derivation is never reached from a mutation's request path: a mutation's row-touch counters are bounded by its declared affected set, and precondition evaluation is one indexed statement per selector.",
+      "sources": ["NRN-a63", "NRN-a59", "NORN-a15", "NRN-a62"],
       "binding": {
         "status": "dormant",
         "reason": "there is no roster to declare and no mutation request path to keep clear; the read path's derivation-free claim is stated at venue 2 by warm-requests-derive-nothing."
       }
     },
     {
+      "name": "vault-wide-work-is-a-declared-roster",
+      "kind": "defect-class",
+      "venue": 2,
+      "property": "Vault-wide work happens only at declared entry points, and the declared set is a fixed enumerable roster asserted by test: full derivation is reached only at attach, at recovery after coverage was lost, at a watcher overflow the lifecycle re-heals on its own dispatch, at a schema change through the explicit reload, at integrity failure, or at a scheduled health scan.",
+      "sources": ["NRN-a63", "NRN-a59", "NORN-a15", "NRN-a62"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the entry points exist: crates/norn-host/src/lifecycle.rs decides when a vault is derived whole, through its attach, recovery, rebuild and reload paths and the re-heal a watcher overflow dispatches. Nothing enumerates them as a roster a test holds, so a new path to full derivation would land unnoticed. Task NORN-343 authors that roster and the guard over it, and no file is settled to hold the guard.",
+        "grounds": [
+          { "present": "crates/norn-host/src/lifecycle.rs" }
+        ]
+      }
+    },
+    {
       "name": "write-through-the-composed-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A mutation's commit consumes the bytes and parsed post-state the mutation composed: filesystem reads per touched file within a mutation request are zero, and content hashes are computed at most once. Re-reading what the mutation just composed is the shape this forbids: it costs one single-field write three reads and three hashes of its own changed file.",
-      "sources": ["NRN-a59", "NRN-a63"],
+      "property": "An apply reads each file it touches a fixed number of times, the same at any vault size and any plan size, and reads no file it neither touches nor plans from; its commit reads each written file back once, to reach the store without holding its bytes, and hashes it once. Re-reading what the apply just composed a growing number of times is the shape this forbids.",
+      "sources": ["NRN-a59", "NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
         "reason": "nothing composes a post-state to write through."
@@ -1630,7 +1688,7 @@
       "name": "write-verification-gate-covers-the-whole-contract",
       "kind": "defect-class",
       "venue": 4,
-      "property": "The verification gate's coverage equals the contract's promises: where the contract preserves comments, ordering and terminators, the gate compares those bytes rather than a semantic projection of them. Every splice is re-parsed and confirmed before commit rather than trusted on a scanner's proposed span, and the gate's adequacy is itself tested by mutating it and requiring the suite to go red.",
+      "property": "The verification gate's coverage equals the contract's promises: where the contract preserves comments, ordering and terminators, the gate compares those bytes rather than a semantic projection of them. Every splice is re-parsed and confirmed before commit rather than trusted on a scanner's proposed span, and the gate's adequacy is itself tested: with each of its two checks switched off, a doctored plan or a foreign edit lands, so the suite's refusals are shown to come from those checks.",
       "sources": ["NRN-141", "NRN-434", "NRN-142", "NRN-140"],
       "binding": {
         "status": "dormant",

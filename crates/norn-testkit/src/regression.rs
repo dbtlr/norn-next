@@ -76,14 +76,20 @@ use crate::json::{JsonError, read_json};
 ///
 /// Pinned here rather than read from the registry, for the reason the corpus
 /// pins its category lists: a case named in the data alone could be dropped
-/// by editing the data. The unknown-key class is two of these cases, the
-/// diagnostic a query answers on the wire and the surfaces that render it and
-/// exit on it, and both halves are mandatory. The audit requires the registry
-/// to mark exactly these `mandatory`, so removing one fails the gate
-/// whichever file the edit lands in.
+/// by editing the data. A mandatory case split across layers stays mandatory
+/// in both halves: the unknown-key class is the diagnostic a query answers on
+/// the wire and the surfaces that render it and exit on it; a failure's code
+/// is drawn from its operation's domain at the mutations layer and agrees with
+/// the exit code at the surfaces; and a forecast is one classifier with its
+/// apply at the mutations layer and is labelled a forecast in every format at
+/// the surfaces. The audit requires the registry to mark exactly these
+/// `mandatory`, so removing one fails the gate whichever file the edit lands
+/// in.
 pub const MANDATORY_CASES: &[&str] = &[
+    "a-forecast-is-labelled-a-forecast-in-every-format",
     "error-variant-matches-the-operation-reported",
     "every-surface-tells-an-unsatisfiable-request-from-an-empty-answer",
+    "exit-code-agrees-with-the-failure-codes-fault-class",
     "forecast-and-apply-are-one-classifier",
     "mutation-honors-its-planned-flags",
     "one-display-source-per-semantic",

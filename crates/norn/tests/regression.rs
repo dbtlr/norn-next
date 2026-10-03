@@ -81,7 +81,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 113;
+const CASE_TOTAL: usize = 117;
 
 /// The whole registry's contract, as one value.
 ///
@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 113;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "17a70c9d3efd4ff486ba6f2fa05f66719f57a0f9ed9ac1ec26e084ea931cd773";
+const CONTRACT_DIGEST: &str = "9b63d1d3b98dd6249609fae60a2593e95d3b2560b763236aa17439c216d14803";
 
 /// The cases carried by tests today, by name.
 ///
@@ -179,6 +179,7 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
+    "vault-wide-work-is-a-declared-roster",
 ];
 
 fn workspace_root() -> PathBuf {
