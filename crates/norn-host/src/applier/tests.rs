@@ -2322,6 +2322,7 @@ fn a_moved_files_two_records_of_its_bytes_must_agree_with_each_other_and_the_byt
             .iter()
             .all(|target| target.result == TargetResult::Found)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A landed target's recorded flag stands for the bytes it no longer
@@ -2343,6 +2344,57 @@ fn a_landed_quarantined_targets_recorded_flag_stands_for_its_bytes() {
     );
     applied(fixture.apply(plan));
     assert_eq!(fixture.read("d.md").as_deref(), Some("dd\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A vacated quarantine takes its own finding and no other file's.** The
+/// rendering marker is a legal document-path character, so a real file
+/// `r\u{FFFD}.md` can share a subject with the rendering of the unstorable
+/// `r\u{1}.md`. The quarantine the vacated file left ends; the finding about
+/// the file that still stands there is about that other file, and a build from
+/// zero holds it.
+#[test]
+fn a_vacated_quarantine_leaves_the_finding_about_another_file_sharing_its_subject() {
+    let marked = "r\u{FFFD}.md";
+    let build = || {
+        let mut fixture = quarantined_fixture();
+        fixture.foreign("r\u{1}.md", "unstorable name\n");
+        fixture.foreign(marked, UNDECODABLE);
+        fixture
+    };
+
+    let mut fixture = build();
+    let resolution = fixture.resolution(vec![deleting(marked)]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = build();
+    let resolution = fixture.resolution(vec![moving(marked, "elsewhere/r.md")]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A delete of a file the store holds neither a row nor a finding for
+/// commits no changeset.** Nothing about the place changes, so the apply takes
+/// no generation for it.
+#[test]
+fn a_delete_of_a_path_the_store_holds_nothing_at_takes_no_generation() {
+    let mut fixture = Fixture::new(&[("d.md", "d\n")]);
+    fixture.write("n.md", "never taken in\n");
+    let before = fixture
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("a generation");
+    let resolution = fixture.resolution(vec![deleting("n.md")]);
+    applied(fixture.apply(resolution.plan));
+    assert!(!fixture.vault.join("n.md").exists());
+    let after = fixture
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("a generation");
+    assert_eq!(after, before);
 }
 
 /// A plan that drops a condition its operations carry is refused: the

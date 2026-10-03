@@ -107,6 +107,11 @@ pub enum StoreError {
         /// What the finding was that only the store files.
         what: &'static str,
     },
+    /// A changeset vacated a place where a document row stands, or stood
+    /// earlier in the same changeset. Refused rather than applied: the entry ends
+    /// the findings about a place that holds no document, and doing so beside a
+    /// row would leave a state no build from zero holds.
+    VacatedPlaceHoldsRow,
     /// One entry of a changeset was refused, named by where it sits and what it
     /// is about. A streaming heal hands over tens of thousands of entries and
     /// fails on whichever one is pathological, so the refusal that reaches the
@@ -158,6 +163,11 @@ impl fmt::Display for StoreError {
                 "{what} is a finding the store judges and files itself, and no caller records or \
                  discards one"
             ),
+            StoreError::VacatedPlaceHoldsRow => write!(
+                f,
+                "a place a document row stands at cannot be vacated: its findings describe that document, \
+                 and a death is how one is ended"
+            ),
             StoreError::Entry {
                 index,
                 path,
@@ -192,7 +202,8 @@ impl StoreError {
             | StoreError::Bound { .. }
             | StoreError::UnpinnedDeclaration { .. }
             | StoreError::KeySpace { .. }
-            | StoreError::StoreJudged { .. } => None,
+            | StoreError::StoreJudged { .. }
+            | StoreError::VacatedPlaceHoldsRow => None,
         }
     }
 }

@@ -238,10 +238,11 @@ impl<'a> Request<'a> {
     /// comparing generations sees it arrive at an instant rather than as a run
     /// of numbers it has to recognize as one act.
     ///
-    /// An **empty changeset takes no generation.** It writes no document row,
-    /// so moving the store's write sequence for one would make the sequence
+    /// An **empty changeset takes no generation.** It names no entry, so
+    /// moving the store's write sequence for one would make the sequence
     /// report an act that never happened; the outcome says so by carrying no
-    /// generation at all. A finding takes a generation of its own either way,
+    /// generation at all. Any entry takes one, [`Change::Vacated`] included,
+    /// although it writes no document row: it ends findings, and that is an act. A finding takes a generation of its own either way,
     /// exactly as it does through [`Request::record_finding`].
     ///
     /// # Entries apply in order, and the last entry for a path decides
@@ -257,7 +258,10 @@ impl<'a> Request<'a> {
     ///
     /// So however a changeset interleaves one path, it ends in at most one
     /// pillar: `documents` holds the live vault, `tombstones` holds the dead
-    /// paths, and the two are disjoint over stored paths.
+    /// paths, and the two are disjoint over stored paths. A [`Change::Vacated`]
+    /// entry belongs to neither pillar: it names a place that holds no row, and
+    /// it is refused ([`crate::StoreError::VacatedPlaceHoldsRow`]) where a row
+    /// stands at the path, a row written earlier in the changeset included.
     ///
     /// # Dependent state is composed inside the same act
     ///
@@ -270,16 +274,17 @@ impl<'a> Request<'a> {
     /// **Findings are discarded on three axes**, all inside the one transaction:
     ///
     /// - *By subject path.* Every changed path — upserted or dead — takes the
-    ///   findings recorded about it. A re-derivation's findings were read off
+    ///   findings recorded about it, and a vacated place takes the content
+    ///   findings its emptied bytes left, on this axis alone. A re-derivation's findings were read off
     ///   facts the changeset has just replaced, and a death's describe a
     ///   document that is gone.
-    /// - *By affected ambiguity class.* Every changed path also names the class
-    ///   it belongs to, and the findings in the union of those classes go with
+    /// - *By affected ambiguity class.* Every upserted or dead path also names the
+    ///   class it belongs to, and the findings in the union of those classes go with
     ///   it — the resolution axis, where a document joining or leaving a class
     ///   invalidates findings written in documents that did not change. This
     ///   discard runs inside the link-health re-decision below, which judges
     ///   again each link a finding it takes was about.
-    /// - *By affected path key.* Every changed path also names itself as the
+    /// - *By affected path key.* Every upserted or dead path also names itself as the
     ///   exact path key a path-addressed link spells — a rename's old path
     ///   included, since a rename is the old path's death beside the new path's
     ///   write — and the findings keyed by any of those paths go with it. No

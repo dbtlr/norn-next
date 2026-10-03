@@ -2220,3 +2220,216 @@ fn a_vacated_place_discards_its_findings_and_records_no_tombstone() {
         None
     );
 }
+
+/// **A vacated place takes the content findings its emptied bytes left and no
+/// finding about a spelling.** A place-scoped finding about a path's spelling
+/// can stand at a subject that is also a real file's, and the act that emptied
+/// that file did not empty the other spelling.
+#[test]
+fn a_vacated_place_leaves_a_finding_about_a_spelling_standing() {
+    let scratch = Scratch::new("vacated-spelling");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .record_finding(&violation("held/r.md"))
+        .expect("recording a content finding");
+    request
+        .record_finding(&path_names_no_document_in_class(
+            "held/r.md",
+            "one",
+            "one/",
+            &[],
+            1,
+        ))
+        .expect("recording a spelling finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Composed,
+            [Change::Vacated {
+                path: path("held/r.md"),
+            }],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    let standing = request
+        .stored_findings(&path("held/r.md"))
+        .expect("findings");
+    assert_eq!(standing.len(), 1);
+    assert_eq!(standing[0].kind, "document/path-names-no-document");
+}
+
+/// **A vacated place takes a generation, and a changeset of nothing does not.**
+/// The entry ends findings, which is an act the write sequence reports.
+#[test]
+fn a_vacated_place_takes_a_generation_and_writes_no_row() {
+    let scratch = Scratch::new("vacated-generation");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .record_finding(&violation("held/q.md"))
+        .expect("recording a finding");
+    let before = request.write_generation().expect("a generation");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Composed,
+            [Change::Vacated {
+                path: path("held/q.md"),
+            }],
+            &[],
+            &norn_store::ContentModel::none(),
+        )
+        .expect("applying a changeset");
+
+    assert!(outcome.generation.is_some());
+    assert!(request.write_generation().expect("a generation") > before);
+    assert_eq!(request.pillars().expect("a pillar report").documents, 0);
+}
+
+/// **A place a row stands at is refused, and nothing of the changeset lands.**
+/// Ending the findings about a standing document would leave a state no build
+/// from zero holds, whether the row was there before the changeset or an entry
+/// of the same changeset wrote it.
+#[test]
+fn a_vacated_place_holding_a_row_is_refused() {
+    let scratch = Scratch::new("vacated-row");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(&mut request, &[document("held/d.md", "hash-1", "body\n")]);
+    request
+        .record_finding(&violation("held/d.md"))
+        .expect("recording a finding");
+
+    for entries in [
+        vec![Change::Vacated {
+            path: path("held/d.md"),
+        }],
+        vec![
+            upsert("held/e.md", "hash-1", "body\n"),
+            Change::Vacated {
+                path: path("held/e.md"),
+            },
+        ],
+    ] {
+        let refused = request.apply_increment(
+            IncrementProvenance::Composed,
+            entries,
+            &[],
+            &norn_store::ContentModel::none(),
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(StoreError::Entry { problem, .. })
+                    if matches!(**problem, StoreError::VacatedPlaceHoldsRow)
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(request.pillars().expect("a pillar report").documents, 1);
+    assert_eq!(
+        request
+            .stored_findings(&path("held/d.md"))
+            .expect("findings")
+            .len(),
+        1
+    );
+    assert_eq!(
+        request.stored_document(&path("held/e.md")).expect("a read"),
+        None
+    );
+}
+
+/// The environment variable that puts this suite's own binary in the child role
+/// for the vacated-place tear.
+const TORN_VACATED_DATABASE: &str = "NORN_STORE_TORN_VACATED_DATABASE";
+
+const TORN_VACATED_CASE: &str =
+    "increments::a_torn_changeset_holding_a_vacated_place_leaves_its_finding_standing";
+
+/// **A changeset torn after a vacated entry leaves the finding standing.** The
+/// vacated discard commits with the changeset or not at all: the child is killed
+/// inside a changeset that has discarded the finding, the abort landing on the
+/// vacated entry itself and the pages spilled to the log, and the reopened store holds the finding and no new generation.
+#[test]
+#[cfg(unix)]
+fn a_torn_changeset_holding_a_vacated_place_leaves_its_finding_standing() {
+    if let Some(database) = std::env::var_os(TORN_VACATED_DATABASE) {
+        let mut store = Store::open(
+            Path::new(&database),
+            StoredPathOrder::Sensitive,
+            crate::common::DERIVATION,
+        )
+        .expect("opening the store the parent wrote");
+        norn_store::induced_failure::execute_out_of_band(&mut store, "PRAGMA cache_size = 16")
+            .expect("shrinking the page cache");
+        norn_store::induced_failure::abort_after_changeset_entries(2);
+        let _ = store.begin_request().apply_increment(
+            IncrementProvenance::Composed,
+            [
+                upsert("notes/three.md", "hash-1", &torn_body()),
+                Change::Vacated {
+                    path: path("held/q.md"),
+                },
+                upsert("notes/four.md", "hash-1", &torn_body()),
+            ],
+            &[],
+            &norn_store::ContentModel::none(),
+        );
+        panic!("the changeset committed, so the arrangement that arms the abort did not fire");
+    }
+
+    let scratch = Scratch::new("torn-vacated");
+    let database = scratch.database();
+    let mut store = Store::open(
+        &database,
+        StoredPathOrder::Sensitive,
+        crate::common::DERIVATION,
+    )
+    .expect("creating a store");
+    let mut request = store.begin_request();
+    request
+        .record_finding(&violation("held/q.md"))
+        .expect("recording a finding");
+    let before = request.write_generation().expect("a generation");
+    request.finish();
+    drop(store);
+
+    let child = Command::new(std::env::current_exe().expect("this suite's own executable"))
+        .args(["--exact", TORN_VACATED_CASE])
+        .env(TORN_VACATED_DATABASE, &database)
+        .output()
+        .expect("running this suite in the child role");
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            child.status.signal(),
+            Some(SIGABRT),
+            "the child did not reach the changeset: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+    assert!(write_ahead_log_size(&database) >= SPILLED_WAL_FLOOR);
+
+    let mut reopened = Store::open(
+        &database,
+        StoredPathOrder::Sensitive,
+        crate::common::DERIVATION,
+    )
+    .expect("reopening a store");
+    let request = reopened.begin_request();
+    assert_eq!(
+        request
+            .stored_findings(&path("held/q.md"))
+            .expect("findings")
+            .len(),
+        1,
+        "the torn changeset's vacated discard survived it"
+    );
+    assert_eq!(request.write_generation().expect("a generation"), before);
+    assert_eq!(request.pillars().expect("a pillar report").documents, 0);
+}

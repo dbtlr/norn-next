@@ -578,7 +578,8 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
             | StoreError::Bound { .. }
             | StoreError::UnpinnedDeclaration { .. }
             | StoreError::KeySpace { .. }
-            | StoreError::StoreJudged { .. }),
+            | StoreError::StoreJudged { .. }
+            | StoreError::VacatedPlaceHoldsRow),
         ) => {
             let told = store_refusal_told(&error);
             return match error.damage() {
@@ -638,7 +639,8 @@ pub(crate) fn store_refusal_told(error: &StoreError) -> String {
         // static words, none of which is a path.
         StoreError::UnpinnedDeclaration { .. }
         | StoreError::KeySpace { .. }
-        | StoreError::StoreJudged { .. } => error.to_string(),
+        | StoreError::StoreJudged { .. }
+        | StoreError::VacatedPlaceHoldsRow => error.to_string(),
         StoreError::Entry { index, problem, .. } => {
             format!("changeset entry {index}: {}", store_refusal_told(problem))
         }
@@ -1672,6 +1674,7 @@ mod page_refusal_tests {
                 | StoreError::UnpinnedDeclaration { .. }
                 | StoreError::KeySpace { .. }
                 | StoreError::StoreJudged { .. }
+                | StoreError::VacatedPlaceHoldsRow
                 | StoreError::Entry { .. },
             ) => Shape::Store,
         }

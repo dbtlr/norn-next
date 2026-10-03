@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
-use norn_wire::fold_tag;
+use norn_wire::{FindingKind, fold_tag};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
@@ -26,8 +26,9 @@ use crate::store::Store;
 
 /// One entry in a changeset.
 ///
-/// The two shapes are the two things that happen to a path: it is derived, or
-/// it is gone.
+/// The three shapes are the things that happen to a path: it is derived, it is
+/// gone, or it is a place emptied of the findings about it that never held a
+/// row.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)] // An upsert is the common entry: boxing it would allocate once per document to shrink the rarer death.
 pub enum Change {
@@ -68,26 +69,40 @@ pub enum Change {
     /// A path nothing had derived still gets a tombstone. The ordering it
     /// carries is the point, and it is worth most exactly when a derivation
     /// never happened: a late event then has something to compare against
-    /// instead of guessing.
+    /// instead of guessing. The one place that is not killed is a quarantined
+    /// one, which the heal never tombstones; [`Change::Vacated`] ends it.
     Death {
         path: DocumentPath,
         provenance: Provenance,
     },
-    /// A place that held no document row and is left empty: the findings
-    /// recorded about it go, in this transaction, and nothing else is written.
+    /// A place that held no document row and is left empty: the quarantine
+    /// finding its undecodable bytes left goes, in this transaction, and nothing
+    /// else is written.
     ///
-    /// **It is not a death.** A death tombstones a path the store derived a
-    /// document at; a place whose bytes never decoded holds no row, and a
-    /// tombstone there would state the removal of a document the vault never
-    /// held. What such a place holds is its findings — a quarantine finding
-    /// says its bytes are not a document — and when an act empties the place,
-    /// those findings are about nothing. Ending them in the act's own
-    /// transaction is what keeps a read seeing the whole state before the act
-    /// or the whole state after it (ADR 0032), and what makes the store equal a
-    /// build from zero over the emptied tree.
+    /// **It is not a death.** A death tombstones a path, and the ordering a
+    /// tombstone carries is wanted wherever a late event could otherwise guess.
+    /// A place whose bytes never decoded is one the heal deliberately never
+    /// tombstones, so a build from zero over the emptied tree holds no tombstone
+    /// there, and a death would leave a state that build does not produce. What
+    /// the place holds is a quarantine finding — its bytes are not a document —
+    /// and when an act empties the place that finding is about nothing. Ending
+    /// it in the act's own transaction is what keeps a read seeing the whole
+    /// state before the act or the whole state after it (ADR 0032), and what
+    /// makes the store equal a build from zero over the emptied tree.
     ///
-    /// No row changes, so it names no class and no path for the link-health
-    /// re-decision: nothing a link resolves to moved.
+    /// **It takes the content findings only**
+    /// ([`FindingKind::BodyBytesNotUtf8`]), which are the findings the emptied
+    /// file's own bytes produced. A place-scoped finding about the path's
+    /// spelling stands at a subject that can be the rendering of a different,
+    /// unstorable file, which this act did not empty, so it stays.
+    ///
+    /// **The place must hold no row.** A row at the path is refused
+    /// ([`crate::StoreError::VacatedPlaceHoldsRow`]), including one an earlier
+    /// entry of the same changeset wrote, because ending the findings about a
+    /// document that stands would leave a state no build from zero holds. A
+    /// vacated place takes no class or path key for the link-health
+    /// re-decision, since no row changes and nothing a link resolves to moves,
+    /// and it takes a generation like any other nonempty changeset.
     Vacated { path: DocumentPath },
 }
 
@@ -275,9 +290,8 @@ pub(crate) fn apply(
             // A vacated place changes no row and no link resolution, so it
             // takes the discard below and nothing else.
             if let Change::Vacated { path } = &change {
-                let discarded = discard_the_subject(&mut statements.discard_subject, path);
-                tally.findings_discarded +=
-                    discarded.map_err(|problem| error::in_entry(index, path, problem))?;
+                tally.findings_discarded += vacate(&mut statements, path)
+                    .map_err(|problem| error::in_entry(index, path, problem))?;
                 #[cfg(feature = "induced-failure")]
                 crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
                 continue;
@@ -445,6 +459,11 @@ struct Statements<'t> {
     discard_subject: CachedStatement<'t>,
     /// The path-keyed findings discard, over one path key at a time.
     discard_path: CachedStatement<'t>,
+    /// The content findings a vacated place's emptied bytes left, over one path
+    /// at a time.
+    discard_vacated: CachedStatement<'t>,
+    /// Whether a document row stands at a path.
+    row_at: CachedStatement<'t>,
 }
 
 /// The fact rows a re-derivation replaces, one statement per table.
@@ -564,6 +583,14 @@ impl<'t> Statements<'t> {
             discard_path: prepared(
                 request::PATH_DISCARD_SQL,
                 "preparing a path key's findings discard",
+            )?,
+            discard_vacated: prepared(
+                &format!("{} AND kind = ?2", request::SUBJECT_DISCARD_SQL),
+                "preparing a vacated place's findings discard",
+            )?,
+            row_at: prepared(
+                "SELECT EXISTS (SELECT 1 FROM documents WHERE path = ?1)",
+                "preparing a row probe",
             )?,
         })
     }
@@ -915,6 +942,30 @@ fn discard_the_subject(
     Ok(statement
         .execute(params![path.as_str()])
         .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
+}
+
+/// End the content findings at a place the changeset empties, and report how
+/// many went.
+///
+/// Refused where a document row stands at the place, which includes a row an
+/// earlier entry of this changeset wrote: this is the one entry that discards
+/// findings without changing a row, so it is the one that could leave a document
+/// standing beside nothing said about it.
+fn vacate(statements: &mut Statements<'_>, path: &DocumentPath) -> Result<u64, StoreError> {
+    let held: bool = statements
+        .row_at
+        .query_row(params![path.as_str()], |row| row.get(0))
+        .map_err(|error| error::sql("probing a vacated place for a row", error))?;
+    if held {
+        return Err(StoreError::VacatedPlaceHoldsRow);
+    }
+    Ok(statements
+        .discard_vacated
+        .execute(params![
+            path.as_str(),
+            FindingKind::BodyBytesNotUtf8.as_str()
+        ])
+        .map_err(|error| error::sql("discarding a vacated place's findings", error))? as u64)
 }
 
 /// Discard the findings keyed by every path the changeset writes or kills, and
