@@ -976,3 +976,78 @@ fn confirming_a_removal_that_finds_a_file_refuses() {
         "{refusal}"
     );
 }
+
+/// **The kernel's reads count themselves, and name what they read.** A
+/// replacement hashes its target at staging and again at publication, and
+/// its shadow once just before the rename; a removal hashes its target at
+/// both phases and reads no shadow. Each read is one count and one named
+/// file, so the tally says which file every read was of: the target at its
+/// full path, the shadow in the shadow home.
+#[test]
+fn the_kernels_reads_are_counted_per_hash_and_name_their_file() {
+    use norn_fs::reads::{FileRead, ReadAct, ReadWindow, record_files};
+
+    let scratch = Scratch::new("reads-named");
+    let replaced = scratch.place("replaced.md", b"old");
+    let removed = scratch.place("removed.md", b"doomed");
+    let _recording = record_files();
+
+    let window = ReadWindow::open();
+    let staging = staged(
+        scratch
+            .stage(
+                "replaced.md",
+                Transition::Replace {
+                    before: hash(b"old"),
+                    content: b"new",
+                },
+            )
+            .expect("staging a replacement"),
+    );
+    let shadow = scratch.only_shadow();
+    let published =
+        crate::common::wrote(scratch.publish(staging).expect("publishing a replacement"));
+    let (tally, files) = window.finish_with_files();
+    assert!(matches!(published.after, AfterState::Present(_)));
+    assert_eq!(
+        (tally.target_reads, tally.shadow_reads, tally.document_opens),
+        (2, 1, 0),
+        "a replacement's reads: {tally:?}"
+    );
+    let read = |act, path: &std::path::Path| FileRead {
+        act,
+        path: path.to_path_buf(),
+    };
+    assert_eq!(
+        files,
+        vec![
+            read(ReadAct::Target, &replaced),
+            read(ReadAct::Target, &replaced),
+            read(ReadAct::Shadow, &shadow),
+        ]
+    );
+
+    let window = ReadWindow::open();
+    let published = scratch
+        .stage_and_publish(
+            "removed.md",
+            Transition::Remove {
+                before: hash(b"doomed"),
+            },
+        )
+        .expect("a removal");
+    let (tally, files) = window.finish_with_files();
+    assert!(matches!(published.after, AfterState::Absent));
+    assert_eq!(
+        (tally.target_reads, tally.shadow_reads),
+        (2, 0),
+        "a removal's reads: {tally:?}"
+    );
+    assert_eq!(
+        files,
+        vec![
+            read(ReadAct::Target, &removed),
+            read(ReadAct::Target, &removed),
+        ]
+    );
+}

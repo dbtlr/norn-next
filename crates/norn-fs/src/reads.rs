@@ -6,13 +6,27 @@
 //!
 //! # The counted set is narrow, and the fields say what is in it
 //!
-//! This is not every stat the crate takes. Five acts are counted — the opens
-//! `open_regular_at` performs, the stats that act and the walk take
-//! along the way, the directory entries a walk pulls off a stream, and the
-//! write kernel's reads of a target and of a staged shadow — and
-//! [`ReadTally`]'s fields name them one at a time, each with what it leaves
-//! out. An act outside those fields is outside the tally by construction: no
-//! call site elsewhere reaches the counters.
+//! This is not every stat the crate takes. Five acts are counted — the reads
+//! of a file's content through a descriptor `open_regular_at` handed back, the
+//! stats that open and the walk take along the way, the directory entries a
+//! walk pulls off a stream, and the write kernel's reads of a target and of a
+//! staged shadow — and [`ReadTally`]'s fields name them one at a time, each
+//! with what it leaves out. An act outside those fields is outside the tally
+//! by construction: no call site elsewhere reaches the counters.
+//!
+//! **A read is counted by the act that reads the bytes**, not by the open
+//! that precedes it: the function that reads a file's content and hashes it
+//! counts itself, so a descriptor read and hashed twice counts twice, and no
+//! counted reader can hash a byte it did not count.
+//!
+//! # Which file was read, under `induced-failure`
+//!
+//! A count says how many reads a thread took and not of what. A build with
+//! `induced-failure` also records, per counted read, the act that took it and
+//! the path it read ([`FileRead`]), while a [`FileRecording`] is armed and a
+//! window stands on the thread; [`ReadWindow::finish_with_files`] hands both
+//! back together. A build without the feature carries none of it: no type,
+//! no storage and no code at a read site.
 //!
 //! What is counted is what the churn suite's cost bars are stated over, so the
 //! set is widened by a bar that needs an act it does not hold, and widening it
@@ -43,10 +57,14 @@ use std::marker::PhantomData;
 /// What one thread read while a window stood over it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReadTally {
-    /// Files opened for their content through `open_regular_at`, which
-    /// is the one route both a document read and a walk's own read of a file it
-    /// enumerated take. A directory opened to descend into is not one of these,
-    /// and neither is a file opened by any other protocol in this crate.
+    /// Files read for their content through a descriptor `open_regular_at`
+    /// handed back, which is the one route both a document read and a walk's
+    /// own read of a file it enumerated take: one per read of the file's
+    /// content, counted by the read itself, so a descriptor read twice counts
+    /// twice. Every reader takes one open and reads it once, so the count is
+    /// also the opens that reached a regular file and were read. A directory
+    /// opened to descend into is not one of these, and neither is a file opened
+    /// by any other protocol in this crate.
     pub document_opens: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
@@ -76,21 +94,22 @@ pub struct ReadTally {
     /// written. A reader that needs the two apart splits the field rather than
     /// inferring the split.
     pub walk_dirents: u64,
-    /// Targets the write kernel read to judge their state: one per regular
-    /// file opened at a target's name and hashed through that descriptor, by
-    /// staging, by publication's verification again, and by a landing's
-    /// confirmation. A name holding no regular file — a create's absent
-    /// target among them — opens nothing to hash and is not one.
+    /// Targets the write kernel read to judge their state: one per hash of a
+    /// regular file opened at a target's name, taken by staging, by
+    /// publication's verification again, and by a landing's confirmation. A
+    /// name holding no regular file — a create's absent target among them —
+    /// opens nothing to hash and is not one.
     ///
     /// Apart from [`ReadTally::document_opens`] because the act is another
     /// protocol's: the kernel reads a target to judge a transition, through
-    /// its own no-follow open, and no byte of it reaches derivation. Every one
-    /// hashes exactly what it read, once.
+    /// its own no-follow open, and no byte of it reaches derivation. The
+    /// hashing counts itself, so a descriptor hashed twice counts twice.
     pub target_reads: u64,
     /// Staged shadows the write kernel read to confirm, just before a
     /// publication act, that the shadow is still the file staging made and
-    /// still holds what staging wrote: one open and one hash per confirmation.
-    /// A shadow lives in the shadow home, under no name of the vault's.
+    /// still holds what staging wrote: one per hash of a confirmation, counted
+    /// by the hashing itself. A shadow lives in the shadow home, under no name
+    /// of the vault's.
     pub shadow_reads: u64,
 }
 
@@ -104,6 +123,74 @@ thread_local! {
     }) };
     /// Whether a window already stands on this thread.
     static STANDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Which counted act read a file: the [`ReadTally`] field the read is in.
+#[cfg(feature = "induced-failure")]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ReadAct {
+    /// A read of a file's content, [`ReadTally::document_opens`].
+    Document,
+    /// The write kernel's read of a target, [`ReadTally::target_reads`].
+    Target,
+    /// The write kernel's read of a staged shadow, [`ReadTally::shadow_reads`].
+    Shadow,
+}
+
+/// One counted read of one file: the act that took it and the path it read,
+/// spelled as the read site holds it — the anchor joined with the relative
+/// name below it for a contained read, the walked root joined with the
+/// walked path for a walk's read, the vault root joined with the target's
+/// path for the write kernel, and the shadow home's own name for a shadow.
+#[cfg(feature = "induced-failure")]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FileRead {
+    /// Which counted act read the file.
+    pub act: ReadAct,
+    /// The file it read.
+    pub path: std::path::PathBuf,
+}
+
+/// How many [`FileRecording`]s stand in the process.
+#[cfg(feature = "induced-failure")]
+static RECORDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "induced-failure")]
+thread_local! {
+    /// The files this thread's counted reads read while a window stood and a
+    /// recording was armed.
+    static FILES: std::cell::RefCell<Vec<FileRead>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+/// While one stands, every window in the process records the file each of
+/// its counted reads read, beside the count.
+///
+/// **Process-wide, and opt-in.** The windows it arms are on whichever threads
+/// run jobs, which a harness never holds, so the arm is the process's; it is
+/// off unless asked for so a long run under `induced-failure` — a soak — pays
+/// no allocation per read and holds no record it never reads. A harness that
+/// arms it reads one case at a time.
+#[cfg(feature = "induced-failure")]
+#[must_use = "the recording stands only while this is held"]
+pub struct FileRecording {
+    _armed: (),
+}
+
+/// Arm the recording of which files counted reads read, for as long as the
+/// answer is held.
+#[cfg(feature = "induced-failure")]
+pub fn record_files() -> FileRecording {
+    RECORDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    FileRecording { _armed: () }
+}
+
+#[cfg(feature = "induced-failure")]
+impl Drop for FileRecording {
+    fn drop(&mut self) {
+        RECORDING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// One thread's window over its own reads.
@@ -145,6 +232,8 @@ impl ReadWindow {
              reads the first is standing on"
         );
         TALLY.set(ReadTally::default());
+        #[cfg(feature = "induced-failure")]
+        FILES.with_borrow_mut(Vec::clear);
         ReadWindow {
             _thread_bound: PhantomData,
         }
@@ -157,17 +246,32 @@ impl ReadWindow {
     pub fn finish(self) -> ReadTally {
         TALLY.get()
     }
+
+    /// What this thread read while the window stood, the file each counted
+    /// read read — empty where no [`FileRecording`] was armed — and the end
+    /// of the window.
+    #[cfg(feature = "induced-failure")]
+    pub fn finish_with_files(self) -> (ReadTally, Vec<FileRead>) {
+        (TALLY.get(), FILES.with_borrow_mut(std::mem::take))
+    }
 }
 
 impl Drop for ReadWindow {
     fn drop(&mut self) {
         TALLY.set(ReadTally::default());
+        #[cfg(feature = "induced-failure")]
+        FILES.with_borrow_mut(Vec::clear);
         STANDING.set(false);
     }
 }
 
-pub(crate) fn count_document_open() {
+/// Count one read of a file's content at `path`, by the act that reads it.
+pub(crate) fn count_document_read(path: &std::path::Path) {
     bump(|tally| tally.document_opens += 1);
+    #[cfg(feature = "induced-failure")]
+    record(ReadAct::Document, path);
+    #[cfg(not(feature = "induced-failure"))]
+    let _ = path;
 }
 
 pub(crate) fn count_stat() {
@@ -178,12 +282,38 @@ pub(crate) fn count_dirents(entries: u64) {
     bump(|tally| tally.walk_dirents += entries);
 }
 
-pub(crate) fn count_target_read() {
+/// Count one hash of the target at `path`, by the act that hashes it.
+pub(crate) fn count_target_read(path: &std::path::Path) {
     bump(|tally| tally.target_reads += 1);
+    #[cfg(feature = "induced-failure")]
+    record(ReadAct::Target, path);
+    #[cfg(not(feature = "induced-failure"))]
+    let _ = path;
 }
 
-pub(crate) fn count_shadow_read() {
+/// Count one hash of the staged shadow at `path`, by the act that hashes it.
+pub(crate) fn count_shadow_read(path: &std::path::Path) {
     bump(|tally| tally.shadow_reads += 1);
+    #[cfg(feature = "induced-failure")]
+    record(ReadAct::Shadow, path);
+    #[cfg(not(feature = "induced-failure"))]
+    let _ = path;
+}
+
+/// Record which file a counted read read, where a recording is armed and a
+/// window stands to hand it back. A thread with no window records nothing,
+/// so a thread that never opens one holds nothing however long it reads.
+#[cfg(feature = "induced-failure")]
+fn record(act: ReadAct, path: &std::path::Path) {
+    if RECORDING.load(std::sync::atomic::Ordering::SeqCst) == 0 || !STANDING.get() {
+        return;
+    }
+    FILES.with_borrow_mut(|files| {
+        files.push(FileRead {
+            act,
+            path: path.to_path_buf(),
+        });
+    });
 }
 
 fn bump(change: impl FnOnce(&mut ReadTally)) {
@@ -196,6 +326,8 @@ fn bump(change: impl FnOnce(&mut ReadTally)) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// A window reports what the thread read while it stood, and nothing it
@@ -204,11 +336,11 @@ mod tests {
     fn a_window_reports_the_reads_made_under_it() {
         count_stat();
         let window = ReadWindow::open();
-        count_document_open();
+        count_document_read(Path::new("note.md"));
         count_stat();
         count_dirents(4);
-        count_target_read();
-        count_shadow_read();
+        count_target_read(Path::new("note.md"));
+        count_shadow_read(Path::new("shadow"));
         assert_eq!(
             window.finish(),
             ReadTally {
@@ -237,6 +369,73 @@ mod tests {
                 walk_dirents: 2,
                 ..ReadTally::default()
             }
+        );
+    }
+
+    /// The arm is the process's, so the cases that arm it or read it unarmed
+    /// take turns.
+    #[cfg(feature = "induced-failure")]
+    static RECORDING_CASES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// An armed window names the file each counted read read, by the act that
+    /// read it, once per read: a file read twice is named twice.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn an_armed_window_names_each_file_its_reads_read() {
+        let _serial = RECORDING_CASES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _recording = record_files();
+        let window = ReadWindow::open();
+        count_document_read(Path::new("note.md"));
+        count_target_read(Path::new("note.md"));
+        count_target_read(Path::new("note.md"));
+        count_shadow_read(Path::new("shadow"));
+        let (tally, files) = window.finish_with_files();
+        assert_eq!(
+            (tally.document_opens, tally.target_reads, tally.shadow_reads),
+            (1, 2, 1)
+        );
+        let read = |act, path: &str| FileRead {
+            act,
+            path: path.into(),
+        };
+        assert_eq!(
+            files,
+            vec![
+                read(ReadAct::Document, "note.md"),
+                read(ReadAct::Target, "note.md"),
+                read(ReadAct::Target, "note.md"),
+                read(ReadAct::Shadow, "shadow"),
+            ]
+        );
+    }
+
+    /// No file is named where no recording is armed, nor on a thread with no
+    /// window, nor before the window that reports opened.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn a_window_names_files_only_while_armed_and_standing() {
+        let _serial = RECORDING_CASES
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let unarmed = ReadWindow::open();
+        count_document_read(Path::new("unarmed.md"));
+        let (tally, files) = unarmed.finish_with_files();
+        assert_eq!(tally.document_opens, 1);
+        assert!(files.is_empty(), "an unarmed window named {files:?}");
+
+        let _recording = record_files();
+        count_document_read(Path::new("no-window.md"));
+        let window = ReadWindow::open();
+        count_document_read(Path::new("windowed.md"));
+        let (_, files) = window.finish_with_files();
+        assert_eq!(
+            files,
+            vec![FileRead {
+                act: ReadAct::Document,
+                path: "windowed.md".into(),
+            }]
         );
     }
 

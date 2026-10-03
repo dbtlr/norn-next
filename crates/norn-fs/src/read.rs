@@ -166,6 +166,7 @@ pub(crate) fn read_if_present_bounded(
             ));
         }
     };
+    crate::reads::count_document_read(&path);
     let mut bytes = Vec::new();
     let limit = u64::try_from(bound).unwrap_or(u64::MAX).saturating_add(1);
     (&mut file)
@@ -190,8 +191,8 @@ fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refu
         Ok(file) => file,
         Err(unreached) => return Ok(Observed::Nothing(unreached)),
     };
-    let (bytes, content_hash) =
-        read_bytes_and_hash(&mut file).map_err(|error| environment("reading", path, &error))?;
+    let (bytes, content_hash) = read_bytes_and_hash(&mut file, path)
+        .map_err(|error| environment("reading", path, &error))?;
     Ok(Observed::Read(ReadAndHash {
         path: path.to_owned(),
         bytes,
@@ -221,4 +222,50 @@ fn reach(
 
 fn errno_error(errno: rustix::io::Errno) -> io::Error {
     io::Error::from_raw_os_error(errno.raw_os_error())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::reads::ReadWindow;
+    use crate::scratch::Scratch;
+
+    /// **A contained read counts its reads, not its opens.** Each of the three
+    /// readers reads the file once and is one `document_opens`; a name holding
+    /// no file is read by none of them and counts nothing. Under
+    /// `induced-failure` each read names the file it read, spelled as the
+    /// anchor joined with the name below it.
+    #[test]
+    fn a_contained_read_counts_each_read_of_its_file() {
+        let scratch = Scratch::new("contained-reads");
+        scratch.directory("vault/notes");
+        let note = scratch.place("notes/note.md", b"body");
+        let anchor = scratch.at("");
+        #[cfg(feature = "induced-failure")]
+        let _recording = crate::reads::record_files();
+
+        let window = ReadWindow::open();
+        read_and_hash(&anchor, Path::new("notes/note.md")).expect("a read");
+        read_optional_and_hash(&anchor, Path::new("notes/note.md")).expect("a read");
+        read_if_present_bounded(&anchor, Path::new("notes/note.md"), 64).expect("a read");
+        read_optional_and_hash(&anchor, Path::new("notes/absent.md")).expect("an answer");
+        #[cfg(feature = "induced-failure")]
+        {
+            let (tally, files) = window.finish_with_files();
+            assert_eq!(tally.document_opens, 3, "{tally:?}");
+            let read = crate::reads::FileRead {
+                act: crate::reads::ReadAct::Document,
+                path: anchor.join("notes/note.md"),
+            };
+            assert_eq!(files, vec![read.clone(), read.clone(), read]);
+            assert_eq!(note, anchor.join("notes/note.md"));
+        }
+        #[cfg(not(feature = "induced-failure"))]
+        {
+            let _ = note;
+            assert_eq!(window.finish().document_opens, 3);
+        }
+    }
 }

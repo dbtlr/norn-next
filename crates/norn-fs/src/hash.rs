@@ -29,10 +29,17 @@ use sha2::{Digest, Sha256};
 /// what a document happens to weigh.
 const CHUNK: usize = 64 * 1024;
 
-/// One forward pass over `reader`; consumers receive the same bytes the hash saw.
+/// One forward pass over `reader`, the file at `path`; consumers receive the
+/// same bytes the hash saw.
+///
+/// **The read counts itself** ([`crate::reads::ReadTally::document_opens`]):
+/// every call is one counted read of `path`, so a descriptor read and hashed
+/// twice is two reads in the tally rather than one open.
 pub(crate) fn read_bytes_and_hash(
     reader: &mut impl Read,
+    path: &std::path::Path,
 ) -> std::io::Result<(Vec<u8>, ContentHash)> {
+    crate::reads::count_document_read(path);
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     let hash = ContentHash::of(&bytes);
@@ -127,6 +134,13 @@ impl fmt::Debug for ContentHash {
 /// weight of the document. A read interrupted by a signal is retried, because
 /// `EINTR` is not a failure to read and half a hash is not a smaller hash.
 ///
+/// **This form is not counted** in any [`crate::reads::ReadTally`] field: the
+/// write kernel's reads of a target and of a shadow go through
+/// [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
+/// and the one caller in this crate that hashes through this form is the
+/// watcher's echo check, which runs on the watcher's thread outside every
+/// job's account.
+///
 /// What this cannot promise is anything about the *name* the handle came from.
 /// The bytes hashed are the bytes of the file this descriptor refers to; whether
 /// some path still resolves to that file is a separate question, asked with a
@@ -158,6 +172,28 @@ pub fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHa
         len += read as u64;
     }
     Ok((ContentHash(hasher.finalize().into()), len))
+}
+
+/// The write kernel's read of the target at `full`: [`hashed_from`] over its
+/// descriptor, counted as one [`crate::reads::ReadTally::target_reads`] by
+/// the act itself, so a target hashed twice counts twice.
+pub(crate) fn target_hashed_from<H: Read + Seek>(
+    handle: &mut H,
+    full: &std::path::Path,
+) -> std::io::Result<(ContentHash, u64)> {
+    crate::reads::count_target_read(full);
+    hashed_from(handle)
+}
+
+/// The write kernel's read of the staged shadow at `path`: [`hashed_from`]
+/// over its descriptor, counted as one
+/// [`crate::reads::ReadTally::shadow_reads`] by the act itself.
+pub(crate) fn shadow_hashed_from<H: Read + Seek>(
+    handle: &mut H,
+    path: &std::path::Path,
+) -> std::io::Result<(ContentHash, u64)> {
+    crate::reads::count_shadow_read(path);
+    hashed_from(handle)
 }
 
 #[cfg(test)]

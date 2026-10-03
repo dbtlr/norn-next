@@ -188,7 +188,7 @@ use rustix::fs::{
 use rustix::io::Errno;
 
 use crate::faults::{Faults, Stage, Window};
-use crate::hash::{ContentHash, hashed_from};
+use crate::hash::{ContentHash, shadow_hashed_from, target_hashed_from};
 use crate::identity::{Identity, PostState, identity_of, identity_of_stat, post_state};
 use crate::open::{Step, Stopped, anchor_flags, contained_names, regular_flags, step_into};
 use crate::path::{
@@ -1725,9 +1725,8 @@ fn confirm_shadow(
             &invalid_data("the shadow is not the file staging made"),
         ));
     }
-    crate::reads::count_shadow_read();
-    let (hash, len) =
-        hashed_from(&mut file).map_err(|error| environment(OPERATION, &path, &error))?;
+    let (hash, len) = shadow_hashed_from(&mut file, &path)
+        .map_err(|error| environment(OPERATION, &path, &error))?;
     if hash != after {
         return Err(environment(
             OPERATION,
@@ -2128,9 +2127,8 @@ fn observe(
     if !metadata.file_type().is_file() {
         return Ok(Found::Other);
     }
-    crate::reads::count_target_read();
-    let (hash, len) =
-        hashed_from(&mut file).map_err(|error| environment("reading", full, &error))?;
+    let (hash, len) = target_hashed_from(&mut file, full)
+        .map_err(|error| environment("reading", full, &error))?;
     disturb(Window::Verifying);
     let read = identity_of(&metadata);
     match statat(folder, name, AtFlags::SYMLINK_NOFOLLOW) {

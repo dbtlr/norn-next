@@ -796,7 +796,7 @@ impl FileFact {
         let metadata = file
             .metadata()
             .map_err(|source| environment("stating", &access, source))?;
-        let (bytes, content_hash) = read_bytes_and_hash(&mut file)
+        let (bytes, content_hash) = read_bytes_and_hash(&mut file, &access)
             .map_err(|source| environment("reading", &access, source))?;
         Ok(Some(ReadFile {
             path: self.path,
@@ -1888,7 +1888,8 @@ mod tests {
             inner: Cursor::new(b"one pass only".to_vec()),
             bytes: 0,
         };
-        let (bytes, hash) = read_bytes_and_hash(&mut reader).expect("one reading");
+        let (bytes, hash) =
+            read_bytes_and_hash(&mut reader, Path::new("one-pass.md")).expect("one reading");
         assert_eq!(reader.bytes, bytes.len());
         assert_eq!(hash, ContentHash::of(&bytes));
     }
