@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1141,8 +1141,9 @@ struct EntryState<A: SnapshotSource> {
     /// What a plan is resolved against over the coverage the entry holds, as
     /// [`EntryOps::plan_ground`] read it in the gate hold that last recorded
     /// the entry's declaration; `None` until then, and once the coverage goes
-    /// back. A preview, which holds no coverage, plans against it.
-    plan_ground: Option<PlanGround>,
+    /// back. A preview, which holds no coverage, plans against it, as its
+    /// read's establishing hold carries it out on the [`ReadHold`].
+    plan_ground: Option<Arc<PlanGround>>,
     /// The applies admitted against the entry and not yet run, in the order
     /// they were admitted. Each is demand on the entry while it waits.
     applies: ApplyQueue,
@@ -2493,14 +2494,79 @@ fn schedule_queued_apply<A: SnapshotSource>(
     )
 }
 
+/// What one hold made of the damage a read's store met: the refusal the read
+/// is answered with, and whether the hold scheduled the rebuild.
+struct DamageVerdict {
+    refusal: ReadRefusal,
+    scheduled: bool,
+}
+
+/// Judge the damage a read that ran on `ran_on` met, under one hold of its
+/// entry's gate, and publish it where the verdict is the entry's.
+///
+/// **The verdict is the entry's where the entry still reads the store the
+/// read ran on**: its reader is `ran_on`, it owes no rebuild already, and no
+/// park stands over it. The read and the hold that judges can be apart: a read
+/// that found the gate held leaves this for the next hold, and that hold
+/// judges the entry as it finds it, so an entry that has moved to another
+/// handle, or rebuilt, or parked since the read ran publishes nothing. The
+/// refusal is the read's answer only where the read took this hold itself.
+fn judge_damage_a_read_met<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+    ran_on: &Weak<A::Reader>,
+    detail: String,
+) -> DamageVerdict {
+    let refused = |refusal| DamageVerdict {
+        refusal,
+        scheduled: false,
+    };
+    let published = state.published_demand();
+    let on_that_handle = state
+        .reader
+        .as_ref()
+        .is_some_and(|standing| std::ptr::eq(Arc::as_ptr(standing), ran_on.as_ptr()));
+    let serving = published == Demand::State(TrustState::Ready);
+    if !on_that_handle {
+        return refused(if serving {
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "this entry's reads moved to another handle while this read ran",
+            ))
+        } else {
+            ReadRefusal::NotServing(published)
+        });
+    }
+    if state.rebuild_required || state.stands_parked() {
+        return refused(ReadRefusal::NotServing(published));
+    }
+    if state.damage_met_under_a_claim.is_none() {
+        state.damage_met_under_a_claim = Some(detail);
+    }
+    if publish_damage_a_read_met(state, name).is_none() {
+        return refused(if serving {
+            ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while other work held this entry; the \
+                 entry rebuilds it when that work ends",
+            ))
+        } else {
+            ReadRefusal::NotServing(published)
+        });
+    }
+    DamageVerdict {
+        refusal: ReadRefusal::NotServing(state.published_demand()),
+        scheduled: true,
+    }
+}
+
 /// Publish the damage a read's store met, and schedule the rebuild that
 /// resolves it, where nothing holds the entry: no claim, no scheduled job and
 /// no release in flight, over coverage the entry holds, in service and
 /// unparked.
 ///
 /// **This is where read-met damage is published over a free entry.** A read
-/// over a free entry reaches it at once through
-/// [`Host::withdraw_for_read_damage`]; a read under a held claim leaves the
+/// over a free entry reaches it through [`judge_damage_a_read_met`], under
+/// the hold [`Host::withdraw_for_read_damage`] takes or the next one where
+/// that read found the gate held; a read under a held claim leaves the
 /// verdict in [`EntryState::damage_met_under_a_claim`], and the end of that
 /// claim reaches it here, unless a hand-on published it first through
 /// [`hand_on_carried_damage`]. Where something still holds the entry the verdict stays for the
@@ -2624,7 +2690,7 @@ fn record_active_declaration<O: EntryOps>(
 ) {
     state.active_fingerprints = ops.active_fingerprints(attachment);
     state.active_content_model = ops.active_content_model(attachment);
-    state.plan_ground = ops.plan_ground(attachment);
+    state.plan_ground = ops.plan_ground(attachment).map(Arc::new);
     state.delivered_engine = ops.semantic().and_then(|engines| engines.delivery(name));
     record_advisories(state, ops, attachment);
 }
@@ -3203,9 +3269,18 @@ fn restore_lost_claim<A: SnapshotSource>(state: &mut EntryState<A>, job: Job) {
 
 /// Give back the queue slot a send took, where the entry still holds it for
 /// that send.
+///
+/// **It never waits for the gate.** A read's dispatch reaches here after its
+/// query, outside its bound, so the give-back runs at once where the gate is
+/// free and is otherwise left for the next hold, which runs it before anything
+/// reads the slot. It is deferred rather than skipped: a slot left taken would
+/// keep the dispatcher tick's retry from sending the job the marker still
+/// names. The give-back names its epoch, so a later hold frees only a slot that
+/// still names this send.
 fn release_queue_slot<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) {
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    state.claim.free_slot(epoch);
+    entry
+        .gate
+        .run_under_the_next_hold(move |state| state.claim.free_slot(epoch));
 }
 
 /// Send the job an entry has scheduled, where the entry has no job in the
@@ -3218,13 +3293,40 @@ fn dispatch_pending<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
 ) -> Result<(), HostError> {
-    let job = {
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let Some(job) = state.claim.take_slot_for_marked() else {
-            return Ok(());
-        };
-        job
+    let state = entry.gate.lock().expect("entry gate poisoned");
+    dispatch_marked(shared, entry, state)
+}
+
+/// Send the job an entry has scheduled, as [`dispatch_pending`] does, where
+/// the entry gate is free; where it is held, send nothing and wait for
+/// nothing.
+///
+/// **This is a read's dispatch.** A read's way out after its query is outside
+/// its bound, so it tries the gate once rather than waiting for a holder that
+/// can keep it for as long as a mint's open under it takes. A job it does not
+/// hand off stands as the entry's marker, with the claim held for it, and the
+/// dispatcher tick's retry sends it.
+fn dispatch_pending_where_free<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+) -> Result<(), HostError> {
+    let Some(state) = entry.gate.lock_until(Instant::now()) else {
+        return Ok(());
     };
+    dispatch_marked(shared, entry, state.expect("entry gate poisoned"))
+}
+
+/// Take the queue slot for the job `state` marks, under that hold, and send
+/// the job once the hold is given back.
+fn dispatch_marked<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    mut state: GateHold<'_, EntryState<O::Attachment>>,
+) -> Result<(), HostError> {
+    let Some(job) = state.claim.take_slot_for_marked() else {
+        return Ok(());
+    };
+    drop(state);
     dispatch_taken_job(shared, entry, job)
 }
 
@@ -3235,9 +3337,12 @@ fn dispatch_pending<O: EntryOps>(
 /// back only the slot still naming that job's epoch.
 ///
 /// **The slot goes back after the job sender's lock does.** The give-back
-/// takes the entry gate, which panics on a poisoned gate, and a panic under
-/// the sender's lock would poison the sender every later dispatch and the
-/// host's destruction take; the send is the only work done under that lock.
+/// can take the entry gate, and a hold of it runs whatever writes other
+/// callers left for it; a panic in one of those under the sender's lock would
+/// poison the sender every later dispatch and the host's destruction take, so
+/// the send is the only work done under that lock. The give-back waits for no
+/// holder of the gate, so a read's dispatch that meets a refused send still
+/// answers at once.
 fn dispatch_taken_job<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -3311,7 +3416,8 @@ fn run_dispatcher_step(step: impl FnOnce()) {
 
 /// Send the job each entry's marker holds, where the entry has no job in the
 /// channel and none in flight: a dispatch a full queue refused left the job
-/// there, and this is what sends it once the queue has room.
+/// there, as did a read's dispatch that found the entry gate held, and this is
+/// what sends it once the queue has room and the gate is free.
 fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
     #[cfg(test)]
     if shared.panic_in_dispatch_retry.swap(false, Ordering::SeqCst) {
@@ -3820,6 +3926,10 @@ pub struct ReadHold<O: EntryOps> {
     /// The content model the snapshot's store pins, taken under the gate hold
     /// that established the snapshot.
     content_model: Arc<ContentModel>,
+    /// What a plan over the snapshot is resolved against, taken under the
+    /// gate hold that established the snapshot; `None` where the entry's ops
+    /// record none.
+    plan_ground: Option<Arc<PlanGround>>,
     /// The demand this read holds on the entry for its own length. Declared
     /// last because fields drop in declaration order: the pin goes back in
     /// this type's own drop, under the gate, and the lease takes the gate
@@ -3893,6 +4003,14 @@ impl<O: EntryOps> ReadHold<O> {
     pub fn content_model(&self) -> &ContentModel {
         &self.content_model
     }
+
+    /// The ground a preview on this hold plans against: what the entry's
+    /// coverage recorded, read in the gate hold that established the
+    /// snapshot, so a preview reads it without taking the gate again; `None`
+    /// where the entry's ops record none.
+    pub(crate) fn plan_ground(&self) -> Option<&PlanGround> {
+        self.plan_ground.as_deref()
+    }
 }
 
 impl<O: EntryOps> fmt::Debug for ReadHold<O> {
@@ -3908,20 +4026,24 @@ impl<O: EntryOps> fmt::Debug for ReadHold<O> {
 }
 
 impl<O: EntryOps> Drop for ReadHold<O> {
-    /// **The snapshot ends before the gate is taken.** Giving the connection
+    /// **The snapshot ends before the pin goes back.** Giving the connection
     /// back is what wakes an acquisition waiting for it, and that acquisition
     /// waits outside the entry gate and takes the gate for itself once it has
     /// the connection — so ending the snapshot first hands it on while this
     /// hold is still outside the gate, rather than making it wait out this
-    /// hold's own unpinning behind the lock as well.
+    /// hold's own unpinning as well.
     ///
-    /// The gate is taken through a poison, as every drop that takes it is: a
-    /// read's query work that unwinds after another thread poisoned the gate
-    /// would otherwise panic a second time here.
+    /// **The pin goes back without waiting for the gate.** A read's way out
+    /// is outside its bound, so a gate another holder keeps — a mint's open
+    /// under it among them — would hold the read there for as long as it is
+    /// held. The unpin runs at once where the gate is free, and otherwise is
+    /// left for the next hold, which runs it before anything reads the entry;
+    /// that route reads through a poison, so a read's query work that unwinds
+    /// after another thread poisoned the gate does not panic a second time
+    /// here.
     fn drop(&mut self) {
         drop(self.snapshot.take());
-        let mut state = self.entry.gate.lock_in_a_drop();
-        state.unpin();
+        self.entry.gate.run_under_the_next_hold(EntryState::unpin);
     }
 }
 
@@ -5036,14 +5158,6 @@ impl<O: EntryOps> Host<O> {
         ))
     }
 
-    /// The ground a preview of the vault `name` plans against: what the
-    /// entry's coverage recorded, and nothing where it holds none.
-    pub(crate) fn plan_ground(&self, name: &VaultName) -> Option<PlanGround> {
-        let entry = self.shared.entries.get(name)?;
-        let state = entry.gate.lock().expect("entry gate poisoned");
-        state.plan_ground.clone()
-    }
-
     /// How many passes that stat every served root this host has run against
     /// its serving set: each classification a recheck runs, and each
     /// resolution of a directory.
@@ -5334,7 +5448,10 @@ impl<O: EntryOps> Host<O> {
     /// refuses the read as that wait running out; the demand the read
     /// recorded goes back with the next hold of the gate rather than waiting
     /// for it. A zero bound therefore refuses at once wherever the read would
-    /// wait. A teardown waits for no
+    /// wait. No later take on a read's path waits for the gate at all: the
+    /// dispatch of work a refusing read scheduled, the verdict on damage its
+    /// query met, and its hold's drop each try the gate once and otherwise
+    /// leave their work to the next hold. A teardown waits for no
     /// read: its publication moves the stance, which wakes every settling
     /// read, and a woken read refuses with what the entry then publishes
     /// unless the entry has reached `Ready` again by the time it retakes the
@@ -5455,10 +5572,12 @@ impl<O: EntryOps> Host<O> {
             // not something this read is refused for: the entry's own
             // published demand is what answers it either way. It takes the
             // gate, so the gate goes first, and the lease goes back after the
-            // dispatch.
+            // dispatch. It takes the gate only where it is free: the read
+            // answers now, and a job it does not hand off is the dispatcher
+            // tick's retry to send.
             let published = state.published_demand();
             let outside = state.let_the_gate_go();
-            let _ = dispatch_pending(&self.shared, &entry);
+            let _ = dispatch_pending_where_free(&self.shared, &entry);
             drop(outside);
             return Err(ReadRefusal::NotServing(published));
         }
@@ -5590,12 +5709,15 @@ impl<O: EntryOps> Host<O> {
         // the gate and whether the establishing round stayed one hold,
         // attested by the hold rather than reported by the establishment.
         //
-        // The model is the entry's under this same hold, so it and the
-        // snapshot established below describe one declaration, and the demand
+        // The model and the plan ground are the entry's under this same hold,
+        // so they and the snapshot established below describe one
+        // declaration, and a preview reads its ground off the hold rather
+        // than taking the gate again past its bound. The demand
         // is the one this hold answers under: `Ready`, or the healing of an
         // entry that has derived every fact this read met.
         let published = state.published_demand();
         let content_model = Arc::clone(&state.active_content_model);
+        let plan_ground = state.plan_ground.clone();
         let established = match <O::Attachment as SnapshotSource>::Reader::establish(turn) {
             Ok(established) => established,
             Err(unavailable) => {
@@ -5624,6 +5746,7 @@ impl<O: EntryOps> Host<O> {
                 store: established.reading,
             },
             content_model,
+            plan_ground,
             _lease: lease,
         })
     }
@@ -5633,8 +5756,19 @@ impl<O: EntryOps> Host<O> {
     /// resolves it, and refuse the read with what the entry then publishes.
     ///
     /// It runs after the builder returned, so no statement runs under the
-    /// gate it takes. The publication and the refusal come out of that one
-    /// hold, so the read answers the demand it published.
+    /// gate it takes. Where the read takes the gate itself, the publication
+    /// and the refusal come out of that one hold, so the read answers the
+    /// demand it published.
+    ///
+    /// **It never waits for the gate.** It runs after the read's query, outside
+    /// the read's bound, so it tries the gate once. Where another holder has
+    /// it, the verdict is left for the next hold, which judges it afresh
+    /// against the entry as that hold finds it — the handle, an owed rebuild, a
+    /// park and a claim all re-read — and publishes it there; a rebuild that
+    /// hold schedules is sent by the dispatcher tick's retry. The read is then
+    /// refused as reader-unavailable, because it read nothing under the gate
+    /// that could answer it otherwise. Its dispatch of a rebuild it scheduled
+    /// tries the gate once in the same way.
     ///
     /// **The verdict is the entry's where the entry still reads the store the
     /// read ran on**: its reader is the handle this read ran on, it owes no
@@ -5663,46 +5797,29 @@ impl<O: EntryOps> Host<O> {
         detail: String,
     ) -> ReadRefusal {
         let entry = &hold.entry;
-        let name = entry.name();
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let published = state.published_demand();
-        let on_this_handle = state
-            .reader
-            .as_ref()
-            .is_some_and(|standing| Arc::ptr_eq(standing, &hold.reader));
-        let serving = published == Demand::State(TrustState::Ready);
-        if !on_this_handle {
-            return if serving {
-                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                    "this entry's reads moved to another handle while this read ran",
-                ))
-            } else {
-                ReadRefusal::NotServing(published)
-            };
-        }
-        if state.rebuild_required || state.stands_parked() {
-            return ReadRefusal::NotServing(published);
-        }
-        if state.damage_met_under_a_claim.is_none() {
-            state.damage_met_under_a_claim = Some(detail);
-        }
-        if publish_damage_a_read_met(&mut state, name).is_none() {
-            return if serving {
-                ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
-                    "the store found its derived data damaged while other work held this \
-                     entry; the entry rebuilds it when that work ends",
-                ))
-            } else {
-                ReadRefusal::NotServing(published)
-            };
-        }
-        let published = state.published_demand();
+        // The handle the read ran on, held weakly: a verdict left for a later
+        // hold names the handle without keeping it open.
+        let ran_on = Arc::downgrade(&hold.reader);
+        let Some(state) = entry.gate.lock_until(Instant::now()) else {
+            let name = entry.name().clone();
+            entry.gate.run_under_the_next_hold(move |state| {
+                judge_damage_a_read_met(state, &name, &ran_on, detail);
+            });
+            return ReadRefusal::ReaderUnavailable(ReaderUnavailable::new(
+                "the store found its derived data damaged while another hold had this entry; \
+                 the entry judges it under its next hold",
+            ));
+        };
+        let mut state = state.expect("entry gate poisoned");
+        let verdict = judge_damage_a_read_met(&mut state, entry.name(), &ran_on, detail);
         drop(state);
-        // The dispatch's one failure is the worker pool being gone, which is
-        // the host coming down; the published demand answers the read either
-        // way.
-        let _ = dispatch_pending(&self.shared, entry);
-        ReadRefusal::NotServing(published)
+        if verdict.scheduled {
+            // The dispatch's one failure is the worker pool being gone, which
+            // is the host coming down; the published demand answers the read
+            // either way.
+            let _ = dispatch_pending_where_free(&self.shared, entry);
+        }
+        verdict.refusal
     }
 
     /// What this host's reads have cost: how many were served, what they ran
@@ -8268,6 +8385,69 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 #[cfg(test)]
 pub(crate) fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
     Demand::State(state).answer(&VaultName::new("answered").expect("a legal vault name"))
+}
+
+/// Another thread's hold of an entry's gate, kept until a case drops this or
+/// ten seconds pass, so a case that fails under it still ends.
+#[cfg(test)]
+pub(crate) struct GateHeldElsewhere {
+    let_go: Option<mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl GateHeldElsewhere {
+    /// Take `entry`'s gate on another thread, and return once it is held.
+    fn take<A: SnapshotSource>(entry: &Arc<Entry<A>>) -> Self {
+        let (holding, held) = mpsc::channel::<()>();
+        let (let_go, released) = mpsc::channel::<()>();
+        let entry = Arc::clone(entry);
+        let holder = std::thread::spawn(move || {
+            let hold = entry.gate.lock().expect("entry gate poisoned");
+            holding.send(()).expect("the case waits for the hold");
+            let _ = released.recv_timeout(Duration::from_secs(10));
+            drop(hold);
+        });
+        held.recv().expect("the holder took the gate");
+        GateHeldElsewhere {
+            let_go: Some(let_go),
+            holder: Some(holder),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GateHeldElsewhere {
+    /// Let the gate go, and return once the holder has.
+    fn drop(&mut self) {
+        // A holder that kept the gate its whole ten seconds has gone already.
+        if let Some(let_go) = self.let_go.take() {
+            let _ = let_go.send(());
+        }
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
+}
+
+#[cfg(test)]
+impl<O: EntryOps> Host<O> {
+    /// Once the next read of `name` lets the entry's gate go, take the gate
+    /// on another thread and keep it: the hold arrives on the receiver this
+    /// answers, and the gate goes back when the case drops it. A case outside
+    /// this module reaches a read's way past its establishing hold this way.
+    pub(crate) fn hold_the_gate_once_a_read_lets_go(
+        &self,
+        name: &VaultName,
+    ) -> mpsc::Receiver<GateHeldElsewhere> {
+        let entry = self.shared.entries.get(name).expect("the entry is served");
+        let (taken, held) = mpsc::channel();
+        let hook_entry = Arc::clone(&entry);
+        entry.gate.when_a_read_lets_go(move || {
+            let _ = taken.send(GateHeldElsewhere::take(&hook_entry));
+        });
+        held
+    }
 }
 
 #[cfg(test)]
@@ -15501,13 +15681,16 @@ mod tests {
     }
 
     /// **A send a full queue refuses gives its slot back outside the job
-    /// sender's lock**, so a gate poisoned between the slot's take and its
-    /// give-back panics that give-back without poisoning the sender, and the
-    /// host's destruction still takes the sender.
+    /// sender's lock, and reads through a poisoned gate to do it**, so a gate
+    /// poisoned between the slot's take and its give-back neither unwinds the
+    /// send nor poisons the sender, and the host's destruction still takes the
+    /// sender.
     ///
     /// The one worker is inside an attach and the one channel slot holds the
-    /// next job, so the send is refused as full; the send runs under
-    /// `catch_unwind`, which catches the give-back's panic on the poison.
+    /// next job, so the send is refused as full. The give-back is left for the
+    /// gate's next hold where it cannot take the gate at once, and that route
+    /// reads through a poison as a drop's does: what it writes there no later
+    /// holder reads, since every ordinary take still panics on the poison.
     #[test]
     fn a_send_refused_over_a_poisoned_gate_leaves_the_job_sender_unpoisoned() {
         let ops = Arc::new(FakeOps::default());
@@ -15543,12 +15726,12 @@ mod tests {
         }));
 
         assert!(
-            sent.is_err(),
-            "the give-back of the refused send's slot did not meet the poison"
+            matches!(sent, Ok(Ok(()))),
+            "a send a full queue refused over a poisoned gate did not answer as refused"
         );
         assert!(
             !host.shared.jobs.is_poisoned(),
-            "the give-back panicked under the job sender's lock"
+            "the give-back poisoned the job sender"
         );
         ops.block_attach.store(false, Ordering::SeqCst);
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -22092,6 +22275,199 @@ mod tests {
             "the refused read's demand outlived it"
         );
         ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// The read bound of the host a held-gate case runs on, and what a read
+    /// whose way out meets a held gate is held to: a read that waited for the
+    /// gate at all would wait out the ten seconds the holder keeps it, and one
+    /// that waited up to any bound of its own past the read's would cross
+    /// this.
+    const A_READS_BOUND: Duration = Duration::from_millis(300);
+
+    /// **A read's hold dropped while its gate is held gives its pin back
+    /// without waiting for the gate.** Another holder keeps the gate far past
+    /// the read's bound; the hold's drop returns at once rather than once the
+    /// holder lets go, and the next hold reads the entry unpinned.
+    #[test]
+    fn a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let held = GateHeldElsewhere::take(&entry);
+        let started = Instant::now();
+        drop(hold);
+        let waited = started.elapsed();
+        drop(held);
+        assert!(
+            waited < A_READS_BOUND,
+            "a read's hold waited {waited:?} for a held gate to give its pin back"
+        );
+        assert_eq!(
+            entry.gate.lock().expect("entry gate poisoned").safety_pins,
+            0,
+            "the next hold read the dropped read's pin still standing"
+        );
+    }
+
+    /// **A read that schedules the attach it owes and refuses does not wait
+    /// for the gate to send it.** The read schedules the attach under its
+    /// first hold, and in the instant it lets the gate go another holder takes
+    /// the gate and keeps it far past the read's bound. The read refuses with
+    /// the warming the attach publishes at once rather than once the holder
+    /// lets go, and the attach it scheduled stands for the dispatcher's retry,
+    /// which sends it once the gate is free.
+    #[test]
+    fn a_read_that_schedules_and_refuses_under_a_held_gate_leaves_the_dispatch_to_the_retry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        let (taken, held) = mpsc::channel::<GateHeldElsewhere>();
+        let hook_entry = Arc::clone(&entry);
+        entry.gate.when_a_read_lets_go(move || {
+            taken
+                .send(GateHeldElsewhere::take(&hook_entry))
+                .expect("the case waits for the hold");
+        });
+
+        let started = Instant::now();
+        let refusal = host
+            .begin_read(&name)
+            .expect_err("an unattached entry answered a read");
+        let waited = started.elapsed();
+        drop(held.recv().expect("the read let the gate go"));
+        assert!(
+            waited < A_READS_BOUND,
+            "the read waited {waited:?} for a held gate to send the attach it scheduled"
+        );
+        assert_eq!(
+            refusal,
+            ReadRefusal::NotServing(Demand::State(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None
+            ))),
+            "the refused read published something other than the work it scheduled"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            0,
+            "an attach the read could not hand off was sent before any retry"
+        );
+
+        retry_pending_dispatches(&host.shared);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the retry did not send the attach the read scheduled"
+        );
+    }
+
+    /// **A queue slot a refused send gives back while the gate is held goes
+    /// back with the next hold.** A read's dispatch that finds the gate free
+    /// takes the slot and gives the gate back before it sends; where the
+    /// channel then refuses the job, the give-back meets whatever holder took
+    /// the gate in between. It returns at once rather than once the holder
+    /// lets go, and the next hold reads the slot free, so the retry can send
+    /// the job the marker still names.
+    #[test]
+    fn a_queue_slot_given_back_under_a_held_gate_is_free_at_the_next_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+        let epoch = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            schedule_demand(&mut state, &name);
+            state
+                .claim
+                .take_slot_for_marked()
+                .expect("the scheduled attach takes the free slot")
+                .epoch()
+        };
+
+        let held = GateHeldElsewhere::take(&entry);
+        let started = Instant::now();
+        release_queue_slot(&entry, epoch);
+        let waited = started.elapsed();
+        drop(held);
+        assert!(
+            waited < A_READS_BOUND,
+            "the slot's give-back waited {waited:?} for a held gate"
+        );
+        assert!(
+            !entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .slot_taken(),
+            "the next hold read the slot the refused send gave back still taken"
+        );
+
+        retry_pending_dispatches(&host.shared);
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// **A read that meets damage while its gate is held leaves the verdict
+    /// to the next hold.** Another holder keeps the gate far past the read's
+    /// bound. The read is refused as reader-unavailable at once rather than
+    /// once the holder lets go, since it read nothing under the gate; the next
+    /// hold publishes the damage and schedules the rebuild, and the
+    /// dispatcher's retry sends it.
+    #[test]
+    fn a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_settling_within(Arc::clone(&ops), A_READS_BOUND);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        let hold = host
+            .begin_read(&name)
+            .expect("a ready entry answers a read");
+        let entry = host.shared.entries.get(&name).expect("the entry is served");
+
+        let held = GateHeldElsewhere::take(&entry);
+        let started = Instant::now();
+        let refusal = host.withdraw_for_read_damage(&hold, "the store is damaged".to_string());
+        let waited = started.elapsed();
+        drop(held);
+        drop(hold);
+        assert!(
+            waited < A_READS_BOUND,
+            "a read that met damage waited {waited:?} for a held gate"
+        );
+        assert!(
+            matches!(refusal, ReadRefusal::ReaderUnavailable(_)),
+            "a read that met damage under a held gate was refused as {refusal:?}"
+        );
+
+        assert_eq!(
+            host.state(&name),
+            answered(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the store is damaged")
+            )),
+            "the next hold published another state than the damage the read met"
+        );
+        assert!(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .is_held(),
+            "the next hold scheduled no rebuild"
+        );
+        retry_pending_dispatches(&host.shared);
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
     }
 

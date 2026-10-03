@@ -1171,12 +1171,19 @@
       "property": "A read's wait is bounded and reported, and an in-flight write does not serialize the read surface. One session mutex held across a blocking round trip is the shape this forbids: under it a 40-second apply blocks every concurrent read for 40 seconds with no diagnostic.",
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
-        "status": "dormant",
-        "reason": "the write side has its subject and is carried: an apply runs as a job holding its entry's claim and answers its caller through crates/norn-host/src/lifecycle.rs::PendingApply, and the entry stays Ready from planning to its changeset, so a read during an apply is answered at once from the state before it, as a_fact_delivered_during_an_apply_waits_for_its_changeset_and_hands_on_to_the_reconcile states. No session mutex is held across anything: an entry's reads run on the handle its coverage minted, crates/norn-store/src/store.rs::SnapshotReader — a second connection opened with the read-only flag beside the one writer connection a store holds behind &mut — and crates/norn-host/src/lifecycle.rs answers concurrent reads of one entry through that single handle. What keeps the case dormant is the read side's end-to-end bound. Every wait Host::begin_read takes — its first take of the entry gate, the wait for a change it settles over, the wait for a held connection, and the retake of the gate after either wait — runs to the one read deadline, as a_reads_first_take_of_a_gate_held_past_its_bound_refuses_within_the_bound, a_read_past_its_settle_bound_refuses_as_still_indexing, a_read_waiting_for_the_connection_refuses_at_its_bound, a_reads_retake_of_a_gate_held_past_its_bound_refuses_within_the_bound and a_reads_retake_after_the_connection_wait_refuses_within_the_bound state; three takes of the entry gate on a read's path remain ordinary locks: ReadHold's drop through lock_in_a_drop, withdraw_for_read_damage, and the dispatch_pending lock in begin_read's schedule-and-refuse branch — so a read's wait is not yet bounded end to end.",
-        "grounds": [
-          {"symbol-present": "crates/norn-store/src/store.rs::SnapshotReader"},
-          {"present": "crates/norn-host/src/lifecycle.rs"},
-          {"symbol-present": "crates/norn-host/src/lifecycle.rs::PendingApply"}
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/src/lifecycle/tests/applies.rs::a_fact_delivered_during_an_apply_waits_for_its_changeset_and_hands_on_to_the_reconcile",
+          "crates/norn-host/src/lifecycle.rs::a_reads_first_take_of_a_gate_held_past_its_bound_refuses_within_the_bound",
+          "crates/norn-host/src/lifecycle.rs::a_read_past_its_settle_bound_refuses_as_still_indexing",
+          "crates/norn-host/src/lifecycle.rs::a_read_waiting_for_the_connection_refuses_at_its_bound",
+          "crates/norn-host/src/lifecycle.rs::a_reads_retake_after_the_connection_wait_refuses_within_the_bound",
+          "crates/norn-host/src/lifecycle.rs::a_reads_retake_of_a_gate_held_past_its_bound_refuses_within_the_bound",
+          "crates/norn-host/src/lifecycle.rs::a_read_that_schedules_and_refuses_under_a_held_gate_leaves_the_dispatch_to_the_retry",
+          "crates/norn-host/src/lifecycle.rs::a_queue_slot_given_back_under_a_held_gate_is_free_at_the_next_hold",
+          "crates/norn-host/src/lifecycle.rs::a_read_that_meets_damage_under_a_held_gate_leaves_the_verdict_to_the_next_hold",
+          "crates/norn-host/src/lifecycle.rs::a_read_hold_dropped_under_a_held_gate_unpins_with_the_next_hold",
+          "crates/norn-host/src/production.rs::a_preview_answers_within_its_bound_while_another_holds_the_gate"
         ]
       }
     },
