@@ -403,6 +403,110 @@ pub const READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// hosted reading stands beside the local ones yet.
 pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
+/// Peak resident set attaching the `realistic` profile with the plan subjects
+/// planted beside it and running every plan of the planning child must stay
+/// under.
+///
+/// The subject is a child process that adopts a tree the parent generated with
+/// the plan subjects planted beside it, attaches it through a production
+/// host, keeps it attached, and previews then applies, each apply landing the
+/// plan its preview answered: a `set --where` matching ten planted documents,
+/// a move of a planted hub whose twenty in-links its cascade rewrites, a delete
+/// of a document no link names, a move of a 4 KiB document and a move of a 4
+/// MiB one. So the reading is the attach's cost, the live host's, and the
+/// highest any plan reached, plus the test binary that carried them; the
+/// kernel reports one peak per child, which is why the plans share one.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04: **60.78–65.05 MiB**
+/// over fourteen readings of the planning child at `realistic`, across this
+/// bar's own case and the profile pair's `realistic` child. The same host read the attach ceiling's child at 29.44 MiB and the
+/// read ceiling's at 31.81 MiB in the same run of the lane. **Most of the
+/// distance to the read child is the 4 MiB document**: the attach heal reads
+/// and parses it whole, and each of its move's preview and apply holds about
+/// four times its body at once.
+///
+/// **This ceiling bounds the process.** It is 105 MiB, by the rule
+/// [`READ_PEAK_RSS_CEILING_BYTES`] is authored under: the proportion
+/// [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its highest reading, 1.61x,
+/// over the highest plan reading, 65.05 MiB, which is 104.73 MiB, rounded up
+/// to a whole MiB. It is the coarse backstop: what refuses a plan whose memory
+/// is the vault is [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`].
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates. No
+/// hosted reading stands beside the local ones yet: **re-derive it from the
+/// first hosted readings**, and again once a move no longer holds the bytes
+/// it moves, which lowers every reading it was scaled from.
+pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 105 * 1024 * 1024;
+
+/// How many more bytes of heap the plan mix may hold above the attach over
+/// the `realistic` profile than over the `ambiguous` profile.
+///
+/// **The bar that a plan's memory is its operations and a fixed record per
+/// target, never the vault.** A planning child attaches its profile with the
+/// plan subjects planted beside it, the same subjects at both profiles, marks
+/// the heap once the attachment is ready, and previews three writes through
+/// the host: a `set --where` matching ten planted documents, a move of a
+/// planted hub whose twenty in-links its cascade rewrites, and a delete of a
+/// document no link names. It then applies each plan exactly as previewed and
+/// reports the most the six requests raised the live heap above the mark. A
+/// plan that holds its operations and a record for each target it writes
+/// holds the same bytes at both profiles; one that held something for every
+/// document of the vault holds 1,700 more of it at `realistic`. It is a
+/// difference in bytes rather than a ratio for the reason
+/// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] gives: the reading is exact.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over eight runs of
+/// the pair: **166,262 bytes at both profiles in six runs and 166,266 at both
+/// in the other two**, a difference of **0 bytes** in every run. The previews
+/// all run before the first apply: an apply's watcher echo is confirmed by a
+/// job beside a later preview or not by timing alone, and a mix that
+/// interleaved them read 164,110 to 232,512 bytes at one profile across runs.
+///
+/// **The reading still moves by about 31 KB between two states.** The
+/// watcher's threads take an apply's own publications in while the apply is
+/// still committing, and whether their event buffers stand at the apply's
+/// peak is timing. The planning children outside the pair read 166,222 to
+/// 166,546 bytes in some runs and 192,701 to 197,512 in others, the same work
+/// on every thread each time, an excursion of at most **30,966 bytes**. The
+/// pair's sixteen readings have all sat in the lower state so far, but
+/// nothing holds them there.
+///
+/// The allowance is **40 KiB**: the excursion with a quarter of headroom,
+/// 38,708 bytes, rounded up to the next 8 KiB. A retention held for each of
+/// the 1,700 documents between the profiles fails it from **24.1 bytes a
+/// document** (40,960 / 1,700) where both readings sit in one state, and from
+/// **42.3 bytes a document** ((40,960 + 30,966) / 1,700) where the excursion
+/// lands on `ambiguous` alone. That is coarser than the 4 KiB
+/// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
+/// [`HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES`] are authored at, whose subjects
+/// run with no apply in flight, and it is the price of a plan applied through
+/// a live host: **an id kept for every document passes it.** A path kept for
+/// every document fails it in either state.
+///
+/// **What it does not see is a retention that stays under the mix's
+/// high-water**, the read pair's declared blind spot carried over: the
+/// reading is the highest the heap stood, so a retention built after the
+/// peak, or one that never climbs past it, reads as nothing. NORN-131 watches
+/// that limit.
+///
+/// **Its negative controls**, each read once locally on 2026-10-04:
+///
+/// - The `where` matcher paging through every document of the vault and
+///   keeping each path while it plans reads 166,262 bytes at `ambiguous`,
+///   where the 333 paths stay under the mix's high-water, and 523,375 at
+///   `realistic`, a difference of **357,113 bytes**, which fails.
+/// - A `Vec<u64>` holding one id for every derived document, allocated right
+///   after the mark and kept past the reading, reads 168,934 bytes at
+///   `ambiguous` and 182,534 at `realistic`, a difference of **13,600 bytes**,
+///   which passes, as the arithmetic above says it does.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates. No
+/// hosted reading stands beside the local ones yet: **re-derive it from the
+/// first hosted readings.**
+pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
+
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.
 ///

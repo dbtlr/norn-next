@@ -1147,7 +1147,12 @@ counted by the process's own allocator, at the 300-document and ~2k-document pro
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the
 whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
-stays under the find's pages is not seen. No query shape carries a timing bar.
+stays under the find's pages is not seen. No query shape carries a timing bar. Two `plan-`
+bars hold a write plan the same way: one process previews and applies a `set --where`, a hub
+move with its cascade and a delete, and the heap they raise above the attached host is bounded
+in bytes across the two profiles, because a plan's memory is its operations and a fixed record
+per target, never the vault; and the ~2k-document profile's process carries an absolute peak
+ceiling.
 
 ### 4. One obvious path
 
