@@ -311,8 +311,9 @@ fn a_quote_inside_a_plain_scalar_hides_no_comment() {
 }
 
 /// **A quote where a scalar begins opens a quoted scalar**, whose `#` is no
-/// comment: as a key, a sequence entry, a flow entry, and after a tag or an
-/// anchor.
+/// comment: as a key, a sequence entry, a flow entry, after a tag or an
+/// anchor, and as the next key of a mapping inside a sequence entry, whose
+/// line ends the plain scalar before it although indented past the `-`.
 #[test]
 fn a_quote_where_a_scalar_begins_hides_its_hash() {
     let rewriting = one_step(|text| {
@@ -325,11 +326,13 @@ fn a_quote_where_a_scalar_begins_hides_its_hash() {
                 - 'entry # quoted'\n\
                 flow: ['flow # quoted', {k: \"map # quoted\"}]\n\
                 tagged: !!str 'tag # quoted'\n\
-                anchored: &a 'anchor # quoted'\n";
+                anchored: &a 'anchor # quoted'\n\
+                l:\n\
+                - a: rock\n  'next # quoted': v\n";
     assert_eq!(
         rewriting.migrate(file.as_bytes()),
         Ok(Some(
-            "version: 2\n'key': v\nseq:\n- 'entry'\nflow: ['flow', {k: \"map\"}]\ntagged: !!str 'tag'\nanchored: &a 'anchor'\n"
+            "version: 2\n'key': v\nseq:\n- 'entry'\nflow: ['flow', {k: \"map\"}]\ntagged: !!str 'tag'\nanchored: &a 'anchor'\nl:\n- a: rock\n  'next': v\n"
                 .to_string()
         ))
     );
