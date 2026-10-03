@@ -29,19 +29,25 @@
 //!
 //! **A command is read whole or not at all.** It is one line, holding no shell
 //! metacharacter anywhere — no pipe, list operator, redirection, comment,
-//! expansion, brace, wildcard, tilde, escape, quote or subshell — and it runs under `bash` or `sh`,
-//! named or left as the runner's default, so it is one process with the
-//! arguments it spells: each of those shells splits such a line on whitespace
-//! and does nothing else to it. Any other `shell:`, on the step or as a job's
-//! or the workflow's `defaults.run.shell`, is a template the runner hands the
-//! command to, and the template decides what runs — `true {0}` runs nothing.
-//! The arguments are then held to a grammar: optionally
-//! the flake tripwire in front, then either the lane script with a package, a
-//! target and harness arguments that select nothing, or `cargo test` with the
-//! flags that name a package, a feature and one target and the few that change
-//! nothing about which tests run. A command outside that grammar runs nothing,
-//! so a step this cannot read fails whatever needed it rather than vouching for
-//! a test it may not run.
+//! expansion, brace, wildcard, tilde, escape, quote or subshell — and it runs
+//! under `bash` or `sh`, named or left as the runner's default, so it is one
+//! process with the arguments it spells: each of those shells splits such a
+//! line on whitespace and does nothing else to it. Any other `shell:`, on the
+//! step or as a job's or the workflow's `defaults.run.shell`, is a template
+//! the runner hands the command to, and the template decides what runs —
+//! `true {0}` runs nothing. The arguments are then held to a grammar:
+//! optionally the flake tripwire in front, then either the lane script with a
+//! package, a target and harness arguments that select nothing, or
+//! `cargo test` with the flags that name a package, a feature and one target
+//! and the few that change nothing about which tests run. A command outside that
+//! grammar runs nothing, so a step this cannot read fails whatever needed it
+//! rather than vouching for a test it may not run.
+//!
+//! **When a workflow runs is not judged here.** Its triggers and their path
+//! filters, and a step's `working-directory`, are read by no rule above, on
+//! purpose: they decide whether and where CI runs a workflow, the same for a
+//! lane step as for a `cargo test` step, not what a step that runs vouches
+//! for.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -520,9 +526,10 @@ fn harness_selects_nothing(harness: &[&str]) -> Option<()> {
     Some(())
 }
 
-/// Whether `text` is a positive decimal count.
+/// Whether `text` is a positive decimal count: digits alone, not all of them
+/// zero.
 fn is_count(text: &str) -> bool {
-    !text.is_empty() && text.chars().all(|c| c.is_ascii_digit())
+    text.chars().all(|c| c.is_ascii_digit()) && text.chars().any(|c| c != '0')
 }
 
 #[cfg(test)]
@@ -578,6 +585,8 @@ mod tests {
             ".github/scripts/lane-suite.sh norn-host memory --exact a_case",
             ".github/scripts/lane-suite.sh norn-host memory --skip a_case",
             ".github/scripts/lane-suite.sh norn-host memory --test-threads=many",
+            ".github/scripts/lane-suite.sh norn-host memory --test-threads=0",
+            ".github/scripts/lane-suite.sh norn-host memory --test-threads 00",
             ".github/scripts/lane-suite.sh norn-host",
             ".github/scripts/lane-suite.sh --package norn-host memory",
             "scripts/lane-suite.sh norn-host memory",
