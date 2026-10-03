@@ -2483,7 +2483,9 @@ fn one_apply(
 /// the account counted, every document and target read must be of a file
 /// below `root` that the plan touches, each touched file must be read
 /// exactly its fate's budget by each protocol, and each staged shadow must be
-/// read once, under a name of its own. A read of a file the plan does not
+/// read once, under a name of its own: an absolute path whose file name is a
+/// shadow name, outside `root` or in the shadow home's fallback below it, so
+/// a shadow read counted against a document fails. A read of a file the plan does not
 /// touch fails here even where it leaves every count at its budget.
 #[cfg(feature = "induced-failure")]
 fn the_reads_name_the_touched_files(
@@ -2511,9 +2513,21 @@ fn the_reads_name_the_touched_files(
         std::collections::BTreeMap::new();
     let mut untouched = Vec::new();
     let mut shadows = std::collections::BTreeSet::new();
+    let mut not_shadows = Vec::new();
+    let shadow_fallback = root.join(norn_fs::shadow::FALLBACK);
     for read in files {
         if read.act == ReadAct::Shadow {
-            shadows.insert(read.path.as_path());
+            let named_a_shadow = read
+                .path
+                .file_name()
+                .is_some_and(norn_fs::shadow::is_shadow_name);
+            let outside_the_documents =
+                !read.path.starts_with(root) || read.path.starts_with(&shadow_fallback);
+            if read.path.is_absolute() && named_a_shadow && outside_the_documents {
+                shadows.insert(read.path.as_path());
+            } else {
+                not_shadows.push(read.path.display().to_string());
+            }
             continue;
         }
         match read.path.strip_prefix(root) {
@@ -2532,6 +2546,15 @@ fn the_reads_name_the_touched_files(
         touched.summary(),
         root.display(),
         &untouched[..untouched.len().min(5)]
+    );
+    assert!(
+        not_shadows.is_empty(),
+        "{what} over `{}` counted {} shadow reads of files that are not staged shadows, a \
+         shadow being a file under a shadow name in a shadow home outside the vault's \
+         documents; the first: {:?}",
+        profile.name,
+        not_shadows.len(),
+        &not_shadows[..not_shadows.len().min(5)]
     );
     let mut off_budget = Vec::new();
     for (path, fate) in &touched.fates {
