@@ -996,7 +996,7 @@
       }
     },
     {
-      "name": "audit-stream-integrity",
+      "name": "every-filesystem-effect-is-planned-and-forecast",
       "kind": "defect-class",
       "venue": 4,
       "property": "Every filesystem effect an apply makes appears in its plan and its forecast: every file it writes is a transition of the resolved plan, every folder it makes or removes is one its forecast names, and the applied report names the same folders the forecast did.",
