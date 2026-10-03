@@ -48,10 +48,10 @@
 //!
 //! What is left waits on nothing any subject names — a shell step, a
 //! `compile_fail` doctest, a vocabulary nobody has written, a guard with no
-//! home decided. Those reasons expire only when a
+//! home decided, a surface nothing wires. Those reasons expire only when a
 //! person re-derives them, so the class is pinned by name in
-//! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is that
-//! the class is a reviewed list rather than a silent majority.
+//! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is
+//! that the class is a reviewed list rather than a silent majority.
 //!
 //! # What this suite is not
 //!
@@ -158,12 +158,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reader behind the `induced-failure` feature is not a residue: the audit
 /// lists the feature build where a cited test is missing without it, and holds
-/// such a carrier to a CI step running its package with the feature on. Three
-/// cases pinned here — `each-file-is-read-once-per-build`,
-/// `instrumentation-exists-and-is-consumed` and
-/// `maintenance-touches-the-affected-set-only` — still name that reader among
-/// what they wait on, so those reasons are due to be re-derived: bound to the
-/// carriers the feature build compiles, or restated on what they still lack.
+/// such a carrier to a CI step running its package with the feature on.
 ///
 /// The grounds beside such a reason hold the subjects it cites as present, so
 /// the audit still catches those moving; the claim that something is missing is
