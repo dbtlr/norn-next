@@ -2493,7 +2493,12 @@ fn one_apply(
 /// shadow name, outside `root` or in the shadow home's fallback below it, so
 /// a shadow read counted against a document fails. A read of a file the
 /// plan does not touch fails here even where it leaves every count at its
-/// budget.
+/// budget. The recording is in the order the reads ran, so each file the
+/// plan writes must be read as a document exactly once after the kernel's
+/// last read of it — the commit's read-back, which carries the written state
+/// to the store without the applier holding its bytes — and a step that
+/// reused bytes it had read before while the commit read twice fails here
+/// with every count at its budget.
 #[cfg(feature = "induced-failure")]
 fn the_reads_name_the_touched_files(
     profile: &norn_fixtures::Profile,
@@ -2593,6 +2598,38 @@ fn the_reads_name_the_touched_files(
         profile.name,
         spent.shadow_reads,
         shadows.len()
+    );
+    let mut not_read_back_once = Vec::new();
+    for (path, fate) in &touched.fates {
+        if *fate == Fate::Removed {
+            continue;
+        }
+        let of_this = |read: &&norn_fs::reads::FileRead| {
+            read.act != ReadAct::Shadow && read.path.strip_prefix(root).ok() == Some(path.as_path())
+        };
+        let after_the_kernel = files
+            .iter()
+            .rposition(|read| of_this(&read) && read.act == ReadAct::Target)
+            .map_or(0, |last| last + 1);
+        let read_back = files[after_the_kernel..]
+            .iter()
+            .filter(of_this)
+            .filter(|read| read.act == ReadAct::Document)
+            .count();
+        if read_back != 1 {
+            not_read_back_once.push(format!(
+                "{} ({fate:?}): {read_back} document reads after the kernel's last",
+                path.display()
+            ));
+        }
+    }
+    assert!(
+        not_read_back_once.is_empty(),
+        "{what} over `{}` did not read {} written files back exactly once after the kernel \
+         published them; the first: {:?}",
+        profile.name,
+        not_read_back_once.len(),
+        &not_read_back_once[..not_read_back_once.len().min(5)]
     );
 }
 

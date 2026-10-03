@@ -1814,7 +1814,7 @@
       "name": "write-through-the-composed-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "An apply reads each file it touches a fixed number of times by each protocol that reads it, set by what the plan does to that file, the same at 300 documents as at 2000 and at plans of 1, 10, 22 and 200 targets, and reads no file it neither touches nor plans from; its commit reads each written file back once, to reach the store without holding its bytes, and each read hashes what it read once. Re-reading what the apply just composed a growing number of times is the shape this forbids.",
+      "property": "An apply reads each file it touches a fixed number of times by each protocol that reads it, set by what the plan does to that file, the same at 300 documents as at 2000 and at plans of 1, 10, 22 and 200 targets, and reads no vault file it neither touches nor plans from, beyond one read of each shadow it stages; its commit reads each written file back once, after the write kernel last read it, to reach the store without holding its bytes, and each read hashes what it read once. Re-reading what the apply just composed a growing number of times is the shape this forbids.",
       "sources": ["NRN-a59", "NRN-a63", "NRN-a62"],
       "binding": {
         "status": "bound",
