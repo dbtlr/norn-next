@@ -2302,7 +2302,9 @@ control files through the normal attach path. The host does not persist an accep
 candidate.
 
 The schema fingerprint is the invalidation key for schema-dependent derived tables. A re-pin
-discards schema-keyed rows and names no paths, so a vault-wide walk records them again. That
+discards schema-keyed rows and names no paths, so a vault-wide walk records them again. The
+one exception is a document row's admitting count, which the pin leaves standing and the walk
+derives again in place (its declaration is below). That
 walk is hash-authoritative for the *content* half, and the pin's own generation is what
 reaches a row whose content never drifted: **a row stamped at or below the generation the
 standing pin was taken at owes its judgment again**, so a document whose bytes have not
@@ -2378,6 +2380,21 @@ fingerprint it was read from, an increment refuses typed values derived under an
 than the one pinned in its own transaction, and refuses a declaration read under any other
 to judge its link health by, and every read builder refuses a declaration
 its snapshot does not pin.
+
+The **admitting count** is the one column of a document row the declaration shapes: the
+fewest segments a link target spells that keeps the document in its ambiguity class. Its
+declaration under [ADR 0027](decisions/0027-link-health-rides-the-changeset.md): its inputs
+are the document's path and the pinned ambiguity-ignore set, matched under the store's
+order; derivation is deterministic, one pure function of the two; it is maintained inside
+the document's own changeset, computed under the declaration that changeset is judged under;
+and its invalidation key is the standing schema pin. **A re-pin does not discard it**: the
+pin's transaction leaves the column standing, and the heal that follows converges it by
+deriving every row below the pin again, so until that heal reaches a row, the row holds the
+count the old ignore set gave it. No read observes that window, because a schema reload
+closes the entry's reader until the heal converges. A re-decision inside the heal's own
+changesets may read an old count, but a class is re-decided by every changeset that writes
+one of its members, and the last of them runs after every member is derived under the new
+set.
 
 **Exclusion is a membership boundary**: an excluded place holds no rows, and any row
 standing under an excluded root is pruned by the next leg that ranges over that root —

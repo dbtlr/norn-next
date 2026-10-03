@@ -440,10 +440,10 @@ pub(crate) fn heads_parameters(
 /// distinct key names, each row the arm, the key's index in its list, and the
 /// count, over the two arms [`heads_sql`] reads. The class arm counts the
 /// key's range of the suffix key the root probes, less the places the ignore
-/// set `?3` excludes under the order `?4`, which is the set of members the
-/// stored admitting counts [`heads_sql`] seeks by admit; so it steps past the
-/// members its class keeps out, as a count of the class steps past every
-/// member it admits.
+/// set `?3` excludes under the order `?4`. That is the same set of members
+/// [`heads_sql`] seeks through the stored admitting counts, but this count
+/// tests the globs row by row, so it steps past every member its class keeps
+/// out, as it steps past every member it admits (NORN-339).
 pub(crate) fn totals_sql(key: SuffixKey) -> String {
     let class = class_predicate(key);
     let path = resolve::link_key_path("dp", key, "j.value");
