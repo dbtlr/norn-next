@@ -1537,16 +1537,19 @@ fn files_owning(directory: &[String], kind: &str) -> Vec<Vec<String>> {
 }
 
 /// Whether `source` declares the file module `name` with `mod <name>;` in the
-/// block of its inline module `inline` — not beside the block, and not in a
-/// block nested inside it.
+/// block of its top-level inline module `inline` — not beside the block, not in
+/// a block nested inside it, and not in a same-named block nested in another
+/// inline module, whose files sit one directory further down.
 ///
 /// The block is read by its indentation, which rustfmt holds the workspace
-/// to: a `mod <inline> {` line opens it, the first later line indented no
-/// further than that one closes it, and the block's own items stand at the
-/// indentation of its first line. A line that breaks the shape — a string
-/// literal's continuation at the margin — closes the block early, so a
-/// misread can only miss a declaration and fail the audit, never find one
-/// that is not there.
+/// to: a `mod <inline> {` line at the margin opens it, the first later line
+/// indented no further than that one closes it, and the block's own items
+/// stand at the indentation of its first line. A line that breaks the shape —
+/// a string literal's continuation at the margin — closes the block early, so
+/// that misread misses a declaration and fails the audit. Source text that
+/// only spells such a block, a string literal holding one at the margin, is
+/// read as one; there the audit leans on its listing check, which asks cargo
+/// for the test by its module path.
 fn declares_module_inside(source: &str, inline: &str, name: &str) -> bool {
     let indentation = |line: &str| line.len() - line.trim_start().len();
     let lines: Vec<&str> = source
@@ -1554,13 +1557,12 @@ fn declares_module_inside(source: &str, inline: &str, name: &str) -> bool {
         .filter(|line| !line.trim().is_empty())
         .collect();
     lines.iter().enumerate().any(|(at, opening)| {
-        if !inline_modules(opening).contains(inline) {
+        if indentation(opening) > 0 || !inline_modules(opening).contains(inline) {
             return false;
         }
-        let outside = indentation(opening);
         let mut block = lines[at + 1..]
             .iter()
-            .take_while(|line| indentation(line) > outside)
+            .take_while(|line| indentation(line) > 0)
             .peekable();
         let Some(own) = block.peek().map(|line| indentation(line)) else {
             return false;
@@ -3812,8 +3814,10 @@ fn a_carrier() {}
     }
 
     /// A file module counts as an inline module's own only where it is
-    /// declared inside that module's block: a declaration beside the block, or
-    /// inside another inline module, is a different file.
+    /// declared inside that module's block, and the block opens at the file's
+    /// top level: a declaration beside the block, inside another inline
+    /// module, or inside a same-named block nested in another inline module is
+    /// a different file.
     #[test]
     fn a_file_module_is_an_inline_modules_only_inside_its_block() {
         let source = "\
@@ -3829,12 +3833,17 @@ mod tests {
 
 mod other {
     mod elsewhere;
+
+    mod tests {
+        mod hidden;
+    }
 }
 ";
         assert!(declares_module_inside(source, "tests", "nested"));
         assert!(!declares_module_inside(source, "tests", "beside"));
         assert!(!declares_module_inside(source, "tests", "further"));
         assert!(!declares_module_inside(source, "tests", "elsewhere"));
+        assert!(!declares_module_inside(source, "tests", "hidden"));
         assert!(!declares_module_inside(source, "absent", "nested"));
     }
 
