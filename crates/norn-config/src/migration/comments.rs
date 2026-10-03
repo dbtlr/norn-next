@@ -46,7 +46,8 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// A block scalar being read: the indentation of the line holding its
-/// header, and of its content once the first content line fixes it.
+/// header, and of its content once its header's indentation indicator or
+/// its first content line fixes it.
 struct Block {
     parent: usize,
     content: Option<usize>,
@@ -55,9 +56,9 @@ struct Block {
 impl Block {
     /// Whether `line` is the block's content rather than what follows it: a
     /// blank line, or one indented as deep as its content — more deeply than
-    /// its header's line, where no content line has fixed it yet.
+    /// its header's line, where nothing has fixed it yet.
     fn holds(&mut self, line: &str) -> bool {
-        let indent = line.len() - line.trim_start_matches(' ').len();
+        let indent = indentation(line);
         if indent == line.len() {
             return true;
         }
@@ -72,13 +73,41 @@ impl Block {
     }
 }
 
+/// The spaces `line` is indented by.
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// Whether the byte at `at` in `bytes` is followed by whitespace or ends
+/// the line.
+fn ends_a_token(bytes: &[u8], at: usize) -> bool {
+    bytes
+        .get(at + 1)
+        .is_none_or(|next| matches!(next, b' ' | b'\t'))
+}
+
 /// YAML's comments: a `#` at the start of a line or after a space or a tab,
 /// outside a single- or double-quoted scalar — which may span lines — and
 /// outside a block scalar's content.
+///
+/// **A quote opens a quoted scalar only where a scalar begins**: a line's
+/// first token, after a key's `:`, a sequence entry's `-`, a `?`, a
+/// document start, a tag or an anchor, or a flow collection's `[`, `{` or
+/// `,`. A quote anywhere else is a character of the plain scalar it stands
+/// in, and so is one on a line continuing a plain scalar — a line indented
+/// past the line whose value the scalar began as.
 fn yaml(text: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let mut quote: Option<u8> = None;
     let mut block: Option<Block> = None;
+    // The indentation of the line a plain scalar value began on, while the
+    // scalar may still continue onto the next line.
+    let mut plain: Option<usize> = None;
+    // How deep in flow collections the text stands.
+    let mut flow = 0_usize;
+    // Whether a scalar may begin at the next token: carried across lines in
+    // a flow collection.
+    let mut node_start = true;
     for line in lines(text) {
         if quote.is_none()
             && let Some(open) = block.as_mut()
@@ -88,10 +117,30 @@ fn yaml(text: &str) -> Vec<&str> {
             }
             block = None;
         }
+        let indent = indentation(line);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let continues_plain = quote.is_none() && plain.is_some_and(|parent| indent > parent);
+        if !continues_plain {
+            plain = None;
+        }
+        if flow == 0 {
+            node_start = !continues_plain;
+        }
         let bytes = line.as_bytes();
         let mut comment = None;
         let mut previous: Option<u8> = None;
+        let mut value_plain = continues_plain;
+        let mut in_property = false;
         let mut at = 0;
+        if quote.is_none()
+            && (line.starts_with("---") || line.starts_with("..."))
+            && ends_a_token(bytes, 2)
+        {
+            at = 3;
+            previous = Some(bytes[2]);
+        }
         while at < bytes.len() {
             let byte = bytes[at];
             match quote {
@@ -101,10 +150,14 @@ fn yaml(text: &str) -> Vec<&str> {
                         at += 1;
                     } else {
                         quote = None;
+                        node_start = false;
                     }
                 }
                 Some(b'"') if byte == b'\\' => at += 1,
-                Some(b'"') if byte == b'"' => quote = None,
+                Some(b'"') if byte == b'"' => {
+                    quote = None;
+                    node_start = false;
+                }
                 Some(_) => {}
                 None if byte == b'#'
                     && previous.is_none_or(|before| matches!(before, b' ' | b'\t')) =>
@@ -112,14 +165,39 @@ fn yaml(text: &str) -> Vec<&str> {
                     comment = Some(at);
                     break;
                 }
-                None if matches!(byte, b'\'' | b'"')
-                    && previous.is_none_or(|before| {
-                        matches!(before, b' ' | b'\t' | b'[' | b'{' | b',')
-                    }) =>
-                {
+                None if matches!(byte, b' ' | b'\t') => in_property = false,
+                None if in_property => {}
+                None if node_start && matches!(byte, b'\'' | b'"') => {
                     quote = Some(byte);
+                    value_plain = false;
                 }
-                None => {}
+                None if node_start && matches!(byte, b'[' | b'{') => {
+                    flow += 1;
+                    value_plain = false;
+                }
+                None if flow > 0 && matches!(byte, b']' | b'}') => {
+                    flow -= 1;
+                    node_start = false;
+                    value_plain = false;
+                }
+                None if flow > 0 && byte == b',' => {
+                    node_start = true;
+                    value_plain = false;
+                }
+                None if byte == b':' && ends_a_token(bytes, at) => {
+                    // What stood before it was a key; its value begins next.
+                    node_start = true;
+                    value_plain = false;
+                }
+                None if node_start && matches!(byte, b'-' | b'?') && ends_a_token(bytes, at) => {}
+                None if node_start && matches!(byte, b'!' | b'&') => in_property = true,
+                None if node_start && matches!(byte, b'*' | b'|' | b'>') => node_start = false,
+                None => {
+                    if node_start {
+                        value_plain = true;
+                    }
+                    node_start = false;
+                }
             }
             previous = Some(byte);
             at += 1;
@@ -127,38 +205,49 @@ fn yaml(text: &str) -> Vec<&str> {
         if let Some(at) = comment {
             found.push(line[at..].trim_end());
         }
-        if quote.is_none() && opens_a_block(&line[..comment.unwrap_or(line.len())]) {
-            let parent = line.len() - line.trim_start_matches(' ').len();
+        let opens_block = quote
+            .is_none()
+            .then(|| block_header(&line[..comment.unwrap_or(line.len())]))
+            .flatten();
+        if let Some(indicator) = opens_block {
             block = Some(Block {
-                parent,
-                content: None,
+                parent: indent,
+                content: indicator.map(|digit| indent + digit),
             });
         }
+        // A comment ends a plain scalar; one left open may continue onto a
+        // line indented past this one's.
+        plain = (quote.is_none() && flow == 0 && comment.is_none() && value_plain)
+            .then(|| plain.unwrap_or(indent));
     }
     found
 }
 
 /// Whether `content`, a line with its comment taken off, ends in a block
-/// scalar's header: `|` or `>` with its chomping and indentation indicators,
-/// standing where a value does — the line's first token, or after a key, a
-/// sequence entry's `-`, a `?`, a document start, a tag or an anchor.
-fn opens_a_block(content: &str) -> bool {
+/// scalar's header — `|` or `>` with its chomping and indentation
+/// indicators, standing where a value does: the line's first token, or
+/// after a key, a sequence entry's `-`, a `?`, a document start, a tag or
+/// an anchor — and the content indentation its indicator states past its
+/// line's, where it states one.
+fn block_header(content: &str) -> Option<Option<usize>> {
     let mut tokens = content.split_whitespace().rev();
-    let Some(last) = tokens.next() else {
-        return false;
-    };
-    let header = last.strip_prefix(['|', '>']).is_some_and(|indicators| {
-        indicators.len() <= 2
-            && indicators
-                .bytes()
-                .all(|byte| matches!(byte, b'+' | b'-' | b'1'..=b'9'))
+    let last = tokens.next()?;
+    let indicators = last.strip_prefix(['|', '>'])?;
+    let header = indicators.len() <= 2
+        && indicators
+            .bytes()
+            .all(|byte| matches!(byte, b'+' | b'-' | b'1'..=b'9'));
+    let placed = tokens.next().is_none_or(|before| {
+        before.ends_with(':')
+            || matches!(before, "-" | "?" | "---")
+            || before.starts_with(['!', '&'])
     });
-    header
-        && tokens.next().is_none_or(|before| {
-            before.ends_with(':')
-                || matches!(before, "-" | "?" | "---")
-                || before.starts_with(['!', '&'])
-        })
+    (header && placed).then(|| {
+        indicators
+            .bytes()
+            .find(u8::is_ascii_digit)
+            .map(|digit| usize::from(digit - b'0'))
+    })
 }
 
 /// TOML's comments: a `#` outside a basic, literal or multi-line string,

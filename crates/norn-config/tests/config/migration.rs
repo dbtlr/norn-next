@@ -281,3 +281,71 @@ fn a_hash_inside_a_toml_string_is_no_comment() {
         Err(MigrationRefusal::comment_lost("#note"))
     );
 }
+
+/// **A quote inside a plain scalar opens no quoted scalar**, so the comments
+/// after it are still comments and a rewrite dropping them is refused: a
+/// quote after a word on a key's line, on a plain scalar's continuation
+/// line, in a sequence entry and in a flow collection's plain scalar.
+#[test]
+fn a_quote_inside_a_plain_scalar_hides_no_comment() {
+    let dropping = one_step(|text| {
+        text.replace("version: 1", "version: 2")
+            .replace(" # keep me", "")
+            .replace("# the owner reads this\n", "")
+    });
+    for file in [
+        "version: 1\ntitle: rock 'n roll # keep me\n# the owner reads this\nb: 2\n",
+        "version: 1\nheight: 5 \"tall # keep me\n# the owner reads this\nb: 2\n",
+        "version: 1\ntitle: rock\n  'n roll # keep me\n# the owner reads this\nb: 2\n",
+        "version: 1\nitems:\n- a 'b # keep me\n# the owner reads this\n",
+        "version: 1\nflow: [a 'b, c] # keep me\n# the owner reads this\n",
+    ] {
+        assert_eq!(
+            dropping.migrate(file.as_bytes()),
+            Err(MigrationRefusal::comment_lost("# keep me")),
+            "{file:?}"
+        );
+    }
+}
+
+/// **A quote where a scalar begins opens a quoted scalar**, whose `#` is no
+/// comment: as a key, a sequence entry, a flow entry, and after a tag or an
+/// anchor.
+#[test]
+fn a_quote_where_a_scalar_begins_hides_its_hash() {
+    let rewriting = one_step(|text| {
+        text.replace("version: 1", "version: 2")
+            .replace(" # quoted", "")
+    });
+    let file = "version: 1\n\
+                'key # quoted': v\n\
+                seq:\n\
+                - 'entry # quoted'\n\
+                flow: ['flow # quoted', {k: \"map # quoted\"}]\n\
+                tagged: !!str 'tag # quoted'\n\
+                anchored: &a 'anchor # quoted'\n";
+    assert_eq!(
+        rewriting.migrate(file.as_bytes()),
+        Ok(Some(
+            "version: 2\n'key': v\nseq:\n- 'entry'\nflow: ['flow', {k: \"map\"}]\ntagged: !!str 'tag'\nanchored: &a 'anchor'\n"
+                .to_string()
+        ))
+    );
+}
+
+/// **A block scalar's explicit indentation indicator sets its content's
+/// indentation**, so a line indented less than that, though more than its
+/// header's line, is no content: a comment moved there from outside the
+/// block becomes the block's content and is lost.
+#[test]
+fn a_block_scalar_s_indentation_indicator_bounds_its_content() {
+    let moving = one_step(|text| {
+        text.replace("version: 1", "version: 2")
+            .replace("# keep me\n", "")
+            .replace("   lead\n", "   lead\n # keep me\n")
+    });
+    assert_eq!(
+        moving.migrate(b"version: 1\n# keep me\na: |1\n   lead\n"),
+        Err(MigrationRefusal::comment_lost("# keep me"))
+    );
+}
