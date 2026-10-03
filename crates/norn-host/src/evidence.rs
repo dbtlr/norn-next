@@ -95,6 +95,11 @@ pub struct JobEvidence {
     apply_statements: AtomicU64,
     apply_vm_steps: AtomicU64,
     apply_full_scan_steps: AtomicU64,
+    /// The file each counted read of every job read, in the order the jobs
+    /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
+    /// ran: nothing is kept while none is.
+    #[cfg(feature = "induced-failure")]
+    files_read: std::sync::Mutex<Vec<norn_fs::reads::FileRead>>,
 }
 
 /// One reading of a host's account.
@@ -220,10 +225,12 @@ pub struct EvidenceReading {
     /// minted: one for an apply that read the store, and none for one that
     /// did not.
     pub apply_snapshots_opened: u64,
-    /// Statements the apply jobs ran on those snapshots — a `where` target's
-    /// matching, the link judgments of planning and of the applier's check,
-    /// and the fresh plan a refusal resolves — as each snapshot counted them
-    /// ([`norn_store::SnapshotCounters`]).
+    /// Statements the apply jobs ran on those snapshots — the one that
+    /// establishes each snapshot, a `where` target's matching, the link
+    /// judgments of planning and of the applier's check, and the fresh plan a
+    /// refusal resolves — as each snapshot counted them
+    /// ([`norn_store::SnapshotCounters::statements_executed`]). A snapshot
+    /// opened is one statement here before it answers anything.
     pub apply_statements: u64,
     /// Virtual-machine steps those statements took.
     pub apply_vm_steps: u64,
@@ -310,6 +317,21 @@ impl EvidenceReading {
 }
 
 impl JobEvidence {
+    /// The file each counted read of every job read while a
+    /// [`norn_fs::reads::FileRecording`] stood, in the order the jobs ended.
+    ///
+    /// The log only grows, so what one act read is what follows the length a
+    /// caller took before it. It is the reads' identity beside the counts
+    /// [`JobEvidence::read`] holds — the same reads, counted the same way —
+    /// and is kept on a build with `induced-failure` alone.
+    #[cfg(feature = "induced-failure")]
+    pub fn files_read(&self) -> Vec<norn_fs::reads::FileRead> {
+        self.files_read
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// This host's account as it stands.
     #[cfg(any(feature = "induced-failure", test))]
     pub fn read(&self) -> EvidenceReading {
@@ -405,6 +427,20 @@ impl JobEvidence {
     /// emptied as it is read, so no reading is folded twice and nothing a job
     /// spent is left behind for the next one.
     fn absorb(&self, window: ReadWindow) {
+        #[cfg(feature = "induced-failure")]
+        let reads = {
+            let (reads, files) = window.finish_with_files();
+            if !files.is_empty() {
+                // Read through a poison: this runs while a failed job unwinds,
+                // and a panic here would abort rather than let it finish.
+                self.files_read
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend(files);
+            }
+            reads
+        };
+        #[cfg(not(feature = "induced-failure"))]
         let reads = window.finish();
         self.document_opens
             .fetch_add(reads.document_opens, Ordering::Relaxed);
@@ -734,6 +770,37 @@ mod tests {
             ),
             (1, 4, 300, 0)
         );
+    }
+
+    /// Under an armed recording, the files a job's counted reads read reach
+    /// the account with the job, and nothing is kept for a job that ran
+    /// while none was armed.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the document the job reads.
+    fn a_jobs_files_reach_the_account_only_while_recorded() {
+        let scratch = norn_testkit::scratch::Scratch::new("evidence-files");
+        let anchor = scratch.join("");
+        std::fs::write(anchor.join("note.md"), "body").expect("a document");
+        let evidence = Arc::new(JobEvidence::default());
+        {
+            let _job = evidence.attributing();
+            norn_fs::read_and_hash(&anchor, std::path::Path::new("note.md")).expect("a read");
+        }
+        assert!(evidence.files_read().is_empty());
+        {
+            let _recording = norn_fs::reads::record_files();
+            let _job = evidence.attributing();
+            norn_fs::read_and_hash(&anchor, std::path::Path::new("note.md")).expect("a read");
+        }
+        assert_eq!(
+            evidence.files_read(),
+            vec![norn_fs::reads::FileRead {
+                act: norn_fs::reads::ReadAct::Document,
+                path: anchor.join("note.md"),
+            }]
+        );
+        assert_eq!(evidence.read().document_opens, 2);
     }
 
     /// A leg's mint reaches the account where it is counted, with no window

@@ -1635,14 +1635,17 @@ fn moved_in_place_hub_path() -> String {
 ///   document, and its changeset re-decides the twenty links that named it.
 ///
 /// Each apply reads every file it touches exactly the authored number of
-/// times for what it does to that file
-/// ([`baselines::APPLY_READS_PER_REPLACED_TARGET`],
-/// [`baselines::APPLY_READS_PER_CREATED_TARGET`],
-/// [`baselines::APPLY_READS_PER_REMOVED_TARGET`]) and each staged shadow
-/// once ([`baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET`]), and no other
-/// file: the reads it took sum to those budgets over the plan's own
-/// transitions. Every one of those reads hashes what it read exactly once,
-/// so the hash clause is held by the same count. Each apply commits one
+/// times for what it does to that file, by each protocol that reads it —
+/// document reads ([`baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`]
+/// and its siblings), the write kernel's target reads
+/// ([`baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET`] and its siblings)
+/// — each staged shadow once
+/// ([`baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET`]), and no other
+/// file: each protocol's count is its budget summed over the plan's own
+/// transitions, and the recording of which file each read was of names only
+/// the plan's files, each at its own budget. Every read is counted by the
+/// act that hashes what it read, so a file hashed twice is two reads and
+/// the hash clause is held by the same counts. Each apply commits one
 /// changeset whose work is its touched set's — a document derived and
 /// upserted per written target, a death and a tombstone per removed one,
 /// the links reaching them re-decided and nothing else — opens at most one
@@ -1698,7 +1701,9 @@ fn an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales() 
 /// no link names and [`SET_SUBJECT_PATH`] planted beside it, apply the
 /// write-through bar's four writes through the host one after another, hold
 /// each to the write-through bar, and hand back every count each spent,
-/// named for its apply.
+/// named for its apply. The planted paths sort among the generated vault's at
+/// both scales ([`the_planted_keys_sort_among_the_generated`]), asserted
+/// rather than assumed.
 fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
@@ -1719,7 +1724,7 @@ fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> Co
         let host = vault.host();
         let _lease = attach::attach_and_wait(&host, vault.name());
 
-        let set = one_apply(profile, "a set by path", &host, || {
+        let set = one_apply(profile, "a set by path", &host, vault.path(), || {
             host.set(norn_wire::SetParams::new(
                 address.clone(),
                 norn_wire::ApplyMode::Apply,
@@ -1730,7 +1735,7 @@ fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> Co
                 )],
             ))
         });
-        let moved = one_apply(profile, "the hub's move", &host, || {
+        let moved = one_apply(profile, "the hub's move", &host, vault.path(), || {
             host.move_path(norn_wire::MoveParams::new(
                 address.clone(),
                 norn_wire::ApplyMode::Apply,
@@ -1740,23 +1745,35 @@ fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> Co
                 ),
             ))
         });
-        let lonely = one_apply(profile, "a delete no link refuses", &host, || {
-            host.delete(norn_wire::DeleteParams::new(
-                address.clone(),
-                norn_wire::ApplyMode::Apply,
-                document(&lonely_path),
-            ))
-        });
-        let hub = one_apply(profile, "the moved hub's delete", &host, || {
-            host.delete(
-                norn_wire::DeleteParams::new(
+        let lonely = one_apply(
+            profile,
+            "a delete no link refuses",
+            &host,
+            vault.path(),
+            || {
+                host.delete(norn_wire::DeleteParams::new(
                     address.clone(),
                     norn_wire::ApplyMode::Apply,
-                    document(&moved_in_place_hub_path()),
+                    document(&lonely_path),
+                ))
+            },
+        );
+        let hub = one_apply(
+            profile,
+            "the moved hub's delete",
+            &host,
+            vault.path(),
+            || {
+                host.delete(
+                    norn_wire::DeleteParams::new(
+                        address.clone(),
+                        norn_wire::ApplyMode::Apply,
+                        document(&moved_in_place_hub_path()),
+                    )
+                    .breaking_links(),
                 )
-                .breaking_links(),
-            )
-        });
+            },
+        );
         for (prefix, spent) in [
             ("set", set),
             ("move", moved),
@@ -1791,6 +1808,21 @@ fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> Co
         "the write-through bar's stems are the planted neighborhood's, and the attachment \
          derived other documents at them: {sharing:?}"
     );
+    let planted: Vec<String> = (0..HUB_IN_LINKS)
+        .map(|at| format!("hub-gate/in-links/{at:04}.md"))
+        .chain([
+            hub_path(),
+            moved_in_place_hub_path(),
+            lonely_path,
+            SET_SUBJECT_PATH.to_owned(),
+        ])
+        .collect();
+    the_planted_keys_sort_among_the_generated(
+        &mut store,
+        profile,
+        "the write-through bar's hub neighborhood",
+        &planted,
+    );
     let counters: CounterSnapshot = counters.into_iter().collect();
     record_the_counters(
         &format!(
@@ -1822,7 +1854,9 @@ const WHERE_STEM: &str = "apply-gate-where";
 /// past all of them at one: a seek for a key past every key an index holds
 /// ends at the index's end in fewer steps than one that lands on a row it
 /// then passes over, so a name sorting last at one scale and not at the other
-/// would read a step apart per key for no difference in work.
+/// would read a step apart per key for no difference in work. Asserted rather
+/// than assumed, at both scales
+/// ([`the_planted_keys_sort_among_the_generated`]).
 const WHERE_FOLDER: &str = "apply-gate";
 
 /// **A `set --where` costs its matches, never the vault around them.** The
@@ -1834,9 +1868,13 @@ const WHERE_FOLDER: &str = "apply-gate";
 /// the steps they took, beside the applier's judgment of the plan's links on
 /// the same snapshot — is the same at `ambiguous` (300 documents) as at
 /// `realistic` (2000), and none of it stepped a table or an index end to end.
-/// The apply writes through exactly the matches: the reads it took are
-/// [`baselines::APPLY_READS_PER_REPLACED_TARGET`] per match and a shadow
-/// read each, in one changeset upserting the matches alone.
+/// The apply writes through exactly the matches: the reads it took are a
+/// replaced target's budgets per match
+/// ([`baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`],
+/// [`baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET`]) and a shadow read
+/// each, of the matches' files alone — planning's reads of the documents the
+/// selector matched among them — in one changeset upserting the matches
+/// alone.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_where_apply_costs_the_same_at_both_scales() {
@@ -1861,10 +1899,12 @@ fn a_where_apply_costs_the_same_at_both_scales() {
                 profile.name
             );
         }
+        // The statement that establishes the snapshot is one of its
+        // statements, so a selector that ran is a second.
         assert!(
-            counters.get("statements") > 0 && counters.get("vm_steps") > 0,
-            "the set --where over `{}` ran nothing on its snapshot, so the bar reads no \
-             selector: {counters:?}",
+            counters.get("statements") > 1 && counters.get("vm_steps") > 0,
+            "the set --where over `{}` ran nothing on its snapshot past the statement that \
+             establishes it, so the bar reads no selector: {counters:?}",
             profile.name
         );
     }
@@ -1900,7 +1940,7 @@ fn one_set_where(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
     let spent = {
         let host = vault.host();
         let _lease = attach::attach_and_wait(&host, vault.name());
-        one_apply(profile, "a set --where", &host, || {
+        one_apply(profile, "a set --where", &host, vault.path(), || {
             host.set(norn_wire::SetParams::new(
                 VaultAddress::name(vault.name().clone()),
                 norn_wire::ApplyMode::Apply,
@@ -1933,6 +1973,16 @@ fn one_set_where(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
         "the set --where's key and stems are the planted documents' alone, and the attachment \
          derived them at {carrying:?}"
     );
+    let planted: Vec<String> = (0..WHERE_MATCHES)
+        .map(|at| format!("{WHERE_FOLDER}/{WHERE_STEM}-{at:02}.md"))
+        .chain([format!("{WHERE_FOLDER}/{WHERE_STEM}-kept.md")])
+        .collect();
+    the_planted_keys_sort_among_the_generated(
+        &mut store,
+        profile,
+        "the set --where's planted matches",
+        &planted,
+    );
     record_the_counters(
         &format!(
             "applying a set --where matching {WHERE_MATCHES} documents over `{}`",
@@ -1948,8 +1998,11 @@ fn one_set_where(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapsh
 /// store-level bar's order of magnitude.
 const MASS_DELETES: usize = 200;
 
-/// The stem every document the mass-delete bar removes opens with. No
-/// generated document shares one, asserted rather than assumed.
+/// The stem every document the mass-delete bar removes opens with, and the
+/// folder they stand in. No generated document shares one, and some generated
+/// stem and path sort after every one of them at both scales
+/// ([`the_planted_keys_sort_among_the_generated`]), both asserted rather than
+/// assumed.
 const MASS_DELETE_STEM: &str = "mass-gate";
 
 /// **The Layer 3 mass-delete cost limit binds `delete`.** [`MASS_DELETES`]
@@ -1962,9 +2015,10 @@ const MASS_DELETE_STEM: &str = "mass-gate";
 /// names steps the store at most [`norn_testkit::work::STEPS_PER_EMPTY_KEY`]
 /// per key — the limit the store's own mass-delete bar holds a bare
 /// changeset to — at `ambiguous` (300 documents) as at `realistic` (2000),
-/// in the same counts at both. Its reads are
-/// [`baselines::APPLY_READS_PER_REMOVED_TARGET`] per document it removes
-/// and none of any other file.
+/// in the same counts at both. Its reads are a removed target's budgets
+/// ([`baselines::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET`],
+/// [`baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET`]) per document it
+/// removes and none of any other file.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales() {
@@ -2044,7 +2098,7 @@ fn one_mass_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
                 .operations
             })
             .collect();
-        one_apply(profile, "a mass delete", &host, || {
+        one_apply(profile, "a mass delete", &host, vault.path(), || {
             host.apply(norn_wire::ApplyParams::new(
                 norn_wire::ApplyMode::Apply,
                 norn_wire::PlanDocument::operations(norn_wire::AuthoredPlan::new(
@@ -2067,6 +2121,17 @@ fn one_mass_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
         "the mass delete removed every document at its stems, and the attachment derived \
          others at them: {sharing:?}"
     );
+    let planted: Vec<String> = doomed
+        .iter()
+        .cloned()
+        .chain([format!("{folder}kept.md")])
+        .collect();
+    the_planted_keys_sort_among_the_generated(
+        &mut store,
+        profile,
+        "the mass delete's planted documents",
+        &planted,
+    );
     record_the_counters(
         &format!(
             "deleting {MASS_DELETES} documents no link names in one plan over `{}`",
@@ -2077,17 +2142,104 @@ fn one_mass_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
     spent
 }
 
-/// How many of each transition an applied plan carries, by what it does to
-/// its file. Read only where the host's account is, behind `induced-failure`.
-#[derive(Clone, Copy, Debug, Default)]
+/// **A planted neighborhood's keys sort among the generated vault's, at the
+/// scale `store` holds — asserted rather than assumed.** A seek for a key past
+/// every key an index holds ends at the index's end in fewer steps than one
+/// that lands on a row it then passes over, so a planted stem or path sorting
+/// past every generated one at one scale and not at the other would read a
+/// step apart per key for no difference in work, and a size-independence
+/// equality over the pair would fail on the fixture's vocabulary rather than
+/// on what the write did. That equality stands on this condition: **some
+/// generated stem, and some generated path, sorts after every `planted` one**,
+/// in the order a sensitive key keeps and in the ASCII-folded order a folded
+/// key keeps. A vocabulary change that breaks it fails here, by name.
+fn the_planted_keys_sort_among_the_generated(
+    store: &mut Store,
+    profile: &norn_fixtures::Profile,
+    what: &str,
+    planted: &[String],
+) {
+    type Order = fn(&str) -> String;
+    let orders: [(&str, Order); 2] = [
+        ("sensitive", |key| key.to_owned()),
+        ("folded", |key| key.to_ascii_lowercase()),
+    ];
+    let planted: Vec<DocumentPath> = planted
+        .iter()
+        .map(|path| DocumentPath::new(path).expect("a planted document path"))
+        .collect();
+    let mut generated = Vec::new();
+    attach::for_each_derived_path(store, |path| {
+        if !planted.contains(path) {
+            generated.push(path.clone());
+        }
+    });
+    for (order, key) in orders {
+        for (part, of) in [
+            ("stem", DocumentPath::stem as fn(&DocumentPath) -> &str),
+            ("path", DocumentPath::as_str),
+        ] {
+            let last = |paths: &[DocumentPath]| paths.iter().map(|path| key(of(path))).max();
+            let last_planted = last(&planted).expect("a planted neighborhood");
+            let last_generated = last(&generated).unwrap_or_default();
+            assert!(
+                last_generated > last_planted,
+                "{what}: over `{}`, no generated {part} sorts after the planted `{last_planted}` \
+                 in the {order} order (the last generated is `{last_generated}`), so the planted \
+                 keys sort past the vault's own and a seek for them reads a different number of \
+                 steps at each scale; plant them under names that sort among the generated ones",
+                profile.name
+            );
+        }
+    }
+}
+
+/// What an applied plan does to one file it touches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(feature = "induced-failure")]
+enum Fate {
+    /// Standing before and after, its content replaced.
+    Replaced,
+    /// Absent before and standing after.
+    Created,
+    /// Standing before and absent after.
+    Removed,
+}
+
+#[cfg(feature = "induced-failure")]
+impl Fate {
+    /// The document reads the authored budgets allow a file of this fate.
+    fn document_reads(self) -> u64 {
+        match self {
+            Fate::Replaced => baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET,
+            Fate::Created => baselines::APPLY_DOCUMENT_READS_PER_CREATED_TARGET,
+            Fate::Removed => baselines::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET,
+        }
+    }
+
+    /// The write kernel's target reads the authored budgets allow a file of
+    /// this fate.
+    fn target_reads(self) -> u64 {
+        match self {
+            Fate::Replaced => baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET,
+            Fate::Created => baselines::APPLY_TARGET_READS_PER_CREATED_TARGET,
+            Fate::Removed => baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET,
+        }
+    }
+
+    /// Whether the file is written, through a shadow of its own.
+    fn written(self) -> bool {
+        matches!(self, Fate::Replaced | Fate::Created)
+    }
+}
+
+/// The files an applied plan touches, by their vault-relative paths, each
+/// with what the plan does to it. Read only where the host's account is,
+/// behind `induced-failure`.
+#[derive(Clone, Debug, Default)]
 #[cfg(feature = "induced-failure")]
 struct Touched {
-    /// Files standing before and after, their content replaced.
-    replaced: u64,
-    /// Files absent before and standing after.
-    created: u64,
-    /// Files standing before and absent after.
-    removed: u64,
+    fates: std::collections::BTreeMap<std::path::PathBuf, Fate>,
 }
 
 #[cfg(feature = "induced-failure")]
@@ -2099,35 +2251,61 @@ impl Touched {
             let present = |state: &norn_wire::FileState| {
                 matches!(state, norn_wire::FileState::Present { .. })
             };
-            match (present(&transition.before), present(&transition.after)) {
-                (true, true) => touched.replaced += 1,
-                (false, true) => touched.created += 1,
-                (true, false) => touched.removed += 1,
+            let fate = match (present(&transition.before), present(&transition.after)) {
+                (true, true) => Fate::Replaced,
+                (false, true) => Fate::Created,
+                (true, false) => Fate::Removed,
                 (false, false) => panic!(
                     "a transition at `{}` names no file before or after it",
                     transition.path.as_str()
                 ),
-            }
+            };
+            let earlier = touched.fates.insert(transition.path.as_str().into(), fate);
+            assert!(
+                earlier.is_none(),
+                "the plan carries two transitions at `{}`",
+                transition.path.as_str()
+            );
         }
         touched
     }
 
-    /// The files written, each through a shadow of its own.
-    fn written(self) -> u64 {
-        self.replaced + self.created
+    /// How many files the plan does `fate` to.
+    fn count(&self, fate: Fate) -> u64 {
+        self.fates.values().filter(|&&each| each == fate).count() as u64
     }
 
-    /// The reads the authored budgets allow this plan's files.
-    fn read_budget(self) -> u64 {
-        self.replaced * baselines::APPLY_READS_PER_REPLACED_TARGET
-            + self.created * baselines::APPLY_READS_PER_CREATED_TARGET
-            + self.removed * baselines::APPLY_READS_PER_REMOVED_TARGET
+    /// The files written, each through a shadow of its own.
+    fn written(&self) -> u64 {
+        self.fates.values().filter(|fate| fate.written()).count() as u64
+    }
+
+    /// The document reads the authored budgets allow this plan's files.
+    fn document_reads(&self) -> u64 {
+        self.fates.values().map(|fate| fate.document_reads()).sum()
+    }
+
+    /// The write kernel's target reads the authored budgets allow this
+    /// plan's files.
+    fn target_reads(&self) -> u64 {
+        self.fates.values().map(|fate| fate.target_reads()).sum()
+    }
+
+    /// The plan's files counted by fate, for a message.
+    fn summary(&self) -> String {
+        format!(
+            "{} replaced, {} created and {} removed",
+            self.count(Fate::Replaced),
+            self.count(Fate::Created),
+            self.count(Fate::Removed)
+        )
     }
 }
 
-/// Apply what `act` asks through the host, read what the apply job spent off
-/// the host's account around it, hold it to the write-through bar, and hand
-/// back every count it spent with the transitions its plan carried.
+/// Apply what `act` asks through the host serving the vault at `root`, read
+/// what the apply job spent off the host's account around it, hold it to the
+/// write-through bar, and hand back every count it spent with the transitions
+/// its plan carried.
 ///
 /// **The account is the apply job's own.** The job runs on a worker thread
 /// under the attribution window every job opens, so what it read through
@@ -2139,23 +2317,46 @@ impl Touched {
 /// without a job: every apply here makes and empties no folder, so the echo
 /// names no path a job would read.
 ///
+/// **What the account cannot see.** The read tally is per thread, so it holds
+/// the reads the job's own thread took and nothing the job moved onto another
+/// — a limit every counter-lane read bar shares since Layer 3. And the
+/// watcher's echo check (`norn-fs`'s `matches_expected`) opens and hashes
+/// each written file once more on the watcher's thread, outside every job's
+/// account: that read is excluded from the budgets, not counted in them.
+///
 /// **The bar**, at every apply:
 ///
-/// - the reads of the plan's files — documents opened through `norn-fs`'s
-///   contained read and targets read by the write kernel — are exactly the
-///   authored budget summed over its transitions, so no file the plan does
-///   not touch is read, and each staged shadow is read once;
+/// - each read protocol's count is exactly its authored budget summed over
+///   the plan's transitions — the document reads
+///   ([`baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`] and its
+///   siblings), the write kernel's target reads
+///   ([`baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET`] and its
+///   siblings) and the shadow reads
+///   ([`baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET`]) — floor and
+///   ceiling, field by field, so no read moves from one protocol to another;
+/// - **every read names a file the plan touches**: under a recording of the
+///   files each counted read read, every document and target read is of a
+///   path one of the plan's transitions names — a `where` target's planning
+///   reads of its matches among them — each touched path is read exactly its
+///   fate's budget by each protocol, and each staged shadow is read once,
+///   under a name of its own;
 /// - one changeset, deriving and upserting exactly the written targets and
 ///   killing and tombstoning exactly the removed ones;
-/// - at most one read handle minted, and exactly one snapshot opened on each
-///   handle minted, with no table or index stepped end to end on it.
+/// - at most one read handle minted, with no table or index stepped end to
+///   end on the snapshot it holds. One snapshot on each handle minted holds
+///   by the type — a minted handle is one established snapshot — so the
+///   equality of the two counts says the account was read off the snapshots
+///   the job minted, not that a second snapshot was refused.
 #[cfg(feature = "induced-failure")]
 fn one_apply(
     profile: &norn_fixtures::Profile,
     what: &str,
     host: &attach::ServingHost,
+    root: &Path,
     act: impl FnOnce() -> Result<norn_host::PendingApply, norn_wire::ErrorEnvelope>,
 ) -> CounterSnapshot {
+    let _recording = norn_fs::reads::record_files();
+    let mark = host.files_read().len();
     let before = host.evidence();
     let answered = act()
         .expect("an apply is admitted")
@@ -2164,6 +2365,7 @@ fn one_apply(
             panic!("{what} over `{}` was refused: {refused:?}", profile.name)
         });
     let spent = host.evidence().since(before);
+    let files = host.files_read().split_off(mark);
     let norn_wire::ApplyReport::Applied {
         plan, changeset, ..
     } = answered.report
@@ -2177,26 +2379,28 @@ fn one_apply(
         profile.name
     );
     let touched = Touched::of(&plan);
-    let read = spent.document_opens + spent.target_reads;
-    let budget = touched.read_budget();
-    assert!(
-        baselines::fits(read, budget) && baselines::fits(budget, read),
-        "{what} over `{}` read its files {read} times ({} documents opened, {} targets read by \
-         the write kernel), and the authored budgets over its {touched:?} allow exactly {budget}",
-        profile.name,
-        spent.document_opens,
-        spent.target_reads
-    );
-    let shadows = touched.written() * baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET;
-    assert!(
-        baselines::fits(spent.shadow_reads, shadows)
-            && baselines::fits(shadows, spent.shadow_reads),
-        "{what} over `{}` read {} staged shadows for its {} written targets, where the authored \
-         budget allows exactly {shadows}",
-        profile.name,
-        spent.shadow_reads,
-        touched.written()
-    );
+    for (name, reading, budget) in [
+        (
+            "document_opens",
+            spent.document_opens,
+            touched.document_reads(),
+        ),
+        ("target_reads", spent.target_reads, touched.target_reads()),
+        (
+            "shadow_reads",
+            spent.shadow_reads,
+            touched.written() * baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET,
+        ),
+    ] {
+        assert!(
+            baselines::fits(reading, budget) && baselines::fits(budget, reading),
+            "{what} over `{}` read `{name}` {reading} times, and the authored budgets over its \
+             {} files allow exactly {budget}",
+            profile.name,
+            touched.summary()
+        );
+    }
+    the_reads_name_the_touched_files(profile, what, root, &touched, &spent, &files);
     for (name, reading, expected) in [
         ("changesets_applied", spent.changesets_applied, 1),
         (
@@ -2212,19 +2416,21 @@ fn one_apply(
         (
             "documents_deleted",
             spent.documents_deleted,
-            touched.removed,
+            touched.count(Fate::Removed),
         ),
         (
             "tombstones_recorded",
             spent.tombstones_recorded,
-            touched.removed,
+            touched.count(Fate::Removed),
         ),
         ("apply_full_scan_steps", spent.apply_full_scan_steps, 0),
     ] {
         assert_eq!(
-            reading, expected,
-            "{what} over `{}` read `{name}` as {reading}, and its {touched:?} name {expected}",
-            profile.name
+            reading,
+            expected,
+            "{what} over `{}` read `{name}` as {reading}, and its {} files name {expected}",
+            profile.name,
+            touched.summary()
         );
     }
     assert!(
@@ -2239,9 +2445,9 @@ fn one_apply(
         spent.apply_snapshots_opened
     );
     [
-        ("replaced", touched.replaced),
-        ("created", touched.created),
-        ("removed", touched.removed),
+        ("replaced", touched.count(Fate::Replaced)),
+        ("created", touched.count(Fate::Created)),
+        ("removed", touched.count(Fate::Removed)),
         ("document_opens", spent.document_opens),
         ("target_reads", spent.target_reads),
         ("shadow_reads", spent.shadow_reads),
@@ -2272,12 +2478,101 @@ fn one_apply(
     .collect()
 }
 
+/// **Which file each read was of.** `files` is the recording of the apply
+/// job's counted reads, one per read: it must name exactly as many reads as
+/// the account counted, every document and target read must be of a file
+/// below `root` that the plan touches, each touched file must be read
+/// exactly its fate's budget by each protocol, and each staged shadow must be
+/// read once, under a name of its own. A read of a file the plan does not
+/// touch fails here even where it leaves every count at its budget.
+#[cfg(feature = "induced-failure")]
+fn the_reads_name_the_touched_files(
+    profile: &norn_fixtures::Profile,
+    what: &str,
+    root: &Path,
+    touched: &Touched,
+    spent: &norn_host::EvidenceReading,
+    files: &[norn_fs::reads::FileRead],
+) {
+    use norn_fs::reads::ReadAct;
+
+    assert_eq!(
+        files.len() as u64,
+        spent.document_opens + spent.target_reads + spent.shadow_reads,
+        "{what} over `{}` counted {} document, {} target and {} shadow reads, and the recording \
+         names {} files: every counted read names the file it read",
+        profile.name,
+        spent.document_opens,
+        spent.target_reads,
+        spent.shadow_reads,
+        files.len()
+    );
+    let mut per_file: std::collections::BTreeMap<(&Path, ReadAct), u64> =
+        std::collections::BTreeMap::new();
+    let mut untouched = Vec::new();
+    let mut shadows = std::collections::BTreeSet::new();
+    for read in files {
+        if read.act == ReadAct::Shadow {
+            shadows.insert(read.path.as_path());
+            continue;
+        }
+        match read.path.strip_prefix(root) {
+            Ok(relative) if touched.fates.contains_key(relative) => {
+                *per_file.entry((relative, read.act)).or_default() += 1;
+            }
+            _ => untouched.push(format!("{:?} {}", read.act, read.path.display())),
+        }
+    }
+    assert!(
+        untouched.is_empty(),
+        "{what} over `{}` read files its plan does not touch {} times, its {} files under `{}` \
+         being the only ones it may read; the first: {:?}",
+        profile.name,
+        untouched.len(),
+        touched.summary(),
+        root.display(),
+        &untouched[..untouched.len().min(5)]
+    );
+    let mut off_budget = Vec::new();
+    for (path, fate) in &touched.fates {
+        for (act, budget) in [
+            (ReadAct::Document, fate.document_reads()),
+            (ReadAct::Target, fate.target_reads()),
+        ] {
+            let read = per_file.get(&(path.as_path(), act)).copied().unwrap_or(0);
+            if read != budget {
+                off_budget.push(format!(
+                    "{} ({fate:?}): {read} {act:?} reads, budget {budget}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    assert!(
+        off_budget.is_empty(),
+        "{what} over `{}` read {} touched files other than their fates' budgets; the first: \
+         {:?}",
+        profile.name,
+        off_budget.len(),
+        &off_budget[..off_budget.len().min(5)]
+    );
+    assert_eq!(
+        shadows.len() as u64,
+        spent.shadow_reads,
+        "{what} over `{}` read {} staged shadows under {} names: each shadow is read once",
+        profile.name,
+        spent.shadow_reads,
+        shadows.len()
+    );
+}
+
 /// A build without `induced-failure` carries no reader of the host's account.
 #[cfg(not(feature = "induced-failure"))]
 fn one_apply(
     _: &norn_fixtures::Profile,
     _: &str,
     _: &attach::ServingHost,
+    _: &Path,
     _: impl FnOnce() -> Result<norn_host::PendingApply, norn_wire::ErrorEnvelope>,
 ) -> CounterSnapshot {
     unreachable!("a case that reads the host's account refuses to run without `induced-failure`")

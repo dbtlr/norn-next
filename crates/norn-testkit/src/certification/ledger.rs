@@ -492,18 +492,33 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
-        name: "apply-reads-per-replaced-target",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_REPLACED_TARGET",
+        name: "apply-document-reads-per-replaced-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET",
         armed: true,
     },
     ExitBar {
-        name: "apply-reads-per-created-target",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_CREATED_TARGET",
+        name: "apply-target-reads-per-replaced-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_TARGET_READS_PER_REPLACED_TARGET",
         armed: true,
     },
     ExitBar {
-        name: "apply-reads-per-removed-target",
-        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_REMOVED_TARGET",
+        name: "apply-document-reads-per-created-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_DOCUMENT_READS_PER_CREATED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-target-reads-per-created-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_TARGET_READS_PER_CREATED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-document-reads-per-removed-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-target-reads-per-removed-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_TARGET_READS_PER_REMOVED_TARGET",
         armed: true,
     },
     ExitBar {

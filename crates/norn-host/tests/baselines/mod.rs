@@ -30,7 +30,7 @@
 //! the generator's baselines carry both architectures they were measured on,
 //! except [`FD_BUDGET`] and [`READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`],
 //! counts read on macos-arm64 that hold the same on both platforms, and the
-//! four `APPLY_*` read budgets, counts of the acts an apply performs read on
+//! seven `APPLY_*` read budgets, counts of the acts an apply performs read on
 //! linux-x86_64, which no platform moves. A
 //! band un-authored back to `None` for recalibration carries the readings it
 //! had, because what a recalibration window gathers is the next set. The soak
@@ -989,71 +989,80 @@ pub const SOAK_RECOVERY_DOSE: u32 = 1;
 /// `ubuntu-latest` x86_64-glibc is where it gates.
 pub const READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION: u64 = 1;
 
-/// **The write-through read budget of a replaced document**: how many times
-/// an apply reads a file whose content its plan replaces. Each read is an
-/// open of the file at its name and one hash of what it read, through the
-/// same descriptor, so the count of hashes is this count: there is no read of
-/// a touched file that does not hash, and none that hashes twice.
+/// **The write-through read budgets: how many times an apply reads each file
+/// its plan touches, by the protocol that reads it and by what the plan does
+/// to the file.** Three protocols read a touched file, and each has a budget
+/// of its own per replaced, created and removed target, so a read moved from
+/// one protocol to another — or onto a file the plan does not touch — fails
+/// as surely as a read added:
 ///
-/// Five, the same at any vault size and any plan size:
+/// - **document reads** ([`norn_fs::reads::ReadTally::document_opens`]) —
+///   `norn-fs`'s contained read of a file's content, by planning for its
+///   before-state, by the applier's recomposition, and by the changeset's
+///   read-back of what landed;
+/// - **target reads** ([`norn_fs::reads::ReadTally::target_reads`]) — the
+///   write kernel's no-follow read of a target, by staging and by
+///   publication's verification again;
+/// - **shadow reads** ([`norn_fs::reads::ReadTally::shadow_reads`]) — the
+///   write kernel's confirmation of the staged shadow a write publishes from.
 ///
-/// 1. **planning** reads the file for its before-state, through `norn-fs`'s
-///    contained read;
-/// 2. **the applier's recomposition** reads it again, running the plan's
-///    operations from the before-states it holds before staging anything;
-/// 3. **staging** reads it through the write kernel's no-follow open and
-///    checks it holds the before-state;
-/// 4. **publication** reads it again through the kernel, just before the
-///    rename, and checks it still does;
-/// 5. **the changeset** reads the landed file back, once, to derive it
-///    without the applier holding its bytes, and derives it only where those
-///    bytes hash to what was published.
+/// Each read is one read of the file's bytes and one hash of what it read,
+/// counted by the act that hashes, so the count of hashes is this count: a
+/// file hashed twice through one descriptor counts twice.
 ///
-/// The shadow the replacement is published from is read once more, apart
-/// from these ([`APPLY_SHADOW_READS_PER_WRITTEN_TARGET`]).
+/// **What these budgets do not see.** The tally is the job's thread's: a read
+/// the apply moved onto another thread would reach no account, a limit every
+/// counter-lane read bar shares since Layer 3. And the watcher's echo check of
+/// the apply's own writes (`norn-fs`'s `matches_expected`) opens and hashes
+/// each written file once more, on the watcher's thread, outside any job's
+/// account: that read is excluded from these budgets, not counted in them.
 ///
-/// Observed: **5 per replaced document** in every local run on linux-x86_64
-/// of `counter_gate.rs`'s write-through workloads — a `set` by path, the
-/// twenty holders a hub's move rewrites, and a `set --where`'s ten matches —
-/// at both per-PR scales: 3 documents opened through the contained read and
-/// 2 targets read by the write kernel per document. It is a count of acts the
-/// apply performs, so it reads the same on any runner, and the workloads hold
-/// a reading to it exactly, floor and ceiling: a read the apply does not
-/// perform fails as surely as one it adds.
+/// Observed: every budget below, in every local run on linux-x86_64 of
+/// `counter_gate.rs`'s write-through workloads — a `set` by path, a hub's
+/// move, two deletes, a `set --where`'s ten matches and a mass delete's two
+/// hundred removals — at both per-PR scales, field by field and file by file.
+/// They are counts of acts the apply performs, so they read the same on any
+/// runner, and the workloads hold each field to its budget exactly, floor and
+/// ceiling.
 ///
 /// **Platform scope: every platform.** A count is not a machine's reading, so
 /// under ADR 0004 it may gate a pull request. The per-PR `counter gates` job on
 /// `ubuntu-latest` x86_64-glibc is where it gates.
-pub const APPLY_READS_PER_REPLACED_TARGET: u64 = 5;
+///
+/// A replaced document's document reads: three — **planning** reads the file
+/// for its before-state, **the applier's recomposition** reads it again to
+/// run the plan's operations before staging anything, and **the changeset**
+/// reads the landed file back once to derive it without the applier holding
+/// its bytes, deriving it only where those bytes hash to what was published.
+pub const APPLY_DOCUMENT_READS_PER_REPLACED_TARGET: u64 = 3;
 
-/// **The write-through read budget of a created document**: how many times an
-/// apply reads a file its plan creates. One: **the changeset's read-back** of
-/// the landed file, hashed once as [`APPLY_READS_PER_REPLACED_TARGET`]'s are.
-/// Planning, the recomposition, staging and publication each find the name
-/// holding no file, and a name with no file opens nothing to read or hash.
-///
-/// Observed: **1 per created document** — the hub a move creates at its new
-/// name — in every local run on linux-x86_64 at both per-PR scales.
-///
-/// **Platform scope: every platform**, gating in the per-PR `counter gates`
-/// job, as [`APPLY_READS_PER_REPLACED_TARGET`] does.
-pub const APPLY_READS_PER_CREATED_TARGET: u64 = 1;
+/// A replaced document's target reads: two — **staging** reads it through the
+/// write kernel's no-follow open and checks it holds the before-state, and
+/// **publication** reads it again just before the rename and checks it still
+/// does. Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
 
-/// **The write-through read budget of a removed document**: how many times an
-/// apply reads a file its plan removes. Four, each hashed once as
-/// [`APPLY_READS_PER_REPLACED_TARGET`]'s are: planning's read of its
-/// before-state, the recomposition's, staging's check and publication's
-/// check again. The changeset reads none: it asks whether a document stands
-/// at the name, which opens no file.
-///
-/// Observed: **4 per removed document** — the source of a hub's move, a
-/// delete of a document no link names, a hub's delete leaving its links
-/// broken, and each of a mass delete's two hundred removals — in every local
-/// run on linux-x86_64 at both per-PR scales.
-///
-/// **Platform scope: every platform**, gating in the per-PR `counter gates`
-/// job, as [`APPLY_READS_PER_REPLACED_TARGET`] does.
-pub const APPLY_READS_PER_REMOVED_TARGET: u64 = 4;
+/// A created document's document reads: one — **the changeset's read-back**
+/// of the landed file. Planning and the recomposition find the name holding
+/// no file, and a name with no file opens nothing to read. Budgeted with
+/// [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_DOCUMENT_READS_PER_CREATED_TARGET: u64 = 1;
+
+/// A created document's target reads: none — staging and publication find the
+/// name holding no file, and an absent target opens nothing to hash. Budgeted
+/// with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_TARGET_READS_PER_CREATED_TARGET: u64 = 0;
+
+/// A removed document's document reads: two — **planning**'s read of its
+/// before-state and **the recomposition**'s. The changeset reads none: it asks
+/// whether a document stands at the name, which opens no file. Budgeted with
+/// [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_DOCUMENT_READS_PER_REMOVED_TARGET: u64 = 2;
+
+/// A removed document's target reads: two — **staging**'s check of its
+/// before-state and **publication**'s check again just before the unlink.
+/// Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_TARGET_READS_PER_REMOVED_TARGET: u64 = 2;
 
 /// **The staged shadows an apply reads per document it writes.** One: the
 /// write kernel confirms, just before the publication act, that the shadow a
@@ -1061,13 +1070,9 @@ pub const APPLY_READS_PER_REMOVED_TARGET: u64 = 4;
 /// made and still holds the after-state, opening it and hashing it once. A
 /// shadow lives in the shadow home under no name of the vault's, and it is
 /// the apply's own file: it is counted apart from the reads of the vault's
-/// files so neither count stands in for the other.
-///
-/// Observed: **1 per written document** in every local run on linux-x86_64 of
-/// the write-through workloads at both per-PR scales.
-///
-/// **Platform scope: every platform**, gating in the per-PR `counter gates`
-/// job, as [`APPLY_READS_PER_REPLACED_TARGET`] does.
+/// files so neither count stands in for the other, and each shadow is read
+/// once, under a name of its own. A removal stages no shadow. Budgeted, and
+/// limited, with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
 pub const APPLY_SHADOW_READS_PER_WRITTEN_TARGET: u64 = 1;
 
 /// Whether a reading fits under an authored ceiling.
