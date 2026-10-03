@@ -56,9 +56,19 @@
 //! each crate's guard asserts its table against the row named for it, and this
 //! module asserts the rows against
 //! [`LANE_IGNORE_PREFIXES`](crate::regression::LANE_IGNORE_PREFIXES).
+//!
+//! **A test step that builds a package with a feature on is read here too.**
+//! A case compiled only behind a feature runs only where some step turns the
+//! feature on, which is the same kind of fact as a lane step adopting an
+//! ignored case: a statement about what CI runs, read off the workflows. So the
+//! regression audit asks `ci_steps_in` for both, and one reader holds both to
+//! the same posture — a workflow it cannot read is an error, and an invocation
+//! it cannot read whole runs nothing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::regression::Target;
 
 /// The script a CI step adopts a whole target's ignored cases through.
 const LANE_SCRIPT: &str = "lane-suite.sh";
@@ -284,31 +294,6 @@ pub fn assert_lane_prefixes_agree(package: &str, lanes: &[(&str, &str)]) {
     );
 }
 
-/// Every wholesale adoption a workflow declares, as `(package, test target)`.
-///
-/// The invocation is read as tokens rather than matched as a line, so a
-/// wrapper in front of the script — the flake tripwire runs one — and harness
-/// arguments behind it change nothing: the two tokens after the script are its
-/// package and its target, which is the script's own argument order. A comment
-/// line is not an invocation however it mentions the script, and the module
-/// doc above mentions it in prose that would otherwise parse as one.
-fn lane_steps(workflow: &str) -> Vec<(String, String)> {
-    workflow
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| {
-            let mut tokens = line.split_whitespace();
-            tokens.find(|token| {
-                *token == LANE_SCRIPT || token.ends_with(&format!("/{LANE_SCRIPT}"))
-            })?;
-            let package = tokens.next()?;
-            let target = tokens.next()?;
-            Some((package.to_string(), target.to_string()))
-        })
-        .collect()
-}
-
 /// The features a target's own source puts any of itself behind, or the
 /// first feature gate in it this reader cannot read.
 ///
@@ -408,7 +393,15 @@ fn quoted_between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str>
     (!name.is_empty() && !name.contains('"')).then_some(name)
 }
 
-/// The step body each lane invocation sits in, as `(package, target, body)`.
+/// The step body each lane invocation sits in, as `(package, target, body)`:
+/// every wholesale adoption a workflow declares.
+///
+/// The invocation is read as tokens rather than matched as a line, so a
+/// wrapper in front of the script — the flake tripwire runs one — and harness
+/// arguments behind it change nothing: the two tokens after the script are its
+/// package and its target, which is the script's own argument order. A comment
+/// line is not an invocation however it mentions the script, and the module
+/// doc above mentions it in prose that would otherwise parse as one.
 ///
 /// **The body is the containing YAML step and nothing else.** It opens at the
 /// step's own `- ` line, so a step declaring its `env:` above its `run:` is read
@@ -592,20 +585,173 @@ fn workflows_directory(manifest_dir: &Path) -> PathBuf {
         })
 }
 
-/// Every wholesale adoption the workflows in `directory` declare, as
-/// `(package, test target)`: the targets whose ignored cases some CI step
-/// runs through [`LANE_SCRIPT`].
+/// What the workflows run that a test is held to, read once for every
+/// question asked of it.
+#[derive(Debug, Default)]
+pub(crate) struct CiSteps {
+    /// The targets whose ignored cases some step runs wholesale through
+    /// [`LANE_SCRIPT`], as `(package, test target)`, each with every feature
+    /// an adopting step names through [`LANE_FEATURES`].
+    pub(crate) adopted: BTreeMap<(String, String), BTreeSet<String>>,
+    /// The `cargo test` invocations that run a package's tests with a feature
+    /// on, one entry per package and feature each names.
+    pub(crate) featured: BTreeSet<FeaturedRun>,
+}
+
+impl CiSteps {
+    /// Whether some step runs `package`'s `target` with `feature` on.
+    pub(crate) fn runs_with_feature(&self, package: &str, target: &Target, feature: &str) -> bool {
+        self.featured.iter().any(|run| {
+            run.package == package
+                && run.feature == feature
+                && run
+                    .target
+                    .as_ref()
+                    .is_none_or(|selected| selected == target)
+        })
+    }
+}
+
+/// One `cargo test` invocation's reach over one package with one feature on.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct FeaturedRun {
+    pub(crate) package: String,
+    /// The one target the invocation selects, or `None` where it selects none
+    /// and so runs every test target the package has.
+    pub(crate) target: Option<Target>,
+    pub(crate) feature: String,
+}
+
+/// Every `cargo test` invocation in `workflow` that runs a package's tests
+/// with a feature on.
+///
+/// **An invocation is read whole or not at all.** The tokens after
+/// `cargo test` are held to the spellings that name a package, a feature or one
+/// target, and to the few that change nothing about which tests run; what
+/// follows a `--` is held to the harness arguments that select nothing. Any
+/// other token — a name filter, `--ignored`, a target selector this does not
+/// read, a flag it does not know, a line continued onto the next — makes the
+/// invocation run something other than what its package and feature say, so
+/// it is read as running nothing. That is the strict side: a step this cannot
+/// read fails the carrier that needed it, rather than vouching for a test it
+/// may not run. A shell operator ends the invocation, so a redirection or a
+/// pipe behind it changes nothing.
+///
+/// Read as tokens for the reason a lane step is: a wrapper in front, such as
+/// the flake tripwire, changes nothing, and a comment line is prose rather
+/// than an invocation.
+fn featured_test_runs(workflow: &str) -> Vec<FeaturedRun> {
+    workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .flat_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let Some(at) = tokens.windows(2).position(|pair| {
+                (pair[0] == "cargo" || pair[0].ends_with("/cargo")) && pair[1] == "test"
+            }) else {
+                return Vec::new();
+            };
+            featured_runs_of(&tokens[at + 2..]).unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The runs the arguments of one `cargo test` invocation make, or `None` where
+/// an argument is one [`featured_test_runs`] does not read.
+fn featured_runs_of(arguments: &[&str]) -> Option<Vec<FeaturedRun>> {
+    let mut packages: Vec<&str> = Vec::new();
+    let mut features: Vec<&str> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
+    let mut tokens = arguments.iter().copied();
+    while let Some(token) = tokens.next() {
+        if ends_the_invocation(token) {
+            break;
+        }
+        match token {
+            "--locked" | "--frozen" | "--offline" | "--release" => {}
+            "-p" | "--package" => packages.push(tokens.next()?),
+            "-F" | "--features" => features.extend(tokens.next()?.split(',')),
+            "--lib" => targets.push(Target::Lib),
+            "--test" => targets.push(Target::Integration(tokens.next()?.to_string())),
+            "--" => {
+                harness_arguments_select_nothing(&mut tokens)?;
+                break;
+            }
+            _ if token.starts_with("--package=") => packages.push(&token["--package=".len()..]),
+            _ if token.starts_with("--features=") => {
+                features.extend(token["--features=".len()..].split(','));
+            }
+            // Any token not spelled above is not read, so the invocation
+            // reads as running nothing.
+            _ => targets.push(Target::Integration(
+                token.strip_prefix("--test=")?.to_string(),
+            )),
+        }
+    }
+    let features: BTreeSet<&str> = features.into_iter().filter(|f| !f.is_empty()).collect();
+    // Several selectors run several targets, and each is read as its own.
+    let reach: Vec<Option<Target>> = if targets.is_empty() {
+        vec![None]
+    } else {
+        targets.into_iter().map(Some).collect()
+    };
+    let mut runs = Vec::new();
+    for package in &packages {
+        for feature in &features {
+            for target in &reach {
+                runs.push(FeaturedRun {
+                    package: (*package).to_string(),
+                    target: target.clone(),
+                    feature: (*feature).to_string(),
+                });
+            }
+        }
+    }
+    Some(runs)
+}
+
+/// Whether the harness arguments after a `--` leave every test the invocation
+/// selected running, consuming them up to the end of the invocation.
+fn harness_arguments_select_nothing<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<()> {
+    while let Some(token) = tokens.next() {
+        if ends_the_invocation(token) {
+            return Some(());
+        }
+        match token {
+            "--nocapture" | "--show-output" | "--quiet" | "-q" => {}
+            "--test-threads" => {
+                tokens.next()?;
+            }
+            _ if token.starts_with("--test-threads=") => {}
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// Whether `token` is a shell operator, which ends the command it follows.
+fn ends_the_invocation(token: &str) -> bool {
+    matches!(token, "|" | "||" | "&&" | ";" | "&")
+        || token.starts_with('>')
+        || token.starts_with("2>")
+        || token.starts_with("1>")
+}
+
+/// What the workflows in `directory` run: the targets lane steps adopt
+/// wholesale, with the features each adopting step names, and the `cargo
+/// test` invocations that run a package with a feature on.
 ///
 /// A directory that cannot be read, a workflow that cannot be read, and a
-/// directory holding no workflow are each an error rather than an empty set,
-/// so a caller asking whether a target is adopted never reads "nothing was
-/// read" as "nothing is adopted".
+/// directory holding no workflow are each an error rather than an empty
+/// answer, so a caller asking whether a target is adopted or a feature build
+/// runs never reads "nothing was read" as "nothing runs".
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files.
-pub(crate) fn adoptions_in(directory: &Path) -> Result<BTreeSet<(String, String)>, String> {
+pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
     let entries = std::fs::read_dir(directory)
         .map_err(|e| format!("reading {} for workflows: {e}", directory.display()))?;
     let mut workflows = 0usize;
-    let mut adoptions = BTreeSet::new();
+    let mut steps = CiSteps::default();
     for entry in entries {
         let path = entry
             .map_err(|e| format!("reading {} for workflows: {e}", directory.display()))?
@@ -616,7 +762,14 @@ pub(crate) fn adoptions_in(directory: &Path) -> Result<BTreeSet<(String, String)
         workflows += 1;
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        adoptions.extend(lane_steps(&text));
+        for (package, target, body) in lane_step_bodies(&text) {
+            steps
+                .adopted
+                .entry((package, target))
+                .or_default()
+                .extend(features_a_step_names(&body));
+        }
+        steps.featured.extend(featured_test_runs(&text));
     }
     if workflows == 0 {
         return Err(format!(
@@ -624,7 +777,7 @@ pub(crate) fn adoptions_in(directory: &Path) -> Result<BTreeSet<(String, String)
             directory.display()
         ));
     }
-    Ok(adoptions)
+    Ok(steps)
 }
 
 /// The packages a step adopts ignored cases from that
@@ -659,11 +812,11 @@ fn packages_outside_the_rows(adopting: &BTreeSet<String>) -> Vec<String> {
 /// guard reads at all, which is the first two hazards with nothing standing
 /// where they would be caught.
 pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&str, &str)]) {
-    let adoptions = adoptions_in(&workflows_directory(manifest_dir))
+    let steps = ci_steps_in(&workflows_directory(manifest_dir))
         .unwrap_or_else(|problem| panic!("{problem}"));
     let mut adopted: BTreeSet<String> = BTreeSet::new();
     let mut adopting: BTreeSet<String> = BTreeSet::new();
-    for (named, target) in adoptions {
+    for (named, target) in steps.adopted.into_keys() {
         if named == package {
             adopted.insert(target);
         }
@@ -693,11 +846,19 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
 #[cfg(test)]
 mod tests {
     use super::{
-        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, features_a_step_names,
-        features_a_target_needs, ignore_attributes, lane_step_bodies, lane_steps,
+        FeaturedRun, LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, featured_test_runs,
+        features_a_step_names, features_a_target_needs, ignore_attributes, lane_step_bodies,
         packages_outside_the_rows, reason, unrecognized_ignore_attribute_lines,
     };
-    use crate::regression::LANE_IGNORE_PREFIXES;
+    use crate::regression::{LANE_IGNORE_PREFIXES, Target};
+
+    /// The wholesale adoptions a workflow declares, as `(package, target)`.
+    fn lane_steps(workflow: &str) -> Vec<(String, String)> {
+        lane_step_bodies(workflow)
+            .into_iter()
+            .map(|(package, target, _)| (package, target))
+            .collect()
+    }
     use std::collections::BTreeSet;
 
     const LANES: &[(&str, &str)] = &[
@@ -1042,5 +1203,121 @@ mod tests {
             features_a_step_names(body),
             BTreeSet::from(["induced-failure".to_string()])
         );
+    }
+
+    /// One featured run, as the reader reports it.
+    fn run(package: &str, target: Option<Target>, feature: &str) -> FeaturedRun {
+        FeaturedRun {
+            package: package.to_string(),
+            target,
+            feature: feature.to_string(),
+        }
+    }
+
+    /// **A test step with a feature on reads as its package and its feature**,
+    /// whatever wraps it: the flake tripwire in front, and the YAML that
+    /// carries the line.
+    #[test]
+    fn a_wrapped_test_step_with_a_feature_reads_as_its_package_and_feature() {
+        let workflow = "        run: .github/scripts/flake-tripwire.sh cargo test --locked -p \
+                        norn-host --features induced-failure\n";
+        assert_eq!(
+            featured_test_runs(workflow),
+            vec![run("norn-host", None, "induced-failure")]
+        );
+    }
+
+    /// **Every spelling cargo takes for a package, a feature and a target reads
+    /// alike**, and what stands after the command — harness arguments that
+    /// select nothing, a redirection, a pipe — changes nothing.
+    #[test]
+    fn the_spellings_cargo_takes_for_a_package_feature_and_target_read_alike() {
+        for (line, expected) in [
+            (
+                "run: cargo test --package=norn-host --features=induced-failure",
+                vec![run("norn-host", None, "induced-failure")],
+            ),
+            (
+                "run: cargo test --package norn-host -F induced-failure --release",
+                vec![run("norn-host", None, "induced-failure")],
+            ),
+            (
+                "run: cargo test --locked -p norn-host --features other,induced-failure",
+                vec![
+                    run("norn-host", None, "induced-failure"),
+                    run("norn-host", None, "other"),
+                ],
+            ),
+            (
+                "run: cargo test -p norn-host --features induced-failure --test kill_recovery \
+                 -- --nocapture --test-threads=1 2>&1 | tee log",
+                vec![run(
+                    "norn-host",
+                    Some(Target::Integration("kill_recovery".to_string())),
+                    "induced-failure",
+                )],
+            ),
+            (
+                "run: cargo test -p norn-host --features induced-failure --lib -- \
+                 --test-threads 1 --show-output",
+                vec![run("norn-host", Some(Target::Lib), "induced-failure")],
+            ),
+            (
+                "run: cargo test -p norn-host --features induced-failure --test=lockdown",
+                vec![run(
+                    "norn-host",
+                    Some(Target::Integration("lockdown".to_string())),
+                    "induced-failure",
+                )],
+            ),
+        ] {
+            let mut read = featured_test_runs(line);
+            read.sort();
+            assert_eq!(read, expected, "`{line}` read otherwise");
+        }
+    }
+
+    /// **A step that runs less than the selection it names is no such step.**
+    /// A name filter, an ignored-only run, an exact match, a target selector
+    /// this reader does not read, a flag it does not know and a line continued
+    /// onto the next each make the invocation run something other than what
+    /// its package and feature say, so each reads as running nothing rather
+    /// than as running everything.
+    #[test]
+    fn a_step_that_runs_less_than_its_selection_is_not_read() {
+        for line in [
+            "run: cargo test -p norn-host --features induced-failure some_other_case",
+            "run: cargo test -p norn-host --features induced-failure -- --ignored",
+            "run: cargo test -p norn-host --features induced-failure -- --exact a_case",
+            "run: cargo test -p norn-host --features induced-failure -- some_other_case",
+            "run: cargo test -p norn-host --features induced-failure --tests",
+            "run: cargo test -p norn-host --features induced-failure --no-run",
+            "run: cargo test -p norn-host --features induced-failure \\",
+        ] {
+            assert_eq!(
+                featured_test_runs(line),
+                Vec::<FeaturedRun>::new(),
+                "`{line}` was read as running its package's tests"
+            );
+        }
+    }
+
+    /// **A step that runs no test with a feature on is not read as one**: a
+    /// lint over the feature build, a test step with no feature, one naming no
+    /// package, and a comment that spells the command in prose.
+    #[test]
+    fn a_step_that_runs_no_test_with_a_feature_is_not_read() {
+        for line in [
+            "run: cargo clippy --locked -p norn-host --all-targets --features induced-failure",
+            "run: cargo test --locked -p norn-host",
+            "run: cargo test --locked --features induced-failure",
+            "# cargo test -p norn-host --features induced-failure runs the crash proof",
+        ] {
+            assert_eq!(
+                featured_test_runs(line),
+                Vec::<FeaturedRun>::new(),
+                "`{line}` was read as a test step with a feature on"
+            );
+        }
     }
 }
