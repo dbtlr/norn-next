@@ -48,6 +48,12 @@
 //! purpose: they decide whether and where CI runs a workflow, the same for a
 //! lane step as for a `cargo test` step, not what a step that runs vouches
 //! for.
+//!
+//! **Nor is what earlier steps leave behind.** A step is judged by its own
+//! text and the mappings above it, not by the state earlier steps in its job
+//! leave for it — an entry written to `$GITHUB_ENV` or `$GITHUB_PATH`, a file
+//! such as `.cargo/config.toml` or `rust-toolchain.toml` — which a static
+//! reading cannot see; review of the workflow's diff is the backstop there.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
