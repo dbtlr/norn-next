@@ -445,7 +445,8 @@ pub struct ExitBar {
 /// **A name opens with the subject it bars**, so a layer's exit can ask for
 /// the bars of one subject by prefix: `attach-` for attaching a vault,
 /// `read-` for reading one through a live hold, `hub-write-` for link
-/// health's re-decision over a hub's write, `soak-host-` for the host under a
+/// health's re-decision over a hub's write, `apply-` for what an apply reads
+/// writing through its plan, `soak-host-` for the host under a
 /// long mixed load, `soak-settle-` for how long churn takes to settle,
 /// `generator-` for generating a fixture tree, and `text-` for parsing
 /// document text.
@@ -488,6 +489,26 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "hub-write-heap-growth-allowance",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-reads-per-replaced-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_REPLACED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-reads-per-created-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_CREATED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-reads-per-removed-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_READS_PER_REMOVED_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-shadow-reads-per-written-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_SHADOW_READS_PER_WRITTEN_TARGET",
         armed: true,
     },
     ExitBar {

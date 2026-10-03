@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Four bars, all counts:
+//! Five bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -73,6 +73,16 @@
 //!   one round of the entry gate after its first, no one of them more than the
 //!   ceiling authored in this crate's baselines. The control runs the same
 //!   reads one after another and must fail on contention alone.
+//!
+//! - **An apply writes through its touched set.** A `set` by path, a hub's
+//!   move, two deletes, a `set --where` and a mass delete are applied through
+//!   the host's verbs at both per-PR scales, each read off the host's account
+//!   of the apply job: it reads each file it touches the authored number of
+//!   times for what it does to that file and no other file, commits one
+//!   changeset whose work is its touched set's, opens at most one snapshot
+//!   and steps no table or index end to end on it, and costs the same in every
+//!   count at 300 documents as at 2000. A mass delete's re-decision is held to
+//!   the Layer 3 limit per key the store's own bar holds.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -1595,6 +1605,679 @@ fn hub_rewrite(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot
         &counters,
     );
     counters
+}
+
+/// The document the write-through bar's `set` writes, beside the hub
+/// neighborhood: a frontmatter field and a heading, and no link. No
+/// generated document shares its stem, asserted rather than assumed.
+const SET_SUBJECT_PATH: &str = "hub-gate/apply-gate-subject.md";
+
+/// Where the write-through bar's hub move takes the hub: a new stem, so every
+/// in-link stops naming it and the cascade rewrites all of them, in the
+/// folder the hub already stands in, so the move makes and empties no folder
+/// and what the watcher reports back is the applier's own writes alone.
+fn moved_in_place_hub_path() -> String {
+    format!("hub-gate/{MOVED_HUB_STEM}.md")
+}
+
+/// **Write-through over the composed post-state, through the host's own
+/// verbs.** Four applies run one after another over one attachment at each
+/// per-PR scale, each through the verb a client's request reaches and each
+/// read off the host's account around it, the apply job's own work on its
+/// worker thread:
+///
+/// - **a `set` by path** replaces one document's frontmatter;
+/// - **the hub's move** to a new stem replaces each of its [`HUB_IN_LINKS`]
+///   holders with its link rewritten, creates the hub at its new name and
+///   removes it from its old one;
+/// - **a delete of a document no link names** removes one document;
+/// - **the moved hub's delete leaving its links broken** removes one
+///   document, and its changeset re-decides the twenty links that named it.
+///
+/// Each apply reads every file it touches exactly the authored number of
+/// times for what it does to that file
+/// ([`baselines::APPLY_READS_PER_REPLACED_TARGET`],
+/// [`baselines::APPLY_READS_PER_CREATED_TARGET`],
+/// [`baselines::APPLY_READS_PER_REMOVED_TARGET`]) and each staged shadow
+/// once ([`baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET`]), and no other
+/// file: the reads it took sum to those budgets over the plan's own
+/// transitions. Every one of those reads hashes what it read exactly once,
+/// so the hash clause is held by the same count. Each apply commits one
+/// changeset whose work is its touched set's — a document derived and
+/// upserted per written target, a death and a tombstone per removed one,
+/// the links reaching them re-decided and nothing else — opens at most one
+/// snapshot, steps no table or index end to end on it, and costs the same
+/// in every count at `ambiguous` (300 documents) as at `realistic` (2000).
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn an_apply_reads_each_file_it_touches_a_fixed_number_of_times_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = applies_through_the_host("counter-gate-applies-ambiguous", &small);
+    let large_counters = applies_through_the_host("counter-gate-applies-realistic", &large);
+
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("set_replaced", 1),
+            ("set_links_redecided", 0),
+            ("set_snapshots_opened", 0),
+            ("move_replaced", HUB_IN_LINKS as u64),
+            ("move_created", 1),
+            ("move_removed", 1),
+            ("move_links_redecided", HUB_IN_LINKS as u64),
+            ("move_link_health_keys_resolved", 1),
+            ("move_link_health_candidates_read", 1),
+            ("move_findings_written", 0),
+            ("lonely_removed", 1),
+            ("lonely_links_redecided", 0),
+            ("hub_removed", 1),
+            ("hub_links_redecided", HUB_IN_LINKS as u64),
+            ("hub_findings_written", HUB_IN_LINKS as u64),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "the applies over `{}` did not read `{name}` as their planted neighborhood \
+                 names: {counters:?}",
+                profile.name
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "applying a set, a hub's move and two deletes through the host",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with the hub, its [`HUB_IN_LINKS`] in-links, a document
+/// no link names and [`SET_SUBJECT_PATH`] planted beside it, apply the
+/// write-through bar's four writes through the host one after another, hold
+/// each to the write-through bar, and hand back every count each spent,
+/// named for its apply.
+fn applies_through_the_host(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    plant_hub_in_links(&vault);
+    std::fs::write(vault.path().join(hub_path()), "the hub\n").expect("writing the hub");
+    let lonely_path = format!("hub-gate/{LONELY_STEM}.md");
+    std::fs::write(vault.path().join(&lonely_path), "no link names me\n")
+        .expect("writing the lonely document");
+    std::fs::write(
+        vault.path().join(SET_SUBJECT_PATH),
+        "---\nstatus: draft\n---\n# Subject\n",
+    )
+    .expect("writing the set's subject");
+    let document = |at: &str| norn_wire::DocumentPath::new(at).expect("a document path");
+    let address = VaultAddress::name(vault.name().clone());
+    let mut counters: Vec<(String, u64)> = Vec::new();
+    {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+
+        let set = one_apply(profile, "a set by path", &host, || {
+            host.set(norn_wire::SetParams::new(
+                address.clone(),
+                norn_wire::ApplyMode::Apply,
+                norn_wire::WriteTarget::path(document(SET_SUBJECT_PATH)),
+                vec![norn_wire::FieldChange::set(
+                    "status",
+                    norn_wire::AuthoredValue::string("done"),
+                )],
+            ))
+        });
+        let moved = one_apply(profile, "the hub's move", &host, || {
+            host.move_path(norn_wire::MoveParams::new(
+                address.clone(),
+                norn_wire::ApplyMode::Apply,
+                norn_wire::MoveSubject::document(
+                    document(&hub_path()),
+                    document(&moved_in_place_hub_path()),
+                ),
+            ))
+        });
+        let lonely = one_apply(profile, "a delete no link refuses", &host, || {
+            host.delete(norn_wire::DeleteParams::new(
+                address.clone(),
+                norn_wire::ApplyMode::Apply,
+                document(&lonely_path),
+            ))
+        });
+        let hub = one_apply(profile, "the moved hub's delete", &host, || {
+            host.delete(
+                norn_wire::DeleteParams::new(
+                    address.clone(),
+                    norn_wire::ApplyMode::Apply,
+                    document(&moved_in_place_hub_path()),
+                )
+                .breaking_links(),
+            )
+        });
+        for (prefix, spent) in [
+            ("set", set),
+            ("move", moved),
+            ("lonely", lonely),
+            ("hub", hub),
+        ] {
+            counters.extend(
+                spent
+                    .names()
+                    .map(|name| (format!("{prefix}_{name}"), spent.get(name))),
+            );
+        }
+    }
+
+    // Every stem the applies wrote, moved or removed is the planted
+    // neighborhood's alone: the hub went to its new stem and both it and the
+    // lonely document were deleted, so no document the attachment derived
+    // may stand at any of the three, and the subject stands alone at its own.
+    let mut store = vault.store();
+    let mut sharing = Vec::new();
+    let subject = DocumentPath::new(SET_SUBJECT_PATH).expect("a document path");
+    attach::for_each_derived_path(&mut store, |path| {
+        let stem = path.stem();
+        if [HUB_STEM, MOVED_HUB_STEM, LONELY_STEM].contains(&stem)
+            || (stem == subject.stem() && path != &subject)
+        {
+            sharing.push(path.as_str().to_string());
+        }
+    });
+    assert!(
+        sharing.is_empty(),
+        "the write-through bar's stems are the planted neighborhood's, and the attachment \
+         derived other documents at them: {sharing:?}"
+    );
+    let counters: CounterSnapshot = counters.into_iter().collect();
+    record_the_counters(
+        &format!(
+            "applying a set, a hub's move and two deletes through the host over `{}`",
+            profile.name
+        ),
+        &counters,
+    );
+    counters
+}
+
+/// The documents a `set --where` writes at both scales: as many at 300
+/// documents as at 2000, so what its selector and its writes cost is the
+/// matches' own.
+const WHERE_MATCHES: usize = 10;
+
+/// The frontmatter key the `set --where` pair's documents carry, and no
+/// generated document does, asserted rather than assumed.
+const WHERE_KEY: &str = "apply_gate_where";
+
+/// The stem every `set --where` document opens with, so the classes its
+/// changeset names are the planted documents' alone: a generated document
+/// at one of them would put a match in a populated class at one scale and
+/// not the other. Asserted rather than assumed.
+const WHERE_STEM: &str = "apply-gate-where";
+
+/// The folder the `set --where` documents stand in. It sorts, as their
+/// stems do, among the generated vault's own names at both scales rather than
+/// past all of them at one: a seek for a key past every key an index holds
+/// ends at the index's end in fewer steps than one that lands on a row it
+/// then passes over, so a name sorting last at one scale and not at the other
+/// would read a step apart per key for no difference in work.
+const WHERE_FOLDER: &str = "apply-gate";
+
+/// **A `set --where` costs its matches, never the vault around them.** The
+/// same [`WHERE_MATCHES`] documents carry [`WHERE_KEY`] beside each per-PR
+/// profile, with one more in their folder carrying another value of it, and
+/// a `set` whose `where` names the value they share is applied through the
+/// host. Its selector is matched on the apply job's one snapshot, through
+/// the find builder: what the snapshot ran — the selector's statements and
+/// the steps they took, beside the applier's judgment of the plan's links on
+/// the same snapshot — is the same at `ambiguous` (300 documents) as at
+/// `realistic` (2000), and none of it stepped a table or an index end to end.
+/// The apply writes through exactly the matches: the reads it took are
+/// [`baselines::APPLY_READS_PER_REPLACED_TARGET`] per match and a shadow
+/// read each, in one changeset upserting the matches alone.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_where_apply_costs_the_same_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_set_where("counter-gate-set-where-ambiguous", &small);
+    let large_counters = one_set_where("counter-gate-set-where-realistic", &large);
+
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("replaced", WHERE_MATCHES as u64),
+            ("snapshots_opened", 1),
+            ("links_redecided", 0),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "the set --where over `{}` did not read `{name}` as its {WHERE_MATCHES} matches \
+                 name: {counters:?}",
+                profile.name
+            );
+        }
+        assert!(
+            counters.get("statements") > 0 && counters.get("vm_steps") > 0,
+            "the set --where over `{}` ran nothing on its snapshot, so the bar reads no \
+             selector: {counters:?}",
+            profile.name
+        );
+    }
+
+    SizeIndependencePair::new(
+        "applying a set --where matching the same documents",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with [`WHERE_MATCHES`] documents carrying [`WHERE_KEY`]
+/// planted beside it, apply the `set --where` naming them through the host,
+/// hold it to the write-through bar, and hand back what it spent.
+fn one_set_where(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let folder = vault.path().join(WHERE_FOLDER);
+    std::fs::create_dir_all(&folder).expect("creating the matches' folder");
+    for at in 0..WHERE_MATCHES {
+        std::fs::write(
+            folder.join(format!("{WHERE_STEM}-{at:02}.md")),
+            format!("---\n{WHERE_KEY}: flip\n---\n# Match {at}\n"),
+        )
+        .expect("writing a match");
+    }
+    std::fs::write(
+        folder.join(format!("{WHERE_STEM}-kept.md")),
+        format!("---\n{WHERE_KEY}: keep\n---\n# Kept\n"),
+    )
+    .expect("writing the document the predicate passes over");
+    let spent = {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        one_apply(profile, "a set --where", &host, || {
+            host.set(norn_wire::SetParams::new(
+                VaultAddress::name(vault.name().clone()),
+                norn_wire::ApplyMode::Apply,
+                norn_wire::WriteTarget::matching([Predicate::equal_to(WHERE_KEY, "flip")]),
+                vec![norn_wire::FieldChange::set(
+                    WHERE_KEY,
+                    norn_wire::AuthoredValue::string("flipped"),
+                )],
+            ))
+        })
+    };
+
+    // The matches are the planted ones alone: the store holds the key, and
+    // the stems, on exactly the planted documents — the matches, now
+    // flipped, and the one kept.
+    let mut store = vault.store();
+    let mut carrying = Vec::new();
+    attach::for_each_derived_document(&mut store, |document| {
+        let keyed = document
+            .frontmatter
+            .as_ref()
+            .is_some_and(|projection| projection.contains(&format!("\"{WHERE_KEY}\"")));
+        if keyed || document.path.stem().starts_with(WHERE_STEM) {
+            carrying.push(document.path.as_str().to_string());
+        }
+    });
+    assert_eq!(
+        carrying.len(),
+        WHERE_MATCHES + 1,
+        "the set --where's key and stems are the planted documents' alone, and the attachment \
+         derived them at {carrying:?}"
+    );
+    record_the_counters(
+        &format!(
+            "applying a set --where matching {WHERE_MATCHES} documents over `{}`",
+            profile.name
+        ),
+        &spent,
+    );
+    spent
+}
+
+/// How many documents the mass-delete bar removes in one plan: enough that
+/// a cost per key the Layer 3 limit does not admit is far past it, and the
+/// store-level bar's order of magnitude.
+const MASS_DELETES: usize = 200;
+
+/// The stem every document the mass-delete bar removes opens with. No
+/// generated document shares one, asserted rather than assumed.
+const MASS_DELETE_STEM: &str = "mass-gate";
+
+/// **The Layer 3 mass-delete cost limit binds `delete`.** [`MASS_DELETES`]
+/// documents no link names are planted beside each per-PR profile, each at a
+/// stem of its own, with one more beside them in their folder so the plan
+/// empties no folder. One plan carrying, for each, the operation
+/// [`norn_host::Host::delete`] compiles its request to is applied through the
+/// host: it removes every one of them in one changeset, re-decides no link,
+/// and that changeset's re-decision of the class and the path each removal
+/// names steps the store at most [`norn_testkit::work::STEPS_PER_EMPTY_KEY`]
+/// per key — the limit the store's own mass-delete bar holds a bare
+/// changeset to — at `ambiguous` (300 documents) as at `realistic` (2000),
+/// in the same counts at both. Its reads are
+/// [`baselines::APPLY_READS_PER_REMOVED_TARGET`] per document it removes
+/// and none of any other file.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_mass_delete_through_the_host_costs_a_constant_per_key_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_mass_delete("counter-gate-mass-delete-ambiguous", &small);
+    let large_counters = one_mass_delete("counter-gate-mass-delete-realistic", &large);
+
+    // Each removal names a class, its stem, and a path, its own.
+    let keys = 2 * MASS_DELETES as u64;
+    let ceiling = norn_testkit::work::STEPS_PER_EMPTY_KEY * keys;
+    for (profile, counters) in [(&small, &small_counters), (&large, &large_counters)] {
+        for (name, expected) in [
+            ("removed", MASS_DELETES as u64),
+            ("links_redecided", 0),
+            ("findings_written", 0),
+        ] {
+            assert_eq!(
+                counters.get(name),
+                expected,
+                "the mass delete over `{}` did not read `{name}` as its {MASS_DELETES} unlinked \
+                 documents name: {counters:?}",
+                profile.name
+            );
+        }
+        let steps = counters.get("changeset_read_steps");
+        assert!(
+            steps > 0 && baselines::fits(steps, ceiling),
+            "the mass delete's changeset over `{}` took {steps} steps re-deciding the {keys} \
+             classes and paths its {MASS_DELETES} removals name, past the Layer 3 limit of {} \
+             per key ({ceiling}), or none at all",
+            profile.name,
+            norn_testkit::work::STEPS_PER_EMPTY_KEY
+        );
+    }
+
+    SizeIndependencePair::new(
+        "deleting documents no link names in one plan",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` with [`MASS_DELETES`] unlinked documents planted beside
+/// it, apply their deletes in one plan through the host, hold it to the
+/// write-through bar, and hand back what it spent.
+fn one_mass_delete(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    let folder = format!("{MASS_DELETE_STEM}/");
+    std::fs::create_dir_all(vault.path().join(&folder)).expect("creating the doomed folder");
+    let doomed: Vec<String> = (0..MASS_DELETES)
+        .map(|at| format!("{folder}{MASS_DELETE_STEM}-{at:04}.md"))
+        .collect();
+    for (at, path) in doomed.iter().enumerate() {
+        std::fs::write(vault.path().join(path), format!("doomed {at}\n"))
+            .expect("writing a doomed document");
+    }
+    std::fs::write(vault.path().join(format!("{folder}kept.md")), "kept\n")
+        .expect("writing the document that keeps the folder");
+    let address = VaultAddress::name(vault.name().clone());
+    let spent = {
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        let operations: Vec<norn_wire::Operation> = doomed
+            .iter()
+            .flat_map(|path| {
+                norn_wire::DeleteParams::new(
+                    address.clone(),
+                    norn_wire::ApplyMode::Apply,
+                    norn_wire::DocumentPath::new(path).expect("a document path"),
+                )
+                .plan()
+                .operations
+            })
+            .collect();
+        one_apply(profile, "a mass delete", &host, || {
+            host.apply(norn_wire::ApplyParams::new(
+                norn_wire::ApplyMode::Apply,
+                norn_wire::PlanDocument::operations(norn_wire::AuthoredPlan::new(
+                    address.clone(),
+                    operations,
+                )),
+            ))
+        })
+    };
+
+    let mut store = vault.store();
+    let mut sharing = Vec::new();
+    attach::for_each_derived_path(&mut store, |path| {
+        if path.stem().starts_with(MASS_DELETE_STEM) {
+            sharing.push(path.as_str().to_string());
+        }
+    });
+    assert!(
+        sharing.is_empty(),
+        "the mass delete removed every document at its stems, and the attachment derived \
+         others at them: {sharing:?}"
+    );
+    record_the_counters(
+        &format!(
+            "deleting {MASS_DELETES} documents no link names in one plan over `{}`",
+            profile.name
+        ),
+        &spent,
+    );
+    spent
+}
+
+/// How many of each transition an applied plan carries, by what it does to
+/// its file. Read only where the host's account is, behind `induced-failure`.
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg(feature = "induced-failure")]
+struct Touched {
+    /// Files standing before and after, their content replaced.
+    replaced: u64,
+    /// Files absent before and standing after.
+    created: u64,
+    /// Files standing before and absent after.
+    removed: u64,
+}
+
+#[cfg(feature = "induced-failure")]
+impl Touched {
+    /// What `plan`'s transitions do, file by file.
+    fn of(plan: &norn_wire::ResolvedPlan) -> Touched {
+        let mut touched = Touched::default();
+        for transition in &plan.transitions {
+            let present = |state: &norn_wire::FileState| {
+                matches!(state, norn_wire::FileState::Present { .. })
+            };
+            match (present(&transition.before), present(&transition.after)) {
+                (true, true) => touched.replaced += 1,
+                (false, true) => touched.created += 1,
+                (true, false) => touched.removed += 1,
+                (false, false) => panic!(
+                    "a transition at `{}` names no file before or after it",
+                    transition.path.as_str()
+                ),
+            }
+        }
+        touched
+    }
+
+    /// The files written, each through a shadow of its own.
+    fn written(self) -> u64 {
+        self.replaced + self.created
+    }
+
+    /// The reads the authored budgets allow this plan's files.
+    fn read_budget(self) -> u64 {
+        self.replaced * baselines::APPLY_READS_PER_REPLACED_TARGET
+            + self.created * baselines::APPLY_READS_PER_CREATED_TARGET
+            + self.removed * baselines::APPLY_READS_PER_REMOVED_TARGET
+    }
+}
+
+/// Apply what `act` asks through the host, read what the apply job spent off
+/// the host's account around it, hold it to the write-through bar, and hand
+/// back every count it spent with the transitions its plan carried.
+///
+/// **The account is the apply job's own.** The job runs on a worker thread
+/// under the attribution window every job opens, so what it read through
+/// `norn-fs` and what its changeset did are folded into the account when it
+/// ends, before its answer is published; the snapshot it read the store on is
+/// counted where its planning and applying are done with it. Nothing else
+/// runs between the two readings but the watcher's echo of the applier's own
+/// writes, which the own-write ledger suppresses on the watcher's thread
+/// without a job: every apply here makes and empties no folder, so the echo
+/// names no path a job would read.
+///
+/// **The bar**, at every apply:
+///
+/// - the reads of the plan's files — documents opened through `norn-fs`'s
+///   contained read and targets read by the write kernel — are exactly the
+///   authored budget summed over its transitions, so no file the plan does
+///   not touch is read, and each staged shadow is read once;
+/// - one changeset, deriving and upserting exactly the written targets and
+///   killing and tombstoning exactly the removed ones;
+/// - at most one snapshot opened, with a mint behind it exactly where one is
+///   opened, and no table or index stepped end to end on it.
+#[cfg(feature = "induced-failure")]
+fn one_apply(
+    profile: &norn_fixtures::Profile,
+    what: &str,
+    host: &attach::ServingHost,
+    act: impl FnOnce() -> Result<norn_host::PendingApply, norn_wire::ErrorEnvelope>,
+) -> CounterSnapshot {
+    let before = host.evidence();
+    let answered = act()
+        .expect("an apply is admitted")
+        .wait()
+        .unwrap_or_else(|refused| {
+            panic!("{what} over `{}` was refused: {refused:?}", profile.name)
+        });
+    let spent = host.evidence().since(before);
+    let norn_wire::ApplyReport::Applied {
+        plan, changeset, ..
+    } = answered.report
+    else {
+        panic!("{what} answered {:?}", answered.report);
+    };
+    assert_eq!(
+        changeset,
+        norn_wire::ChangesetOutcome::Committed,
+        "{what} over `{}` left its changeset to a heal",
+        profile.name
+    );
+    let touched = Touched::of(&plan);
+    let read = spent.document_opens + spent.target_reads;
+    let budget = touched.read_budget();
+    assert!(
+        baselines::fits(read, budget) && baselines::fits(budget, read),
+        "{what} over `{}` read its files {read} times ({} documents opened, {} targets read by \
+         the write kernel), and the authored budgets over its {touched:?} allow exactly {budget}",
+        profile.name,
+        spent.document_opens,
+        spent.target_reads
+    );
+    let shadows = touched.written() * baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET;
+    assert!(
+        baselines::fits(spent.shadow_reads, shadows)
+            && baselines::fits(shadows, spent.shadow_reads),
+        "{what} over `{}` read {} staged shadows for its {} written targets, where the authored \
+         budget allows exactly {shadows}",
+        profile.name,
+        spent.shadow_reads,
+        touched.written()
+    );
+    for (name, reading, expected) in [
+        ("changesets_applied", spent.changesets_applied, 1),
+        (
+            "documents_derived",
+            spent.documents_derived,
+            touched.written(),
+        ),
+        (
+            "documents_upserted",
+            spent.documents_upserted,
+            touched.written(),
+        ),
+        (
+            "documents_deleted",
+            spent.documents_deleted,
+            touched.removed,
+        ),
+        (
+            "tombstones_recorded",
+            spent.tombstones_recorded,
+            touched.removed,
+        ),
+        ("apply_full_scan_steps", spent.apply_full_scan_steps, 0),
+    ] {
+        assert_eq!(
+            reading, expected,
+            "{what} over `{}` read `{name}` as {reading}, and its {touched:?} name {expected}",
+            profile.name
+        );
+    }
+    assert!(
+        spent.apply_snapshots_opened <= 1
+            && (spent.apply_snapshots_opened == 0) == (spent.apply_mint_statements == 0),
+        "{what} over `{}` opened {} snapshots over mints that ran {} statements: an apply opens \
+         at most one, on the one handle it mints",
+        profile.name,
+        spent.apply_snapshots_opened,
+        spent.apply_mint_statements
+    );
+    [
+        ("replaced", touched.replaced),
+        ("created", touched.created),
+        ("removed", touched.removed),
+        ("document_opens", spent.document_opens),
+        ("target_reads", spent.target_reads),
+        ("shadow_reads", spent.shadow_reads),
+        ("stats", spent.stats),
+        ("walk_dirents", spent.walk_dirents),
+        ("documents_derived", spent.documents_derived),
+        ("changesets_applied", spent.changesets_applied),
+        ("documents_upserted", spent.documents_upserted),
+        ("documents_deleted", spent.documents_deleted),
+        ("tombstones_recorded", spent.tombstones_recorded),
+        ("findings_discarded", spent.findings_discarded),
+        ("findings_written", spent.findings_written),
+        ("links_redecided", spent.links_redecided),
+        ("link_health_keys_resolved", spent.link_health_keys_resolved),
+        (
+            "link_health_candidates_read",
+            spent.link_health_candidates_read,
+        ),
+        ("changeset_read_steps", spent.changeset_read_steps),
+        ("mint_statements", spent.apply_mint_statements),
+        ("snapshots_opened", spent.apply_snapshots_opened),
+        ("statements", spent.apply_statements),
+        ("vm_steps", spent.apply_vm_steps),
+        ("full_scan_steps", spent.apply_full_scan_steps),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// A build without `induced-failure` carries no reader of the host's account.
+#[cfg(not(feature = "induced-failure"))]
+fn one_apply(
+    _: &norn_fixtures::Profile,
+    _: &str,
+    _: &attach::ServingHost,
+    _: impl FnOnce() -> Result<norn_host::PendingApply, norn_wire::ErrorEnvelope>,
+) -> CounterSnapshot {
+    unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
 }
 
 /// **The size-independence bar over a read.** The vault around a bounded find
