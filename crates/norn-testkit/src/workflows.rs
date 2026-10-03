@@ -136,14 +136,56 @@ pub(crate) struct FeaturedRun {
 /// What the workflows run.
 #[derive(Debug, Default)]
 pub(crate) struct CiSteps {
-    /// The vouching lane steps: a lane step that may be skipped, or whose
-    /// failure is tolerated, adopts nothing.
+    /// The vouching lane steps, the ones a check that a target is run may
+    /// count: a lane step that may be skipped, or whose failure is tolerated,
+    /// runs nothing such a check needs run.
     pub(crate) lanes: Vec<LaneStep>,
     /// What the vouching `cargo test` steps run with a feature on.
     pub(crate) featured: BTreeSet<FeaturedRun>,
+    /// Every lane step whose command reads, vouching or not, for the checks
+    /// that refuse a step that exists: each adopts its target's ignored cases
+    /// whenever it runs, so each is held to the package rows, the stems and
+    /// the features its target needs.
+    pub(crate) every_lane: Vec<LaneStep>,
+    /// Every command naming [`LANE_SCRIPT`] that does not read whole,
+    /// vouching or not. Its package and target cannot be read, so it counts
+    /// as no lane step anywhere above; the lane guards refuse it instead,
+    /// rather than leave a step that may adopt a suite unchecked.
+    pub(crate) unread_lanes: Vec<String>,
 }
 
 impl CiSteps {
+    /// Adds what the steps of `workflow` run, or says why it is not a
+    /// workflow.
+    pub(crate) fn read(&mut self, workflow: &str) -> Result<(), String> {
+        for step in steps_in(workflow)? {
+            let Some(run) = step.run.as_deref() else {
+                continue;
+            };
+            // A step that may be skipped, may fail unnoticed, or may run other
+            // than its command spells vouches for nothing it runs — but a lane
+            // step adopts its target's ignored cases whenever it does run, so
+            // every lane step is recorded for the guards that refuse one.
+            match invocation(run) {
+                Some(Invocation::Lane { package, target }) => {
+                    let lane = LaneStep {
+                        package,
+                        target,
+                        features: features_named(step.env.get(LANE_FEATURES)),
+                    };
+                    if step.vouches {
+                        self.lanes.push(lane.clone());
+                    }
+                    self.every_lane.push(lane);
+                }
+                Some(Invocation::Test(runs)) if step.vouches => self.featured.extend(runs),
+                None if run.contains(LANE_SCRIPT) => self.unread_lanes.push(run.to_string()),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Whether a vouching step runs `package`'s `target` with `feature` on.
     pub(crate) fn runs_with_feature(&self, package: &str, target: &Target, feature: &str) -> bool {
         self.featured.iter().any(|run| {
@@ -156,8 +198,8 @@ impl CiSteps {
         })
     }
 
-    /// The features the lane steps adopting `package`'s `target` name between
-    /// them, or `None` where no lane step adopts it.
+    /// The features the vouching lane steps adopting `package`'s `target` name
+    /// between them, or `None` where no vouching lane step adopts it.
     pub(crate) fn adopted(&self, package: &str, target: &str) -> Option<BTreeSet<String>> {
         let mut adopting = self
             .lanes
@@ -204,24 +246,8 @@ pub(crate) fn ci_steps_in(directory: &Path) -> Result<CiSteps, String> {
         workflows += 1;
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let steps = steps_in(&text).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        for step in steps {
-            let Some(run) = step.run.as_deref() else {
-                continue;
-            };
-            match invocation(run) {
-                // A step that may be skipped, may fail unnoticed, or may run
-                // other than its command spells vouches for nothing it runs.
-                _ if !step.vouches => {}
-                Some(Invocation::Lane { package, target }) => read.lanes.push(LaneStep {
-                    package,
-                    target,
-                    features: features_named(step.env.get(LANE_FEATURES)),
-                }),
-                Some(Invocation::Test(runs)) => read.featured.extend(runs),
-                None => {}
-            }
-        }
+        read.read(&text)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
     }
     if workflows == 0 {
         return Err(format!(
