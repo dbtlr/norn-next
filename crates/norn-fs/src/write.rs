@@ -3103,8 +3103,9 @@ mod tests {
     /// create below a folder that is a link, a replace at a name holding
     /// other bytes, and a replace at its before-state each judge as staging
     /// them does — the first two refusing with staging's own refusal, the
-    /// last passing — and judging stages no shadow and writes nothing
-    /// through the link.
+    /// last passing — and judging stages no shadow, writes nothing through
+    /// the link, and leaves the vault root and the shadow home unmodified, so
+    /// not even a file made and removed again passes unseen.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
     fn judging_a_target_answers_as_staging_it_does_and_writes_nothing() {
@@ -3125,19 +3126,41 @@ mod tests {
                 transition,
             )
         };
+        // Each folder's modification time is set well into the past first,
+        // so a change judging made is seen even within the clock's tick.
+        let folders = [scratch.at(""), scratch.shadows().directory().to_owned()];
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1 << 20);
+        for folder in &folders {
+            std::fs::File::open(folder)
+                .and_then(|handle| handle.set_modified(long_ago))
+                .expect("backdating a folder");
+        }
+        let modified = || {
+            folders
+                .iter()
+                .map(|folder| {
+                    std::fs::metadata(folder)
+                        .and_then(|meta| meta.modified())
+                        .expect("an mtime")
+                })
+                .collect::<Vec<_>>()
+        };
 
-        for (relative, transition) in [
+        let refused = [
             ("linked/fresh.md", Transition::Create { content: b"ours" }),
             ("drifted.md", replace),
-        ] {
-            let refusal = judged(relative, transition).expect_err("a refused target");
+        ]
+        .map(|(relative, transition)| (relative, transition, judged(relative, transition)));
+        assert_eq!(judged("ready.md", replace), Ok(()));
+        assert_eq!(modified(), vec![long_ago; 2], "judging modified a folder");
+        for (relative, transition, judgment) in refused {
+            let refusal = judgment.expect_err("a refused target");
             assert_eq!(
                 Err(refusal),
                 stage_in(&scratch, relative, transition, Faults::NONE),
                 "{relative}"
             );
         }
-        assert_eq!(judged("ready.md", replace), Ok(()));
         assert!(scratch.shadow_names().is_empty(), "judging staged a shadow");
         assert!(
             std::fs::read_dir(&outside)

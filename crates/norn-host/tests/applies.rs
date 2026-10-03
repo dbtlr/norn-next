@@ -492,10 +492,18 @@ fn a_resolved_plan_with_a_transition_for_an_untouched_file_previews_as_plan_inva
 /// A document no plan here touches.
 const UNTOUCHED: &str = "apply-untouched.md";
 
-/// Every entry under `root`, with its inode and modification time.
+/// `root` and every entry under it, with its inode and modification time.
+///
+/// The root is an entry too: a file made and removed again directly under it
+/// leaves no entry behind, only the root's own modification time moved.
 fn tree_state(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
     use std::os::unix::fs::MetadataExt;
-    let mut found = Vec::new();
+    let metadata = std::fs::symlink_metadata(root).expect("the root's metadata");
+    let mut found = vec![(
+        root.to_owned(),
+        metadata.ino(),
+        metadata.modified().expect("an mtime"),
+    )];
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).expect("a listing") {
