@@ -45,9 +45,9 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
-/// A block scalar being read: the indentation of the line holding its
-/// header, and of its content once its header's indentation indicator or
-/// its first content line fixes it.
+/// A block scalar being read: the column of the node holding its header,
+/// and the indentation of its content once its header's indentation
+/// indicator or its first content line fixes it.
 struct Block {
     parent: usize,
     content: Option<usize>,
@@ -56,7 +56,7 @@ struct Block {
 impl Block {
     /// Whether `line` is the block's content rather than what follows it: a
     /// blank line, or one indented as deep as its content — more deeply than
-    /// its header's line, where nothing has fixed it yet.
+    /// the node holding its header, where nothing has fixed it yet.
     fn holds(&mut self, line: &str) -> bool {
         let indent = indentation(line);
         if indent == line.len() {
@@ -95,14 +95,23 @@ fn ends_a_token(bytes: &[u8], at: usize) -> bool {
 /// document start, a tag or an anchor, or a flow collection's `[`, `{` or
 /// `,`. A quote anywhere else is a character of the plain scalar it stands
 /// in, and so is one on a line continuing a plain scalar — a line indented
-/// past the line whose value the scalar began as.
+/// past the node holding the scalar.
+///
+/// **A value is bounded by the node holding it**: the key whose value it
+/// is, or the sequence entry's `-`, whose column may stand past its line's
+/// indentation (`- a: b`) and whose line may precede the value's (`a:` with
+/// the value on the next line). A plain scalar continues onto, and a block
+/// scalar's content is, a line indented past that column.
 fn yaml(text: &str) -> Vec<&str> {
     let mut found = Vec::new();
     let mut quote: Option<u8> = None;
     let mut block: Option<Block> = None;
-    // The indentation of the line a plain scalar value began on, while the
-    // scalar may still continue onto the next line.
+    // The column of the node holding a plain scalar value, while the scalar
+    // may still continue onto the next line.
     let mut plain: Option<usize> = None;
+    // The column of the key or `-` whose value is still to come at the end
+    // of a line, carried to the next line the value may begin on.
+    let mut pending: Option<usize> = None;
     // How deep in flow collections the text stands.
     let mut flow = 0_usize;
     // Whether a scalar may begin at the next token: carried across lines in
@@ -121,7 +130,7 @@ fn yaml(text: &str) -> Vec<&str> {
         if line.trim().is_empty() {
             continue;
         }
-        let continues_plain = quote.is_none() && plain.is_some_and(|parent| indent > parent);
+        let continues_plain = quote.is_none() && plain.is_some_and(|holder| indent > holder);
         if !continues_plain {
             plain = None;
         }
@@ -133,6 +142,12 @@ fn yaml(text: &str) -> Vec<&str> {
         let mut previous: Option<u8> = None;
         let mut value_plain = continues_plain;
         let mut in_property = false;
+        // The column of the node holding the next value on this line, and
+        // of the node token begun since the last key or `-`.
+        let mut holder = pending.take();
+        let mut token: Option<usize> = None;
+        // The holder of the plain scalar value this line began.
+        let mut plain_holder = None;
         let mut at = 0;
         if quote.is_none()
             && (line.starts_with("---") || line.starts_with("..."))
@@ -140,6 +155,7 @@ fn yaml(text: &str) -> Vec<&str> {
         {
             at = 3;
             previous = Some(bytes[2]);
+            holder = None;
         }
         while at < bytes.len() {
             let byte = bytes[at];
@@ -168,10 +184,12 @@ fn yaml(text: &str) -> Vec<&str> {
                 None if matches!(byte, b' ' | b'\t') => in_property = false,
                 None if in_property => {}
                 None if node_start && matches!(byte, b'\'' | b'"') => {
+                    token.get_or_insert(at);
                     quote = Some(byte);
                     value_plain = false;
                 }
                 None if node_start && matches!(byte, b'[' | b'{') => {
+                    token.get_or_insert(at);
                     flow += 1;
                     value_plain = false;
                 }
@@ -185,16 +203,29 @@ fn yaml(text: &str) -> Vec<&str> {
                     value_plain = false;
                 }
                 None if byte == b':' && ends_a_token(bytes, at) => {
-                    // What stood before it was a key; its value begins next.
+                    // What stood before it was a key, which holds the value
+                    // beginning next.
+                    holder = Some(token.take().unwrap_or(at));
                     node_start = true;
                     value_plain = false;
                 }
-                None if node_start && matches!(byte, b'-' | b'?') && ends_a_token(bytes, at) => {}
-                None if node_start && matches!(byte, b'!' | b'&') => in_property = true,
-                None if node_start && matches!(byte, b'*' | b'|' | b'>') => node_start = false,
+                None if node_start && matches!(byte, b'-' | b'?') && ends_a_token(bytes, at) => {
+                    holder = Some(at);
+                    token = None;
+                }
+                None if node_start && matches!(byte, b'!' | b'&') => {
+                    token.get_or_insert(at);
+                    in_property = true;
+                }
+                None if node_start && matches!(byte, b'*' | b'|' | b'>') => {
+                    token.get_or_insert(at);
+                    node_start = false;
+                }
                 None => {
                     if node_start {
+                        token.get_or_insert(at);
                         value_plain = true;
+                        plain_holder = holder;
                     }
                     node_start = false;
                 }
@@ -210,15 +241,21 @@ fn yaml(text: &str) -> Vec<&str> {
             .then(|| block_header(&line[..comment.unwrap_or(line.len())]))
             .flatten();
         if let Some(indicator) = opens_block {
+            let parent = holder.unwrap_or(indent);
             block = Some(Block {
-                parent: indent,
-                content: indicator.map(|digit| indent + digit),
+                parent,
+                content: indicator.map(|digit| parent + digit),
             });
         }
         // A comment ends a plain scalar; one left open may continue onto a
-        // line indented past this one's.
+        // line indented past the node holding it.
         plain = (quote.is_none() && flow == 0 && comment.is_none() && value_plain)
-            .then(|| plain.unwrap_or(indent));
+            .then(|| plain.or(plain_holder).unwrap_or(indent));
+        // A key or `-` whose value has not begun holds the value the next
+        // line may begin.
+        pending = (quote.is_none() && flow == 0 && node_start)
+            .then_some(holder)
+            .flatten();
     }
     found
 }

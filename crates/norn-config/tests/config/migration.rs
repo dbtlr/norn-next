@@ -280,7 +280,10 @@ fn a_hash_inside_a_toml_string_is_no_comment() {
 /// **A quote inside a plain scalar opens no quoted scalar**, so the comments
 /// after it are still comments and a rewrite dropping them is refused: a
 /// quote after a word on a key's line, on a plain scalar's continuation
-/// line, in a sequence entry and in a flow collection's plain scalar.
+/// line, in a sequence entry and in a flow collection's plain scalar — and
+/// on a continuation line indented only as deep as the scalar's first line,
+/// where the scalar began on the line after its key or its `-`, since the
+/// node holding it bounds its continuation.
 #[test]
 fn a_quote_inside_a_plain_scalar_hides_no_comment() {
     let dropping = one_step(|text| {
@@ -294,6 +297,10 @@ fn a_quote_inside_a_plain_scalar_hides_no_comment() {
         "version: 1\ntitle: rock\n  'n roll # keep me\n# the owner reads this\nb: 2\n",
         "version: 1\nitems:\n- a 'b # keep me\n# the owner reads this\n",
         "version: 1\nflow: [a 'b, c] # keep me\n# the owner reads this\n",
+        "version: 1\nsummary:\n  Music of the\n  '90s and beyond # keep me\n# the owner reads this\nb: 2\n",
+        "version: 1\nitems:\n-\n  rock\n  'n roll # keep me\n# the owner reads this\n",
+        "version: 1\nsize:\n  five\n  \"tall # keep me\n# the owner reads this\nb: 2\n",
+        "version: 1\nl:\n- a: rock\n    'n roll # keep me\n# the owner reads this\n",
     ] {
         assert_eq!(
             dropping.migrate(file.as_bytes()),
@@ -329,9 +336,11 @@ fn a_quote_where_a_scalar_begins_hides_its_hash() {
 }
 
 /// **A block scalar's explicit indentation indicator sets its content's
-/// indentation**, so a line indented less than that, though more than its
-/// header's line, is no content: a comment moved there from outside the
-/// block becomes the block's content and is lost.
+/// indentation, past the node holding its header**, so a line indented less
+/// than that, though more than its header's line, is no content: a comment
+/// moved there from outside the block becomes the block's content and is
+/// lost, and a comment after a block in a mapping inside a sequence entry —
+/// whose key stands past its line's indentation — is a comment.
 #[test]
 fn a_block_scalar_s_indentation_indicator_bounds_its_content() {
     let moving = one_step(|text| {
@@ -341,6 +350,14 @@ fn a_block_scalar_s_indentation_indicator_bounds_its_content() {
     });
     assert_eq!(
         moving.migrate(b"version: 1\n# keep me\na: |1\n   lead\n"),
+        Err(MigrationRefusal::comment_lost("# keep me"))
+    );
+    let dropping = one_step(|text| {
+        text.replace("version: 1", "version: 2")
+            .replace("  # keep me\n", "")
+    });
+    assert_eq!(
+        dropping.migrate(b"version: 1\nl:\n- a: |1\n    x\n  # keep me\nb: 2\n"),
         Err(MigrationRefusal::comment_lost("# keep me"))
     );
 }
