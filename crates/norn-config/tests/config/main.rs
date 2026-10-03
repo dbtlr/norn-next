@@ -16,6 +16,7 @@ mod concurrency;
 mod creation;
 mod filling;
 mod layout;
+mod migration;
 mod names;
 mod registry;
 mod schema;

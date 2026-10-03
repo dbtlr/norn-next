@@ -34,6 +34,8 @@
 //! - [`schema`] — the vault schema's content model: the declared fields with
 //!   their types, the declared tag facet, the folders, the path rules, and the
 //!   creation rules and inbox.
+//! - [`migration`] — the ladder each control file is walked up to the version
+//!   this build reads, as text transforms over the file's own bytes.
 //!
 //! # The two surfaces
 //!
@@ -84,6 +86,7 @@ mod error;
 mod file;
 
 pub mod machine;
+pub mod migration;
 pub mod registry;
 pub mod schema;
 pub mod vault;
