@@ -1354,6 +1354,12 @@ type Adoptions = Result<BTreeSet<(String, String)>, String>;
 /// The walk ends at a crate root: `src/lib.rs` for a library, `tests/<name>.rs`
 /// for a flat integration target, `tests/<name>/main.rs` for a directory one.
 ///
+/// A directory no file owns is an inline module's where the file owning the
+/// directory above it opens `mod <dir> {` and declares the file module inside
+/// that block, so `lifecycle/tests/applies.rs` is reached from the
+/// `mod tests { mod applies; }` in `lifecycle.rs`, and the walk goes on from
+/// there.
+///
 /// A directory under `tests/` that holds a `mod.rs` beside its `main.rs` ends
 /// the walk instead: it roots a target and a shared module tree at once, so
 /// each file below it compiles into the directory's own target and into every
@@ -1420,29 +1426,51 @@ fn unreachable_module(
                     ));
                 }
             }
-            vec![vec![directory.clone(), "main.rs".to_string()]]
-        } else if above.is_empty() {
+            files_owning(above, kind)
+        } else if above.is_empty() && kind != "src" {
             // Under `tests/` nothing is left above a file with no directories
             // over it: the flat file and the directory root are both crate
             // roots, and the grammar refuses the one remaining shape.
-            if kind != "src" {
-                return None;
-            }
-            vec![vec!["lib.rs".to_string()]]
+            return None;
         } else {
-            let mut inside = above.to_vec();
-            inside.push("mod.rs".to_string());
-            let mut beside = above[..above.len() - 1].to_vec();
-            beside.push(format!("{}.rs", above[above.len() - 1]));
-            vec![inside, beside]
+            files_owning(above, kind)
         };
-        let found = candidates.iter().find(|candidate| {
+        let exists = |candidate: &Vec<String>| {
             let path = candidate
                 .iter()
                 .fold(base.clone(), |path, part| path.join(part));
             resolves_case_exactly(workspace_root, &path, LastComponent::File)
-        });
+        };
+        let found = candidates.iter().find(|candidate| exists(candidate));
         let Some(parent) = found else {
+            // A directory no file owns can still be an inline module's: `mod
+            // <dir> { mod <module>; }` in the file owning the directory above
+            // it reaches `<dir>/<module>.rs`, the shape a unit-test module
+            // that keeps some of its cases in files of their own takes.
+            if let Some((inline, outer)) = above.split_last()
+                && let Some(owner) = files_owning(outer, kind).into_iter().find(exists)
+            {
+                let path = owner
+                    .iter()
+                    .fold(base.clone(), |path, part| path.join(part));
+                let text = sources
+                    .entry(workspace_root.join(&path))
+                    .or_insert_with_key(|path| read(path).ok());
+                if let Some(text) = text
+                    && inline_modules(text).contains(inline)
+                {
+                    if !declares_module_inside(text, inline, &module) {
+                        return Some(format!(
+                            "no module declares it: nothing in the inline `mod {inline}` of `{}` \
+                             declares `mod {module};`, so no target compiles `{}`",
+                            path.display(),
+                            file.display()
+                        ));
+                    }
+                    current = owner;
+                    continue;
+                }
+            }
             let named: Vec<String> = candidates
                 .iter()
                 .map(|candidate| format!("crates/{package}/{kind}/{}", candidate.join("/")))
@@ -1486,6 +1514,59 @@ fn unreachable_module(
         }
         current = parent.clone();
     }
+}
+
+/// The files that can own the module directory `directory`, as components
+/// under the target kind's base: the library root for `src/` itself, a test
+/// target's `main.rs` for a directory directly under `tests/`, and otherwise
+/// `<directory>/mod.rs` or the `<directory>.rs` beside it. `tests/` itself is
+/// owned by no file, since every file there roots a target of its own.
+fn files_owning(directory: &[String], kind: &str) -> Vec<Vec<String>> {
+    match directory {
+        [] if kind == "src" => vec![vec!["lib.rs".to_string()]],
+        [] => Vec::new(),
+        [target] if kind == "tests" => vec![vec![target.clone(), "main.rs".to_string()]],
+        [outer @ .., last] => {
+            let mut inside = directory.to_vec();
+            inside.push("mod.rs".to_string());
+            let mut beside = outer.to_vec();
+            beside.push(format!("{last}.rs"));
+            vec![inside, beside]
+        }
+    }
+}
+
+/// Whether `source` declares the file module `name` with `mod <name>;` in the
+/// block of its inline module `inline` — not beside the block, and not in a
+/// block nested inside it.
+///
+/// The block is read by its indentation, which rustfmt holds the workspace
+/// to: a `mod <inline> {` line opens it, the first later line indented no
+/// further than that one closes it, and the block's own items stand at the
+/// indentation of its first line. A line that breaks the shape — a string
+/// literal's continuation at the margin — closes the block early, so a
+/// misread can only miss a declaration and fail the audit, never find one
+/// that is not there.
+fn declares_module_inside(source: &str, inline: &str, name: &str) -> bool {
+    let indentation = |line: &str| line.len() - line.trim_start().len();
+    let lines: Vec<&str> = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    lines.iter().enumerate().any(|(at, opening)| {
+        if !inline_modules(opening).contains(inline) {
+            return false;
+        }
+        let outside = indentation(opening);
+        let mut block = lines[at + 1..]
+            .iter()
+            .take_while(|line| indentation(line) > outside)
+            .peekable();
+        let Some(own) = block.peek().map(|line| indentation(line)) else {
+            return false;
+        };
+        block.any(|line| indentation(line) == own && declares_module(line, name))
+    })
 }
 
 /// Whether `source` declares the file module `name` with `mod <name>;`.
@@ -2225,9 +2306,9 @@ fn read(path: &Path) -> Result<String, RegistryError> {
 mod tests {
     use super::{
         Binding, BindingStatus, Case, Ground, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
-        MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_symbol,
-        declares_test, ignore_reason, inline_modules, is_identifier, is_kebab_case,
-        matches_function, opens_fn,
+        MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue,
+        declares_module_inside, declares_symbol, declares_test, ignore_reason, inline_modules,
+        is_identifier, is_kebab_case, matches_function, opens_fn,
     };
     use crate::scratch::Scratch;
     use std::collections::BTreeSet;
@@ -2321,11 +2402,13 @@ pub(crate) fn foo(count: u64) -> u64 {
 
     /// The module beside the carriers, and the file module under it: a
     /// namesake ignored for a reason no lane adopts, and an inline module the
-    /// listing names.
+    /// listing names, which declares a file module of its own.
     const INNER_EXTRA_SOURCE: &str = "\
 mod sub;
 
 mod tests {
+    mod nested;
+
     #[test]
     fn an_inline_carrier() {}
 }
@@ -2348,7 +2431,8 @@ fn a_carrier() {}
     ///
     /// The tree holds every shape the grammar has to tell apart: a test in the
     /// target root, a module beside it, a file module under that module, an
-    /// inline module, a directory module whose own declaration is behind a
+    /// inline module, a file module that inline module declares beside a file
+    /// in its directory it does not, a directory module whose own declaration is behind a
     /// `cfg` nothing turns on, a file no `mod` declaration reaches beside an
     /// inline module wearing its name, a directory that roots no target at
     /// all, and a directory that is a target and a shared module tree at once.
@@ -2395,6 +2479,17 @@ fn a_carrier() {}
         .expect("a carrier source");
         std::fs::write(suite.join("inner/sub.rs"), NAMESAKE_CARRIER_SOURCE)
             .expect("a namesake under the carrier");
+        std::fs::create_dir_all(suite.join("inner/tests")).expect("an inline module's directory");
+        std::fs::write(
+            suite.join("inner/tests/nested.rs"),
+            "#[test]\nfn a_nested_carrier() {}\n",
+        )
+        .expect("a file module an inline module declares");
+        std::fs::write(
+            suite.join("inner/tests/stray.rs"),
+            "#[test]\nfn a_carrier() {}\n",
+        )
+        .expect("a file under an inline module that declares no such module");
         std::fs::write(suite.join("other.rs"), NAMESAKE_CARRIER_SOURCE).expect("a namesake source");
         std::fs::write(suite.join("deep/mod.rs"), DEEP_SOURCE).expect("a directory module");
         std::fs::write(suite.join("deep/leaf.rs"), "#[test]\nfn a_carrier() {}\n")
@@ -3649,6 +3744,7 @@ fn a_carrier() {}
                 "inner::an_orphan_carrier",
                 "inner::sub::a_carrier",
                 "inner::tests::an_inline_carrier",
+                "inner::tests::nested::a_nested_carrier",
                 "other::a_carrier",
             ]),
             "cargo lists a test under the module path it is declared in"
@@ -3680,6 +3776,66 @@ fn a_carrier() {}
             cargo_audit(&root, "crates/demo/tests/suite/inner.rs::an_inline_carrier"),
             Vec::<String>::new()
         );
+    }
+
+    /// A file module an inline module declares is reached through the file
+    /// that holds the inline module: `inner.rs` declares `mod tests { mod
+    /// nested; }`, so `inner/tests/nested.rs` compiles with no `tests.rs` or
+    /// `tests/mod.rs` above it.
+    #[test]
+    fn a_file_module_an_inline_module_declares_is_reached() {
+        let root = cargo_workspace();
+        assert_eq!(
+            cargo_audit(
+                &root,
+                "crates/demo/tests/suite/inner/tests/nested.rs::a_nested_carrier"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A file under an inline module's directory that the inline module does
+    /// not declare is caught: nothing compiles it.
+    #[test]
+    fn a_file_under_an_inline_module_that_does_not_declare_it_is_caught() {
+        let root = cargo_workspace();
+        let found = cargo_audit(
+            &root,
+            "crates/demo/tests/suite/inner/tests/stray.rs::a_carrier",
+        );
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("declares `mod stray;`")),
+            "{found:#?}"
+        );
+    }
+
+    /// A file module counts as an inline module's own only where it is
+    /// declared inside that module's block: a declaration beside the block, or
+    /// inside another inline module, is a different file.
+    #[test]
+    fn a_file_module_is_an_inline_modules_only_inside_its_block() {
+        let source = "\
+mod beside;
+
+mod tests {
+    mod nested;
+
+    mod deeper {
+        mod further;
+    }
+}
+
+mod other {
+    mod elsewhere;
+}
+";
+        assert!(declares_module_inside(source, "tests", "nested"));
+        assert!(!declares_module_inside(source, "tests", "beside"));
+        assert!(!declares_module_inside(source, "tests", "further"));
+        assert!(!declares_module_inside(source, "tests", "elsewhere"));
+        assert!(!declares_module_inside(source, "absent", "nested"));
     }
 
     /// A reference whose function only exists in a file module below it is
