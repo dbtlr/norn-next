@@ -916,6 +916,7 @@ fn a_plain_delete_of_a_quarantined_file_is_never_refused_for_backlinks() {
         Some("[[q]] and [x](q.md)\n")
     );
     assert_eq!(fixture.read("k.md").as_deref(), Some("![[q]]\n"));
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A `rewrite_to` naming a quarantined file names no document.** The

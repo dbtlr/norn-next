@@ -588,7 +588,7 @@ hold a document whose own name is that place. That collision is one key holding 
 withheld rather than filed over a readable document, so for as long as the collision lasts nothing
 records that the quarantined document cannot be read. The trade is deliberate — a finding at that
 place would call a document that derived unreadable — and **the heal that removes the colliding
-document is the one that clears it**: the deaths that vacate rendered places send the heal back,
+document is the one that clears it**: the deaths that free rendered places send the heal back,
 after its last increment, to read the roots those places sit under, and every refused spelling
 those readings meet is quarantined then. Waiting for a demand or for unrelated work to reach the
 quarantined path is what that revisit exists to prevent.
@@ -3023,7 +3023,11 @@ Four contracts inside that flow carry weight:
   and derives it by the one derivation every heal runs, only where its bytes still hash to
   what was published, which is the composed post-state byte for byte. A path the plan left
   absent dies unless the tree lists a document at exactly its spelling, so a case-only
-  rename's retired spelling dies on a volume that folds it into the new one. A path another
+  rename's retired spelling dies on a volume that folds it into the new one. A left-absent
+  path that holds no row but holds a quarantine finding — a quarantined file the plan removed
+  or moved — is vacated instead: the same changeset ends that finding and records no
+  tombstone, because the heal never tombstones a place whose bytes never decoded, so the
+  store equals a build from zero the moment the apply lands. A path another
   writer changed between publication and the changeset is left out, and the watcher reports
   it, because the own-write ledger's entry names what was published rather than what the
   path holds. The bar is **mark-invariance**: the same changeset reads the same derivation

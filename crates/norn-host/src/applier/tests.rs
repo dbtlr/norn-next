@@ -2061,6 +2061,7 @@ fn a_delete_of_a_quarantined_document_records_no_link_change_and_applies() {
     assert_eq!(resolution.forecast.links, vec![]);
     applied(fixture.apply(resolution.plan));
     assert!(!fixture.vault.join("q.md").exists());
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A move of a quarantined file records no link change, and applies**: it
@@ -2093,6 +2094,7 @@ fn a_move_of_a_quarantined_document_records_no_link_change_and_applies() {
             .as_deref(),
         Some(UNDECODABLE)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **Bytes that come to decode at a file put a document there, and bytes
@@ -2141,6 +2143,7 @@ fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_app
         std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
         Some(UNDECODABLE)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **Where a holder's content stood before the plan is a fact of its path
@@ -2150,8 +2153,6 @@ fn a_file_whose_bytes_start_or_stop_decoding_records_the_links_naming_it_and_app
 /// stood, `old/q.md`, as naming `old/d.md`: the move's cascade respells
 /// `./d.md` to keep naming it from `new/q.md`, the plan records
 /// `../old/d.md` there resolving to `old/d.md` on both sides, and applies.
-/// (The source's quarantine finding outlives the apply until a heal,
-/// NORN-323, so the store is not compared with a build from zero here.)
 #[test]
 fn a_repaired_then_moved_holder_reads_its_links_before_the_plan_from_its_lineage_source() {
     let mut fixture = Fixture::new(&[("old/d.md", "old target\n"), ("new/d.md", "new target\n")]);
@@ -2186,6 +2187,7 @@ fn a_repaired_then_moved_holder_reads_its_links_before_the_plan_from_its_lineage
         fixture.read("new/q.md").as_deref(),
         Some("\u{a0} [d](../old/d.md)\n")
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A holder whose bytes do not decode after the plan holds no links
@@ -2195,9 +2197,8 @@ fn a_repaired_then_moved_holder_reads_its_links_before_the_plan_from_its_lineage
 /// naming it at either spelling, being no document on either side; and a
 /// document holding a link that quarantined bytes are moved over loses that
 /// link with no entry, while `[[d]]`, naming a document before and none
-/// after, is left broken. Each plan applies. (A moved quarantined file's
-/// finding outlives the apply until a heal, NORN-323, so the store is not
-/// compared with a build from zero here.)
+/// after, is left broken. Each plan applies, and the store equals a build
+/// from zero.
 #[test]
 fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_document_ness() {
     let mut fixture = Fixture::new(&[
@@ -2213,6 +2214,7 @@ fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_docume
     assert_eq!(plan.conditions, vec![]);
     applied(fixture.apply(plan));
     assert!(fixture.vault.join("new/q.md").exists());
+    fixture.assert_store_is_a_build_from_zero();
 
     let mut fixture = Fixture::new(&[
         ("l.md", "[[d]]\n"),
@@ -2235,6 +2237,7 @@ fn a_holder_undecodable_after_the_plan_holds_no_links_and_is_named_by_its_docume
         std::fs::read(fixture.vault.join("d.md")).ok().as_deref(),
         Some(UNDECODABLE)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A recorded flag the bytes do not bear out is a plan whose transitions
@@ -2319,6 +2322,7 @@ fn a_moved_files_two_records_of_its_bytes_must_agree_with_each_other_and_the_byt
             .iter()
             .all(|target| target.result == TargetResult::Found)
     );
+    fixture.assert_store_is_a_build_from_zero();
 }
 
 /// **A landed target's recorded flag stands for the bytes it no longer
@@ -2340,6 +2344,57 @@ fn a_landed_quarantined_targets_recorded_flag_stands_for_its_bytes() {
     );
     applied(fixture.apply(plan));
     assert_eq!(fixture.read("d.md").as_deref(), Some("dd\n"));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A vacated quarantine takes its own finding and no other file's.** The
+/// rendering marker is a legal document-path character, so a real file
+/// `r\u{FFFD}.md` can share a subject with the rendering of the unstorable
+/// `r\u{1}.md`. The quarantine the vacated file left ends; the finding about
+/// the file that still stands there is about that other file, and a build from
+/// zero holds it.
+#[test]
+fn a_vacated_quarantine_leaves_the_finding_about_another_file_sharing_its_subject() {
+    let marked = "r\u{FFFD}.md";
+    let build = || {
+        let mut fixture = quarantined_fixture();
+        fixture.foreign("r\u{1}.md", "unstorable name\n");
+        fixture.foreign(marked, UNDECODABLE);
+        fixture
+    };
+
+    let mut fixture = build();
+    let resolution = fixture.resolution(vec![deleting(marked)]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut fixture = build();
+    let resolution = fixture.resolution(vec![moving(marked, "elsewhere/r.md")]);
+    applied(fixture.apply(resolution.plan));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A delete of a file the store holds neither a row nor a finding for
+/// commits no changeset.** Nothing about the place changes, so the apply takes
+/// no generation for it.
+#[test]
+fn a_delete_of_a_path_the_store_holds_nothing_at_takes_no_generation() {
+    let mut fixture = Fixture::new(&[("d.md", "d\n")]);
+    fixture.write("n.md", "never taken in\n");
+    let before = fixture
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("a generation");
+    let resolution = fixture.resolution(vec![deleting("n.md")]);
+    applied(fixture.apply(resolution.plan));
+    assert!(!fixture.vault.join("n.md").exists());
+    let after = fixture
+        .store
+        .begin_request()
+        .write_generation()
+        .expect("a generation");
+    assert_eq!(after, before);
 }
 
 /// A plan that drops a condition its operations carry is refused: the

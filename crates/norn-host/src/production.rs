@@ -2454,14 +2454,21 @@ pub(crate) struct PlanEffect {
 /// a case-only rename's retired spelling, which a volume that folds resolves
 /// to the renamed file, dies all the same. A document the tree lists there
 /// again was put back by another writer, and is the watcher's to report, as
-/// the ledger's entry expects absence.
+/// the ledger's entry expects absence. A path with no row that the store holds
+/// findings at — a quarantined file the plan removed or moved — has them ended
+/// in the same changeset, found from the store's findings and not from the
+/// plan's record of what the file was, so the store equals a build from zero.
 ///
 /// Every death is entered ahead of every upsert, so a case-only rename's old
 /// spelling dies before its new one is written under a store whose path order
 /// folds case. The job-closing readings a heal runs after its flushes have
-/// nothing to read here: a plan's paths are document paths, which carry no
-/// rendering marker, so its deaths vacate no rendered place, and the changeset
-/// walks no scope whose unaccounted findings a prune would take.
+/// nothing to read here, and no prune is owed: a quarantined file the plan
+/// removed has its findings ended by the changeset's own [`Change::Vacated`]
+/// entry, so nothing is left behind for a reading to find, and the changeset
+/// walks no scope whose unaccounted findings a prune would take. A plan path
+/// that carries the rendering marker, which a real document name may, owes the
+/// reading of the other spellings that render to it, and the changeset does not
+/// run it (NORN-340).
 pub(crate) fn commit_plan_changeset(
     store: &mut Store,
     root: &Path,
@@ -2497,6 +2504,21 @@ pub(crate) fn commit_plan_changeset(
             pending.push(Change::Death {
                 path: left.path.clone(),
                 provenance: Provenance::PlanDelete,
+            });
+        } else if pending
+            .store
+            .begin_request()
+            .stored_findings(&left.path)
+            .map_err(store_effect)?
+            .iter()
+            .any(|finding| finding.kind == FindingKind::BodyBytesNotUtf8.as_str())
+        {
+            // A place whose bytes never decoded holds a quarantine finding and
+            // no row, and a plan that empties it leaves that finding about
+            // nothing. A finding of another kind at the subject is about a
+            // spelling this plan did not empty, and stands.
+            pending.push(Change::Vacated {
+                path: left.path.clone(),
             });
         }
     }
@@ -3063,11 +3085,11 @@ pub fn stored_path_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrd
 /// quarantine about the document occupying that place stands through a reading
 /// that was never about it.
 #[derive(Default)]
-struct Vacated {
+struct FreedRoots {
     roots: BTreeSet<String>,
 }
 
-impl Vacated {
+impl FreedRoots {
     /// Take the roots a changeset's deaths free a reading of.
     ///
     /// Only a place carrying the rendering marker can have withheld a finding: a
@@ -3088,7 +3110,7 @@ impl Vacated {
                 Change::Death { path, .. } if path.carries_marker() => {
                     self.roots.insert(path.unrendered_ancestor().to_owned());
                 }
-                Change::Death { .. } | Change::Upsert(_) => {}
+                Change::Death { .. } | Change::Vacated { .. } | Change::Upsert(_) => {}
             }
         }
     }
@@ -3123,7 +3145,7 @@ impl Vacated {
 /// rows every one of its flushes has already committed.
 #[derive(Default)]
 struct Account {
-    vacated: Vacated,
+    freed: FreedRoots,
     filed: Filed,
     withheld: Withheld,
     walked: Vec<Walked>,
@@ -3520,7 +3542,7 @@ fn revisit_vacated(
     policy: ProductionPolicy,
     account: &mut Account,
 ) -> Result<(), JobFailure> {
-    let readings = std::mem::take(&mut account.vacated).into_readings();
+    let readings = std::mem::take(&mut account.freed).into_readings();
     if readings.is_empty() {
         return Ok(());
     }
@@ -3605,14 +3627,14 @@ impl Declaration {
 ///
 /// A changeset may name one path more than once and **the last entry for a path
 /// decides**, which is how the increment applies them: an upsert leaves a row,
-/// a death leaves none, and a path the changeset never names is absent here so
+/// a death or a vacated place leaves none, and a path the changeset never names is absent here so
 /// the caller asks the store about it.
 fn rows_the_changeset_leaves(changes: &[Change]) -> BTreeMap<&DocumentPath, bool> {
     changes
         .iter()
         .map(|change| match change {
             Change::Upsert(facts) => (&facts.path, true),
-            Change::Death { path, .. } => (path, false),
+            Change::Death { path, .. } | Change::Vacated { path } => (path, false),
         })
         .collect()
 }
@@ -3866,7 +3888,7 @@ impl<'s> Pending<'s> {
         }
         let applied = !self.changes.is_empty();
         if applied {
-            self.account.vacated.absorb(&self.changes);
+            self.account.freed.absorb(&self.changes);
         }
         let mut request = self.store.begin_request();
         let outcome = request
