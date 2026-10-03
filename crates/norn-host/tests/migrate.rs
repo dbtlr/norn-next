@@ -496,4 +496,49 @@ mod over_test_ladders {
         assert_eq!(read(&vault, SCHEMA).as_deref(), Some(OLD_SCHEMA));
         assert_eq!(read(&vault, CONFIG).as_deref(), Some(OLD_CONFIG));
     }
+
+    /// Where the config ladder's meddling step writes: the config of the
+    /// one case that runs it.
+    static MIDWAY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    /// What another writer leaves in the config while the migration runs.
+    const THEIRS: &str =
+        "# engines\n[engine.old]\nlimit = 4 # a bound\n# theirs, written mid-migration\n";
+
+    /// **A file another writer changes between the migration's read and its
+    /// plan is refused as changed**, and nothing is written: the config
+    /// step, run after both files were read and before the plan is
+    /// previewed, stands in for that writer. The other writer's bytes stand,
+    /// and the schema, behind as well, is not rewritten either.
+    #[test]
+    fn a_file_changed_after_the_migration_read_it_is_refused_as_changed() {
+        let (_sandbox, vault) = a_vault(
+            "host-migrate-changed-midway",
+            &[(SCHEMA, OLD_SCHEMA), (CONFIG, OLD_CONFIG)],
+        );
+        let host = vault.host();
+        let _lease = attach::attach_and_wait(&host, vault.name());
+        MIDWAY
+            .set(vault.path().join(CONFIG))
+            .expect("one case meddles");
+        let mut meddling = config_ladder();
+        meddling.steps[0].rewrite = |text| {
+            std::fs::write(MIDWAY.get().expect("the config's path"), THEIRS)
+                .expect("the other writer's edit");
+            text.replacen("[engine.old]", "[engine.new]", 1)
+        };
+
+        let refused = host
+            .vault_migrate_with_ladders(
+                &params(&vault, ApplyMode::Apply),
+                &schema_ladder(),
+                &meddling,
+            )
+            .expect_err("a file changed since it was read is refused");
+        assert_eq!(
+            refusal(&refused),
+            (ControlFile::Config, MigrationRefusal::changed())
+        );
+        assert_eq!(read(&vault, CONFIG).as_deref(), Some(THEIRS));
+        assert_eq!(read(&vault, SCHEMA).as_deref(), Some(OLD_SCHEMA));
+    }
 }

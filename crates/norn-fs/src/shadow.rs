@@ -290,6 +290,24 @@ impl ShadowHome {
         Self::resolve_where(vault_root, data_tmp, key, vault == data)
     }
 
+    /// [`ShadowHome::resolve`], with whether the data directory shares the
+    /// vault's filesystem stated rather than read, so another crate's suite
+    /// on a machine with one filesystem can reach the in-vault fallback home.
+    ///
+    /// **Behind `test-support`**, as
+    /// [`PathNormalizer::for_sensitivity`](crate::PathNormalizer::for_sensitivity)
+    /// is: a shipped build has no way to state a relation between filesystems
+    /// that nothing read.
+    #[cfg(feature = "test-support")]
+    pub fn resolve_stating(
+        vault_root: &Path,
+        data_tmp: &Path,
+        key: &MaintainershipKey,
+        same_device: bool,
+    ) -> Result<ShadowHome, Refusal> {
+        Self::resolve_where(vault_root, data_tmp, key, same_device)
+    }
+
     /// [`ShadowHome::resolve`], with the device comparison's answer passed in
     /// rather than read off the filesystem.
     ///

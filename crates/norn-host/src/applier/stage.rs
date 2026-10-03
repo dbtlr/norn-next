@@ -732,8 +732,9 @@ fn stage_one(
                 Stop::Refused(vec![RefusedCheck::drifted(path.clone(), holds)])
             }
             Classified::NameTaken => Stop::Refused(vec![RefusedCheck::name_taken(path.clone())]),
-            Classified::RootReplaced if landing.outside => Stop::Failed(folder_replaced(&landing)),
-            Classified::RootReplaced => Stop::RootReplaced,
+            Classified::RootReplaced => landing
+                .replaced_outside()
+                .map_or(Stop::RootReplaced, Stop::Failed),
             Classified::Io(detail) => Stop::Failed(detail),
         }),
     }
@@ -757,16 +758,6 @@ fn drifted_away(
             FileState::absent(),
         )]),
     }
-}
-
-/// Why a target outside the vault stopped where the folder it is anchored
-/// at was replaced: no vault root was, so the vault's root identity is not
-/// what changed.
-pub(super) fn folder_replaced(landing: &Landing<'_>) -> String {
-    format!(
-        "the folder `{}` holding the vault schema was replaced while the plan was applied",
-        landing.anchor.display()
-    )
 }
 
 /// The filesystem layer's hash of a wire hash.

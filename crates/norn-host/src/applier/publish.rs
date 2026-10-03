@@ -12,8 +12,7 @@ use super::OwnWriteLedger;
 use super::observe::Unit;
 use super::place::{Ground, Landing};
 use super::stage::{
-    Classified, Held, Phase, StagedPlan, classify, discard_all, folder_replaced, kernel_hash,
-    staged_path,
+    Classified, Held, Phase, StagedPlan, classify, discard_all, kernel_hash, staged_path,
 };
 use crate::production::PlanEffect;
 
@@ -250,8 +249,9 @@ fn stopped(refusal: &norn_fs::Refusal, path: &DocumentPath, landing: &Landing<'_
             holds,
         },
         Classified::NameTaken => Stopped::NameTaken { path: path.clone() },
-        Classified::RootReplaced if landing.outside => Stopped::Io(folder_replaced(landing)),
-        Classified::RootReplaced => Stopped::RootReplaced,
+        Classified::RootReplaced => landing
+            .replaced_outside()
+            .map_or(Stopped::RootReplaced, Stopped::Io),
         Classified::Io(detail) => Stopped::Io(detail),
     }
 }

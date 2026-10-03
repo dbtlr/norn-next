@@ -7,9 +7,16 @@ use norn_wire::{
     RefusedCheck, TargetResult, Transition,
 };
 
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+
+use norn_fs::ShadowHome;
+
+use super::super::{Applier, ApplyOutcome};
 use super::{Fixture, applied, deleting, path, refused, results};
 use crate::planner::compose::content_hash;
 use crate::planner::control::SchemaPlace;
+use crate::planner::view::{TreeView, VaultView};
 
 const SCHEMA: &str = ".norn/schema.yaml";
 const CONFIG: &str = ".norn/config.toml";
@@ -269,4 +276,182 @@ fn a_schema_write_lands_at_a_source_inside_the_vault() {
         *fixture.recorded.calls.borrow(),
         vec![(std::path::PathBuf::from(source), true)]
     );
+}
+
+/// A vault holding `a.md`, its schema read from `schema.yaml` in a folder
+/// `shared` outside it — holding `source` where it is `Some` — staged
+/// through `shadows`, or the vault's own home where that is `None`.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the source a case arranges.
+fn outside(source: Option<&str>) -> (Fixture, PathBuf) {
+    let mut fixture = Fixture::new(&[("a.md", "# A\n")]);
+    let folder = fixture.vault.parent().expect("a parent").join("shared");
+    std::fs::create_dir_all(&folder).expect("the source's folder");
+    if let Some(source) = source {
+        std::fs::write(folder.join("schema.yaml"), source).expect("the source");
+    }
+    fixture.schema = SchemaPlace::Outside {
+        folder: folder.clone(),
+        name: "schema.yaml".into(),
+        shadows: fixture.shadows.clone(),
+    };
+    (fixture, folder)
+}
+
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the source a case reads back.
+fn source_at(folder: &Path) -> Option<String> {
+    std::fs::read_to_string(folder.join("schema.yaml")).ok()
+}
+
+/// **A source folder replaced between staging and publication publishes
+/// nothing** (ADR 0034): its identity, recorded when the schema was staged,
+/// no longer names the folder at its path, and the apply is answered as a
+/// write that failed naming that folder — never as the vault root changing,
+/// which it did not. Neither the folder staged against nor its replacement
+/// is written, and no shadow is left.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the swap a case arranges.
+fn a_source_folder_replaced_before_publication_publishes_nothing() {
+    let (mut fixture, folder) = outside(Some("version: 1\n"));
+    let plan = fixture.plan(vec![writing(ControlFile::Schema, "version: 1\n# shared\n")]);
+    let moved = folder.with_file_name("shared-old");
+    let swap = || {
+        std::fs::rename(&folder, &moved).expect("the folder moves away");
+        std::fs::create_dir(&folder).expect("another folder in its place");
+        std::fs::write(folder.join("schema.yaml"), "version: 1\n").expect("the same bytes");
+        true
+    };
+    let links = fixture.links();
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &swap,
+        links: &links.index(),
+    };
+    match applier.apply(plan, &RefCell::new(&mut fixture.store)) {
+        ApplyOutcome::WriteFailed { detail, .. } => {
+            assert!(detail.contains("was replaced"), "{detail}");
+            assert!(detail.contains(&folder.display().to_string()), "{detail}");
+        }
+        other => panic!("the apply answered {other:?}"),
+    }
+    assert_eq!(source_at(&moved).as_deref(), Some("version: 1\n"));
+    assert_eq!(source_at(&folder).as_deref(), Some("version: 1\n"));
+    assert!(fixture.recorded.calls.borrow().is_empty());
+    assert!(
+        fixture.shadows_left().is_empty(),
+        "{:?}",
+        fixture.shadows_left()
+    );
+}
+
+/// **A source folder gone between the check and staging stops the plan
+/// before anything is staged, naming why**: a replace of the source no
+/// longer finds the bytes it was checked against, and refuses as drift at
+/// the role's path; a create has no folder to make its file in, and fails
+/// naming that folder.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: the removal a case arranges.
+fn a_source_folder_gone_before_staging_stops_the_plan() {
+    let stage_after_removal = |source: Option<&str>| {
+        let (mut fixture, folder) = outside(source);
+        let plan = fixture.plan(vec![writing(ControlFile::Schema, "version: 1\n# shared\n")]);
+        let view =
+            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+        let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
+        let links = fixture.links();
+        let checked = super::super::stage::check(&plan, &view, &declared, &links.index())
+            .expect("the plan checks");
+        std::fs::remove_dir_all(&folder).expect("the folder goes");
+        let ground = super::super::place::Ground {
+            vault: &fixture.vault,
+            root: fixture.root,
+            schema: &fixture.schema,
+        };
+        let stopped = super::super::stage::stage(
+            &ground,
+            &fixture.shadows,
+            &plan,
+            view.normalizer(),
+            checked,
+        )
+        .expect_err("nothing stands to stage against");
+        assert!(
+            fixture.shadows_left().is_empty(),
+            "{:?}",
+            fixture.shadows_left()
+        );
+        (stopped, folder)
+    };
+    match stage_after_removal(Some("version: 1\n")) {
+        (super::super::stage::Stop::Refused(checks), _) => assert_eq!(
+            checks,
+            vec![RefusedCheck::drifted(path(SCHEMA), FileState::absent())]
+        ),
+        (other, _) => panic!("a replace stopped with {other:?}"),
+    }
+    match stage_after_removal(None) {
+        (super::super::stage::Stop::Failed(detail), folder) => {
+            assert!(detail.contains("is gone"), "{detail}");
+            assert!(detail.contains(&folder.display().to_string()), "{detail}");
+        }
+        (other, _) => panic!("a create stopped with {other:?}"),
+    }
+}
+
+/// **A schema write to a source outside the vault does not resolve where
+/// the vault's shadow home is the in-vault fallback** (ADR 0034): the write
+/// kernel reaches that home only through the vault root, so nothing it
+/// stages there can be renamed into the source's folder. The operation is
+/// left unresolved naming why, and the source is not written.
+#[test]
+fn a_schema_write_outside_the_vault_does_not_resolve_from_the_fallback_home() {
+    let (mut fixture, folder) = outside(Some("version: 1\n"));
+    let fallback = ShadowHome::resolve_stating(
+        &fixture.vault,
+        &fixture.data.join("tmp"),
+        &norn_fs::MaintainershipKey::new("test", "vault", "data").expect("a key"),
+        false,
+    )
+    .expect("the fallback home");
+    fixture.schema = SchemaPlace::Outside {
+        folder: folder.clone(),
+        name: "schema.yaml".into(),
+        shadows: fallback,
+    };
+    let view =
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+    let links = fixture.links();
+    let authored = norn_wire::AuthoredPlan::new(
+        norn_wire::VaultAddress::name(norn_wire::VaultName::new("notes").expect("a name")),
+        vec![writing(ControlFile::Schema, "version: 1\n# shared\n")],
+    );
+    let resolution = crate::planner::resolve::resolve(
+        authored,
+        fixture.root_identity(),
+        &std::collections::BTreeSet::new(),
+        &view,
+        &links.index(),
+    )
+    .expect("the plan is planned");
+    assert!(
+        resolution.plan.transitions.is_empty(),
+        "{:?}",
+        resolution.plan.transitions
+    );
+    assert_eq!(
+        resolution.unresolved.len(),
+        1,
+        "{:?}",
+        resolution.unresolved
+    );
+    let reason = format!("{:?}", resolution.unresolved[0].reason);
+    assert!(
+        reason.contains("no write outside the vault can publish from"),
+        "{reason}"
+    );
+    assert_eq!(source_at(&folder).as_deref(), Some("version: 1\n"));
 }

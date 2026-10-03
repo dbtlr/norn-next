@@ -84,6 +84,20 @@ impl Landing<'_> {
         }
         norn_fs::path_identity(self.anchor).map_err(|refusal| refusal.to_string())
     }
+
+    /// Why this target stops, in words, where the kernel found its anchor
+    /// replaced and no vault root was: outside the vault, the folder it is
+    /// anchored at, which is answered as an I/O failure naming that folder.
+    /// `None` beneath the root, where the vault root's identity is what
+    /// changed.
+    pub(super) fn replaced_outside(&self) -> Option<String> {
+        self.outside.then(|| {
+            format!(
+                "the folder `{}` holding the vault schema was replaced while the plan was applied",
+                self.anchor.display()
+            )
+        })
+    }
 }
 
 #[cfg(test)]
