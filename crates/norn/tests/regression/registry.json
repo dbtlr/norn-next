@@ -627,17 +627,18 @@
       "name": "incremental-structures-are-resident-not-rebuilt",
       "kind": "defect-class",
       "venue": 1,
-      "property": "Blast-radius and resolution structures are maintained substrate state, or are built over the affected set alone. Per-mutation build cost is independent of vault link and file count, and each structure is built at most once per request.",
+      "property": "Blast-radius and resolution structures are maintained substrate state, or are built over the affected set alone. Per-mutation build cost is independent of vault link and file count. A structure is built at most once per judging stage of a request — planning, and the applier's check, which re-derives what the plan recorded rather than trusting it — and never per operation or per document, so its cost follows the affected set.",
       "sources": ["NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the structures are resident and a mutation's use of them is bounded: crates/norn-store/src/ddl/facts.rs holds links and the reverse suffix key as maintained rows, crates/norn-store/src/increment.rs writes them over the changed set alone, and crates/norn-host/tests/counter_gate.rs::a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales and crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales hold the change set a plan judges and the cascade it generates to the hub's in-links, the same at 300 documents as at 2000, with no table or index stepped end to end. The last clause is not held, and the code does not meet it: the move bar pins four judgments for one preview because the applier computes the plan's change set again after planning computed it, reading each planned file a second time, so one request builds that structure twice. A carrier holding each structure to one build per request is pre-committed as crates/norn-host/tests/counter_gate.rs::a_plans_change_set_is_built_once_per_request; landing it is a change to the apply path, not a test alone.",
+        "reason": "the structures are resident and a mutation's use of them is bounded: crates/norn-store/src/ddl/facts.rs holds links and the reverse suffix key as maintained rows, and crates/norn-store/src/increment.rs writes them over the changed set alone. The counter lane holds a mutation's judgments of them to the hub's in-links, the same at 300 documents as at 2000, with no table or index stepped end to end, and pins how many judgments one preview makes whatever the number of holders: four for a hub's move in crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales — the cascade's backlink pass and spelling probe, planning's change set, and the applier's re-derivation of it — with each planned file opened twice, once per stage; one, two and three for a hub's deletes in crates/norn-host/tests/counter_gate.rs::a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales; and ten for a wikilink rewrite in crates/norn-host/tests/counter_gate.rs::a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales. That holds a structure to one build per judging stage and never one per document. It does not hold the operation half: every one of those plans is one operation, so no count shows a plan of several operations judging its change set once per stage rather than once per operation. It is pre-committed as crates/norn-host/tests/counter_gate.rs::a_plan_of_several_operations_judges_once_per_stage_at_both_scales.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/facts.rs" },
           { "present": "crates/norn-store/src/increment.rs" },
-          { "symbol-present": "crates/norn-host/tests/counter_gate.rs::a_hub_deletes_resolution_change_set_follows_its_in_links_at_both_scales" },
           { "symbol-present": "crates/norn-host/tests/counter_gate.rs::a_hub_moves_cascade_follows_its_in_links_at_both_scales" },
-          { "symbol-absent": "crates/norn-host/tests/counter_gate.rs::a_plans_change_set_is_built_once_per_request" }
+          { "symbol-present": "crates/norn-host/tests/counter_gate.rs::a_hub_deletes_backlink_judgment_follows_its_in_links_at_both_scales" },
+          { "symbol-present": "crates/norn-host/tests/counter_gate.rs::a_hubs_wikilink_rewrite_follows_its_in_links_at_both_scales" },
+          { "symbol-absent": "crates/norn-host/tests/counter_gate.rs::a_plan_of_several_operations_judges_once_per_stage_at_both_scales" }
         ]
       }
     },
