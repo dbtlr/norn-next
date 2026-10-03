@@ -20,6 +20,7 @@
 use std::num::NonZeroUsize;
 
 use norn_db::EmittedPlan;
+use norn_db::rusqlite::types::Null;
 use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
 
@@ -32,6 +33,7 @@ use crate::health::statement::{self as health, Selected};
 use crate::path::ClassKey;
 use crate::read::SuffixSpellings;
 use crate::resolve::AmbiguityIgnore;
+use crate::write_path::WriteStatement;
 
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
@@ -165,6 +167,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::LinkHealthFoundLinks => health::links_sql(key, Selected::Links),
             ExplainedStatement::LinkHealthDiscard => health::discard_sql(),
             ExplainedStatement::LinkHealthOccupied => health::occupied_sql(key),
+            ExplainedStatement::Write(write) => write.sql().to_string(),
         };
         let database = &self.store.database;
         Ok(match statement {
@@ -379,6 +382,12 @@ impl<'a> Request<'a> {
                     params_from_iter(health::occupied_parameters(&[&class], &[path.as_str()])?),
                 )
             }
+            // A write statement is explained, not run: its plan is a report
+            // about the statement, so every value it binds is null.
+            ExplainedStatement::Write(write) => database.emitted_plan(
+                &sql,
+                params_from_iter(std::iter::repeat_n(Null, write.parameter_count())),
+            ),
         }?)
     }
 
@@ -597,6 +606,12 @@ pub enum ExplainedStatement<'a> {
     /// key no link and no finding is held under costs a share of, and no
     /// pass beside it.
     LinkHealthOccupied,
+    /// A statement the write path runs, named in [`crate::WriteStatement`]: the
+    /// increment's prepared statements, the findings writes, the generation and
+    /// pinned-scalar writes and the schema pin's discard of stale findings.
+    /// One variant carries the registry rather than one variant per statement,
+    /// so the registry's own census is what says every statement has a bar.
+    Write(WriteStatement),
 }
 
 /// How many keyed point reads this seam names.
@@ -610,7 +625,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 40;
+pub const STATEMENTS: usize = 41;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -624,7 +639,9 @@ impl<'a> ExplainedStatement<'a> {
     /// its place in it.
     ///
     /// The parameters are the ones a statement cannot be spelled without, and
-    /// `ids` is the width of a finding-id chunk. The scope, the order and the
+    /// `ids` is the width of a finding-id chunk. The write registry holds one slot
+    /// here, bound to its first statement: its own census is
+    /// [`WriteStatement::all`]. The scope, the order and the
     /// discard scope are not parameters: a statement's place in this
     /// enumeration does not depend on which of them it carries, and the bars
     /// that care about those axes range over them themselves.
@@ -681,6 +698,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthFoundLinks,
             Self::LinkHealthDiscard,
             Self::LinkHealthOccupied,
+            Self::Write(WriteStatement::UpsertDocument),
         ]
     }
 
@@ -733,6 +751,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::LinkHealthFoundLinks => 37,
             Self::LinkHealthDiscard => 38,
             Self::LinkHealthOccupied => 39,
+            Self::Write(_) => 40,
         };
         assert!(
             slot < STATEMENTS,
@@ -814,7 +833,8 @@ impl<'a> ExplainedStatement<'a> {
             | Self::LinkHealthClassFindings
             | Self::LinkHealthFoundLinks
             | Self::LinkHealthDiscard
-            | Self::LinkHealthOccupied => false,
+            | Self::LinkHealthOccupied
+            | Self::Write(_) => false,
         }
     }
 }

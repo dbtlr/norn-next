@@ -87,6 +87,7 @@ use crate::increment::{self, Change, DerivedFinding, IncrementOutcome, Increment
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, PathKey, SuffixKey, SuffixProbe};
 use crate::resolve::{self, AmbiguityIgnore, TargetClass};
 use crate::store::Store;
+use crate::write_path::WriteStatement;
 
 mod instrument;
 pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
@@ -537,13 +538,9 @@ impl<'a> Request<'a> {
         )?;
         norn_db::meta::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION, generation)?;
 
-        // Two open ranges rather than `<>`: an inequality is not a predicate an
-        // index can answer, so it would read every finding in the table on every
-        // pin — including the pins that discard nothing.
         let discarded = transaction
             .execute(
-                "DELETE FROM findings
-                 WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1",
+                WriteStatement::DiscardStaleFindings.sql(),
                 params![fingerprint],
             )
             .map_err(|error| error::sql("discarding schema-dependent state", error))?
@@ -1755,14 +1752,7 @@ pub(crate) fn write_finding(
     // Each statement is cached: a changeset's re-decision files a finding per
     // link it finds wanting, each through these same statements.
     let id: i64 = transaction
-        .prepare_cached(
-            "INSERT INTO findings (
-                 vault_schema_fingerprint, generation, kind, severity, path, target,
-                 span_line, span_column, span_offset, candidates_total, message, detail,
-                 ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             RETURNING id",
-        )
+        .prepare_cached(WriteStatement::InsertFinding.sql())
         .and_then(|mut insert| {
             insert.query_row(
                 params![
@@ -1787,10 +1777,7 @@ pub(crate) fn write_finding(
 
     {
         let mut insert = transaction
-            .prepare_cached(
-                "INSERT INTO finding_candidates (finding, rank, path, suffix)
-                 VALUES (?1, ?2, ?3, ?4)",
-            )
+            .prepare_cached(WriteStatement::InsertFindingCandidate.sql())
             .map_err(|error| error::sql("preparing a candidate write", error))?;
         for (rank, candidate) in finding.candidates.iter().enumerate() {
             insert
@@ -1806,7 +1793,7 @@ pub(crate) fn write_finding(
 
     {
         let mut insert = transaction
-            .prepare_cached("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
+            .prepare_cached(WriteStatement::InsertFindingClass.sql())
             .map_err(|error| error::sql("preparing a finding class write", error))?;
         for class_key in &finding.class_keys {
             insert
@@ -1817,7 +1804,7 @@ pub(crate) fn write_finding(
 
     {
         let mut insert = transaction
-            .prepare_cached("INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)")
+            .prepare_cached(WriteStatement::InsertFindingPath.sql())
             .map_err(|error| error::sql("preparing a finding path write", error))?;
         for path_key in &finding.path_keys {
             insert

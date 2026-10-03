@@ -128,6 +128,7 @@ mod resolve;
 mod search;
 mod store;
 mod validate;
+mod write_path;
 
 pub use count::{COUNT_STATEMENTS, CountPlan, CountStatement, CountWork, Counted, GroupMember};
 pub use counters::{DerivationCounters, SnapshotCounters};
@@ -187,3 +188,4 @@ pub use store::{
 pub use validate::{
     VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement, ValidateWork, Validated, Validation,
 };
+pub use write_path::{WRITE_STATEMENTS, WriteStatement};

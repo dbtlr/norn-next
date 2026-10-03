@@ -15,7 +15,7 @@ use crate::common::{
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
-    StoreError, induced_failure, suffix_probe,
+    StoreError, WriteStatement, induced_failure, suffix_probe,
 };
 use std::num::NonZeroUsize;
 
@@ -819,6 +819,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::LinkHealthOccupied => {
             "the_link_health_judgment_seeks_every_row_it_reads"
         }
+        ExplainedStatement::Write(_) => {
+            "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks"
+        }
     }
 }
 
@@ -1158,6 +1161,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
     .chain(FINDING_DETAIL.iter().map(|detail| detail(width)))
+    // The write registry is one slot here, and its own census is the bar's.
+    .chain([ExplainedStatement::Write(WriteStatement::all()[0])])
     .collect();
     let mut slots: Vec<usize> = judged.iter().map(|statement| statement.slot()).collect();
     slots.sort_unstable();
@@ -1179,6 +1184,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+            "every_write_path_statement_scans_no_table_and_each_keyed_one_seeks",
             "the_link_health_judgment_seeks_every_row_it_reads",
             "the_path_discard_seeks_finding_paths_path_key",
         ]
@@ -1488,7 +1494,8 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthClassFindings
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard
-        | ExplainedStatement::LinkHealthOccupied => None,
+        | ExplainedStatement::LinkHealthOccupied
+        | ExplainedStatement::Write(_) => None,
     }
 }
 
@@ -3894,4 +3901,247 @@ fn the_feed_reads_the_last_write_generation_whichever_write_took_it() {
         pin.generation,
         "a write that took no generation moved the reading"
     );
+}
+
+/// What the write-path bar demands of one registered statement: each seek the
+/// plan must report, as the table, what it runs through and the equality or
+/// range constraint it prints. Every statement is also judged to scan no table.
+struct WriteBar {
+    seeks: &'static [(&'static str, Access<'static>, &'static str)],
+}
+
+/// The bar for one write-path statement. Exhaustive over [`WriteStatement`], so
+/// a statement added to the registry has to say here what its plan must show.
+///
+/// An `INSERT` reports no search of its own table, so for most inserts the plan
+/// is empty and its bar, that no step reads a table end to end, cannot fail: it
+/// is stated as the universal bar and not as a judgment. The foreign-key actions
+/// SQLite reports beside a statement are first-level searches of the child
+/// tables, and they sit under that same universal bar: a cascade that fell to
+/// reading a child table end to end fails it. Their seeks are not asserted
+/// positively, and the triggers a write fires and any cascade below the first
+/// level are not in a plan at all.
+fn write_bar(statement: WriteStatement) -> WriteBar {
+    use WriteStatement::*;
+    let seeks: &'static [(&'static str, Access<'static>, &'static str)] = match statement {
+        DiscardLinks => &[(
+            "links",
+            Access::Index("links_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardHeadings => &[(
+            "headings",
+            Access::Index("headings_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardBlocks => &[(
+            "blocks",
+            Access::Index("blocks_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardTags => &[(
+            "document_tags",
+            Access::Index("document_tags_document_ordinal"),
+            "(document=?)",
+        )],
+        DiscardFields => &[("document_fields", Access::PrimaryKey, "(document=?)")],
+        DeleteDocument | RowAt => &[("documents", Access::Index("documents_path"), "(path=?)")],
+        // Two open ranges over the fingerprint rather than an inequality.
+        DiscardStaleFindings => &[
+            (
+                "findings",
+                Access::Index("findings_fingerprint_kind_nocase"),
+                "(vault_schema_fingerprint<?)",
+            ),
+            (
+                "findings",
+                Access::Index("findings_fingerprint_kind_nocase"),
+                "(vault_schema_fingerprint>?)",
+            ),
+        ],
+        NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
+        UpsertDocument
+        | InsertLink
+        | InsertLinkKey
+        | InsertHeading
+        | InsertBlock
+        | InsertTag
+        | InsertField
+        | RecordTombstone
+        | InsertFinding
+        | InsertFindingCandidate
+        | InsertFindingClass
+        | InsertFindingPath
+        | PutMeta => &[],
+    };
+    WriteBar { seeks }
+}
+
+/// Whether a plan meets a write bar: no table scan, and every seek it names.
+fn meets_write_bar(read: &QueryPlan, bar: &WriteBar) -> bool {
+    read.table_scans().is_empty()
+        && read.unbounded_steps().is_empty()
+        && bar.seeks.iter().all(|(table, access, constraint)| {
+            read.searches_of(table)
+                .iter()
+                .any(|row| row.access() == Some(*access) && row.constraint() == Some(*constraint))
+        })
+}
+
+fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
+    plan(
+        store
+            .begin_request()
+            .emitted_plan(ExplainedStatement::Write(statement))
+            .unwrap_or_else(|problem| panic!("a query plan for {statement:?}: {problem}")),
+    )
+}
+
+/// **No statement the write path runs scans a table, and each keyed one seeks
+/// its table by the constraint it binds.** An increment runs these once per
+/// document, per fact row or per finding, so a statement that read a table end
+/// to end would make a changeset cost the store's size on top of its own. The
+/// census is [`WriteStatement::all`], the registry the increment prepares from,
+/// so a statement is judged because it is prepared and not because a list
+/// remembers it; a plan taken of any statement that binds a different number of
+/// values than its text names is an error here.
+///
+/// Controls: the index each keyed statement seeks is dropped, and the same bar
+/// fails — for the two statements that seek a primary key, whose index cannot
+/// be dropped, a plan that scans the table is handed to the same judgment. The
+/// no-scan half has its own control: with the index a foreign-key action seeks
+/// dropped, the plan keeps the seek the bar names and adds a scan, and the bar
+/// still fails.
+#[test]
+fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
+    let scratch = Scratch::new("write-plans");
+    let mut store = scratch.open();
+
+    for statement in WriteStatement::all() {
+        let read = write_plan(&mut store, statement);
+        assert!(
+            meets_write_bar(&read, &write_bar(statement)),
+            "{statement:?} scans a table or misses its seek: {:?}\nemitted SQL: {}",
+            read.rows(),
+            read.sql()
+        );
+    }
+
+    // A primary key cannot be dropped, so the same judgment is handed the plan
+    // a scan of the table would report.
+    for (statement, table) in [
+        (WriteStatement::DiscardFields, "document_fields"),
+        (WriteStatement::NextGeneration, "meta"),
+    ] {
+        let scanning = QueryPlan::new(
+            "scanning",
+            vec![PlanRow::new(2, 0, format!("SCAN {table}"))],
+        );
+        assert!(
+            !meets_write_bar(&scanning, &write_bar(statement)),
+            "the bar for {statement:?} holds a plan that scans {table}"
+        );
+    }
+
+    // The no-scan half alone: a plan that keeps every seek the bar names and
+    // adds a scan of another table must fail.
+    for statement in WriteStatement::all() {
+        let bar = write_bar(statement);
+        let mut rows: Vec<PlanRow> = bar
+            .seeks
+            .iter()
+            .enumerate()
+            .map(|(at, (table, access, constraint))| {
+                let index = match access {
+                    Access::PrimaryKey => "PRIMARY KEY".to_string(),
+                    Access::Index(name) => format!("INDEX {name}"),
+                    _ => unreachable!("a write bar names a primary key or an index"),
+                };
+                PlanRow::new(
+                    at as i64 + 2,
+                    0,
+                    format!("SEARCH {table} USING {index} {constraint}"),
+                )
+            })
+            .collect();
+        let seeking = QueryPlan::new("seeking", rows.clone());
+        assert!(
+            meets_write_bar(&seeking, &bar),
+            "the synthetic plan for {statement:?} does not meet its bar: {:?}",
+            seeking.rows()
+        );
+        rows.push(PlanRow::new(99, 0, "SCAN link_keys".to_string()));
+        assert!(
+            !meets_write_bar(&QueryPlan::new("scanning", rows), &bar),
+            "the bar for {statement:?} holds a plan that keeps its seeks and scans a table"
+        );
+    }
+
+    // The same half on a real plan: with the index a link discard's foreign-key
+    // action seeks dropped, the plan falls to scanning `link_keys`.
+    {
+        let scratch = Scratch::new("write-plans-cascade-control");
+        let mut store = scratch.open();
+        induced_failure::execute_out_of_band(&mut store, "DROP INDEX link_keys_link")
+            .expect("dropping link_keys_link");
+        for statement in [WriteStatement::DiscardLinks, WriteStatement::InsertLink] {
+            let read = write_plan(&mut store, statement);
+            assert!(
+                !read.unbounded_steps().is_empty(),
+                "{statement:?} no longer reads unbounded with link_keys_link dropped: {:?}",
+                read.rows()
+            );
+            assert!(
+                !meets_write_bar(&read, &write_bar(statement)),
+                "the bar for {statement:?} held with link_keys_link dropped: {:?}",
+                read.rows()
+            );
+        }
+    }
+
+    for (statements, indexes) in [
+        (
+            &[WriteStatement::DiscardLinks][..],
+            &["links_document_ordinal"][..],
+        ),
+        (
+            &[WriteStatement::DiscardHeadings],
+            &["headings_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DiscardBlocks],
+            &["blocks_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DiscardTags],
+            &["document_tags_document_ordinal"],
+        ),
+        (
+            &[WriteStatement::DeleteDocument, WriteStatement::RowAt],
+            &["documents_path"],
+        ),
+        // Two indexes lead with the fingerprint, so both go.
+        (
+            &[WriteStatement::DiscardStaleFindings],
+            &[
+                "findings_fingerprint_kind_nocase",
+                "findings_fingerprint_kind_severity_nocase",
+            ],
+        ),
+    ] {
+        let scratch = Scratch::new("write-plans-control");
+        let mut store = scratch.open();
+        for index in indexes {
+            induced_failure::execute_out_of_band(&mut store, &format!("DROP INDEX {index}"))
+                .unwrap_or_else(|problem| panic!("dropping {index}: {problem}"));
+        }
+        for statement in statements {
+            let read = write_plan(&mut store, *statement);
+            assert!(
+                !meets_write_bar(&read, &write_bar(*statement)),
+                "the bar for {statement:?} held with {indexes:?} dropped: {:?}",
+                read.rows()
+            );
+        }
+    }
 }
