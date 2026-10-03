@@ -311,6 +311,7 @@ fn a_null_block_in_any_spelling_promotes_to_a_mapping_holding_its_first_field() 
         ("---\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
         ("---\n~\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
         ("---\nnull\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
+        ("---\nNull\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
         ("---\nNULL\n---\nbody\n", "---\ntitle: t\n---\nbody\n"),
         (
             "---\r\n~\r\n---\r\nbody\r\n",
