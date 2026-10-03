@@ -3415,7 +3415,8 @@ fn run_dispatcher_step(step: impl FnOnce()) {
 
 /// Send the job each entry's marker holds, where the entry has no job in the
 /// channel and none in flight: a dispatch a full queue refused left the job
-/// there, and this is what sends it once the queue has room.
+/// there, as did a read's dispatch that found the entry gate held, and this is
+/// what sends it once the queue has room and the gate is free.
 fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
     #[cfg(test)]
     if shared.panic_in_dispatch_retry.swap(false, Ordering::SeqCst) {
@@ -4012,12 +4013,12 @@ impl<O: EntryOps> fmt::Debug for ReadHold<O> {
 }
 
 impl<O: EntryOps> Drop for ReadHold<O> {
-    /// **The snapshot ends before the gate is taken.** Giving the connection
+    /// **The snapshot ends before the pin goes back.** Giving the connection
     /// back is what wakes an acquisition waiting for it, and that acquisition
     /// waits outside the entry gate and takes the gate for itself once it has
     /// the connection — so ending the snapshot first hands it on while this
     /// hold is still outside the gate, rather than making it wait out this
-    /// hold's own unpinning behind the lock as well.
+    /// hold's own unpinning as well.
     ///
     /// **The pin goes back without waiting for the gate.** A read's way out
     /// is outside its bound, so a gate another holder keeps — a mint's open
@@ -5429,7 +5430,10 @@ impl<O: EntryOps> Host<O> {
     /// refuses the read as that wait running out; the demand the read
     /// recorded goes back with the next hold of the gate rather than waiting
     /// for it. A zero bound therefore refuses at once wherever the read would
-    /// wait. A teardown waits for no
+    /// wait. No later take on a read's path waits for the gate at all: the
+    /// dispatch of work a refusing read scheduled, the verdict on damage its
+    /// query met, and its hold's drop each try the gate once and otherwise
+    /// leave their work to the next hold. A teardown waits for no
     /// read: its publication moves the stance, which wakes every settling
     /// read, and a woken read refuses with what the entry then publishes
     /// unless the entry has reached `Ready` again by the time it retakes the
