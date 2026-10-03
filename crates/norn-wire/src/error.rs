@@ -294,6 +294,12 @@ pub enum ReasonCode {
     /// The detail is every name that resolves to it.
     #[serde(rename = "host/duplicate-root")]
     HostDuplicateRoot,
+    /// `host/shared-schema` — a registration's schema file, whether named by
+    /// `schema_source` or the in-vault default, is the file another
+    /// registration already uses, so a schema write for one vault would
+    /// rewrite another's. The detail is every name that uses the file.
+    #[serde(rename = "host/shared-schema")]
+    HostSharedSchema,
     /// `host/entry-untrusted` — the vault entry's derived state cannot be
     /// trusted, so the request is refused rather than answered. The detail is
     /// the reason the state is untrusted.
@@ -597,6 +603,15 @@ pub enum ErrorDetail {
         /// and the refusal hands the same parsed values back rather than
         /// strings a reader would have to parse again. They arrive ascending
         /// and each named once.
+        aliases: NameSet,
+    },
+    /// The detail of `host/shared-schema`: every registered name whose schema
+    /// file is the one file.
+    #[serde(rename = "host/shared-schema")]
+    #[non_exhaustive]
+    SharedSchema {
+        /// The names sharing the file, at least two, ascending and each named
+        /// once: the same typed set a duplicate root carries.
         aliases: NameSet,
     },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
@@ -907,6 +922,12 @@ impl ErrorDetail {
         ErrorDetail::DuplicateRoot { aliases }
     }
 
+    /// The detail of `host/shared-schema`, for the `aliases` sharing one
+    /// schema file. The floor is the set's.
+    pub fn shared_schema(aliases: NameSet) -> Self {
+        ErrorDetail::SharedSchema { aliases }
+    }
+
     /// The detail of `host/entry-untrusted`, for `reason`.
     pub const fn entry_untrusted(reason: UntrustedReason) -> Self {
         ErrorDetail::EntryUntrusted { reason }
@@ -1130,6 +1151,7 @@ impl ErrorDetail {
     pub const fn code(&self) -> ReasonCode {
         match self {
             ErrorDetail::DuplicateRoot { .. } => ReasonCode::HostDuplicateRoot,
+            ErrorDetail::SharedSchema { .. } => ReasonCode::HostSharedSchema,
             ErrorDetail::EntryUntrusted { .. } => ReasonCode::HostEntryUntrusted,
             ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
             ErrorDetail::UnknownVault { .. } => ReasonCode::HostUnknownVault,
@@ -1308,6 +1330,7 @@ mod tests {
     fn wire_string(code: &ReasonCode) -> &'static str {
         match code {
             ReasonCode::HostDuplicateRoot => "host/duplicate-root",
+            ReasonCode::HostSharedSchema => "host/shared-schema",
             ReasonCode::HostEntryUntrusted => "host/entry-untrusted",
             ReasonCode::HostMaintainerContended => "host/maintainer-contended",
             ReasonCode::HostUnknownVault => "host/unknown-vault",
@@ -1347,6 +1370,7 @@ mod tests {
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
             ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(two_names()),
+            ReasonCode::HostSharedSchema => ErrorDetail::shared_schema(two_names()),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }

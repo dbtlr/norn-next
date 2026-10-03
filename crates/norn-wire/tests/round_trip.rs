@@ -131,6 +131,7 @@ fn trust_states() -> Vec<TrustState> {
 fn reason_codes() -> Vec<ReasonCode> {
     vec![
         ReasonCode::HostDuplicateRoot,
+        ReasonCode::HostSharedSchema,
         ReasonCode::HostEntryUntrusted,
         ReasonCode::HostMaintainerContended,
         ReasonCode::HostUnknownVault,
@@ -223,6 +224,7 @@ fn error_details() -> Vec<ErrorDetail> {
         .collect();
     details.extend([
         ErrorDetail::duplicate_root(names([name("notes"), name("vault")])),
+        ErrorDetail::shared_schema(names([name("notes"), name("vault")])),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
         ErrorDetail::unknown_vault(name("notes")),
@@ -5718,6 +5720,7 @@ fn status_reports() -> Vec<StatusReport> {
 fn registry_problems() -> Vec<RegistryProblem> {
     vec![
         RegistryProblem::duplicate_root(names([name("notes"), name("vault")])),
+        RegistryProblem::shared_schema(names([name("notes"), name("vault")])),
         RegistryProblem::root_unreadable(name("notes"), "the directory cannot be read"),
         RegistryProblem::root_missing(name("notes")),
     ]
