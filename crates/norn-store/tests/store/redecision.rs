@@ -508,6 +508,25 @@ fn a_second_candidate_makes_an_untouched_link_ambiguous_and_its_death_heals_it()
     }
 }
 
+/// **A target that names an ignored place three deep resolves to it.**
+/// `archive/old/twin.md` stands under the ignored `archive/**`, so it is in
+/// the class of a target of three segments that reaches its ignored place,
+/// and in no class of a shorter one: `[[archive/old/twin]]` resolves to it,
+/// while `[[old/twin]]` names nothing and is broken.
+#[test]
+fn a_target_reaching_an_ignored_place_three_deep_resolves_to_it() {
+    for order in [Sensitive, Folding] {
+        let mut vault = Vault::new(&format!("redecide-three-deep-{order:?}"), order);
+        vault.write(&[
+            ("archive/old/twin.md", "twin\n"),
+            ("holder.md", "[[archive/old/twin]]\n"),
+            ("other.md", "[[old/twin]]\n"),
+        ]);
+        assert_eq!(vault.findings("holder.md"), [], "{order:?}");
+        assert_eq!(vault.findings("other.md"), [broken(0)], "{order:?}");
+    }
+}
+
 /// **Editing a target's heading raises and clears a missing anchor.** A
 /// heading anchor and a block anchor name places `t.md` holds; rewriting
 /// `t.md` without them files a missing anchor for each link in the untouched
@@ -1448,25 +1467,24 @@ fn a_writes_work_follows_the_neighborhood_not_the_vault() {
     }
 }
 
-/// What writing `hub.md` at `written` cost a store under `order` holding
-/// `ignored` documents `archive/aNNNN/hub.md`, which `archive/**` keeps out of
-/// the class `hub` opens, beside `holders` — each `(path, body)` — linking
-/// `[[hub]]`: the counters the write moved, the steps its re-decision took,
-/// and the findings it left at `holder.md`.
+/// What writing `zz/hub.md` cost a store under `order` holding `ignored`
+/// documents `{place}/aNNNN/hub.md`, which `archive/**` keeps out of the class
+/// `hub` opens where the root's order matches `place` to it, beside
+/// `holder.md` linking `[[hub]]`: the counters the write moved, the steps its
+/// re-decision took, and the findings it left at `holder.md`.
 fn hub_write_beside_ignored(
     order: StoredPathOrder,
+    place: &str,
     ignored: usize,
-    holders: &[(&str, &str)],
-    written: &str,
 ) -> (DerivationCounters, u64, Vec<Filed>) {
     let mut vault = Vault::new(
-        &format!("redecide-ignored-{order:?}-{ignored}-{}", holders.len()),
+        &format!("redecide-ignored-{order:?}-{place}-{ignored}"),
         order,
     );
     let mut documents: Vec<(String, &str)> = (0..ignored)
-        .map(|at| (format!("archive/a{at:04}/hub.md"), "hub\n"))
+        .map(|at| (format!("{place}/a{at:04}/hub.md"), "hub\n"))
         .collect();
-    documents.extend(holders.iter().map(|(at, body)| (at.to_string(), *body)));
+    documents.push(("holder.md".to_string(), "[[hub]]\n"));
     vault.apply(
         documents
             .iter()
@@ -1478,7 +1496,7 @@ fn hub_write_beside_ignored(
     request
         .apply_increment(
             IncrementProvenance::Derived,
-            [Change::Upsert(derived(written, "hub\n"))],
+            [Change::Upsert(derived("zz/hub.md", "hub\n"))],
             &[],
             &declared(),
         )
@@ -1494,25 +1512,30 @@ fn hub_write_beside_ignored(
 /// in the same steps beside them as beside twenty: the head the re-decision
 /// reads seeks the members the class admits, never the ones it keeps out, so
 /// the link resolves to the one document written and its broken finding goes.
+/// On a root that folds case `Archive/aNNNN/hub.md` is the same ignored place,
+/// so its stored admitting count keeps it out of the class just the same.
 #[test]
 fn a_writes_work_does_not_follow_the_ignored_members_of_its_class() {
-    for order in [Sensitive, Folding] {
-        let holder = [("holder.md", "[[hub]]\n")];
-        let (few, few_steps, few_filed) = hub_write_beside_ignored(order, 20, &holder, "zz/hub.md");
-        let (many, many_steps, many_filed) =
-            hub_write_beside_ignored(order, 2000, &holder, "zz/hub.md");
-        assert_eq!(few_filed, Vec::new(), "{order:?}");
-        assert_eq!(many_filed, Vec::new(), "{order:?}");
-        assert_eq!(counted(&many, "links_redecided"), 1, "{order:?}");
-        assert_eq!(counted(&many, "link_health_keys_resolved"), 1, "{order:?}");
-        assert_eq!(counted(&many, "findings_discarded"), 1, "{order:?}");
+    for (order, place) in [
+        (Sensitive, "archive"),
+        (Folding, "archive"),
+        (Folding, "Archive"),
+    ] {
+        let at = format!("{order:?} {place}");
+        let (few, few_steps, few_filed) = hub_write_beside_ignored(order, place, 20);
+        let (many, many_steps, many_filed) = hub_write_beside_ignored(order, place, 2000);
+        assert_eq!(few_filed, Vec::new(), "{at}");
+        assert_eq!(many_filed, Vec::new(), "{at}");
+        assert_eq!(counted(&many, "links_redecided"), 1, "{at}");
+        assert_eq!(counted(&many, "link_health_keys_resolved"), 1, "{at}");
+        assert_eq!(counted(&many, "findings_discarded"), 1, "{at}");
         snapshot(&many).assert_equal_counts(
             &snapshot(&few),
-            &format!("{order:?}: a hundred times the ignored members"),
+            &format!("{at}: a hundred times the ignored members"),
         );
         assert_eq!(
             many_steps, few_steps,
-            "{order:?}: a hundred times the ignored members moved the re-decision's work"
+            "{at}: a hundred times the ignored members moved the re-decision's work"
         );
     }
 }
