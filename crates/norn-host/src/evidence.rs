@@ -111,7 +111,9 @@ pub struct JobEvidence {
 #[cfg(any(feature = "induced-failure", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceReading {
-    /// Files opened for their content, over every job.
+    /// Reads of a file's content through the contained open, over every
+    /// job: one per read, so a file read twice counts twice
+    /// ([`norn_fs::reads::ReadTally::document_opens`]).
     pub document_opens: u64,
     /// Names stated, however the stat was spelled.
     pub stats: u64,
