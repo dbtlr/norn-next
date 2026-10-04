@@ -1147,22 +1147,40 @@ counted by the process's own allocator, at the 300-document and ~2k-document pro
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the
 whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
-stays under the find's pages is not seen. No query shape carries a timing bar. Three `plan-`
-bars hold one process that previews a `set --where`, a hub move with its cascade and a delete,
-and then applies each as previewed, because a plan's memory is its operations and a fixed
-record per target, never the vault. The heap the previews raise above the attached host,
-read before the first apply, is bounded in bytes across the two profiles at the read bar's
-resolution, so planning that keeps an eight-byte id for every document fails it. The heap the
-whole mix raises with its applies is bounded the same way but more coarsely, because an
-apply's publications reach the watcher's threads while it commits and move that reading by
-about 31 KB: it fails a retention from about 24 bytes a document, or about 43 where that
-excursion lands on the 300-document profile alone. The ~2k-document profile's process carries
-an absolute peak ceiling. Both heap readings are high-waters: memory planning builds and frees
-under its own peak, about 164 KB at these profiles, is not seen, and work proportional to the
-vault while planning is the counter lane's to refuse, which holds a `set --where`'s steps flat
-across the two scales. NORN-131 watches the high-water limit, as it does the read bar's. A
-move's size-independence — a move that changes no bytes holding no copy of the document it
-moves, and one rewriting its own links at most one — is barred by NORN-345, not here.
+stays under the find's pages is not seen. No query shape carries a timing bar. Five `plan-`
+bars hold one process that previews a move of a 4 KiB document and of a 4 MiB one that change
+no bytes, then previews a `set --where`, a hub move with its cascade and a delete, applies each
+of those three as previewed, and then applies the two moves, because a plan's memory is its
+operations and a fixed record per target, never the vault and never the bytes of a file it did
+not author. The heap the mix's previews raise above the attached host, read before its first
+apply, is bounded in bytes across the two profiles at the read bar's resolution, so planning
+that keeps an eight-byte id for every document fails it. The heap the whole mix raises with its
+applies is bounded the same way but more coarsely, because an apply's publications reach the
+watcher's threads while it commits and move that reading by about 31 KB: it fails a retention
+from about 24 bytes a document, or about 43 where that excursion lands on the 300-document
+profile alone. Both readings are high-waters: memory planning builds and frees under its own
+peak, about 171 KB at these profiles, is not seen, and work proportional to the vault while
+planning is the counter lane's to refuse, which holds a `set --where`'s steps flat across the
+two scales. NORN-131 watches the high-water limit, as it does the read bar's. **A move that
+changes no bytes holds no copy of its document once the vault has indexed it**: the heap the
+4 MiB move's preview raises above its mark may exceed the 4 KiB move's by no more than one
+64 KiB chunk of the streamed hash, and a preview that reads the moved document whole fails it
+by about four bodies. **Its apply holds no more than the commit's derivation of the document it
+lands**: the commit re-reads and derives that document through the one derivation every heal
+runs, at about four times its body, and that cost is the derivation's, not the plan's. So the
+process also renames each document into the vault from outside it and reads what the live
+host's own derivation of it raises the heap by, and the 4 MiB move's apply may exceed the
+4 KiB one's by no more than that derivation pair's difference and the same 64 KiB; an apply
+that keeps a copy of the landed document across its commit fails it by about one body. **Watcher
+echoes are a timing hazard these bars avoid rather than read**: the host handles an apply's
+publication and a write from outside on its own threads after the request answers, and the
+echo of a large landed document costs about its body, so every size-pair mark is set once the
+live heap has stopped moving and every preview runs before the first apply. The declared limits
+are not barred: a move over a vault whose index does not vouch for the moved document reads it
+whole once, and a move that rewrites the moved document's own links reads it whole and holds
+the bytes it authors. The ~2k-document profile's process carries an absolute peak ceiling,
+which the 4 MiB documents raise through the attach heal and the commit's derivation, not
+through a plan.
 
 ### 4. One obvious path
 
