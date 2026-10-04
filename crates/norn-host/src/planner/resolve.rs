@@ -706,6 +706,136 @@ mod tests {
         }
     }
 
+    /// A vault whose streamed reads answer `streamed` and whose whole reads
+    /// answer `whole`: one file read twice, changed between the two reads.
+    struct ChangedBetweenReads {
+        streamed: MemoryVault,
+        whole: MemoryVault,
+    }
+
+    impl VaultView for ChangedBetweenReads {
+        type Error = std::convert::Infallible;
+
+        fn normalizer(&self) -> &norn_fs::PathNormalizer {
+            self.streamed.normalizer()
+        }
+
+        fn entry(&self, path: &norn_fs::NormalizedPath) -> Result<view::Entry, Self::Error> {
+            self.whole.entry(path)
+        }
+
+        fn streamed_entry(
+            &self,
+            path: &norn_fs::NormalizedPath,
+        ) -> Result<view::Entry, Self::Error> {
+            self.streamed.streamed_entry(path)
+        }
+
+        fn control_entry(
+            &self,
+            path: &norn_fs::NormalizedPath,
+        ) -> Result<view::Entry, Self::Error> {
+            self.streamed.control_entry(path)
+        }
+
+        fn folder_stands(&self, folder: &norn_fs::NormalizedPath) -> Result<bool, Self::Error> {
+            self.streamed.folder_stands(folder)
+        }
+
+        fn visit_folder_names(
+            &self,
+            folder: &norn_fs::NormalizedPath,
+            visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+        ) -> Result<(), Self::Error> {
+            self.streamed.visit_folder_names(folder, visit)
+        }
+
+        fn visit_root_names(
+            &self,
+            visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+        ) -> Result<(), Self::Error> {
+            self.streamed.visit_root_names(visit)
+        }
+
+        fn folder_contents(
+            &self,
+            folder: &norn_fs::NormalizedPath,
+        ) -> Result<Option<view::FolderContents>, Self::Error> {
+            self.streamed.folder_contents(folder)
+        }
+    }
+
+    /// **A moved document that changes between its streamed read and its
+    /// whole one leaves its move unresolved.** Planning first carries
+    /// `me.md` unread; its cascade then lands on it, which needs its bytes,
+    /// and the whole read finds other bytes than the streamed one hashed. The
+    /// first read fixes the before-state, so the bytes are not to be had at
+    /// it, the rewrite does not compose, and the move is left out as changed
+    /// while the plan was read — never planned over the second read's bytes,
+    /// nor with its cascade dropped.
+    #[test]
+    fn a_moved_document_changed_between_its_two_reads_is_unresolved() {
+        let first = [("me.md", "[[me]] first\n")];
+        let view = ChangedBetweenReads {
+            streamed: MemoryVault::with(&first).streaming(),
+            whole: MemoryVault::with(&[("me.md", "[[me]] second\n")]),
+        };
+        let index = super::super::links::testing::IndexedFiles::of(&first);
+        let resolution = super::resolve(
+            authored(vec![Operation::new(OperationKind::move_document(
+                path("me.md"),
+                path("archive/me2.md"),
+            ))]),
+            root(),
+            &BTreeSet::new(),
+            &view,
+            &index,
+        )
+        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
+        assert_eq!(resolution.plan.transitions, Vec::new());
+        let [unresolved] = &resolution.unresolved[..] else {
+            panic!("the move is unresolved: {:?}", resolution.unresolved);
+        };
+        assert_eq!(
+            unresolved.reason,
+            UnresolvedReason::no_longer_resolves("`me.md` changed while the plan was read")
+        );
+    }
+
+    /// **A document the index does not vouch for, changed between its
+    /// streamed read and the whole read of its links, leaves its move
+    /// unresolved.** The index holds no row for `a.md`, so planning reads it
+    /// whole for the links it holds; the whole read finds other bytes than
+    /// the streamed one hashed, and the move is left out as changed while
+    /// the plan was read rather than planned with the second read's links.
+    #[test]
+    fn an_unindexed_document_changed_between_its_two_reads_is_unresolved() {
+        let view = ChangedBetweenReads {
+            streamed: MemoryVault::with(&[("a.md", "first [[b]]\n")]).streaming(),
+            whole: MemoryVault::with(&[("a.md", "second [[c]]\n")]),
+        };
+        let index = super::super::links::testing::IndexedFiles::of(&[]);
+        let resolution = super::resolve(
+            authored(vec![Operation::new(OperationKind::move_document(
+                path("a.md"),
+                path("archive/a.md"),
+            ))]),
+            root(),
+            &BTreeSet::new(),
+            &view,
+            &index,
+        )
+        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
+        assert_eq!(resolution.plan.transitions, Vec::new());
+        let [unresolved] = &resolution.unresolved[..] else {
+            panic!("the move is unresolved: {:?}", resolution.unresolved);
+        };
+        assert_eq!(
+            unresolved.reason,
+            UnresolvedReason::no_longer_resolves("`a.md` changed while the plan was read")
+        );
+    }
+
     fn planned(vault: &MemoryVault, operations: Vec<Operation>) -> Resolution {
         match resolve(authored(operations), root(), &BTreeSet::new(), vault) {
             Ok(resolution) => resolution,

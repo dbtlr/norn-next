@@ -392,15 +392,19 @@ fn a_carried_move_re_sent_after_it_landed_in_part_is_finished() {
 
 /// **A copy's source that is not what the plan carries is reported as the
 /// source drifting, never as the destination.** Between the check and the
-/// staging of a carried move, another writer changes the source, or puts a
-/// link at its name: the write kernel refuses the copy naming the source,
-/// and the plan stops refused with the source's own path drifted — holding
-/// what it holds, or nothing where a link stands — and nothing staged.
+/// staging of a carried move, another writer changes the source, puts a
+/// link at its name, puts a folder there, or puts a link where its folder
+/// stood: the write kernel refuses the copy naming the source — as drift,
+/// a link, a non-file or a linked folder — and the plan stops refused with
+/// the source's own path drifted, holding what it holds or nothing where no
+/// document stands, and nothing staged.
 #[test]
 fn a_copy_whose_source_drifted_before_staging_is_the_sources_drift() {
     for (what, holds) in [
         ("changed", present("# A, changed\n")),
         ("linked", FileState::absent()),
+        ("a folder", FileState::absent()),
+        ("beneath a linked folder", FileState::absent()),
     ] {
         let fixture = carried_fixture();
         let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
@@ -413,10 +417,20 @@ fn a_copy_whose_source_drifted_before_staging_is_the_sources_drift() {
         let source = fixture.vault.join("notes/a.md");
         match what {
             "changed" => std::fs::write(&source, "# A, changed\n").expect("a foreign edit"),
-            _ => {
+            "linked" => {
                 let aside = fixture.vault.join("aside.md");
                 std::fs::rename(&source, &aside).expect("the source moves aside");
                 std::os::unix::fs::symlink(&aside, &source).expect("a link at its name");
+            }
+            "a folder" => {
+                std::fs::remove_file(&source).expect("the source goes");
+                std::fs::create_dir(&source).expect("a folder at its name");
+            }
+            _ => {
+                let folder = fixture.vault.join("notes");
+                let aside = fixture.vault.join("aside");
+                std::fs::rename(&folder, &aside).expect("the source's folder moves aside");
+                std::os::unix::fs::symlink(&aside, &folder).expect("a link at the folder's name");
             }
         }
         let applier = fixture.applier(&index);
@@ -483,6 +497,63 @@ fn a_carried_move_whose_index_moved_on_is_checked_from_the_file() {
         results(&finished)
     );
     assert_eq!(fixture.read("archive/a.md"), Some(original));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A check whose index moved on reads the links of every carried document
+/// from its file.** Two carried moves are planned while the index holds both
+/// documents at their bytes; another writer then changes `notes/r.md`, the
+/// index takes the change in, and the file goes back to the bytes the plan
+/// carries. The index vouches for `notes/a.md` alone, so the check reads
+/// `notes/r.md`'s links — a relative link and a wikilink — from the file,
+/// and the change set it computes again is the one the plan records: the
+/// plan applies, and the store equals a build from zero.
+#[test]
+fn every_carried_document_the_index_no_longer_vouches_for_is_checked_from_its_file() {
+    let mut fixture = carried_fixture();
+    let plan = fixture.plan(vec![
+        moving("notes/a.md", "archive/a.md"),
+        moving("notes/r.md", "notes/s.md"),
+    ]);
+    let original = fixture.read("notes/r.md").expect("the source");
+    fixture.foreign("notes/r.md", "# R, for a moment\n");
+    fixture.write("notes/r.md", &original);
+    let finished = applied(fixture.apply(plan));
+    assert!(
+        results(&finished)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Wrote),
+        "{:?}",
+        results(&finished)
+    );
+    assert_eq!(fixture.read("notes/s.md"), Some(original));
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A re-sent carried move whose index took in only its source's removal
+/// is finished from its landed destination.** The destination landed and
+/// the source is gone, and the index holds neither document at the bytes
+/// the move carries — it took in the removal, not the landing — so the
+/// check reads the copy's links from the destination standing at that hash,
+/// never from the source that is gone: every target is found, and the
+/// store equals a build from zero.
+#[test]
+fn a_re_sent_carried_move_indexed_only_at_its_source_is_finished_from_its_destination() {
+    let content = "# A\n\n[[c]] and [up](../c.md)\n";
+    let mut fixture = Fixture::new(&[("notes/a.md", content), ("c.md", "# C\n")]);
+    let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
+    std::fs::remove_file(fixture.vault.join("notes/a.md")).expect("the source goes");
+    crate::production::heal_from_zero(&mut fixture.store, &fixture.vault, &fixture.exclusions)
+        .expect("the index takes the removal in");
+    fixture.write("archive/a.md", content);
+    let finished = applied(fixture.apply(plan));
+    assert_eq!(
+        results(&finished),
+        vec![
+            ("archive/a.md".to_string(), TargetResult::Found),
+            ("notes/a.md".to_string(), TargetResult::Found),
+        ]
+    );
     fixture.assert_store_is_a_build_from_zero();
 }
 
