@@ -69,7 +69,7 @@ _Avoid_: Stale document, drift (which names where authored control files stand a
 A report of what a plan would do against a particular observed vault state.
 
 **Interrupted apply**:
-An apply attempt that stopped after at least one of its targets landed and before all of them did. It is not a refusal: it performed part of the requested mutation, and its answer names what landed.
+An apply attempt that published part of the requested mutation before stopping short of the whole plan. Confirming a target another writer completed is not publication by this attempt.
 
 **Refusal**:
 A resolved outcome in which Norn performs no requested mutation or answers no requested read because safety, trust, or preconditions are not satisfied.

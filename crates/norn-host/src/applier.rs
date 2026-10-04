@@ -187,15 +187,16 @@ impl Applier<'_> {
             return ApplyOutcome::RootChanged {
                 expected: plan.root,
                 found,
+                healing: Vec::new(),
             };
         }
         let view = match TreeView::open(self.anchor, self.exclusions, self.schema) {
             Ok(view) => view,
-            Err(error) => return write_failed(plan, error.to_string()),
+            Err(error) => return write_failed(plan, error.to_string(), Vec::new()),
         };
         let declared = match pinned_declaration(&mut store.borrow_mut()) {
             Ok(declared) => declared,
-            Err(failure) => return write_failed(plan, format!("{failure:?}")),
+            Err(failure) => return write_failed(plan, format!("{failure:?}"), Vec::new()),
         };
         let mut staged = match stage::check_and_stage(
             &self.ground(),
@@ -209,8 +210,13 @@ impl Applier<'_> {
             Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
-            Err(Stop::Failed(detail)) => return write_failed(plan, detail),
-            Err(Stop::Unread(refused)) => return ApplyOutcome::Unread(refused),
+            Err(Stop::Failed(detail)) => return write_failed(plan, detail, Vec::new()),
+            Err(Stop::Unread(refusal)) => {
+                return ApplyOutcome::Unread {
+                    refusal,
+                    healing: Vec::new(),
+                };
+            }
         };
         drop(view);
         let forced = std::mem::take(&mut staged.forced);
@@ -296,7 +302,7 @@ impl Applier<'_> {
                 forced,
             });
         };
-        if !progress.effects.is_empty() {
+        if progress.published {
             let cause = match stopped {
                 Stopped::ForeignEdit { path, .. } => InterruptionCause::foreign_edit(path),
                 Stopped::NameTaken { path } => InterruptionCause::name_taken(path),
@@ -319,7 +325,15 @@ impl Applier<'_> {
                 changeset,
             }));
         }
-        match stopped {
+        let healing = if changeset == ChangesetOutcome::Healing {
+            plan.transitions
+                .iter()
+                .map(|transition| transition.path.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let outcome = match stopped {
             Stopped::ForeignEdit { path, holds } => {
                 self.refuse(plan, declared, vec![RefusedCheck::drifted(path, holds)])
             }
@@ -327,8 +341,9 @@ impl Applier<'_> {
                 self.refuse(plan, declared, vec![RefusedCheck::name_taken(path)])
             }
             Stopped::RootReplaced => self.root_replaced(plan),
-            Stopped::Io(detail) => write_failed(plan, detail),
-        }
+            Stopped::Io(detail) => write_failed(plan, detail, Vec::new()),
+        };
+        outcome.with_confirmed_progress(landed, healing)
     }
 
     /// Refuse `plan` for `checks`, answering with a fresh plan judged under
@@ -341,7 +356,7 @@ impl Applier<'_> {
     ) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions, self.schema) {
             Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks, self.links),
-            Err(error) => write_failed(plan, error.to_string()),
+            Err(error) => write_failed(plan, error.to_string(), Vec::new()),
         }
     }
 
@@ -398,11 +413,12 @@ pub(crate) fn preview(
         return Err(Box::new(ApplyOutcome::RootChanged {
             expected: plan.root,
             found,
+            healing: Vec::new(),
         }));
     }
     let view = match TreeView::open(anchor, exclusions, schema) {
         Ok(view) => view,
-        Err(error) => return Err(Box::new(write_failed(plan, error.to_string()))),
+        Err(error) => return Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
     };
     let ground = Ground {
         vault: anchor,
@@ -419,7 +435,7 @@ pub(crate) fn preview(
                             .with_forced(checked.forced)
                             .with_links(checked.links),
                     )),
-                    Err(error) => Err(Box::new(write_failed(plan, error.to_string()))),
+                    Err(error) => Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
                 };
             }
             Err(stop) => stop,
@@ -430,8 +446,11 @@ pub(crate) fn preview(
         Stop::Refused(checks) => refresh::refuse_and_refresh(plan, &view, declared, checks, links),
         Stop::Invalid(fault) => ApplyOutcome::Invalid(fault),
         Stop::RootReplaced => root_replaced(anchor, plan),
-        Stop::Failed(detail) => write_failed(plan, detail),
-        Stop::Unread(refused) => ApplyOutcome::Unread(refused),
+        Stop::Failed(detail) => write_failed(plan, detail, Vec::new()),
+        Stop::Unread(refusal) => ApplyOutcome::Unread {
+            refusal,
+            healing: Vec::new(),
+        },
     }))
 }
 
@@ -442,13 +461,19 @@ fn root_replaced(anchor: &Path, plan: ResolvedPlan) -> ApplyOutcome {
         Ok(Some(now)) => ApplyOutcome::RootChanged {
             expected: plan.root,
             found: RootIdentity::from_device_and_inode(now.dev, now.ino),
+            healing: Vec::new(),
         },
-        _ => write_failed(plan, "the vault root was replaced".to_string()),
+        _ => write_failed(plan, "the vault root was replaced".to_string(), Vec::new()),
     }
 }
 
-fn write_failed(plan: ResolvedPlan, detail: String) -> ApplyOutcome {
-    ApplyOutcome::WriteFailed { plan, detail }
+fn write_failed(plan: ResolvedPlan, detail: String, landed: Vec<DocumentPath>) -> ApplyOutcome {
+    ApplyOutcome::WriteFailed {
+        plan,
+        detail,
+        landed,
+        healing: Vec::new(),
+    }
 }
 
 /// Folders as the wire names them.

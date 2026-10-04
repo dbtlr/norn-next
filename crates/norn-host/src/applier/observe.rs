@@ -512,6 +512,35 @@ pub(super) fn transition_index(
     index
 }
 
+/// Each target drawing on another target's before-state, by transition
+/// index. A respell's source is its old spelling; its content lands at the
+/// new spelling, so the two sides use their own index maps.
+pub(super) fn content_dependencies(
+    plan: &ResolvedPlan,
+    lineage: &Lineage,
+    normalizer: &PathNormalizer,
+) -> Vec<(usize, usize)> {
+    let source_of = transition_index(plan, normalizer);
+    let target_of: BTreeMap<_, _> = plan
+        .transitions
+        .iter()
+        .enumerate()
+        .filter(|(_, transition)| matches!(transition.after, FileState::Present { .. }))
+        .filter_map(|(index, transition)| {
+            identity(normalizer, transition.path.as_str()).map(|file| (file, index))
+        })
+        .collect();
+    lineage
+        .drawing()
+        .filter_map(|(file, drawn)| {
+            if file == &drawn.from {
+                return None;
+            }
+            Some((*target_of.get(file)?, *source_of.get(&drawn.from)?))
+        })
+        .collect()
+}
+
 /// Every content condition the plan carries that the vault no longer meets.
 ///
 /// A content-hash condition is on a file the plan does not write, so it reads

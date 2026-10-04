@@ -75,6 +75,8 @@ pub(super) fn refuse_and_refresh(
             return ApplyOutcome::WriteFailed {
                 plan,
                 detail: error.to_string(),
+                healing: Vec::new(),
+                landed: Vec::new(),
             };
         }
     };
@@ -92,6 +94,13 @@ pub(super) fn refuse_and_refresh(
         .cloned()
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect();
+    let landed = plan
+        .transitions
+        .iter()
+        .zip(&states)
+        .filter(|(_, state)| state.landed())
+        .map(|(transition, _)| transition.path.clone())
         .collect();
     let fates = fates(&plan, &states, &drifted_moves, view.normalizer());
     let met: BTreeSet<OperationId> = plan
@@ -174,9 +183,16 @@ pub(super) fn refuse_and_refresh(
             return ApplyOutcome::WriteFailed {
                 plan,
                 detail: error.to_string(),
+                healing: Vec::new(),
+                landed: Vec::new(),
             };
         }
-        Err(PlanningFailure::Links(refused)) => return ApplyOutcome::Unread(refused),
+        Err(PlanningFailure::Links(refusal)) => {
+            return ApplyOutcome::Unread {
+                refusal,
+                healing: Vec::new(),
+            };
+        }
     };
     unresolved.sort_by_key(|(position, _)| *position);
     let forced = forced_through(&fresh, view, declared, links);
@@ -187,6 +203,8 @@ pub(super) fn refuse_and_refresh(
             .with_links(forecast.links),
         checks,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
+        landed,
+        healing: Vec::new(),
     }))
 }
 

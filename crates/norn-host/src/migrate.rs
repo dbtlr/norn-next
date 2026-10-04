@@ -395,6 +395,7 @@ mod tests {
                 Forecast::new(Vec::new(), Vec::new(), Vec::new()),
                 checks,
                 Vec::new(),
+                Vec::new(),
             ),
         )
     }

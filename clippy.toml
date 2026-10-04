@@ -131,6 +131,7 @@ disallowed-methods = [
     { path = "norn_fs::stage", reason = "the one applier is the one caller of the vault write kernel" },
     { path = "norn_fs::publish", reason = "the one applier is the one caller of the vault write kernel" },
     { path = "norn_fs::confirm_landed", reason = "the one applier is the one caller of the vault write kernel" },
+    { path = "norn_fs::confirm_staged", reason = "the one applier is the one caller of the vault write kernel" },
     { path = "norn_fs::discard", reason = "the one applier is the one caller of the vault write kernel" },
     { path = "norn_fs::remove_empty_folders", reason = "the one applier is the one caller of the vault write kernel" },
 ]

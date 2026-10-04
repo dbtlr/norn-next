@@ -8106,9 +8106,10 @@ fn apply_details() -> Vec<ErrorDetail> {
                     )
                 })
                 .collect(),
+            vec![path("notes/completed.md")],
         ),
         ErrorDetail::root_changed(a_root(), RootIdentity::from_device_and_inode(66_307, 2)),
-        ErrorDetail::write_failed(a_resolved_plan(), "the disk is full"),
+        ErrorDetail::write_failed(a_resolved_plan(), "the disk is full", Vec::new()),
         ErrorDetail::apply_not_run(a_park(), None),
         ErrorDetail::apply_not_run(a_park(), Some(a_resolved_plan())),
         ErrorDetail::apply_outcome_unknown(a_resolved_plan()),
@@ -8500,6 +8501,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
             )),
             UnresolvedReason::no_longer_resolves("the text `draft` no longer occurs"),
         )],
+        vec![path("notes/completed.md")],
     );
     assert_eq!(
         wire(&ErrorEnvelope::new("the plan drifted", detail)),
@@ -8509,7 +8511,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
                 r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[],"links":[],"left_behind":[]}},"#,
                 r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
-                r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}]}}}}"#
+                r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}],"landed":["notes/completed.md"]}}}}"#
             ),
             plan = wire(&a_bare_resolved_plan()),
             f = hash_text(0x0f),
@@ -8623,9 +8625,12 @@ fn the_apply_outcomes_carry_what_a_caller_sends_again() {
     assert_eq!(
         wire(&ErrorDetail::write_failed(
             a_bare_resolved_plan(),
-            "the disk is full"
+            "the disk is full",
+            vec![path("notes/completed.md")]
         )),
-        format!(r#"{{"code":"vault/write-failed","plan":{plan},"detail":"the disk is full"}}"#)
+        format!(
+            r#"{{"code":"vault/write-failed","plan":{plan},"detail":"the disk is full","landed":["notes/completed.md"]}}"#
+        )
     );
     assert_eq!(
         wire(&ErrorDetail::apply_outcome_unknown(a_bare_resolved_plan())),
@@ -8742,14 +8747,20 @@ fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
         })
         .collect();
     let details = [
-        ErrorDetail::plan_refused(plan.clone(), a_forecast(), Vec::new(), Vec::new()),
+        ErrorDetail::plan_refused(
+            plan.clone(),
+            a_forecast(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
         ErrorDetail::plan_interrupted(
             plan.clone(),
             vec![path("notes/a.md")],
             InterruptionCause::io_failure("the disk is full"),
             Vec::new(),
         ),
-        ErrorDetail::write_failed(plan.clone(), "the disk is full"),
+        ErrorDetail::write_failed(plan.clone(), "the disk is full", Vec::new()),
         ErrorDetail::apply_not_run(a_park(), Some(plan.clone())),
         ErrorDetail::apply_outcome_unknown(plan.clone()),
     ];

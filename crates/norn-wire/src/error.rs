@@ -813,6 +813,10 @@ pub enum ErrorDetail {
         /// Each operation the fresh plan leaves out for the caller to dispose
         /// of, and why.
         unresolved: Vec<UnresolvedOperation>,
+        /// Targets of the refused plan already at their after-states,
+        /// whichever writer completed them. This attempt published nothing.
+        #[serde(default)]
+        landed: Vec<DocumentPath>,
     },
     /// The detail of `vault/root-changed`: the identity the plan was resolved
     /// against, and the vault's.
@@ -841,8 +845,8 @@ pub enum ErrorDetail {
         /// forced plan whose every landed result is valid.
         forced: Vec<SchemaViolation>,
     },
-    /// The detail of `vault/write-failed`: the plan, and the failure that
-    /// stopped it before any target landed.
+    /// The detail of `vault/write-failed`: the plan, confirmed targets, and
+    /// the failure that stopped this attempt before it published a target.
     #[serde(rename = "vault/write-failed")]
     #[non_exhaustive]
     WriteFailed {
@@ -851,6 +855,10 @@ pub enum ErrorDetail {
         /// The failure in words, for a person reading a message or a log.
         /// Clients never match on it.
         detail: String,
+        /// Targets already confirmed at their after-states; this attempt
+        /// published nothing before the filesystem failed.
+        #[serde(default)]
+        landed: Vec<DocumentPath>,
     },
     /// The detail of `vault/migration-refused`: the control file, and why it
     /// was not migrated.
@@ -1071,18 +1079,21 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/plan-refused`, for the fresh `plan` and its
-    /// `forecast`, the `checks` that refused and the `unresolved` operations.
+    /// `forecast`, the `checks` that refused, the `unresolved` operations,
+    /// and the original plan's targets already `landed`.
     pub const fn plan_refused(
         plan: ResolvedPlan,
         forecast: Forecast,
         checks: Vec<RefusedCheck>,
         unresolved: Vec<UnresolvedOperation>,
+        landed: Vec<DocumentPath>,
     ) -> Self {
         ErrorDetail::PlanRefused {
             plan,
             forecast,
             checks,
             unresolved,
+            landed,
         }
     }
 
@@ -1110,11 +1121,16 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/write-failed`, for the `plan`, described by
-    /// `detail`.
-    pub fn write_failed(plan: ResolvedPlan, detail: impl Into<String>) -> Self {
+    /// `detail`, and targets already `landed`.
+    pub fn write_failed(
+        plan: ResolvedPlan,
+        detail: impl Into<String>,
+        landed: Vec<DocumentPath>,
+    ) -> Self {
         ErrorDetail::WriteFailed {
             plan,
             detail: detail.into(),
+            landed,
         }
     }
 
@@ -1457,6 +1473,7 @@ mod tests {
                 Forecast::new(Vec::new(), Vec::new(), Vec::new()),
                 vec![RefusedCheck::name_taken(a_path())],
                 Vec::new(),
+                Vec::new(),
             ),
             ReasonCode::VaultRootChanged => ErrorDetail::root_changed(
                 RootIdentity::from_device_and_inode(1, 2),
@@ -1468,7 +1485,9 @@ mod tests {
                 InterruptionCause::io_failure("the disk is full"),
                 Vec::new(),
             ),
-            ReasonCode::VaultWriteFailed => ErrorDetail::write_failed(a_plan(), "the disk is full"),
+            ReasonCode::VaultWriteFailed => {
+                ErrorDetail::write_failed(a_plan(), "the disk is full", Vec::new())
+            }
             ReasonCode::VaultMigrationRefused => ErrorDetail::migration_refused(
                 ControlFile::Schema,
                 MigrationRefusal::version_ahead(2, 1),

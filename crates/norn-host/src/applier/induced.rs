@@ -29,6 +29,7 @@ const OUTCOME: &str = "NORN_APPLIER_OUTCOME";
 const ARMED: &str = "NORN_FS_ARMED_STAGES";
 const HITS: &str = "NORN_FS_ARM_HITS";
 const SCHEMA: &str = "NORN_APPLIER_SCHEMA";
+const EXISTING_STORE: &str = "NORN_APPLIER_EXISTING_STORE";
 
 /// The child: apply the plan it is handed to the vault it is handed, under
 /// whatever the environment arms, and write the outcome as the wire's JSON.
@@ -41,7 +42,12 @@ fn applier_child() {
     let var = |name: &str| PathBuf::from(std::env::var_os(name).expect("the child's input"));
     let plan: ResolvedPlan =
         serde_json::from_slice(&std::fs::read(var(PLAN)).expect("the plan")).expect("a plan");
-    let mut fixture = Fixture::over(None, var(VAULT), var(DATA), "child.sqlite3");
+    let database = if std::env::var_os(EXISTING_STORE).is_some() {
+        "store.sqlite3"
+    } else {
+        "child.sqlite3"
+    };
+    let mut fixture = Fixture::over(None, var(VAULT), var(DATA), database);
     if let Some(schema) = std::env::var_os(SCHEMA) {
         fixture.pin(schema.to_str().expect("a UTF-8 schema"));
     }
@@ -276,6 +282,89 @@ fn a_foreign_edit_after_staging_refuses_before_anything_landed_and_interrupts_af
     expected.sort();
     assert_eq!(fixture.tree(), expected, "only the foreign file is new");
     assert_eq!(fixture.read("e.md").as_deref(), Some("status draft\n"));
+}
+
+/// A removal another writer completed is still part of the landed subset,
+/// even when an earlier replacement stops publication before reaching it.
+#[test]
+fn an_interruption_reports_and_commits_a_removal_already_landed_after_the_stop() {
+    let mut fixture = Fixture::new(&[("e.md", "status draft\n"), ("gone.md", "gone\n")]);
+    let plan = fixture.plan(vec![
+        creating("n.md", "n\n"),
+        editing("e.md", "draft", "final"),
+        deleting("gone.md"),
+    ]);
+    assert_eq!(fixture.stored_paths(), vec!["e.md", "gone.md"]);
+    std::fs::remove_file(fixture.vault.join("gone.md")).expect("another writer removes the file");
+    let child = run_child_switched(&fixture, &plan, "foreign@2=edit", None, &[EXISTING_STORE]);
+    assert!(child.lived);
+    assert!(child.hits.contains("stage=foreign"), "{}", child.hits);
+    assert_eq!(fixture.read("n.md").as_deref(), Some("n\n"));
+    assert!(fixture.read("gone.md").is_none());
+    let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail() else {
+        panic!("publication was interrupted: {:?}", child.outcome);
+    };
+    assert_eq!(*cause, InterruptionCause::foreign_edit(path("e.md")));
+    assert_eq!(*landed, vec![path("gone.md"), path("n.md")]);
+    assert_eq!(fixture.stored_paths(), vec!["e.md", "n.md"]);
+    for (at, body) in [("n.md", "n\n"), ("e.md", "status draft\n")] {
+        let facts = fixture
+            .store
+            .begin_request()
+            .stored_facts(&norn_store::DocumentPath::new(at).unwrap())
+            .expect("the stored target reads")
+            .expect("the target is stored");
+        assert_eq!(facts.body, body);
+    }
+}
+
+/// An attempt that only confirms another writer's progress is refused,
+/// with that progress reported, whichever side of the stop it lies on.
+#[test]
+fn a_publication_stop_without_a_new_write_refuses_with_every_already_landed_target() {
+    for prefix in [false, true] {
+        let fixture = Fixture::new(&[("e.md", "status draft\n"), ("gone.md", "gone\n")]);
+        let (plan, completed, armed) = if prefix {
+            let plan = fixture.plan(vec![
+                creating("n.md", "n\n"),
+                editing("e.md", "draft", "final"),
+            ]);
+            fixture.write("n.md", "n\n");
+            (plan, "n.md", "foreign@1=edit")
+        } else {
+            let plan = fixture.plan(vec![editing("e.md", "draft", "final"), deleting("gone.md")]);
+            std::fs::remove_file(fixture.vault.join("gone.md"))
+                .expect("another writer removes the file");
+            (plan, "gone.md", "foreign@1=edit")
+        };
+        let child = run_child_switched(&fixture, &plan, armed, None, &[EXISTING_STORE]);
+        assert!(child.lived);
+        assert!(
+            child.hits.contains("stage=foreign"),
+            "prefix={prefix}: {} {:?}",
+            child.hits,
+            child.outcome
+        );
+        let refusal = envelope(&child);
+        assert_eq!(
+            refusal.code(),
+            &norn_wire::ReasonCode::VaultPlanRefused,
+            "prefix={prefix}: {refusal:?}"
+        );
+        let detail = serde_json::to_value(refusal.detail()).expect("the refusal encodes");
+        assert_eq!(detail["landed"], serde_json::json!([completed]));
+        let ErrorDetail::PlanRefused {
+            plan: fresh,
+            unresolved,
+            ..
+        } = refusal.detail()
+        else {
+            panic!("the attempt refused: {refusal:?}");
+        };
+        assert!(fresh.operations.is_empty());
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].operation, editing("e.md", "draft", "final"));
+    }
 }
 
 /// **An interrupted forced apply lists the violations its force let through
@@ -552,10 +641,11 @@ fn a_respell_cut_short_at_either_step_is_finished_and_its_first_step_is_committe
 
 /// **A landing not synced stops publication**, whether this apply wrote the
 /// target or found it already landed: a later target may draw on it, so the
-/// apply is interrupted naming what landed, nothing after it publishes, and
+/// attempt interrupts only if it wrote a target; otherwise it fails without
+/// publication. Both report completed targets, nothing after it publishes, and
 /// the shadows staged for what did not publish are discarded.
 #[test]
-fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
+fn a_landing_whose_folder_is_not_synced_stops_the_apply() {
     for (written_first, armed) in [
         // The create publishes first and its folder sync fails.
         (true, "parent-sync@1=fails"),
@@ -575,14 +665,24 @@ fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
         let child = run_child(&fixture, &plan, armed);
         assert!(child.lived, "{armed}");
         assert!(!child.hits.is_empty(), "{armed}: the arm fired");
-        let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail() else {
-            panic!("{armed}: the apply is interrupted: {:?}", child.outcome);
-        };
-        assert_eq!(*landed, vec![path("n.md")], "{armed}");
-        assert!(
-            matches!(cause, InterruptionCause::IoFailure { .. }),
-            "{armed}: {cause:?}"
-        );
+        if written_first {
+            let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail()
+            else {
+                panic!("{armed}: the apply is interrupted: {:?}", child.outcome);
+            };
+            assert_eq!(*landed, vec![path("n.md")], "{armed}");
+            assert!(
+                matches!(cause, InterruptionCause::IoFailure { .. }),
+                "{armed}: {cause:?}"
+            );
+        } else {
+            let refusal = envelope(&child);
+            assert_eq!(refusal.code(), &norn_wire::ReasonCode::VaultWriteFailed);
+            assert_eq!(
+                serde_json::to_value(refusal.detail()).unwrap()["landed"],
+                serde_json::json!(["n.md"])
+            );
+        }
         assert_eq!(
             fixture.read("e.md").as_deref(),
             Some("status draft\n"),
@@ -599,24 +699,22 @@ fn a_landing_whose_folder_is_not_synced_interrupts_the_apply() {
 /// **A target another writer lands inside its own publication, whose folder
 /// is then not synced, stops publication** as one this apply wrote would: the
 /// removal the foreign writer made is found, its folder sync fails, and the
-/// apply is interrupted naming it, with the later removal left unpublished.
+/// attempt answers write-failed naming it, with the later removal unpublished.
 /// `inbox/m.md` links `e.md`, so its delete says the link may be left
 /// broken.
 #[test]
-fn a_target_found_inside_its_publication_whose_folder_is_not_synced_interrupts_the_apply() {
+fn a_target_found_inside_publication_whose_folder_is_not_synced_answers_write_failed() {
     let (fixture, _) = every_position();
     let plan = fixture.plan(vec![breaking("e.md"), deleting("gone.md")]);
     let child = run_child(&fixture, &plan, "foreign@1=remove,parent-sync@1=fails");
     assert!(child.lived);
     assert!(child.hits.contains("stage=foreign"), "{}", child.hits);
     assert!(child.hits.contains("stage=parent-sync"), "{}", child.hits);
-    let ErrorDetail::PlanInterrupted { landed, cause, .. } = envelope(&child).detail() else {
-        panic!("the apply is interrupted: {:?}", child.outcome);
-    };
-    assert_eq!(*landed, vec![path("e.md")]);
-    assert!(
-        matches!(cause, InterruptionCause::IoFailure { .. }),
-        "{cause:?}"
+    let refusal = envelope(&child);
+    assert_eq!(refusal.code(), &norn_wire::ReasonCode::VaultWriteFailed);
+    assert_eq!(
+        serde_json::to_value(refusal.detail()).unwrap()["landed"],
+        serde_json::json!(["e.md"])
     );
     assert_eq!(
         fixture.read("gone.md").as_deref(),

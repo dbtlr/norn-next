@@ -19,6 +19,9 @@ use crate::production::PlanEffect;
 /// What publication did, as far as it went.
 #[derive(Debug, Default)]
 pub(super) struct Progress {
+    /// This attempt published content or removed a file, rather than only
+    /// confirming another writer's completed targets.
+    pub(super) published: bool,
     /// What each path a publication touched now holds, for the changeset:
     /// every landed target, and a respell's first step where only it landed.
     pub(super) effects: Vec<PlanEffect>,
@@ -72,6 +75,7 @@ impl Publisher<'_> {
         let StagedPlan {
             targets,
             stored,
+            content_dependencies,
             forced: _,
         } = staged;
         let mut remaining = targets.into_iter();
@@ -84,7 +88,11 @@ impl Publisher<'_> {
                 unit,
             };
             if let Err(stopped) = self.publish_one(&publishing, target.held, &mut progress) {
-                discard_all(&self.ground, self.shadows, plan, remaining);
+                // Publication stops, but completed suffix targets still belong
+                // in the report and the changeset. Confirm them again without
+                // publishing any pending target.
+                self.confirm_remaining(plan, &stored, remaining, &mut progress);
+                progress.keep_available_sources(plan, &stored, &content_dependencies);
                 return (progress, Some(stopped));
             }
             if phase == Phase::Remove {
@@ -96,6 +104,36 @@ impl Publisher<'_> {
         }
         self.empty_folders(&removed, &mut progress);
         (progress, None)
+    }
+
+    /// Confirm completed suffixes, including a target another writer finished
+    /// after staging, and discard pending shadows. A later confirmation
+    /// refusal leaves that target out; it never replaces the original stop.
+    #[allow(clippy::disallowed_methods)] // The one applier: the vault write kernel's one caller.
+    fn confirm_remaining(
+        &self,
+        plan: &ResolvedPlan,
+        stored: &[norn_store::DocumentPath],
+        remaining: impl Iterator<Item = super::stage::StagedTarget>,
+        progress: &mut Progress,
+    ) {
+        for target in remaining {
+            let suffix = Publishing {
+                plan,
+                stored,
+                unit: target.unit,
+            };
+            if let Held::Staged(staged) = &target.held {
+                if let Ok(landing) = self.ground.landing(staged_path(plan, target.unit))
+                    && norn_fs::confirm_staged(landing.anchor, staged).is_ok()
+                {
+                    suffix.landed_whole(TargetResult::Found, progress);
+                }
+                discard_all(&self.ground, self.shadows, plan, std::iter::once(target));
+            } else {
+                let _ = self.publish_one(&suffix, target.held, progress);
+            }
+        }
     }
 
     /// Publish or confirm one unit.
@@ -122,10 +160,6 @@ impl Publisher<'_> {
         let written_at = self.ground.landing(written_path).map_err(Stopped::Io)?;
         let stop = |refusal: &norn_fs::Refusal| stopped(refusal, written_path, &landing);
         let staged = match held {
-            Held::Nothing => {
-                progress.results.push((written, TargetResult::Found));
-                return Ok(());
-            }
             Held::Landed(landed) => {
                 let confirmed = norn_fs::confirm_landed(landing.anchor, &landed)
                     .map_err(|refusal| stop(&refusal))?;
@@ -138,6 +172,7 @@ impl Publisher<'_> {
             .map_err(|refusal| stop(&refusal))?
         {
             Publication::Wrote(published) => {
+                progress.published = true;
                 if !written_at.outside {
                     self.own_writes.published(written_at.relative, &published);
                 }
@@ -152,6 +187,7 @@ impl Publisher<'_> {
                 durable(confirmed.durability, written_path)
             }
             Publication::Interrupted(interrupted) => {
+                progress.published = true;
                 // The content landed under the old spelling and the rename did
                 // not: the ledger records the first step there, and the
                 // changeset carries it, or the store goes stale. Only the
@@ -204,6 +240,42 @@ impl Publisher<'_> {
                 progress.folders_removed.extend(emptied.removed);
             }
         }
+    }
+}
+
+impl Progress {
+    /// A missing or replaced source is drift while a destination still
+    /// needs its before-state. Judge each edge against the confirmed
+    /// after-states, using the dependencies that ordered publication.
+    fn keep_available_sources(
+        &mut self,
+        plan: &ResolvedPlan,
+        stored: &[norn_store::DocumentPath],
+        dependencies: &[(usize, usize)],
+    ) {
+        let mut result = vec![None; plan.transitions.len()];
+        for &(index, found) in &self.results {
+            result[index] = Some(found);
+        }
+        let mut invalid = vec![false; plan.transitions.len()];
+        for &(target, source) in dependencies {
+            if result[target].is_none()
+                && result[source] == Some(TargetResult::Found)
+                && !plan.transitions[source]
+                    .before
+                    .same_content(&plan.transitions[source].after)
+            {
+                invalid[source] = true;
+            }
+        }
+        self.results.retain(|(index, _)| !invalid[*index]);
+        let excluded: BTreeSet<_> = invalid
+            .iter()
+            .enumerate()
+            .filter_map(|(index, invalid)| invalid.then_some(&stored[index]))
+            .collect();
+        self.effects
+            .retain(|effect| !excluded.contains(&effect.path));
     }
 }
 

@@ -210,7 +210,8 @@ use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 /// One file's change, as the kernel is asked to make it: the state the file
 /// must hold before, and for a write the content it holds after.
 ///
-/// The four kinds are the whole vocabulary a plan resolves into. **A kind
+/// Four kinds change a file; `Absent` checks a target whose before- and
+/// after-states are both absence. **A kind
 /// meaning "whatever is there, replace it" is deliberately absent**, and its
 /// absence is the contract: an agent must never find overwriting cheaper than
 /// merging.
@@ -228,6 +229,9 @@ use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transition<'a> {
+    /// The name must remain absent. This check stages no publication, but
+    /// returns a landing record whose absence is verified again afterward.
+    Absent,
     /// Nothing may be at the name, and `content` is what will be: bytes the
     /// caller holds, or a streamed copy of another file below the same root
     /// that must hash to what the caller names ([`Content`]).
@@ -683,6 +687,33 @@ pub fn confirm_landed(anchor: &Path, landed: &Landed) -> Result<Confirmed, Refus
     confirm_landed_where(anchor, landed, Faults::entry())
 }
 
+/// Confirm a staged target's after-state without publishing its shadow or
+/// removing its before-state. Another writer may have completed it while an
+/// earlier publication stopped the plan; the ordinary landing check also
+/// repairs that completed target's directory durability.
+pub fn confirm_staged(anchor: &Path, staged: &Staged) -> Result<Confirmed, Refusal> {
+    let (path, after, landing) = match &staged.pending {
+        Pending::Create { after, .. } => (staged.path.clone(), Some(*after), Landing::Created),
+        Pending::Replace { after, .. } => (staged.path.clone(), Some(*after), Landing::Replaced),
+        Pending::Remove { .. } => (staged.path.clone(), None, Landing::Removed),
+        Pending::Respell { to, after, .. } => (
+            staged.path.with_file_name(to),
+            Some(*after),
+            Landing::Respelled,
+        ),
+    };
+    confirm_landed_where(
+        anchor,
+        &Landed {
+            root: staged.root,
+            path,
+            after,
+            landing,
+        },
+        Faults::entry(),
+    )
+}
+
 /// Remove a staged target's shadow without publishing it.
 ///
 /// For a plan torn down between the phases: a refusal while staging a later
@@ -785,7 +816,7 @@ fn stage_where(
                 landing: match transition {
                     Transition::Create { .. } => Landing::Created,
                     Transition::Replace { .. } => Landing::Replaced,
-                    Transition::Remove { .. } => Landing::Removed,
+                    Transition::Absent | Transition::Remove { .. } => Landing::Removed,
                     Transition::Respell { .. } => Landing::Respelled,
                 },
             }));
@@ -804,7 +835,10 @@ fn stage_where(
         },
         (Transition::Remove { before }, _) => Pending::Remove { before },
         (
-            Transition::Create { .. } | Transition::Replace { .. } | Transition::Respell { .. },
+            Transition::Absent
+            | Transition::Create { .. }
+            | Transition::Replace { .. }
+            | Transition::Respell { .. },
             _,
         ) => {
             unreachable!("a write's after-state is its content's hash, and a respell stages above")
@@ -879,7 +913,7 @@ fn after_of(transition: &Transition<'_>) -> Option<ContentHash> {
         Transition::Respell {
             before, content, ..
         } => Some(content.map_or(*before, ContentHash::of)),
-        Transition::Remove { .. } => None,
+        Transition::Absent | Transition::Remove { .. } => None,
     }
 }
 
@@ -917,11 +951,13 @@ fn judge_staging(
         (_, Found::Regular { state, .. }) if Some(state.content_hash) == after => {
             Ok(Judged::Landed)
         }
-        (Transition::Remove { .. }, Found::Absent | Found::Blocked { .. }) => Ok(Judged::Landed),
+        (Transition::Absent | Transition::Remove { .. }, Found::Absent | Found::Blocked { .. }) => {
+            Ok(Judged::Landed)
+        }
         (Transition::Create { .. }, Found::Absent) => Ok(Judged::Proceed { mode: None }),
         (Transition::Create { .. }, Found::Blocked { folder }) => Err(folder_is_file(full, folder)),
         (
-            Transition::Create { .. },
+            Transition::Absent | Transition::Create { .. },
             Found::Regular { .. } | Found::OtherSpelling { .. } | Found::Other,
         ) => Err(destination_exists(full)),
         (
