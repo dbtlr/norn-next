@@ -151,6 +151,12 @@ jobs:
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
+      # The write kernel's spelling-listing cost needs a real folding root.
+      # The suite refuses a distinct macOS scratch volume rather than skipping.
+      - name: Folding-root listing bar
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
       - name: Host filesystem contracts
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
@@ -235,6 +241,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Counter bars
         run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        env:
+          LANE_FEATURES: induced-failure
+      - name: Distinct-root listing control
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host folding_cost --nocapture --test-threads=1
         env:
           LANE_FEATURES: induced-failure
 
