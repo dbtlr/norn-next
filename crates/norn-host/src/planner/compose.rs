@@ -858,8 +858,12 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         rewrites: &[&LinkRewrite],
     ) -> Result<(), Unresolved> {
         let bytes = self.held(spelling)?;
-        let kept = kept_at_written(&bytes, rewrites);
-        let (rewritten, skipped) = edit::rewritten(&bytes, rewrites.iter().copied());
+        let edit::Rewritten {
+            bytes: rewritten,
+            skipped,
+            links,
+        } = edit::rewritten(&bytes, rewrites.iter().copied());
+        let kept = kept_at_written(&links, rewrites);
         self.target(spelling).after = After::Bytes(rewritten);
         self.skipped.extend(skipped.into_iter().map(|skip| Skipped {
             holder: spelling.clone(),
@@ -889,10 +893,13 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     }
 }
 
-/// The syntax and address of each link `bytes` hold, as the change set reads
-/// them, that no rewrite of `rewrites` matches and that one of them writes:
-/// what a batch over `bytes` keeps under a key it also writes.
-fn kept_at_written(bytes: &[u8], rewrites: &[&LinkRewrite]) -> Vec<(LinkFamily, String)> {
+/// The syntax and address of each of `links`, as the change set reads them,
+/// that no rewrite of `rewrites` matches and that one of them writes: what a
+/// batch over the holder of `links` keeps under a key it also writes.
+fn kept_at_written(
+    links: &[norn_store::LinkFact],
+    rewrites: &[&LinkRewrite],
+) -> Vec<(LinkFamily, String)> {
     let matches = |syntax: LinkFamily, address: &str| {
         rewrites
             .iter()
@@ -904,9 +911,9 @@ fn kept_at_written(bytes: &[u8], rewrites: &[&LinkRewrite]) -> Vec<(LinkFamily, 
             .any(|rewrite| rewrite.syntax == syntax && rewrite.to == address)
     };
     let mut kept: Vec<(LinkFamily, String)> = Vec::new();
-    for link in document_links(bytes) {
+    for link in links {
         let syntax = wire_family(link.family);
-        let address = links::address(&link);
+        let address = links::address(link);
         if writes(syntax, &address)
             && !matches(syntax, &address)
             && !kept.contains(&(syntax, address.clone()))
@@ -1086,6 +1093,28 @@ mod tests {
 
     fn rewrite(at: &str, from: &str, to: &str) -> norn_wire::LinkRewrite {
         norn_wire::LinkRewrite::new(path(at), norn_wire::LinkFamily::Wikilink, from, to)
+    }
+
+    /// **A holder's batch parses its bytes once.** A moved document naming
+    /// itself is rewritten at its destination by its own cascade: the bytes
+    /// it holds are parsed once, for the links its batch keeps at an address
+    /// it writes and for the respelling alike.
+    #[test]
+    fn a_holders_batch_parses_its_bytes_once() {
+        let vault = MemoryVault::with(&[("a.md", "[me](a.md), [[a]] and [[z]]\n")]);
+        let operations = [
+            Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
+                .with_cascade(vec![rewrite("b.md", "a", "b")]),
+        ];
+        crate::derivation::PARSES.with(|parses| parses.set(0));
+        let composition =
+            compose(&operations, &in_order(&operations), &vault).expect("an infallible view");
+        assert!(composition.unresolvable.is_empty());
+        assert_eq!(
+            after_text(&composition, "b.md").as_deref(),
+            Some("[me](a.md), [[b]] and [[z]]\n")
+        );
+        assert_eq!(crate::derivation::PARSES.with(std::cell::Cell::get), 1);
     }
 
     /// **A cascade composes after every operation of the plan**, each

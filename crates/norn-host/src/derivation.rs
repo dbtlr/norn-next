@@ -1083,8 +1083,30 @@ pub(crate) fn document_links(bytes: &[u8]) -> Vec<LinkFact> {
     let Ok(source) = document_source(bytes) else {
         return Vec::new();
     };
-    let document = Document::parse(source);
-    links_of(&document, &document.scan_body())
+    parsed_links(&parsed(source))
+}
+
+/// The links the parsed `document` holds, as [`document_links`] reads them
+/// from its bytes: for a caller that parsed the document for another reason
+/// and reads its links off that one parse.
+pub(crate) fn parsed_links(document: &Document<'_>) -> Vec<LinkFact> {
+    links_of(document, &document.scan_body())
+}
+
+/// The document `source` spells, as the text layer parses it: the one parse
+/// a plan's reading of a document's links, and its respelling of them, go
+/// through, counted on a test's thread so a case can hold planning to one
+/// parse of a body ([`PARSES`]).
+pub(crate) fn parsed(source: &str) -> Document<'_> {
+    #[cfg(test)]
+    PARSES.with(|parses| parses.set(parses.get() + 1));
+    Document::parse(source)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many documents [`parsed`] has parsed on this thread.
+    pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The links `document`, whose body `scan` read, holds: its frontmatter's
