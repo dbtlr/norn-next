@@ -2611,10 +2611,12 @@ because a plan and its re-send must finish over a vault whose index lags its fil
 0032), as a move did before it carried anything. A move an edit, a link rewrite or its own
 cascade lands on is not carried: it reads the moved document whole, once, and composes from
 that one held copy, and the rewrite it composes is new bytes the plan authors. Verifying a
-rewrite re-scans those bytes whole beside the held copy, so a move that rewrites its own
-links peaks at about five times its document — the held copy, the rewritten bytes and the
-parser's tree over them — which a memory bar holds as a regression floor; where its own cascade lands, planning has
-already streamed it once, so it opens the file twice. Every template value
+rewrite re-scans those bytes whole beside the held copy — the held copy, the rewritten bytes
+and the parser's tree over them live at once — which the memory lane's 4 MiB fixture of plain
+prose lines measures at about five times its document and bars as a regression floor; the
+parser's tree grows with how densely a document packs Markdown nodes, so a document of short
+lines or lists peaks higher. Where its own cascade lands, planning has already streamed it
+once, so it opens the file twice. Every template value
 resolves at planning, so the applier recomposes each target as a pure function of the
 before-states and the operations: before staging anything it runs the plan's operations
 again, through the planner's own ordering and composition, over the vault with every target
