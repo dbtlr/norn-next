@@ -1097,10 +1097,12 @@ mod tests {
         norn_wire::LinkRewrite::new(path(at), norn_wire::LinkFamily::Wikilink, from, to)
     }
 
-    /// **A holder's batch parses its bytes once.** A moved document naming
+    /// **A holder's batch derives its links once.** A moved document naming
     /// itself is rewritten at its destination by its own cascade: the bytes
-    /// it holds are parsed once, for the links its batch keeps at an address
-    /// it writes and for the respelling alike.
+    /// it holds go through the derivation's parse once, for the links its
+    /// batch keeps at an address it writes and for the respelling alike. The
+    /// text layer's verification of the respelling scans the before and the
+    /// rewritten bytes besides, which this count does not see.
     #[test]
     fn a_holders_batch_parses_its_bytes_once() {
         let vault = MemoryVault::with(&[("a.md", "[me](a.md), [[a]] and [[z]]\n")]);

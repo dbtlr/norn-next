@@ -417,26 +417,54 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// that carried them; the kernel reports one peak per child, which is why the
 /// plans share one.
 ///
-/// Observed on x86_64-linux-glibc locally on 2026-10-04: **31.03–31.52 MiB**
-/// over fifteen readings of the planning child at `realistic` across five runs
-/// of the lane, five from this bar's own case and five from each heap pair's
-/// `realistic` child. The same runs read the attach ceiling's child at
-/// 28.93–29.76 MiB, so the plans and the live host add about 2 MiB over the
-/// attach.
+/// Observed on x86_64-linux-glibc locally on 2026-10-04: **31.67–32.18 MiB**
+/// over eighteen readings of the planning child at `realistic` across six runs
+/// of the lane, six from this bar's own case and six from each heap pair's
+/// `realistic` child; the `ambiguous` children read 29.45–29.91 MiB.
+/// Five earlier runs of the same mix read 31.03–31.52 MiB over fifteen
+/// readings. The same runs read the attach ceiling's child at 29.00–30.36
+/// MiB, so the plans and the live host add about 2 MiB over the attach. On
+/// `ubuntu-latest` x86_64-glibc the `memory invariant` jobs 111331931343 and
+/// 111384985926 (runs 37166270607 and 37185003929) read the same mix at
+/// **32.31–32.46 MiB** over six `realistic` readings and 30.00–30.20 over four
+/// `ambiguous` ones.
 ///
-/// **This ceiling bounds the process.** It is 51 MiB, by the rule
+/// **The readings are the plans', not the allocator's.** With glibc's mmap
+/// threshold fixed at 512 KiB (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=524288`
+/// passed to every child, one run of the lane on 2026-10-04) the planning
+/// children read 31.62–31.88 MiB at `realistic` and 29.50–29.59 at
+/// `ambiguous`, inside the default band, and every heap reading was
+/// unchanged. The size subjects are kept out of this child for that reason:
+/// while they shared it, its 4 MiB documents set its peak at 56–83 MiB by
+/// default, 64.06–82.76 in the hosted run 37201706982, and a review's run of
+/// that shared child with the threshold fixed read 47.6–48.7 MiB at both
+/// profiles with the same heap readings, so what set the peak was how many of
+/// their freed allocations glibc's dynamic threshold kept resident, and a
+/// ceiling sized over it was sized on the allocator. The size child carries
+/// no ceiling of its own, for the same reason: its readings span **56.98–82.69
+/// MiB** by default over twenty-four readings across those six runs, in modes
+/// about 57, 65 and 82 MiB that no heap reading shares, and 48.39–48.66 MiB
+/// over four with the threshold fixed. Every stretch it measures is barred in
+/// heap bytes instead, by
+/// [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`],
+/// [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`],
+/// [`DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] and
+/// [`PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`], which
+/// count what the code holds and not what the allocator keeps.
+///
+/// **This ceiling bounds the process.** It is 53 MiB, by the rule
 /// [`READ_PEAK_RSS_CEILING_BYTES`] is authored under: the proportion
 /// [`ATTACH_PEAK_RSS_CEILING_BYTES`] keeps over its highest reading, 1.61x,
-/// over the highest plan reading, 31.52 MiB, which is 50.75 MiB, rounded up
-/// to a whole MiB. It is the coarse backstop: what refuses a plan whose memory
-/// is the vault is [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
+/// over the highest plan reading, local or hosted, 32.46 MiB, which is 52.26
+/// MiB, rounded up to a whole MiB. From the local readings alone the rule
+/// gives 52 MiB (32.18 at 1.61x is 51.81). It is the coarse backstop: what
+/// refuses a plan whose memory is the vault is
+/// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] and
 /// [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`].
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
-/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates. No
-/// hosted reading stands beside the local ones yet: **re-derive it from the
-/// first hosted readings.**
-pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 51 * 1024 * 1024;
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates.
+pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 
 /// How many more bytes of heap the plan previews may hold above the attach
 /// over the `realistic` profile than over the `ambiguous` profile.
@@ -444,8 +472,8 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 51 * 1024 * 1024;
 /// **The bar that planning holds its operations and a fixed record per
 /// target, never the vault, at the read pair's resolution.** A planning child
 /// attaches its profile with the plan subjects planted beside it, the same
-/// subjects at both profiles, marks the heap once the attachment is ready, and
-/// previews three writes through the host: a `set --where` matching ten
+/// subjects at both profiles, marks the heap once the attachment is ready and
+/// the heap has settled, and previews three writes through the host: a `set --where` matching ten
 /// planted documents, a move of a planted hub whose twenty in-links its
 /// cascade rewrites, and a delete of a document no link names. It holds the
 /// three resolved plans and reads the most the previews raised the live heap
@@ -463,7 +491,15 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 51 * 1024 * 1024;
 /// planning child read its previews at 164,750 to 164,788 bytes, ten readings
 /// at `ambiguous` and fifteen at `realistic`; a reading moves by a few bytes
 /// with the sandbox's name, and the pair's two children carry names of one
-/// length.
+/// length. **Re-read after NORN-345's planning changes landed and with the
+/// mark set on a settled heap**, over six runs of the lane on 2026-10-04:
+/// 171,323 bytes at both profiles in all six, a difference of **0 bytes**, and
+/// every planning child read its previews at 171,293 to 171,323 bytes, twelve
+/// readings at `ambiguous` and eighteen at `realistic`. On `ubuntu-latest`
+/// x86_64-glibc the `memory invariant` job 111331931343, before those changes,
+/// read 164,752 bytes at both profiles, and job 111384985926, after them and
+/// before the settle, read 171,287 at both, a difference of **0 bytes** in
+/// each: the rise of about 6.5 KB is those changes', on both platforms.
 ///
 /// The allowance is **4 KiB**, the figure
 /// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at, by the same rule:
@@ -474,26 +510,27 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 51 * 1024 * 1024;
 /// peak, fails it from **2.4 bytes a document** ((4,096 + 0) / 1,700).
 ///
 /// **What it does not see is memory planning builds and frees under the
-/// previews' own high-water**, about 164 KB above the attach at both
+/// previews' own high-water**, about 171 KB above its mark at both
 /// profiles: a working set proportional to the vault that never climbs past
-/// it, up to about 81 bytes for each of `realistic`'s 2,032 documents, reads
+/// it, up to about 84 bytes for each of `realistic`'s 2,032 documents, reads
 /// as nothing. Work proportional to the vault while planning is the counter
 /// lane's to refuse, where `a_where_apply_costs_the_same_at_both_scales`
 /// holds a `set --where`'s steps flat across the same two scales. The
 /// high-water's limit is watched under NORN-131, as the read pair's is.
 ///
-/// **Its negative control**, read in two runs locally on 2026-10-04: a
-/// `Vec<u64>` holding one id for every document of the vault, sized by the
-/// snapshot's own count, allocated as the `set --where` begins matching and
-/// leaked so it outlives the plan, reads 167,434 bytes at `ambiguous` and
-/// 181,034 at `realistic` in both runs, a difference of **13,600 bytes**,
-/// which fails. The mix pair beside it read the same mutant at a difference of
-/// 13,600 bytes and passed, as its allowance says it does.
+/// **Its negative control**, read in two runs locally on 2026-10-04, before
+/// NORN-345's planning changes landed: a `Vec<u64>` holding one id for every
+/// document of the vault, sized by the snapshot's own count, allocated as the
+/// `set --where` begins matching and leaked so it outlives the plan, reads
+/// 167,434 bytes at `ambiguous` and 181,034 at `realistic` in both runs, a
+/// difference of **13,600 bytes**, which fails. The mix pair beside it read
+/// the same mutant at a difference of 13,600 bytes and passed, as its
+/// allowance says it does.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
-/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates. No
-/// hosted reading stands beside the local ones yet: **re-derive it from the
-/// first hosted readings.**
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates, and
+/// its readings above stand beside the local ones; no negative control has
+/// been read there.
 pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 
 /// How many more bytes of heap the plan mix may hold above the attach over
@@ -517,6 +554,14 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// all run before the first apply: an apply's watcher echo is confirmed by a
 /// job beside a later preview or not by timing alone, and a mix that
 /// interleaved them read 164,110 to 232,512 bytes at one profile across runs.
+/// **Re-read after NORN-345's planning changes landed and with the mark set
+/// on a settled heap**, over six runs of the lane on 2026-10-04: 172,191
+/// bytes at both profiles in five runs, a difference of **0 bytes**, and
+/// 172,191 at `ambiguous` with 198,306 at `realistic` in the sixth, **26,115
+/// bytes**. On `ubuntu-latest` x86_64-glibc the `memory invariant` job
+/// 111331931343, before those changes, read 166,206 bytes at `ambiguous` and
+/// 166,210 at `realistic`, and job 111384985926, after them and before the
+/// settle, read 172,211 and 172,215, a difference of **4 bytes** in each.
 ///
 /// **The reading moves by about 31 KB between two states.** The watcher's
 /// threads take an apply's own publications in while the apply is still
@@ -525,7 +570,10 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// mix at 166,222 to 166,282 bytes in the lower state and 192,388 to 197,812
 /// in the upper, the same work on every thread each time, an excursion of at
 /// most **31,550 bytes** over the same child's lower reading. Either profile
-/// can land in either state, and nothing holds them together.
+/// can land in either state, and nothing holds them together. The six runs
+/// of the re-reading read twenty-six children at 172,147 to 172,207 bytes and
+/// four at 193,045 to 198,775, an excursion of at most 26,628 bytes over the
+/// same child's lower reading, inside the one the allowance is derived from.
 ///
 /// The allowance is **40 KiB**: the excursion with a quarter of headroom,
 /// 39,438 bytes, rounded up to the next 8 KiB. A retention held for each of
@@ -541,17 +589,20 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// state.
 ///
 /// **What it does not see is memory a plan builds and frees under the mix's
-/// high-water**, about 166 KB above the attach and set by the previews, which
+/// high-water**, about 172 KB above its mark and set by the previews, which
 /// the applies climb barely past: a working set proportional to the vault that
-/// never climbs past it, up to about 81 bytes for each of `realistic`'s 2,032
+/// never climbs past it, up to about 84 bytes for each of `realistic`'s 2,032
 /// documents, reads as nothing. Work proportional to the vault while planning
 /// is the counter lane's to refuse, where
 /// `a_where_apply_costs_the_same_at_both_scales` holds a `set --where`'s steps
 /// flat across the same two scales. The high-water's limit is watched under
 /// NORN-131, as the read pair's is. **A move's size-independence, holding no
-/// copy of the document it moves, is barred by NORN-345, not here.**
+/// copy of the document it moves, is barred by
+/// [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] and
+/// [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`], not here.**
 ///
-/// **Its negative controls**, each read locally on 2026-10-04:
+/// **Its negative controls**, each read locally on 2026-10-04, before
+/// NORN-345's planning changes landed:
 ///
 /// - The `where` matcher paging through every document of the vault and
 ///   keeping each path past the plan reads 184,441 bytes at `ambiguous` and
@@ -564,10 +615,323 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 ///   bytes**, which passes, as the arithmetic above says it does.
 ///
 /// **Platform scope: the Linux measurement lane.** The per-PR `memory
-/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates. No
-/// hosted reading stands beside the local ones yet: **re-derive it from the
-/// first hosted readings.**
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates, and
+/// its readings above stand beside the local ones; neither caught the
+/// excursion, and no negative control has been read there.
 pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
+
+/// How many more bytes of heap previewing the move of a 4 MiB document may
+/// raise above its mark than previewing the move of a 4 KiB one, where
+/// neither move changes a byte.
+///
+/// **The bar that a move holds no copy of the document it moves once the
+/// vault has indexed it.** The size child at `realistic` previews two moves
+/// right after its attach, before any apply of the child has run: one of a
+/// 4 KiB document and one of a 4 MiB document, both bodies plain lines naming
+/// no link, each path of one the length of the other's. Each preview runs
+/// under its own mark, set once the live heap has held still for 750 ms, and
+/// reads the most the preview raised the heap above it. A move that changes
+/// no bytes is two paths and a fixed record of each one's state, the same for
+/// either document, and planning reads the moved document streamed and takes
+/// its links from the store's index where the index derived them from those
+/// very bytes, so the 4,190,208 bytes between the two bodies are bytes the
+/// plan neither authored nor holds.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
+/// small move's preview read 71,503 to 72,189 bytes and the large one's
+/// 72,127 to 72,155, the small one in states about 690 bytes apart that
+/// neither size sets, differences of **-34 to 636 bytes**, and -34, 630, 630,
+/// 630, -34 and 630 in this bar's own six. On `ubuntu-latest` x86_64-glibc the `memory
+/// invariant` run 37201706982 read differences of -34 to 597 bytes over eight
+/// children, while the size subjects still shared the planning child and ran
+/// ahead of its mix as they run here. Neither reading moves with the body:
+/// both sizes' previews hold the same buffers, among them the one 64 KiB
+/// chunk `norn-fs`'s streamed hash reads at a time, and the plan's fixed
+/// records. Each reading moves by up to a few hundred bytes from run to run
+/// and with the length of the sandbox's path, so another checkout's readings
+/// land near these ranges rather than inside them.
+///
+/// The allowance is **64 KiB**, headroom equal to one chunk of the streamed
+/// hash: a preview that held one more such buffer for the large document
+/// than for the small one fits it, and one holding even one whole copy of the
+/// large document, 4 MiB more, fails it sixty-four times over.
+///
+/// **Its negative control**, read once locally on 2026-10-04 while the size
+/// subjects shared the planning child: the plan's one carried rule answering
+/// that no file is carried, so planning and the applier read the moved
+/// document whole as a move did before it carried anything, reads 91,884 bytes
+/// for the small move and 16,797,891 for the large, a difference of
+/// **16,706,007 bytes**, about four bytes held for each byte moved, which
+/// fails.
+///
+/// **What it does not bar.** A move over a vault whose index does not vouch
+/// for the moved document, which planning reads whole once at the hash it
+/// streamed, the declared limit the module docs of `norn_host::planner`
+/// state; a move that rewrites the moved document's own links, which
+/// [`PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] bars at
+/// its floor; and anything planning builds and frees under the preview's own
+/// high-water. The apply's cost is
+/// [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`]'s.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
+/// readings above are of the shared child, and no negative control has been
+/// read there.
+pub const PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 64 * 1024;
+
+/// How many more bytes of heap applying the move of a 4 MiB document may
+/// raise above the move of a 4 KiB one than the live host's derivation of the
+/// same 4 MiB document raises above its derivation of the 4 KiB one.
+///
+/// **The bar that a move's apply holds no more than the commit's derivation
+/// of the document it lands.** The size child at `realistic`, once its
+/// previews have run, applies the two moves
+/// [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] previewed, each under
+/// its own mark set on a settled heap and read as the apply answers. The
+/// apply stages each move as a streamed copy, so it holds no copy of the
+/// moved document while it writes; then its commit reads the landed document
+/// back and derives it through the one derivation every heal runs, which
+/// holds about four times the body at once
+/// ([`DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`]). **That cost is the
+/// derivation's, not the plan's**, so the bar is held against it rather than
+/// against zero: `apply_large - apply_small <= derive_large - derive_small +
+/// allowance`. Both sides are differences between the two sizes, so what each
+/// stretch holds whatever the document's size, a plan's records on one side
+/// and the watcher's event handling on the other, cancels, and what is
+/// compared is what each holds for the body alone.
+///
+/// **The control is a write from outside the vault, and the live host's own
+/// derivation of it.** Once the applies have landed and the heap has
+/// settled, the child writes a document of each size beside the vault, the
+/// same bytes the moves landed, makes its folder inside the vault, settles,
+/// marks, and renames it in whole; the watcher delivers it, the host derives
+/// it on the entry's worker through that same derivation, and the mark is
+/// read once the store holds the document at its length and the heap has
+/// settled again. That is the cleanest single derivation of one document the
+/// production host runs: the attach heal derives the planted documents too,
+/// but beside the whole vault under one peak, so no mark isolates one of
+/// them, and a create through the host would hold the bytes it authors. The
+/// case refuses a control whose difference is under one body, which is a
+/// control that did not derive the document it stands for.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
+/// applies read 85,553 to 85,651 bytes small and 16,797,889 to 16,798,107
+/// large, a difference of 16,712,246 to 16,712,464; the derivations read
+/// 122,062 to 122,182 small and 16,835,891 to 16,836,203 large, a difference
+/// of 16,713,717 to 16,714,037. **The apply stood 1,463 to 1,775 bytes under
+/// the derivation**, and -1,775, -1,463, -1,701, -1,767, -1,775 and -1,679
+/// in this bar's own six.
+/// On `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982
+/// read the apply 689 to 1,016 bytes over the derivation over eight
+/// children, while the size subjects still shared the planning child and
+/// their applies ran after its mix; locally that arrangement read 590 to
+/// 1,027 over across the PR's own runs and a replication of them, and the
+/// small apply reads about 2.5 KB more run straight after the previews. Each reading moves by up to a few hundred bytes from run to
+/// run and with the length of the sandbox's path, so another checkout's
+/// readings land near these ranges rather than inside them.
+///
+/// The allowance is **64 KiB**, the one chunk `norn-fs`'s streamed hash reads
+/// at a time: the watcher's confirmation of the apply's own publication
+/// streams the landed file through one such chunk on its own thread, and may
+/// stand at it while the commit derives. Any whole copy of the 4 MiB document
+/// the apply held past the derivation's own fails it sixty-four times over.
+///
+/// **Its negative controls**, each read once locally on 2026-10-04 while the
+/// size subjects shared the planning child:
+///
+/// - The plan's one carried rule answering that no file is carried, so
+///   planning and staging read the moved document whole, reads the applies at
+///   83,566 and 16,797,889 bytes against derivations of 122,174 and
+///   16,835,891, **606 bytes** over the derivation, which passes. **The
+///   derivation dominates**: staging's whole read is freed before the commit
+///   reads the document back, so the apply's high-water is the commit's either
+///   way, and a preview that reads it whole is
+///   [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`]'s to refuse.
+/// - A copy of each landed document the commit reads, kept until its
+///   changeset flushes, reads the applies at 87,251 and 20,992,193 bytes
+///   against derivations of 122,174 and 16,836,195, **4,190,921 bytes** over
+///   the derivation, which fails.
+///
+/// **What it does not bar.** The derivation's own cost: a derivation that
+/// held more for each byte raises the control and the apply alike, which
+/// [`DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] bars instead. **Anything
+/// the apply builds and frees under the commit's own high-water**, which is
+/// about four bodies: the first negative control above, an apply that reads
+/// the moved document whole while staging, passes it. What holds the applier
+/// to no copy of a carried document is its seam tests in
+/// `norn-host`'s `applier/tests/carried.rs`: their counting view asserts a
+/// fresh apply reads such a document whole zero times (a re-send that finds
+/// the change already landed reads the landed document whole once)
+/// (`a_chain_of_moves_carries_each_document_where_it_lands`,
+/// `a_carried_name_refilled_by_a_composed_document_is_read_streamed`,
+/// `a_carried_name_a_respell_refills_is_read_streamed`), and
+/// `the_applier_observes_a_carried_move_without_holding_its_document` that it
+/// observes one streamed, holding no bytes. The write kernel's streamed copy
+/// (`norn_fs::Content::CopyOf`) holds one chunk by the construction of its one
+/// streaming loop; `norn-fs`'s copy tests hold the bytes it writes across
+/// chunk boundaries and the files it reads, and no test bounds its buffer. The
+/// apply's reading is taken as it answers, so the watcher's echo of the landed
+/// document, which reads about its body on the host's own threads after the
+/// apply answers, is not charged to it, and the next mark is set only once it
+/// has been handled; an echo that came to overlap the commit would raise the
+/// apply by about a body and fail the bar.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
+/// readings above are of the shared child, and no negative control has been
+/// read there.
+pub const PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES: u64 = 64 * 1024;
+
+/// How many more bytes of heap the live host's derivation of a 4 MiB document
+/// written into the vault from outside it may raise above its mark than its
+/// derivation of a 4 KiB one.
+///
+/// **A regression bar at a declared floor, not a target.** These are the
+/// derivation controls [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`]
+/// holds a move's apply against, which that bar cancels by design: a
+/// derivation that held one more copy of each body raises the control and the
+/// apply alike, and passes it. This bar holds the controls themselves to what
+/// the derivation holds today, so a change that adds a copy of the body to
+/// the one derivation every heal and every commit runs fails here; it does
+/// not say that floor is what a derivation should hold. The size child at
+/// `realistic`, once its moves have landed, writes a 4 KiB and a 4 MiB
+/// document of plain lines naming no link beside the vault, renames each in
+/// under its own mark set on a settled heap, and reads the mark once the store
+/// holds the document at its length and the heap has settled again.
+///
+/// **The floor is about four bodies, two allocations live together** while
+/// the derivation scans the body (`norn_host::derivation::map_document`),
+/// traced locally on 2026-10-04 by logging each allocation of a mebibyte or
+/// more:
+///
+/// - the file's bytes, read whole and hashed
+///   (`norn_fs::read::read_optional_and_hash` through `scoped_increment`),
+///   one body;
+/// - the first-pass tree pulldown-cmark builds over the body (`BodyScan::new`,
+///   through `Document::scan_body`), which reserves a 48-byte node for every
+///   32 bytes of body and doubles once on body text of short lines, about
+///   three bodies.
+///
+/// The tree is dropped inside the scan, before the facts take their own copy
+/// of the body, so that copy stands beside the bytes alone, two bodies, under
+/// the floor. Both figures are this fixture's: the tree grows with how densely
+/// a document packs Markdown nodes, so a document of shorter lines or of lists
+/// holds more than four bodies.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
+/// small derivation read 122,062 to 122,182 bytes and the large 16,835,891 to
+/// 16,836,203, differences of **16,713,717 to 16,714,037 bytes**, about 3.98
+/// bodies, and 16,714,021 in four of this bar's own six, 16,713,717 and
+/// 16,713,925 in the other two. On
+/// `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982 read
+/// differences of 16,713,717 to 16,714,021 bytes over eight children, while
+/// the size subjects still shared the planning child. Each reading moves by
+/// up to a few hundred bytes from run to run and with the length of the
+/// sandbox's path, so another checkout's readings land near these ranges
+/// rather than inside them.
+///
+/// The allowance is **four bodies and 64 KiB**, 16,842,752 bytes: the two
+/// allocations' four bodies of the 4 MiB document, and the one chunk
+/// `norn-fs`'s streamed hash reads at a time as headroom, 128,715 bytes over
+/// the highest reading. A derivation that held one more copy of the body
+/// beside the tree, 4 MiB, fails it.
+///
+/// **Its negative control**, read once locally on 2026-10-04: `map_document`
+/// keeping a copy of the bytes it derives from until it returns, reads
+/// 126,270 bytes for the small derivation and 21,030,403 for the large, a
+/// difference of **20,904,133 bytes**, about five bodies, which fails by
+/// 4,061,381. The apply bar read the same mutant at 1,767 bytes under the
+/// derivation and passed, as it is built to.
+///
+/// **What it does not bar.** Anything the derivation builds and frees under
+/// the tree's high-water, such as the facts' copy of the body, since the
+/// reading is a high-water; and a derivation inside the attach heal, which
+/// derives beside the whole vault under one peak.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
+/// readings above are of the shared child, and no negative control has been
+/// read there.
+pub const DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 4 * 1024 * 1024 + 64 * 1024;
+
+/// How many more bytes of heap previewing the move of a 4 MiB document that
+/// rewrites its own links may raise above its mark than previewing the same
+/// move of a 4 KiB one.
+///
+/// **A regression bar at a declared floor, not a target.** It holds a move
+/// that rewrites the moved document's own links to the heap that move holds
+/// today, so a change that adds a copy of the body fails it; it does not say
+/// that floor is what such a move should hold. The size child at
+/// `realistic` previews, before any apply and each under its own mark set on a
+/// settled heap, the moves of a 4 KiB and a 4 MiB document whose bodies open
+/// with a relative link to a document beside them, which the move into
+/// another folder breaks, so each plan rewrites its own document's link. Each
+/// path of the large document is the length of the small one's.
+///
+/// **The floor is about five bodies, three allocations live together** while
+/// the rewrite verifies that the rewritten bytes read as the document did with
+/// only its links respelled (`Document::reads_as_rewritten`):
+///
+/// - the before-body planning read whole and holds (`TreeView::entry`), one
+///   body;
+/// - the rewritten bytes, which `splice_all` allocates once at their exact
+///   length, one body;
+/// - the first-pass tree pulldown-cmark builds over the rewritten bytes
+///   (`BodyScan::new`, through `rewrite::Reading::of`), which reserves a
+///   48-byte node for every 32 bytes of body and doubles once on body text of
+///   short lines, about three bodies.
+///
+/// Both figures are this fixture's: the tree grows with how densely a
+/// document packs Markdown nodes, so a document of shorter lines or of lists
+/// holds more than five bodies.
+///
+/// **Why the floor stands.** The verification needs a full re-scan of the
+/// rewritten bytes: a backtick, an HTML block, a reference definition or the
+/// frontmatter can change how content far from the edit reads, so no window
+/// around the edit is proof. pulldown-cmark materialises its first-pass tree
+/// for the whole input before it yields an event, so that scan holds the tree
+/// at once, beside the bytes it scans and the body they replace.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
+/// small preview read 106,981 to 106,989 bytes and the large 21,007,273 to
+/// 21,007,289, differences of **20,900,292 to 20,900,300 bytes**, about 4.98
+/// bodies, and 20,900,292 in four of this bar's own six and 20,900,300 in
+/// two.
+/// On `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982
+/// read differences of 20,900,292 to 20,900,300 bytes over eight children,
+/// while the size subjects still shared the planning child and ran ahead of
+/// its mix as they run here. Each reading moves by a few bytes from run to
+/// run and with the length of the sandbox's path, so another checkout's
+/// readings land near these ranges rather than inside them.
+///
+/// The allowance is **five bodies and 64 KiB**, 21,037,056 bytes: the three
+/// allocations' five bodies of the 4 MiB document, and the one chunk
+/// `norn-fs`'s streamed hash reads at a time as headroom, 136,756 bytes over
+/// the highest reading. A preview that held one more copy of the body, 4 MiB,
+/// fails it.
+///
+/// **Its negative control**, read once locally on 2026-10-04 while the size
+/// subjects shared the planning child: `splice_all` allocating the rewritten bytes at the source's length, as it did before it
+/// allocated their exact length, so a rewrite a few bytes longer doubles that
+/// allocation to about two bodies, reads 111,057 bytes for the small preview
+/// and 25,201,557 for the large, a difference of **25,090,500 bytes**, about
+/// six bodies, which fails by 4,053,444.
+///
+/// **What it does not bar.** Anything the rewrite builds and frees under the
+/// three allocations' high-water, such as the scans for the links to rewrite
+/// before the splice, since the reading is a high-water; and the apply of
+/// such a move.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; its
+/// readings above are of the shared child, and no negative control has been
+/// read there.
+pub const PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 =
+    5 * 4 * 1024 * 1024 + 64 * 1024;
 
 /// How many descriptors a long mixed load may add to the count taken once the
 /// attachment is ready.

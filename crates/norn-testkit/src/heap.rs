@@ -82,6 +82,15 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+/// The bytes this process holds allocated now and has not freed.
+///
+/// What a measurement polls to see the heap stop moving before it sets a
+/// [`Mark`], so work still in flight on another thread is not counted against
+/// what follows. Reading it allocates nothing.
+pub fn live() -> usize {
+    LIVE.load(Ordering::SeqCst)
+}
+
 /// The live heap at one instant, from which the high-water mark is read.
 pub struct Mark {
     baseline: usize,

@@ -186,8 +186,9 @@ fn explicit_requirements(
 /// settled here, so the streamed read follows the part of the carried rule
 /// that needs none: a name only moves name that the plan still does not
 /// carry — a moved document holding a link a cascade rewrites — is read
-/// whole again by composition, two opens of the file and one copy of it
-/// (see the planner's `Remembered` view).
+/// whole again by composition, two opens of the file and one held copy of
+/// it, beside the bytes composition authors from it (see the planner's
+/// `Remembered` view).
 fn vacating_requirements<V: VaultView>(
     operations: &[Operation],
     view: &V,

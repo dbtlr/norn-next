@@ -48,20 +48,55 @@
 //! retention a shape builds after the find's pages are gone shows only once it
 //! climbs past them.
 //!
-//! **A plan is held three ways, over one planning child.** The child previews
-//! a `set --where`, a hub move with its cascade and a delete, and then applies
-//! each as previewed. A ceiling holds its whole-process peak at `realistic`,
-//! and two heap pairs hold, across the two profiles, what the previews alone
-//! raised the heap by and what the whole mix with its applies did, because a
-//! plan's memory is its operations and a fixed record per target, never the
-//! vault. The previews' pair is held at the read pair's resolution, so an
-//! eight-byte id kept for every document while planning fails it; the mix's
-//! is coarser, because an apply through a live host moves its reading by
-//! about 31 KB. Both readings are high-waters, so neither sees what planning
-//! builds and frees under its own peak: work proportional to the vault while
-//! planning is the counter lane's to refuse. A move's size-independence — a
-//! move that changes no bytes holding no copy of the document it moves, and
-//! one rewriting its own links at most one — is barred by NORN-345, not here.
+//! **A plan is held three ways, over one planning child.** The child
+//! previews a `set --where`, a hub move with its cascade and a delete, and
+//! applies each as previewed. A ceiling holds its whole-process peak at
+//! `realistic`, and two heap pairs hold, across the two profiles, what the
+//! previews alone raised the heap by and what the whole mix with its applies
+//! did, because a plan's memory is its operations and a fixed record per
+//! target, never the vault. The previews' pair is held at the read pair's
+//! resolution, so an eight-byte id kept for every document while planning
+//! fails it; the mix's is coarser, because an apply through a live host moves
+//! its reading by about 31 KB. Both readings are high-waters, so neither sees
+//! what planning builds and frees under its own peak: work proportional to the
+//! vault while planning is the counter lane's to refuse.
+//!
+//! **What a plan holds for a document's size is held four ways, over a
+//! second child of its own.** The size child previews a move of a 4 KiB
+//! document and of a 4 MiB one that change no bytes and the same pair of
+//! moves that rewrite their own links, applies all four, and then has the
+//! live host derive a document of each size written into the vault from
+//! outside it. Every reading is a size pair, the large document's stretch
+//! against the small one's in the same child, each under its own mark, so
+//! nothing it measures needs the planning child's. It is a child of its own
+//! because the 4 MiB documents' freed allocations stay resident at the
+//! allocator's discretion: they would set the planning child's peak, and that
+//! ceiling would then be sized on the allocator rather than on the plans. The
+//! size child carries no ceiling of its own for the same reason, which
+//! [`PLAN_PEAK_RSS_CEILING_BYTES`](baselines::PLAN_PEAK_RSS_CEILING_BYTES)
+//! records with the readings that show it.
+//!
+//! - The large byte-identical move's preview may raise the heap above its
+//!   mark by no more than the small one's and one chunk of the streamed hash,
+//!   so a preview holds no copy of a document the index vouches for.
+//! - The large move's apply may exceed the small one's by no more than
+//!   deriving the same large document alone exceeds deriving the small one,
+//!   and the same chunk: the commit re-reads and derives the document it
+//!   landed through the one derivation every heal runs, and that cost is the
+//!   derivation's, not the plan's.
+//! - That derivation pair is itself barred at its measured floor of about
+//!   four bodies, so the apply bar's yardstick cannot grow unseen.
+//! - A move that rewrites its own links authors the rewritten document and
+//!   verifies it by re-scanning it whole beside the body it replaces, so its
+//!   large preview may exceed the small one by five bodies and one chunk, the
+//!   three allocations that verification holds at once.
+//!
+//! The last two are regression bars on today's floor, not targets. Every size
+//! mark is set on a settled heap, and every preview runs before the first
+//! apply, because the watcher echo of a large landed document costs about its
+//! body on the host's own threads and would otherwise land in whichever
+//! stretch it overlapped. What no size bar bars is a move the index does not
+//! vouch for, which reads the document whole once.
 //!
 //! # What the measurement charges to whom
 //!
@@ -97,7 +132,7 @@ mod attach;
 mod baselines;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use attach::read::{FIND_LIMIT, bounded_find};
 use norn_host::Answered;
@@ -622,6 +657,11 @@ fn the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_th
 /// constant.
 const PLAN_HARNESS_CASE: &str = "the_gate_profile_plans_inside_its_memory_bar";
 
+/// The case a size child re-executes, which is the one that reads this
+/// constant.
+const SIZE_HARNESS_CASE: &str =
+    "previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_one";
+
 /// The frontmatter field the plan mix's `set --where` matches and rewrites.
 /// No generated document carries it, so the documents it matches are the
 /// planted ones alone, at both profiles.
@@ -645,6 +685,42 @@ const PLAN_HUB_IN_LINKS: usize = 20;
 /// The document the plan mix deletes, which no link names.
 const PLAN_DELETED: &str = "memory-plan-delete/memory-plan-lonely.md";
 
+/// How many bytes the large and the small document of the size pair carry. A
+/// move that changes no bytes renames, so what its plan holds for either is
+/// its paths and a fixed record of each one's state, and the 4,190,208 bytes
+/// between them are bytes the plan did not author.
+const PLAN_LARGE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const PLAN_SMALL_BODY_BYTES: usize = 4 * 1024;
+
+/// Where the large and the small moved document stand before their moves and
+/// where each is moved to. Their bodies name no link, so neither move changes
+/// a byte, and each of the large document's paths is the length of the small
+/// one's.
+const PLAN_LARGE_FROM: &str = "memory-plan-large/memory-plan-large.md";
+const PLAN_LARGE_TO: &str = "memory-plan-large-moved/memory-plan-large.md";
+const PLAN_SMALL_FROM: &str = "memory-plan-small/memory-plan-small.md";
+const PLAN_SMALL_TO: &str = "memory-plan-small-moved/memory-plan-small.md";
+
+/// Where the large and the small relinking document stand before their moves
+/// and where each is moved to. Each body opens with a relative link to
+/// [`PLAN_RELINKED_TARGET`] standing beside it, which a move into another
+/// folder breaks, so each move rewrites its own document. Each of the large
+/// document's paths is the length of the small one's.
+const PLAN_RELINK_LARGE_FROM: &str = "memory-plan-relink-large/memory-plan-relink.md";
+const PLAN_RELINK_LARGE_TO: &str = "memory-plan-relink-large-moved/memory-plan-relink.md";
+const PLAN_RELINK_SMALL_FROM: &str = "memory-plan-relink-small/memory-plan-relink.md";
+const PLAN_RELINK_SMALL_TO: &str = "memory-plan-relink-small-moved/memory-plan-relink.md";
+
+/// The file name of the document each relinking document links to, which
+/// stands in the relinking document's own folder.
+const PLAN_RELINKED_TARGET: &str = "memory-plan-relink-target.md";
+
+/// Where the derivation controls write the large and the small document, the
+/// same bytes as the moved pair's, from outside the vault while it is
+/// attached. The two paths are one length.
+const PLAN_DERIVED_LARGE: &str = "memory-plan-derived-large/memory-plan-derived.md";
+const PLAN_DERIVED_SMALL: &str = "memory-plan-derived-small/memory-plan-derived.md";
+
 /// What each planned write of the planning child writes, as the apply
 /// answers its targets: the set's matches, the hub with its in-links' rewrites
 /// and its new place, and the deleted document.
@@ -654,17 +730,84 @@ const PLAN_WRITES: [(&str, usize); 3] = [
     ("delete", 1),
 ];
 
+/// The heap stretches the planning child measures.
+const PLAN_STRETCHES: [&str; 2] = ["previews", "mix"];
+
+/// How many documents [`plant_plan_subjects`] plants.
+const PLAN_PLANTED: usize = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1;
+
+/// What each planned write of the size child writes, as the apply answers its
+/// targets: each moved or relinked document's two places.
+const SIZE_WRITES: [(&str, usize); 4] = [
+    ("move-small", 2),
+    ("move-large", 2),
+    ("relink-small", 2),
+    ("relink-large", 2),
+];
+
+/// The heap stretches the size child measures.
+const SIZE_STRETCHES: [&str; 8] = [
+    "move-preview-small",
+    "move-preview-large",
+    "relink-preview-small",
+    "relink-preview-large",
+    "move-apply-small",
+    "move-apply-large",
+    "derive-small",
+    "derive-large",
+];
+
+/// How many documents [`plant_size_subjects`] plants.
+const SIZE_PLANTED: usize = 2 + 4;
+
+/// One kind of planning child: the case it re-executes, the subjects planted
+/// before it attaches, the writes it lands, the heap stretches it measures,
+/// and how many documents the vault derives once it is done beyond the
+/// profile's own.
+struct PlanChild {
+    case: &'static str,
+    plant: fn(&attach::Vault),
+    writes: &'static [(&'static str, usize)],
+    stretches: &'static [&'static str],
+    added: usize,
+}
+
+/// The planning child: the mix's three writes, and the plan ceiling's
+/// subject. Every planted subject stands once the plans land, save the one
+/// the mix deletes.
+const PLANNING: PlanChild = PlanChild {
+    case: PLAN_HARNESS_CASE,
+    plant: plant_plan_subjects,
+    writes: &PLAN_WRITES,
+    stretches: &PLAN_STRETCHES,
+    added: PLAN_PLANTED - 1,
+};
+
+/// The size child: the byte-identical and relinking move pairs and the
+/// derivation controls. Every planted subject stands once the moves land,
+/// beside the two documents the derivation controls write.
+const SIZING: PlanChild = PlanChild {
+    case: SIZE_HARNESS_CASE,
+    plant: plant_size_subjects,
+    writes: &SIZE_WRITES,
+    stretches: &SIZE_STRETCHES,
+    added: SIZE_PLANTED + 2,
+};
+
+/// Write `content` at `at` in `vault`'s tree, making its folder.
+fn plant(vault: &attach::Vault, at: &str, content: &[u8]) {
+    let path = vault.path().join(at);
+    std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
+        .expect("creating a planted document's folder");
+    std::fs::write(&path, content).expect("writing a planted document");
+}
+
 /// Plant the planning child's subjects into `vault`'s tree, before anything
 /// attaches it: [`PLAN_SET_MATCHES`] documents carrying [`PLAN_SET_FIELD`],
 /// the hub with [`PLAN_HUB_IN_LINKS`] documents linking it by its bare stem,
 /// and the document the mix deletes.
 fn plant_plan_subjects(vault: &attach::Vault) {
-    let plant = |at: &str, content: &[u8]| {
-        let path = vault.path().join(at);
-        std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
-            .expect("creating a planted document's folder");
-        std::fs::write(&path, content).expect("writing a planted document");
-    };
+    let plant = |at: &str, content: &[u8]| plant(vault, at, content);
     for at in 0..PLAN_SET_MATCHES {
         plant(
             &format!("memory-plan-set/{at:04}.md"),
@@ -679,6 +822,56 @@ fn plant_plan_subjects(vault: &attach::Vault) {
         );
     }
     plant(PLAN_DELETED, b"no link names me\n");
+}
+
+/// Plant the size child's subjects into `vault`'s tree, before anything
+/// attaches it: the large and the small document the byte-identical pair
+/// moves, their bodies written without a link, and the large and the small
+/// document the relinking pair moves, each beside the one it links to.
+fn plant_size_subjects(vault: &attach::Vault) {
+    let plant = |at: &str, content: &[u8]| plant(vault, at, content);
+    plant(PLAN_LARGE_FROM, &unlinked_body(PLAN_LARGE_BODY_BYTES));
+    plant(PLAN_SMALL_FROM, &unlinked_body(PLAN_SMALL_BODY_BYTES));
+    for (from, bytes) in [
+        (PLAN_RELINK_LARGE_FROM, PLAN_LARGE_BODY_BYTES),
+        (PLAN_RELINK_SMALL_FROM, PLAN_SMALL_BODY_BYTES),
+    ] {
+        plant(from, &relinking_body(bytes));
+        let (folder, _) = from
+            .rsplit_once('/')
+            .expect("a relinking document's folder");
+        plant(&format!("{folder}/{PLAN_RELINKED_TARGET}"), b"linked\n");
+    }
+}
+
+/// A document of exactly `bytes` bytes whose body opens with a relative
+/// Markdown link to [`PLAN_RELINKED_TARGET`] and goes on in plain lines that
+/// hold no other link.
+fn relinking_body(bytes: usize) -> Vec<u8> {
+    let mut content = format!(
+        "---\nmemory_plan_size: relinked\n---\nSee [the target]({PLAN_RELINKED_TARGET}).\n"
+    )
+    .into_bytes();
+    let line = b"a plain line of body text that names no other document\n";
+    while content.len() < bytes {
+        content.extend_from_slice(line);
+    }
+    content.truncate(bytes - 1);
+    content.push(b'\n');
+    content
+}
+
+/// A document of exactly `bytes` bytes: a frontmatter block and a body of
+/// plain lines that hold no link.
+fn unlinked_body(bytes: usize) -> Vec<u8> {
+    let mut content = b"---\nmemory_plan_size: moved\n---\n".to_vec();
+    let line = b"a plain line of body text that names no other document\n";
+    while content.len() < bytes {
+        content.extend_from_slice(line);
+    }
+    content.truncate(bytes - 1);
+    content.push(b'\n');
+    content
 }
 
 /// **The plan ceiling**, and the harness a planning child runs.
@@ -697,7 +890,7 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
         return;
     }
 
-    let peak = plan_child("plan-gate", "realistic").peak_rss;
+    let peak = plan_child("plan-gate", "realistic", &PLANNING).peak_rss;
     baselines::record(
         "gate profile plans",
         &[
@@ -725,7 +918,8 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
 /// before anything is applied.
 ///
 /// A planning child at each profile marks the heap once the attachment is
-/// ready, previews a `set --where` matching [`PLAN_SET_MATCHES`] documents, a
+/// ready and the heap has settled, previews a `set --where` matching
+/// [`PLAN_SET_MATCHES`] documents, a
 /// move of a hub whose [`PLAN_HUB_IN_LINKS`] in-links its cascade rewrites,
 /// and a delete, holding the three resolved plans, and reads the most those
 /// previews raised the live heap above the mark before its first apply. Every
@@ -744,8 +938,8 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
 /// **The reading is a high-water**, the blind spot
 /// [`the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]
 /// declares: memory planning builds and frees under the previews' own peak,
-/// about 164 KB above the attach, never raises the reading. Work proportional to the vault while planning is
-/// the counter lane's to refuse, where
+/// about 171 KB above its mark, never raises the reading. Work proportional to
+/// the vault while planning is the counter lane's to refuse, where
 /// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
 /// `set --where`'s steps flat across the same two scales. The high-water's
 /// limit is watched under NORN-131, as the read pair's is.
@@ -753,8 +947,8 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_plan_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile()
  {
-    let small = plan_child("plan-previews-ambiguous", "ambiguous").previews;
-    let large = plan_child("plan-previews-realistic", "realistic").previews;
+    let small = plan_child("plan-previews-ambiguous", "ambiguous", &PLANNING).heap("previews");
+    let large = plan_child("plan-previews-realistic", "realistic", &PLANNING).heap("previews");
     hold_plan_pair(
         "the plan previews",
         small,
@@ -782,22 +976,211 @@ fn the_plan_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_
 ///
 /// **The reading is a high-water, and the mix's peak is high.** Memory
 /// planning or applying builds and frees under it never raises the reading,
-/// which at these profiles leaves a working set of about 166 KB unseen, up to
-/// about 81 bytes for each of `realistic`'s documents. Work proportional to the vault is the counter
-/// lane's to refuse, where
+/// which at these profiles leaves a working set of about 172 KB unseen, up to
+/// about 84 bytes for each of `realistic`'s documents. Work proportional to
+/// the vault is the counter lane's to refuse, where
 /// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
 /// `set --where`'s steps flat across the same two scales. The high-water's
 /// limit is watched under NORN-131, as the read pair's is.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_plan_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
-    let small = plan_child("plan-heap-ambiguous", "ambiguous").mix;
-    let large = plan_child("plan-heap-realistic", "realistic").mix;
+    let small = plan_child("plan-heap-ambiguous", "ambiguous", &PLANNING).heap("mix");
+    let large = plan_child("plan-heap-realistic", "realistic", &PLANNING).heap("mix");
     hold_plan_pair(
         "the plan mix",
         small,
         large,
         baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **Previewing a move that changes no bytes holds no copy of the document it
+/// moves once the index vouches for it**, as a difference in heap bytes
+/// between previewing the move of a large document and of a small one, and
+/// the harness a size child runs.
+///
+/// With [`HARNESS_ENV`] and its token set this process is the child: it
+/// attaches the tree the variable names with the size subjects planted beside
+/// it and runs every stretch of [`SIZE_STRETCHES`] instead of measuring
+/// anything ([`size_and_report`]).
+///
+/// The size child at `realistic` previews both moves right after its attach,
+/// before any apply has run, each under its own mark set once the heap has
+/// settled: one of a document of [`PLAN_SMALL_BODY_BYTES`] and one of a
+/// document of [`PLAN_LARGE_BODY_BYTES`], both bodies plain lines naming no
+/// link, each path of one the length of the other's. The plan is two paths
+/// and a fixed record of each one's state, so a preview that held the moved
+/// bytes, or any working copy of them, reads about 4 MiB more for the large
+/// document for each copy it held at once, as
+/// [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_one() {
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        size_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        return;
+    }
+
+    let reading = plan_child("size-move-preview", "realistic", &SIZING);
+    hold_size_pair(
+        "previewing a move that changes no bytes",
+        reading.heap("move-preview-small"),
+        reading.heap("move-preview-large"),
+        baselines::PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **Applying a move that changes no bytes holds no more than the commit's
+/// derivation of the document it lands**, as a difference in heap bytes
+/// between applying the move of a large document and of a small one, held to
+/// the same difference read off deriving those documents alone.
+///
+/// The size child at `realistic`, once its previews have run, applies the two
+/// moves [`previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_one`]
+/// previewed, each under its own mark set once the heap has settled. The
+/// commit re-reads each landed document and derives it through the one
+/// derivation every heal runs, and that derivation's cost is not the plan's,
+/// so the child then measures it alone: it renames a document of each size
+/// into the vault from outside it, the same bytes the moves landed, and reads
+/// what the live host's own derivation of it raised the heap by, each under
+/// its own mark set once the heap has settled.
+/// [`PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES`](baselines::PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES)
+/// records why the control is that write, how far the apply may stand above
+/// it, and what that leaves unseen.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn applying_a_move_holds_no_more_heap_than_deriving_the_document_it_lands() {
+    let reading = plan_child("size-move-apply", "realistic", &SIZING);
+    let (apply_small, apply_large) = (
+        reading.heap("move-apply-small"),
+        reading.heap("move-apply-large"),
+    );
+    let (derive_small, derive_large) = (reading.heap("derive-small"), reading.heap("derive-large"));
+    let applied = i128::from(apply_large) - i128::from(apply_small);
+    let derived = i128::from(derive_large) - i128::from(derive_small);
+    let allowance = baselines::PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES;
+
+    baselines::record(
+        "heap a move's apply holds above its mark, a large document against a small one, \
+         beside the derivation of the same documents alone",
+        &[
+            ("apply, 4 KiB document (bytes)", apply_small.to_string()),
+            ("apply, 4 MiB document (bytes)", apply_large.to_string()),
+            ("apply, large minus small (bytes)", applied.to_string()),
+            (
+                "derivation, 4 KiB document (bytes)",
+                derive_small.to_string(),
+            ),
+            (
+                "derivation, 4 MiB document (bytes)",
+                derive_large.to_string(),
+            ),
+            ("derivation, large minus small (bytes)", derived.to_string()),
+            (
+                "apply over derivation (bytes)",
+                (applied - derived).to_string(),
+            ),
+            ("allowance (bytes)", allowance.to_string()),
+        ],
+    );
+
+    assert!(
+        apply_small > 0 && apply_large > 0 && derive_small > 0 && derive_large > 0,
+        "a stretch reported no heap reading above its mark, so the bar compares nothing"
+    );
+    assert!(
+        derived >= i128::try_from(PLAN_LARGE_BODY_BYTES).expect("a size fits an i128"),
+        "deriving a document of {PLAN_LARGE_BODY_BYTES} bytes held {derived} bytes more heap than \
+         deriving one of {PLAN_SMALL_BODY_BYTES}, less than its body, so the control did not \
+         measure the derivation it stands for"
+    );
+    assert!(
+        applied <= derived + i128::from(allowance),
+        "applying the move of a document of {PLAN_LARGE_BODY_BYTES} bytes held {applied} bytes \
+         more heap than applying the move of one of {PLAN_SMALL_BODY_BYTES}, past the {derived} \
+         bytes deriving the same documents alone grew by and the {allowance} byte allowance: the \
+         applies held {apply_large} and {apply_small} bytes and the derivations {derive_large} \
+         and {derive_small}",
+    );
+}
+
+/// **Deriving a document holds no more than its declared floor of about four
+/// bodies**, as a difference in heap bytes between the live host deriving a
+/// large document written into the vault from outside it and deriving a
+/// small one.
+///
+/// These are the derivation controls
+/// [`applying_a_move_holds_no_more_heap_than_deriving_the_document_it_lands`]
+/// measures its apply against, which that bar cancels by design: a derivation
+/// that held one more copy of each body raises the control and the apply
+/// alike. This bar holds the controls themselves, so the apply bar's
+/// yardstick cannot grow unseen.
+/// [`DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records what that floor is.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn deriving_a_document_holds_no_more_than_its_declared_floor() {
+    let reading = plan_child("size-derivation", "realistic", &SIZING);
+    hold_size_pair(
+        "deriving a document written from outside the vault",
+        reading.heap("derive-small"),
+        reading.heap("derive-large"),
+        baselines::DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **Previewing a move that rewrites the moved document's own links holds no
+/// more than its declared floor of about five bodies**, as a difference in
+/// heap bytes between previewing the move of a large relinking document and of
+/// a small one.
+///
+/// The size child at `realistic` previews both moves right after the
+/// byte-identical pair's, before any apply, each under its own mark set on a
+/// settled heap: one of a document of [`PLAN_SMALL_BODY_BYTES`] and one of
+/// [`PLAN_LARGE_BODY_BYTES`], each opening with a relative link that the move
+/// into another folder breaks. The plan authors the rewritten document and
+/// verifies it with a full re-scan beside the body it replaces:
+/// [`PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records the three allocations that floor is, and why it stands.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn previewing_a_move_that_rewrites_its_own_links_holds_no_more_than_its_declared_floor() {
+    let reading = plan_child("size-relink-preview", "realistic", &SIZING);
+    hold_size_pair(
+        "previewing a move that rewrites its own links",
+        reading.heap("relink-preview-small"),
+        reading.heap("relink-preview-large"),
+        baselines::PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// Record a size pair's heap readings and hold the large document's to at
+/// most `allowance` bytes over the small one's.
+fn hold_size_pair(stretch: &str, small: u64, large: u64, allowance: u64) {
+    let growth = large.saturating_sub(small);
+    baselines::record(
+        &format!("heap {stretch} raised above its mark, a large document against a small one"),
+        &[
+            ("small, 4 KiB document (bytes)", small.to_string()),
+            ("large, 4 MiB document (bytes)", large.to_string()),
+            (
+                "large minus small (bytes)",
+                (i128::from(large) - i128::from(small)).to_string(),
+            ),
+            ("allowance (bytes)", allowance.to_string()),
+        ],
+    );
+    assert!(
+        small > 0 && large > 0,
+        "{stretch} reported no heap reading above its mark, so the pair compares nothing"
+    );
+    assert!(
+        baselines::fits(growth, allowance),
+        "{stretch} held {growth} bytes more heap for a document of {PLAN_LARGE_BODY_BYTES} bytes \
+         than for one of {PLAN_SMALL_BODY_BYTES}, past the {allowance} byte allowance: the large \
+         held {large} bytes and the small {small}",
     );
 }
 
@@ -830,56 +1213,58 @@ fn hold_plan_pair(stretch: &str, small: u64, large: u64, allowance: u64) {
     );
 }
 
-/// What a planning child's run comes to: the peak resident set the kernel
-/// accounted to it, and the most each measured stretch raised the heap above
-/// the mark set before it.
+/// What a planning or size child's run comes to: the peak resident set the
+/// kernel accounted to it, and the most each measured stretch raised the heap
+/// above the mark set before it.
 struct PlanReading {
     peak_rss: u64,
-    previews: u64,
-    mix: u64,
+    report: PlanReport,
 }
 
-/// Generate `profile`'s tree with the plan subjects planted beside it, run the
-/// planning child over it, and hand back what the child's run came to.
+impl PlanReading {
+    /// The most `stretch` raised the heap above the mark set before it.
+    fn heap(&self, stretch: &str) -> u64 {
+        u64::try_from(self.report.heap(stretch)).expect("a heap reading fits a u64")
+    }
+}
+
+/// Generate `profile`'s tree with `child`'s subjects planted beside it, run
+/// that child over it, and hand back what the child's run came to.
 ///
 /// **A reading is only a statement about plans that landed.** The child
 /// reports how many targets each write's apply wrote, and the parent holds
-/// that to [`PLAN_WRITES`]: a write that resolved nothing, or a report
-/// missing one, fails here rather than reading as a cheap plan.
-fn plan_child(label: &str, profile: &str) -> PlanReading {
+/// that to the child's pinned writes: a write that resolved nothing, or a
+/// report missing one, fails here rather than reading as a cheap plan.
+fn plan_child(label: &str, profile: &str, child: &PlanChild) -> PlanReading {
     let documents = norn_fixtures::Profile::by_name(profile)
         .unwrap_or_else(|| panic!("no profile named `{profile}`"))
         .docs;
-    let (peak_rss, reported) = child_run(label, profile, PLAN_HARNESS_CASE, plant_plan_subjects);
-    let report = PlanReport::from_stdout(&reported).unwrap_or_else(|problem| panic!("{problem}"));
-    if let Err(problem) = report.writes_as_pinned() {
+    let (peak_rss, reported) = child_run(label, profile, child.case, child.plant);
+    let report =
+        PlanReport::from_stdout(&reported, child).unwrap_or_else(|problem| panic!("{problem}"));
+    if let Err(problem) = report.writes_as_pinned(child) {
         panic!("over `{profile}`, {problem}");
     }
-    // Every planted subject stands once the plans land, save the one the
-    // mix deletes.
-    let planted = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1;
     assert!(
-        reported.contains(&report_line(documents + planted - 1)),
-        "`{profile}` holds {documents} documents, {planted} plan subjects were planted beside \
-         them and the mix deletes one, and the harness reported: {reported}"
+        reported.contains(&report_line(documents + child.added)),
+        "`{profile}` holds {documents} documents, the {} child leaves {} more derived beside \
+         them, and the harness reported: {reported}",
+        child.case,
+        child.added,
     );
-    let heap =
-        |subject: &str| u64::try_from(report.heap(subject)).expect("a heap reading fits a u64");
-    let reading = PlanReading {
-        peak_rss,
-        previews: heap("previews"),
-        mix: heap("mix"),
-    };
+    let reading = PlanReading { peak_rss, report };
+    let mut readings: Vec<(&str, String)> = child
+        .stretches
+        .iter()
+        .map(|stretch| (*stretch, reading.heap(stretch).to_string()))
+        .collect();
+    readings.push((
+        "peak resident set (MiB)",
+        baselines::mebibytes(reading.peak_rss),
+    ));
     baselines::record(
-        &format!("heap each plan stretch held ({label}, {profile})"),
-        &[
-            ("previews (bytes)", reading.previews.to_string()),
-            ("mix (bytes)", reading.mix.to_string()),
-            (
-                "peak resident set (MiB)",
-                baselines::mebibytes(reading.peak_rss),
-            ),
-        ],
+        &format!("heap each plan stretch held, in bytes ({label}, {profile})"),
+        &readings,
     );
     reading
 }
@@ -889,24 +1274,17 @@ fn plan_child(label: &str, profile: &str) -> PlanReading {
 /// host's write verbs, each apply landing exactly the plan its preview
 /// answered.
 ///
-/// **One heap mark, read twice.** It is set once the attachment is ready and
-/// read once the three previews have resolved, before the first apply, and
-/// again once the three applies have landed. Each reading is the most the
-/// requests up to it raised the live heap above what the attached host held
-/// as the first began.
-///
-/// **The mix previews all three writes before it applies any.** An apply's
-/// publication comes back to the live host as a watcher echo, which the host
-/// reads to confirm it as the apply's own, and that confirmation runs as a
-/// job on the entry's one worker slot whenever the watcher delivers it. A
+/// **The mark is set on a settled heap** ([`settle_heap`]), once the
+/// attachment is ready, and every preview runs before the first apply. An
+/// apply's publication comes back to the live host as a watcher echo, which
+/// the host reads to confirm it as the apply's own, and that confirmation runs
+/// as a job on the entry's one worker slot whenever the watcher delivers it. A
 /// preview runs on this thread beside it, so a preview after an apply stacks
-/// on that echo or not by timing alone, and the mix read up to 66 KB apart
-/// across runs that way. With every preview ahead of every apply, the
-/// previews' reading holds no apply's work at all, and what is left to move
-/// the mix's is the watcher's own threads taking an apply's publications in
-/// while it commits, which moves it between two states about 31 KB apart.
-/// The three resolved plans are held together across the applies, which is
-/// what the mix holds of them.
+/// on that echo or not by timing alone: the mix read up to 66 KB apart across
+/// runs that way. So the three previews run under one mark read before the
+/// first apply, and the applies are read under that same mark, where what is
+/// left to move the reading is the watcher's own threads taking an apply's
+/// publications in while it commits, between two states about 31 KB apart.
 #[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
 fn plan_and_report(root: &Path) {
     let vault = attach::Vault::adopt(root);
@@ -914,12 +1292,13 @@ fn plan_and_report(root: &Path) {
     let _lease = attach::attach_and_wait(&host, vault.name());
     let address = || VaultAddress::name(vault.name().clone());
     let document = |at: &str| DocumentPath::new(at).expect("a document path");
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(PLAN_WRITES.len());
     let mut landed = |write: &str, plan: ResolvedPlan| {
         let targets = applied_plan(write, &host, plan);
         lines.push(format!("plan {write} wrote {targets}"));
     };
 
+    settle_heap();
     let mark = heap::Mark::set();
     let set = previewed_plan(
         "set",
@@ -970,6 +1349,209 @@ fn plan_and_report(root: &Path) {
     }
     println!("plan heap previews {previews}");
     println!("plan heap mix {mix}");
+}
+
+/// The size harness: adopt the tree at `root`, attach it, keep it attached,
+/// preview then apply each write of [`SIZE_WRITES`] through the host's write
+/// verbs, each apply landing exactly the plan its preview answered, and then
+/// measure the live host deriving a document of each size on its own.
+///
+/// **Every mark is set on a settled heap** ([`settle_heap`]), so no watcher
+/// echo of an earlier write is still being handled on another thread when a
+/// stretch begins. Each reading is the most its requests raised the live heap
+/// above what the attached host held as the stretch began.
+///
+/// **Every preview runs before the first apply**, because the echo of a large
+/// landed document costs about its body and a preview after an apply would
+/// stack on it or not by timing alone. So the byte-identical pair's two moves
+/// are previewed first, right after the attach, then the relinking pair's
+/// two, each under its own mark. The byte-identical pair's moves are applied
+/// next, each under its own mark read as its apply answers, and the relinking
+/// pair's after them, unmeasured but each on a settled heap, so the plans each
+/// preview answered do land without stacking on another write's echo.
+///
+/// **The derivation controls come last.** Each writes a document of one size
+/// outside the vault, settles, marks, renames it in, and reads the mark once
+/// the store holds the document at its length and the heap has settled again,
+/// so the reading spans the live host's whole derivation of it.
+#[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
+fn size_and_report(root: &Path) {
+    let vault = attach::Vault::adopt(root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    // Opened before any mark, so a control's polling of it reads a row rather
+    // than opening a connection inside its window.
+    let mut store = vault.store();
+    let address = || VaultAddress::name(vault.name().clone());
+    let document = |at: &str| DocumentPath::new(at).expect("a document path");
+    let mut lines = Vec::with_capacity(SIZE_WRITES.len());
+    let mut heaps: Vec<(&str, usize)> = Vec::with_capacity(SIZE_STRETCHES.len());
+
+    let previewed_move = |write: &str, from: &str, to: &str| {
+        let params = MoveParams::new(
+            address(),
+            ApplyMode::Preview,
+            MoveSubject::document(document(from), document(to)),
+        );
+        settle_heap();
+        let mark = heap::Mark::set();
+        let plan = previewed_plan(write, host.move_path(params));
+        (plan, mark.peak_above())
+    };
+    let (move_small, reading) = previewed_move("move-small", PLAN_SMALL_FROM, PLAN_SMALL_TO);
+    heaps.push(("move-preview-small", reading));
+    let (move_large, reading) = previewed_move("move-large", PLAN_LARGE_FROM, PLAN_LARGE_TO);
+    heaps.push(("move-preview-large", reading));
+    let (relink_small, reading) =
+        previewed_move("relink-small", PLAN_RELINK_SMALL_FROM, PLAN_RELINK_SMALL_TO);
+    heaps.push(("relink-preview-small", reading));
+    let (relink_large, reading) =
+        previewed_move("relink-large", PLAN_RELINK_LARGE_FROM, PLAN_RELINK_LARGE_TO);
+    heaps.push(("relink-preview-large", reading));
+    for (write, plan, rewrites) in [
+        ("move-small", &move_small, 0),
+        ("move-large", &move_large, 0),
+        ("relink-small", &relink_small, 1),
+        ("relink-large", &relink_large, 1),
+    ] {
+        assert_eq!(
+            plan.operations[0].cascade.len(),
+            rewrites,
+            "the {write} move planned a cascade other than {rewrites} rewrites of its own links: \
+             {:?}",
+            plan.operations[0].cascade
+        );
+    }
+
+    let mut landed = |write: &str, plan: ResolvedPlan| {
+        let targets = applied_plan(write, &host, plan);
+        lines.push(format!("plan {write} wrote {targets}"));
+    };
+    let mut measured_apply = |write: &str, plan: ResolvedPlan| {
+        settle_heap();
+        let mark = heap::Mark::set();
+        landed(write, plan);
+        mark.peak_above()
+    };
+    let reading = measured_apply("move-small", move_small);
+    heaps.push(("move-apply-small", reading));
+    let reading = measured_apply("move-large", move_large);
+    heaps.push(("move-apply-large", reading));
+    // Unmeasured, but each on a settled heap, so no echo of the large move
+    // or of the other relink is handled beside it.
+    for (write, plan) in [
+        ("relink-small", relink_small),
+        ("relink-large", relink_large),
+    ] {
+        settle_heap();
+        landed(write, plan);
+    }
+
+    for (stretch, at, bytes) in [
+        ("derive-small", PLAN_DERIVED_SMALL, PLAN_SMALL_BODY_BYTES),
+        ("derive-large", PLAN_DERIVED_LARGE, PLAN_LARGE_BODY_BYTES),
+    ] {
+        heaps.push((stretch, derived_alone(&vault, &mut store, at, bytes)));
+    }
+
+    println!("{}", report_line(attach::derived_documents(&mut store)));
+    for line in lines {
+        println!("{line}");
+    }
+    for (stretch, bytes) in heaps {
+        println!("plan heap {stretch} {bytes}");
+    }
+}
+
+/// How long the live heap must hold still before a mark is set on it: longer
+/// than the watcher's longest batch (`norn_fs::watch::MAX_BATCH_AGE`, 500 ms),
+/// so an echo of an earlier write the watcher has yet to deliver moves the
+/// heap inside the wait rather than after it.
+const HEAP_STILL_FOR: Duration = Duration::from_millis(750);
+
+/// How often [`settle_heap`] looks at the live heap.
+const HEAP_SETTLE_LOOK: Duration = Duration::from_millis(10);
+
+/// How long the live heap may keep moving before a settle gives up: a runaway
+/// bound, far above any echo's handling.
+const HEAP_SETTLE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Wait until the live heap has held still for [`HEAP_STILL_FOR`].
+///
+/// An apply's own writes and a write from outside reach the live host's
+/// watcher after the request that caused them answers, and the host handles
+/// them on its own threads, the echo of a large landed document reading about
+/// its body. A mark set while that is in flight charges it to whatever the
+/// mark measures next, so every mark here is set once the heap has stopped
+/// moving, the way `fd_budget`'s `settled_fd_count` reads descriptors. The
+/// wait allocates nothing, so it never moves the heap it watches.
+fn settle_heap() {
+    let began = Instant::now();
+    let mut last = heap::live();
+    let mut still_since = Instant::now();
+    while still_since.elapsed() < HEAP_STILL_FOR {
+        assert!(
+            began.elapsed() < HEAP_SETTLE_LIMIT,
+            "the live heap kept moving for {HEAP_SETTLE_LIMIT:?} without holding still for \
+             {HEAP_STILL_FOR:?}, last at {last} bytes"
+        );
+        std::thread::sleep(HEAP_SETTLE_LOOK);
+        let now = heap::live();
+        if now != last {
+            last = now;
+            still_since = Instant::now();
+        }
+    }
+}
+
+/// **A derivation control**: what the live host's own derivation of a
+/// document of `bytes` bytes at `at` raises the heap by, with no plan in it.
+///
+/// The document, [`unlinked_body`] of `bytes` as the byte-identical moves
+/// land, is written beside the vault and its folder made inside it before the
+/// mark, and both settled, so nothing of either stands in the window. Under
+/// the mark it is renamed in whole, the watcher delivers it, and the host
+/// derives it through the one derivation every heal runs; the mark is read
+/// once `store` holds the document at its length and the heap has settled
+/// again.
+fn derived_alone(
+    vault: &attach::Vault,
+    store: &mut norn_store::Store,
+    at: &str,
+    bytes: usize,
+) -> usize {
+    let staged = vault
+        .path()
+        .parent()
+        .expect("the folder the vault stands in")
+        .join(format!("staged-{bytes}.md"));
+    std::fs::write(&staged, unlinked_body(bytes)).expect("staging a derivation control");
+    let landing = vault.path().join(at);
+    std::fs::create_dir_all(landing.parent().expect("a control's folder"))
+        .expect("creating a control's folder");
+    let path = StorePath::new(at).expect("a document path");
+    let length = u64::try_from(bytes).expect("a size fits a u64");
+
+    settle_heap();
+    let mark = heap::Mark::set();
+    std::fs::rename(&staged, &landing).expect("renaming a derivation control in");
+    let began = Instant::now();
+    loop {
+        let stored = store
+            .begin_request()
+            .stored_document(&path)
+            .expect("reading a control's row");
+        if stored.is_some_and(|row| row.byte_length == length) {
+            break;
+        }
+        assert!(
+            began.elapsed() < HEAP_SETTLE_LIMIT,
+            "the live host derived no row of {bytes} bytes at `{at}` within {HEAP_SETTLE_LIMIT:?}"
+        );
+        std::thread::sleep(attach::SETTLE_LOOK);
+    }
+    settle_heap();
+    mark.peak_above()
 }
 
 /// The plan a write verb's preview answered.
@@ -1025,8 +1607,8 @@ fn applied_plan(write: &str, host: &attach::ServingHost, plan: ResolvedPlan) -> 
     targets.len()
 }
 
-/// What a planning child reports: how many targets each write of
-/// [`PLAN_WRITES`] wrote, and the heap each measured stretch raised.
+/// What a planning or size child reports: how many targets each of its
+/// writes wrote, and the heap each measured stretch raised.
 #[derive(Debug, Default, Eq, PartialEq)]
 struct PlanReport {
     wrote: std::collections::BTreeMap<String, usize>,
@@ -1034,13 +1616,10 @@ struct PlanReport {
 }
 
 impl PlanReport {
-    /// The heap stretches a planning child measures.
-    const STRETCHES: [&str; 2] = ["previews", "mix"];
-
-    /// The report a child's output carries, refused where a `plan` line is
-    /// no report, where a write or a stretch is missing, or where one the
-    /// child does not run is present.
-    fn from_stdout(stdout: &str) -> Result<Self, String> {
+    /// The report a `child`'s output carries, refused where a `plan` line is
+    /// no report, where a write or a stretch of that child is missing, or
+    /// where one it does not run is present.
+    fn from_stdout(stdout: &str, child: &PlanChild) -> Result<Self, String> {
         let mut report = PlanReport::default();
         for line in stdout.lines().filter(|line| line.starts_with("plan ")) {
             let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -1062,28 +1641,28 @@ impl PlanReport {
                 }
             }
         }
-        let writes: Vec<&str> = PLAN_WRITES.iter().map(|(write, _)| *write).collect();
+        let writes: Vec<&str> = child.writes.iter().map(|(write, _)| *write).collect();
         let named = |names: &[&str], held: &std::collections::BTreeMap<String, usize>| {
             names.len() == held.len() && names.iter().all(|name| held.contains_key(*name))
         };
-        if !named(&writes, &report.wrote) || !named(&Self::STRETCHES, &report.heap) {
+        if !named(&writes, &report.wrote) || !named(child.stretches, &report.heap) {
             return Err(format!(
                 "the plan harness reported writes {:?} and heap stretches {:?} where it runs \
                  {writes:?} and {:?}: {stdout}",
                 report.wrote.keys().collect::<Vec<_>>(),
                 report.heap.keys().collect::<Vec<_>>(),
-                Self::STRETCHES,
+                child.stretches,
             ));
         }
         Ok(report)
     }
 
-    /// Refuse a report whose writes did not write [`PLAN_WRITES`], naming the
-    /// first that wrote otherwise.
-    fn writes_as_pinned(&self) -> Result<(), String> {
-        for (write, expected) in PLAN_WRITES {
-            let wrote = self.wrote.get(write).copied().unwrap_or(0);
-            if wrote != expected {
+    /// Refuse a report whose writes did not write what `child` pins, naming
+    /// the first that wrote otherwise.
+    fn writes_as_pinned(&self, child: &PlanChild) -> Result<(), String> {
+        for (write, expected) in child.writes {
+            let wrote = self.wrote.get(*write).copied().unwrap_or(0);
+            if wrote != *expected {
                 return Err(format!(
                     "the plan harness's {write} wrote {wrote} targets where its plan writes \
                      {expected}, so the reading is not a reading over the plan: {:?}",
@@ -1101,56 +1680,87 @@ impl PlanReport {
 }
 
 /// **The parent refuses a plan reading it cannot tie to every write landing
-/// as pinned.** A report missing a write or a heap stretch, or one whose write
-/// landed other than its plan writes, fails the bar rather than passing as a
-/// cheap plan.
+/// as pinned.** A report missing a write or a heap stretch, carrying the
+/// other child's, or one whose write landed other than its plan writes, fails
+/// the bar rather than passing as a cheap plan.
 #[test]
 fn a_plan_reading_stands_only_on_a_report_of_every_write_landing_as_pinned() {
-    let printed = |wrote: &dyn Fn(&str, usize) -> Option<usize>, stretches: &[&str]| {
-        PLAN_WRITES
-            .iter()
-            .filter_map(|(write, targets)| {
-                wrote(write, *targets).map(|targets| format!("plan {write} wrote {targets}"))
-            })
-            .chain(
-                stretches
-                    .iter()
-                    .map(|stretch| format!("plan heap {stretch} 4096")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let printed =
+        |child: &PlanChild, wrote: &dyn Fn(&str, usize) -> Option<usize>, stretches: &[&str]| {
+            child
+                .writes
+                .iter()
+                .filter_map(|(write, targets)| {
+                    wrote(write, *targets).map(|targets| format!("plan {write} wrote {targets}"))
+                })
+                .chain(
+                    stretches
+                        .iter()
+                        .map(|stretch| format!("plan heap {stretch} 4096")),
+                )
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
-    let whole = PlanReport::from_stdout(&printed(
-        &|_, targets| Some(targets),
-        &PlanReport::STRETCHES,
-    ))
-    .expect("a report of every write and stretch");
-    assert_eq!(whole.writes_as_pinned(), Ok(()));
-    assert_eq!(whole.heap("previews"), 4096);
+    for child in [&PLANNING, &SIZING] {
+        let first = child.writes[0].0;
+        let whole = PlanReport::from_stdout(
+            &printed(child, &|_, targets| Some(targets), child.stretches),
+            child,
+        )
+        .expect("a report of every write and stretch");
+        assert_eq!(whole.writes_as_pinned(child), Ok(()));
+        assert_eq!(whole.heap(child.stretches[0]), 4096);
 
-    let short = PlanReport::from_stdout(&printed(
-        &|write, targets| (write != "delete").then_some(targets),
-        &PlanReport::STRETCHES,
-    ))
-    .expect_err("a write the child never ran");
-    assert!(short.contains("where it runs"), "{short}");
+        let short = PlanReport::from_stdout(
+            &printed(
+                child,
+                &|write, targets| (write != first).then_some(targets),
+                child.stretches,
+            ),
+            child,
+        )
+        .expect_err("a write the child never ran");
+        assert!(short.contains("where it runs"), "{short}");
 
-    let unmeasured = PlanReport::from_stdout(&printed(&|_, targets| Some(targets), &["mix"]))
+        let unmeasured = PlanReport::from_stdout(
+            &printed(
+                child,
+                &|_, targets| Some(targets),
+                &child.stretches[..child.stretches.len() - 1],
+            ),
+            child,
+        )
         .expect_err("a stretch the child never measured");
-    assert!(unmeasured.contains("heap stretches"), "{unmeasured}");
+        assert!(unmeasured.contains("heap stretches"), "{unmeasured}");
 
-    let nothing = PlanReport::from_stdout(&printed(
-        &|write, targets| Some(if write == "set" { 0 } else { targets }),
-        &PlanReport::STRETCHES,
-    ))
-    .expect("a report of every write and stretch")
-    .writes_as_pinned()
-    .expect_err("a write that wrote nothing");
-    assert!(nothing.contains("set wrote 0 targets"), "{nothing}");
+        let nothing = PlanReport::from_stdout(
+            &printed(
+                child,
+                &|write, targets| Some(if write == first { 0 } else { targets }),
+                child.stretches,
+            ),
+            child,
+        )
+        .expect("a report of every write and stretch")
+        .writes_as_pinned(child)
+        .expect_err("a write that wrote nothing");
+        assert!(
+            nothing.contains(&format!("{first} wrote 0 targets")),
+            "{nothing}"
+        );
 
-    let garbled = PlanReport::from_stdout("plan everything\n").expect_err("no plan report");
-    assert!(garbled.contains("no plan report"), "{garbled}");
+        let garbled =
+            PlanReport::from_stdout("plan everything\n", child).expect_err("no plan report");
+        assert!(garbled.contains("no plan report"), "{garbled}");
+    }
+
+    let crossed = PlanReport::from_stdout(
+        &printed(&PLANNING, &|_, targets| Some(targets), PLANNING.stretches),
+        &SIZING,
+    )
+    .expect_err("the planning child's report read as the size child's");
+    assert!(crossed.contains("where it runs"), "{crossed}");
 }
 
 /// Generate `profile`'s tree under the minimal schema, attach it in a child,
