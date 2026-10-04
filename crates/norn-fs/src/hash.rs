@@ -10,10 +10,13 @@
 //! caller holding a handle, is private to this module and reached only by
 //! name: the write kernel's reads of a target and of a shadow through
 //! [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
-//! and the watcher's echo check through [`uncounted_echo_hashed_from`], which
-//! says in its name that it is not counted. [`crate::read_and_hash`] is the
-//! configured-path form which returns both the bytes and their hash from one
-//! opening.
+//! the watcher's echo check through [`uncounted_echo_hashed_from`], which
+//! says in its name that it is not counted, and a streamed observation
+//! through [`hashed_and_checked_from`].
+//! [`crate::read_and_hash`] is the configured-path form which returns both
+//! the bytes and their hash from one opening, and
+//! [`crate::stream_optional_and_hash`] the form that keeps no bytes: the hash
+//! and whether the bytes are UTF-8, from one streamed reading.
 //!
 //! [`ContentHash::of`] is the same guarantee arrived at from the other side — a
 //! caller that already holds the bytes hashes those bytes, and the write kernel
@@ -134,9 +137,8 @@ impl fmt::Debug for ContentHash {
 /// position is left at the end of the file, which a caller that reads afterwards
 /// has to know.
 ///
-/// The whole file is read as a stream, so peak memory is one chunk rather than the
-/// weight of the document. A read interrupted by a signal is retried, because
-/// `EINTR` is not a failure to read and half a hash is not a smaller hash.
+/// The whole file is read as a stream ([`streamed`]), so peak memory is one
+/// chunk rather than the weight of the document.
 ///
 /// **This form is not counted** in any [`crate::reads::ReadTally`] field, so
 /// it is private: a caller hashes through a wrapper whose name says whether
@@ -148,22 +150,153 @@ impl fmt::Debug for ContentHash {
 /// stat comparison by whoever needs the answer.
 fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, u64)> {
     handle.seek(SeekFrom::Start(0))?;
+    streamed(handle, &mut |_| Ok(())).map_err(CopyFailed::into_error)
+}
+
+/// One forward pass over `reader` from where it stands, [`CHUNK`] bytes at a
+/// time, handing each chunk to `each` once it is hashed: the hash and the
+/// length of everything read.
+///
+/// **The one streaming loop.** Every streamed reading in this crate — a
+/// target's and a shadow's hash, the echo check and a streamed observation —
+/// is this loop and differs only in what it does
+/// with a chunk, so peak memory is one chunk wherever a file is streamed. A
+/// read interrupted by a signal is retried, because `EINTR` is not a failure
+/// to read and half a hash is not a smaller hash.
+fn streamed(
+    reader: &mut impl Read,
+    each: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<(ContentHash, u64), CopyFailed> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; CHUNK];
     let mut len = 0u64;
     loop {
-        let read = match handle.read(&mut buffer) {
+        let read = match reader.read(&mut buffer) {
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(CopyFailed::Reading(error)),
         };
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        each(&buffer[..read]).map_err(CopyFailed::Writing)?;
         len += read as u64;
     }
     Ok((ContentHash(hasher.finalize().into()), len))
+}
+
+/// Which side of a streamed pass failed: the read of the file, or what was
+/// done with a chunk of it.
+#[derive(Debug)]
+pub(crate) enum CopyFailed {
+    Reading(std::io::Error),
+    Writing(std::io::Error),
+}
+
+impl CopyFailed {
+    /// The error, for a pass whose chunks go nowhere that can fail.
+    fn into_error(self) -> std::io::Error {
+        match self {
+            CopyFailed::Reading(error) | CopyFailed::Writing(error) => error,
+        }
+    }
+}
+
+/// What one streamed reading of a file found: its content hash, its length,
+/// and whether its bytes are UTF-8 — each the answer the whole buffer gives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Checked {
+    pub(crate) hash: ContentHash,
+    pub(crate) len: u64,
+    pub(crate) utf8: bool,
+}
+
+/// A streamed observation's read of the file at `path` through `reader`: its
+/// hash, its length and whether it is UTF-8, from one forward pass that holds
+/// one chunk and no more.
+///
+/// **The read counts itself** as one [`crate::reads::ReadTally::document_opens`],
+/// as [`read_bytes_and_hash`] does: the two are the same act — a file read for
+/// what its content is — and differ only in whether the bytes are kept.
+pub(crate) fn hashed_and_checked_from(
+    reader: &mut impl Read,
+    path: &std::path::Path,
+) -> std::io::Result<Checked> {
+    crate::reads::count_document_read(path);
+    let mut utf8 = Utf8Stream::default();
+    let (hash, len) = streamed(reader, &mut |chunk| {
+        utf8.feed(chunk);
+        Ok(())
+    })
+    .map_err(CopyFailed::into_error)?;
+    Ok(Checked {
+        hash,
+        len,
+        utf8: utf8.finish(),
+    })
+}
+
+/// Whether a stream of bytes handed over in chunks is UTF-8, judged as the
+/// chunks arrive and without holding them: the verdict
+/// [`std::str::from_utf8`] gives the whole buffer.
+///
+/// **A character split between two chunks is carried, not judged.** A chunk
+/// that ends inside a multi-byte sequence leaves at most three bytes over, and
+/// they are judged with the start of the next chunk; the stream ending while
+/// bytes are still carried is a sequence cut short, which is not UTF-8.
+#[derive(Debug, Default)]
+pub(crate) struct Utf8Stream {
+    /// The start of a character the last chunk ended inside.
+    carry: [u8; 4],
+    carried: usize,
+    /// A byte that can begin no valid sequence was seen; nothing undoes it.
+    invalid: bool,
+}
+
+impl Utf8Stream {
+    /// Judge the next `chunk` of the stream.
+    pub(crate) fn feed(&mut self, mut chunk: &[u8]) {
+        if self.invalid {
+            return;
+        }
+        if self.carried > 0 {
+            // A carried start is the prefix of a sequence its lead byte gives
+            // the width of; the standard decoder carried nothing else.
+            let width = match self.carry[0] {
+                0xf0..=0xff => 4,
+                0xe0..=0xef => 3,
+                _ => 2,
+            };
+            let take = (width - self.carried).min(chunk.len());
+            self.carry[self.carried..self.carried + take].copy_from_slice(&chunk[..take]);
+            self.carried += take;
+            chunk = &chunk[take..];
+            if self.carried < width {
+                return;
+            }
+            self.carried = 0;
+            if std::str::from_utf8(&self.carry[..width]).is_err() {
+                self.invalid = true;
+                return;
+            }
+        }
+        if let Err(error) = std::str::from_utf8(chunk) {
+            match error.error_len() {
+                Some(_) => self.invalid = true,
+                None => {
+                    let tail = &chunk[error.valid_up_to()..];
+                    self.carry[..tail.len()].copy_from_slice(tail);
+                    self.carried = tail.len();
+                }
+            }
+        }
+    }
+
+    /// Whether everything fed was UTF-8, with no character left unfinished.
+    pub(crate) fn finish(self) -> bool {
+        !self.invalid && self.carried == 0
+    }
 }
 
 /// The write kernel's read of the target at `full`: the stream hash over its
@@ -201,6 +334,7 @@ pub(crate) fn uncounted_echo_hashed_from<H: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::path::Path;
 
     use super::*;
 
@@ -291,6 +425,87 @@ mod tests {
         let (hash, len) = hashed_from(&mut handle).expect("a read that was interrupted");
         assert_eq!(hash, ContentHash::of(&content));
         assert_eq!(len, content.len() as u64);
+    }
+
+    /// Byte strings whose UTF-8 verdict turns on a multi-byte sequence: valid
+    /// two-, three- and four-byte characters, a stray continuation byte, an
+    /// overlong encoding, an encoded surrogate, and each width of sequence cut
+    /// short at the end.
+    fn utf8_cases() -> Vec<Vec<u8>> {
+        let mut cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"plain ascii".to_vec(),
+            "a\u{e9}\u{20ac}\u{1f600}z".as_bytes().to_vec(),
+            "\u{1f600}\u{1f600}".as_bytes().to_vec(),
+            b"a\x80b".to_vec(),
+            b"\xc0\x80".to_vec(),
+            b"\xed\xa0\x80".to_vec(),
+            b"ok \xff".to_vec(),
+        ];
+        for character in ["\u{e9}", "\u{20ac}", "\u{1f600}"] {
+            let bytes = character.as_bytes();
+            for cut in 1..bytes.len() {
+                cases.push([b"x".as_slice(), &bytes[..cut]].concat());
+                cases.push([&bytes[..cut], b"x".as_slice()].concat());
+            }
+        }
+        cases
+    }
+
+    /// **The bar on a character split between chunks.** Fed in chunks of any
+    /// size, the streamed check answers what one check over the whole buffer
+    /// answers: a sequence split across a boundary is the character it spells,
+    /// and a sequence the input ends inside is not UTF-8.
+    ///
+    /// The forbidden shapes are the two halves of checking each chunk on its
+    /// own — a valid character split by a boundary read as two invalid
+    /// fragments, and an incomplete tail carried forward and never judged.
+    #[test]
+    fn the_streamed_utf8_check_agrees_with_the_whole_buffer_at_every_split() {
+        for case in utf8_cases() {
+            let whole = std::str::from_utf8(&case).is_ok();
+            for size in 1..=5 {
+                let mut check = Utf8Stream::default();
+                case.chunks(size).for_each(|chunk| check.feed(chunk));
+                assert_eq!(check.finish(), whole, "{case:?} in chunks of {size}");
+            }
+            for at in 0..=case.len() {
+                let mut check = Utf8Stream::default();
+                check.feed(&case[..at]);
+                check.feed(&case[at..]);
+                assert_eq!(check.finish(), whole, "{case:?} split at {at}");
+            }
+        }
+    }
+
+    /// The streamed pass over a reader answers the hash and the UTF-8 verdict
+    /// of the whole buffer, at the reader's own chunk size: a four-byte
+    /// character straddling the first chunk boundary is UTF-8, and the same
+    /// stream cut inside its last character is not.
+    #[test]
+    fn a_streamed_pass_hashes_and_checks_across_its_own_chunks() {
+        let straddling = [vec![b'a'; CHUNK - 2], "\u{1f600}".as_bytes().to_vec()].concat();
+        let truncated = straddling[..straddling.len() - 1].to_vec();
+        let invalid_late = [vec![b'a'; CHUNK * 2 + 3], vec![0xff]].concat();
+        for (bytes, utf8) in [
+            (Vec::new(), true),
+            (vec![b'a'; CHUNK], true),
+            (straddling, true),
+            (truncated, false),
+            (invalid_late, false),
+        ] {
+            let streamed = hashed_and_checked_from(&mut Cursor::new(bytes.clone()), Path::new("x"))
+                .expect("streaming a cursor");
+            assert_eq!(
+                streamed.hash,
+                ContentHash::of(&bytes),
+                "{} bytes",
+                bytes.len()
+            );
+            assert_eq!(streamed.len, bytes.len() as u64);
+            assert_eq!(streamed.utf8, utf8, "{} bytes", bytes.len());
+            assert_eq!(streamed.utf8, std::str::from_utf8(&bytes).is_ok());
+        }
     }
 
     #[test]
