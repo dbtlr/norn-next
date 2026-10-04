@@ -175,6 +175,20 @@ enum WriteRequest {
 }
 
 impl WriteRequest {
+    fn mode(&self) -> ApplyMode {
+        match self {
+            Self::Set(params) => params.mode,
+            Self::Edit(params) => params.mode,
+            Self::New(params) => params.mode,
+            Self::Move(params) => params.mode,
+            Self::Delete(params) => params.mode,
+            Self::Rewrite(params) => params.mode,
+            Self::Apply(params) => params.mode,
+            Self::Init(params) => params.mode,
+            Self::Migrate(params) => params.mode,
+        }
+    }
+
     fn read(verb: Verb, text: &str) -> Result<Self, serde_json::Error> {
         Ok(match verb {
             Verb::Set => Self::Set(serde_json::from_str(text)?),

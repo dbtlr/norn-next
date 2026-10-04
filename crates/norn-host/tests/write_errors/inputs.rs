@@ -195,6 +195,42 @@ fn allowed(verb: Verb, error: &ErrorEnvelope) -> bool {
     }
 }
 
+/// Give back demand and the host before removing the files it served.
+struct Trial {
+    _lease: norn_host::DemandLease<norn_host::ProductionEntryOps>,
+    host: attach::ServingHost,
+    identity: RootIdentity,
+    _sandbox: Sandbox,
+}
+
+impl Trial {
+    fn new(verb: Verb) -> Self {
+        let sandbox =
+            Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "write-input-trial").unwrap();
+        let root = sandbox.work_dir().join("attached");
+        faults::tree(&root, verb);
+        let vault = attach::Vault::adopt(&root);
+        let host = vault.host();
+        let lease = attach::attach_and_wait(&host, vault.name());
+        let identity = norn_fs::path_identity(vault.path()).unwrap().unwrap();
+        Self {
+            _lease: lease,
+            host,
+            identity: RootIdentity::from_device_and_inode(identity.dev, identity.ino),
+            _sandbox: sandbox,
+        }
+    }
+
+    fn answer(
+        &self,
+        mut request: WriteRequest,
+        seed_root: Option<&RootIdentity>,
+    ) -> Result<Value, ErrorEnvelope> {
+        request.bind_fixture(seed_root, self.identity.clone());
+        request.answer(&self.host, false)
+    }
+}
+
 #[allow(clippy::disallowed_macros)] // Harness evidence, not product rendering.
 pub(super) fn run() {
     let mut totals = (0, 0, 0);
@@ -229,37 +265,33 @@ pub(super) fn run() {
                     }
                 }
                 let mut counts = (0, 0, 0);
+                let mut preview_trial: Option<Trial> = None;
                 for subject in &subjects {
                     let seed_root: Option<RootIdentity> = subject["plan"]
                         .get("root")
                         .and_then(|root| serde_json::from_value(root.clone()).ok());
                     for request in mutations(subject) {
                         let label = format!("{} {mode:?}: {request}", verb.name());
-                        let mut decoded = match WriteRequest::read(verb, &request.to_string()) {
+                        let decoded = match WriteRequest::read(verb, &request.to_string()) {
                             Ok(decoded) => decoded,
                             Err(_) => {
                                 counts.0 += 1;
                                 continue;
                             }
                         };
-                        // An earlier successful apply must not turn a later
-                        // generated body into a name-taken or missing-anchor case.
-                        let sandbox = Sandbox::new(
-                            Path::new(env!("CARGO_TARGET_TMPDIR")),
-                            "write-input-trial",
-                        )
-                        .unwrap();
-                        let root = sandbox.work_dir().join("attached");
-                        faults::tree(&root, verb);
-                        let vault = attach::Vault::adopt(&root);
-                        let host = vault.host();
-                        let _lease = attach::attach_and_wait(&host, vault.name());
-                        let identity = norn_fs::path_identity(vault.path()).unwrap().unwrap();
-                        decoded.bind_fixture(
-                            seed_root.as_ref(),
-                            RootIdentity::from_device_and_inode(identity.dev, identity.ino),
-                        );
-                        match decoded.answer(&host, false) {
+                        let answer = match decoded.mode() {
+                            ApplyMode::Preview => preview_trial
+                                .get_or_insert_with(|| Trial::new(verb))
+                                .answer(decoded, seed_root.as_ref()),
+                            ApplyMode::Apply => {
+                                // Release the preview's watcher lease before
+                                // taking another. Every apply gets a fresh tree,
+                                // so earlier writes cannot mask later inputs.
+                                drop(preview_trial.take());
+                                Trial::new(verb).answer(decoded, seed_root.as_ref())
+                            }
+                        };
+                        match answer {
                             Ok(_) => counts.1 += 1,
                             Err(error) => {
                                 assert!(
