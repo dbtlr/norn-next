@@ -1230,6 +1230,26 @@ pub const APPLY_DOCUMENT_READS_PER_REMOVED_TARGET: u64 = 2;
 /// Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
 pub const APPLY_TARGET_READS_PER_REMOVED_TARGET: u64 = 2;
 
+/// A document a move carries byte for byte, its source's document reads: two
+/// — **planning**'s streamed read of its before-state and **the
+/// recomposition**'s, each a hash and a decode verdict from one pass that
+/// keeps no byte. Its destination, a created document, is never read for its
+/// content before the changeset's read-back. The same count as a removed
+/// document's ([`APPLY_DOCUMENT_READS_PER_REMOVED_TARGET`]), kept apart so a
+/// move's source is held to its own fate. Budgeted with
+/// [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET: u64 = 2;
+
+/// A document a move carries byte for byte, its source's target reads: three
+/// — **staging the destination** streams the source into the destination's
+/// shadow through the write kernel's own open, hashing it as it copies
+/// (`norn_fs::Content::CopyOf`), then **staging** and **publication** check
+/// its before-state before its unlink, as a removed document's do
+/// ([`APPLY_TARGET_READS_PER_REMOVED_TARGET`]). The copy is the one more read
+/// a carried move pays for holding no copy of the document it moves. Budgeted
+/// with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
+pub const APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET: u64 = 3;
+
 /// **The staged shadows an apply reads per document it writes.** One: the
 /// write kernel confirms, just before the publication act, that the shadow a
 /// replacement or a creation is published from is still the file staging

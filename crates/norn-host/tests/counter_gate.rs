@@ -1635,7 +1635,12 @@ fn moved_in_place_hub_path() -> String {
 /// - **a `set` by path** replaces one document's frontmatter;
 /// - **the hub's move** to a new stem replaces each of its [`HUB_IN_LINKS`]
 ///   holders with its link rewritten, creates the hub at its new name and
-///   removes it from its old one;
+///   removes it from its old one — a move carrying the hub byte for byte,
+///   whose create the write kernel stages as a copy of the hub's old file,
+///   so that file's fate is copied away
+///   ([`baselines::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET`]): one target
+///   read more than a removed file's, for the copy, and no read of the hub's
+///   content before the changeset's read-back of its new name;
 /// - **a delete of a document no link names** removes one document;
 /// - **the moved hub's delete leaving its links broken** removes one
 ///   document, and its changeset re-decides the twenty links that named it.
@@ -2210,6 +2215,10 @@ enum Fate {
     Created,
     /// Standing before and absent after.
     Removed,
+    /// Standing before and absent after, a move having carried its bytes
+    /// unchanged to a name the plan creates: the write kernel stages that
+    /// create as a copy of this file, which reads it once more.
+    CopiedAway,
 }
 
 #[cfg(feature = "induced-failure")]
@@ -2220,6 +2229,7 @@ impl Fate {
             Fate::Replaced => baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET,
             Fate::Created => baselines::APPLY_DOCUMENT_READS_PER_CREATED_TARGET,
             Fate::Removed => baselines::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET,
+            Fate::CopiedAway => baselines::APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET,
         }
     }
 
@@ -2230,6 +2240,7 @@ impl Fate {
             Fate::Replaced => baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET,
             Fate::Created => baselines::APPLY_TARGET_READS_PER_CREATED_TARGET,
             Fate::Removed => baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET,
+            Fate::CopiedAway => baselines::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET,
         }
     }
 
@@ -2250,8 +2261,29 @@ struct Touched {
 
 #[cfg(feature = "induced-failure")]
 impl Touched {
-    /// What `plan`'s transitions do, file by file.
+    /// What `plan`'s transitions do, file by file. A removed file a move
+    /// takes to a name the plan creates holding the very bytes it held is
+    /// copied away: the applier carries such a move byte for byte.
     fn of(plan: &norn_wire::ResolvedPlan) -> Touched {
+        let state_at = |path: &norn_wire::DocumentPath| {
+            plan.transitions
+                .iter()
+                .find(|transition| transition.path == *path)
+        };
+        let copied_away: std::collections::BTreeSet<&str> = plan
+            .operations
+            .iter()
+            .filter_map(|operation| match &operation.kind {
+                norn_wire::OperationKind::MoveDocument { from, to } => {
+                    let (from_state, to_state) = (state_at(from)?, state_at(to)?);
+                    (to_state.before == norn_wire::FileState::absent()
+                        && from_state.after == norn_wire::FileState::absent()
+                        && to_state.after == from_state.before)
+                        .then_some(from.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         let mut touched = Touched::default();
         for transition in &plan.transitions {
             let present = |state: &norn_wire::FileState| {
@@ -2260,6 +2292,7 @@ impl Touched {
             let fate = match (present(&transition.before), present(&transition.after)) {
                 (true, true) => Fate::Replaced,
                 (false, true) => Fate::Created,
+                (true, false) if copied_away.contains(transition.path.as_str()) => Fate::CopiedAway,
                 (true, false) => Fate::Removed,
                 (false, false) => panic!(
                     "a transition at `{}` names no file before or after it",
@@ -2281,6 +2314,11 @@ impl Touched {
         self.fates.values().filter(|&&each| each == fate).count() as u64
     }
 
+    /// How many files the plan removes, copied away or not.
+    fn removed(&self) -> u64 {
+        self.count(Fate::Removed) + self.count(Fate::CopiedAway)
+    }
+
     /// The files written, each through a shadow of its own.
     fn written(&self) -> u64 {
         self.fates.values().filter(|fate| fate.written()).count() as u64
@@ -2300,10 +2338,11 @@ impl Touched {
     /// The plan's files counted by fate, for a message.
     fn summary(&self) -> String {
         format!(
-            "{} replaced, {} created and {} removed",
+            "{} replaced, {} created, {} removed and {} copied away",
             self.count(Fate::Replaced),
             self.count(Fate::Created),
-            self.count(Fate::Removed)
+            self.count(Fate::Removed),
+            self.count(Fate::CopiedAway)
         )
     }
 }
@@ -2422,12 +2461,12 @@ fn one_apply(
         (
             "documents_deleted",
             spent.documents_deleted,
-            touched.count(Fate::Removed),
+            touched.removed(),
         ),
         (
             "tombstones_recorded",
             spent.tombstones_recorded,
-            touched.count(Fate::Removed),
+            touched.removed(),
         ),
         ("apply_full_scan_steps", spent.apply_full_scan_steps, 0),
     ] {
@@ -2453,7 +2492,7 @@ fn one_apply(
     [
         ("replaced", touched.count(Fate::Replaced)),
         ("created", touched.count(Fate::Created)),
-        ("removed", touched.count(Fate::Removed)),
+        ("removed", touched.removed()),
         ("document_opens", spent.document_opens),
         ("target_reads", spent.target_reads),
         ("shadow_reads", spent.shadow_reads),
@@ -2601,7 +2640,7 @@ fn the_reads_name_the_touched_files(
     );
     let mut not_read_back_once = Vec::new();
     for (path, fate) in &touched.fates {
-        if *fate == Fate::Removed {
+        if !fate.written() {
             continue;
         }
         let of_this = |read: &&norn_fs::reads::FileRead| {
