@@ -134,6 +134,48 @@ fn a_documents_held_links_are_its_stored_links_in_order_beside_its_hash() {
     );
 }
 
+/// **The order is the statement's, not the index's.** With
+/// `links_document_ordinal` rebuilt out of band to hand a document's links
+/// back in descending ordinal order, the read still answers them in document
+/// order: the order is one the statement asks for, which a walk of any index
+/// over `(document, ordinal)` satisfies, and never the order an index happens
+/// to keep.
+///
+/// The forbidden shape is a links statement that orders nothing and answers
+/// document order only because the index it seeks keeps that order.
+#[test]
+fn held_links_are_in_document_order_whatever_order_the_index_keeps() {
+    let mut held = Held::new("held-links-order");
+    let stored = held
+        .store
+        .begin_request()
+        .stored_facts(&path("notes/linked.md"))
+        .expect("the stored facts")
+        .expect("a document the store holds");
+    let in_order = written_links(&stored);
+    assert!(in_order.len() >= 3, "{in_order:?}");
+
+    for statement in [
+        "DROP INDEX links_document_ordinal",
+        "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal DESC)",
+    ] {
+        induced_failure::execute_out_of_band(&mut held.store, statement)
+            .unwrap_or_else(|problem| panic!("{statement}: {problem}"));
+    }
+    // The rebuilt index is the one the statement seeks, and no sort stands
+    // behind it: what orders the rows is the walk of an index kept the other
+    // way round.
+    let plans = held.plans("notes/linked.md");
+    let links = plan_of(&plans, HeldLinksStatement::Links);
+    links.assert_no_temp_btree();
+    rows_of(&links, "n").assert_searches_through("links", Access::Index("links_document_ordinal"));
+    assert_eq!(
+        held.held("notes/linked.md").map(|held| held.links),
+        Some(in_order),
+        "the links came back in the order the index keeps"
+    );
+}
+
 /// The plan the store reported for one statement, in the harness's shape.
 fn plan(emitted: &HeldLinksPlan) -> QueryPlan {
     QueryPlan::new(
