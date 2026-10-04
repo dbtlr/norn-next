@@ -446,7 +446,8 @@ pub struct ExitBar {
 /// the bars of one subject by prefix: `attach-` for attaching a vault,
 /// `read-` for reading one through a live hold, `hub-write-` for link
 /// health's re-decision over a hub's write, `apply-` for what an apply reads
-/// writing through its plan, `soak-host-` for the host under a
+/// writing through its plan, `plan-` for previewing and applying a write plan
+/// through a live hold, `soak-host-` for the host under a
 /// long mixed load, `soak-settle-` for how long churn takes to settle,
 /// `generator-` for generating a fixture tree, and `text-` for parsing
 /// document text.
@@ -524,6 +525,21 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "apply-shadow-reads-per-written-target",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_SHADOW_READS_PER_WRITTEN_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "plan-peak-rss-ceiling",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PEAK_RSS_CEILING_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "plan-preview-pair-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "plan-pair-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
         armed: true,
     },
     ExitBar {

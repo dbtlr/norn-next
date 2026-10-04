@@ -48,6 +48,21 @@
 //! retention a shape builds after the find's pages are gone shows only once it
 //! climbs past them.
 //!
+//! **A plan is held three ways, over one planning child.** The child previews
+//! a `set --where`, a hub move with its cascade and a delete, and then applies
+//! each as previewed. A ceiling holds its whole-process peak at `realistic`,
+//! and two heap pairs hold, across the two profiles, what the previews alone
+//! raised the heap by and what the whole mix with its applies did, because a
+//! plan's memory is its operations and a fixed record per target, never the
+//! vault. The previews' pair is held at the read pair's resolution, so an
+//! eight-byte id kept for every document while planning fails it; the mix's
+//! is coarser, because an apply through a live host moves its reading by
+//! about 31 KB. Both readings are high-waters, so neither sees what planning
+//! builds and frees under its own peak: work proportional to the vault while
+//! planning is the counter lane's to refuse. A move's size-independence — a
+//! move that changes no bytes holding no copy of the document it moves, and
+//! one rewriting its own links at most one — is barred by NORN-345, not here.
+//!
 //! # What the measurement charges to whom
 //!
 //! Each reading is of a child process, spawned under the testkit's process
@@ -93,10 +108,12 @@ use norn_store::{
 use norn_testkit::heap;
 use norn_testkit::process::{Run, Sandbox};
 use norn_wire::{
-    Column, CountParams, CountReport, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
-    ErrorEnvelope, FindParams, FindReport, GetParams, GetReport, GroupKey, LinkFamily, LinkHealth,
-    Predicate, ResolutionTarget, SearchParams, SearchReport, ValidateParams, ValidateReport,
-    VaultAddress,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredValue, ChangesetOutcome, Column, CountParams,
+    CountReport, DeleteParams, DescribeParams, DescribeReport, DocumentPath, DocumentRow,
+    ErrorEnvelope, FieldChange, FindParams, FindReport, GetParams, GetReport, GroupKey, LinkFamily,
+    LinkHealth, MoveParams, MoveSubject, PlanDocument, Predicate, ResolutionTarget, ResolvedPlan,
+    SearchParams, SearchReport, SetParams, TargetResult, ValidateParams, ValidateReport,
+    VaultAddress, WriteTarget,
 };
 
 /// Every allocation this binary makes goes through the counting allocator, so
@@ -601,6 +618,541 @@ fn the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_th
     );
 }
 
+/// The case a planning child re-executes, which is the one that reads this
+/// constant.
+const PLAN_HARNESS_CASE: &str = "the_gate_profile_plans_inside_its_memory_bar";
+
+/// The frontmatter field the plan mix's `set --where` matches and rewrites.
+/// No generated document carries it, so the documents it matches are the
+/// planted ones alone, at both profiles.
+const PLAN_SET_FIELD: &str = "memory_plan_wave";
+
+/// How many documents the plan mix's `set --where` matches, fixed at both
+/// per-PR scales.
+const PLAN_SET_MATCHES: usize = 10;
+
+/// The stem of the hub the plan mix moves, the folder its in-links stand
+/// under, and the stem it is moved to. No generated document shares either
+/// stem.
+const PLAN_HUB_STEM: &str = "memory-plan-hub";
+const PLAN_HUB_LINKS_DIR: &str = "memory-plan-hub-links";
+const PLAN_MOVED_HUB_STEM: &str = "memory-plan-moved-hub";
+
+/// How many documents link the plan mix's hub by its bare stem, so its move
+/// plans a cascade of as many rewrites, fixed at both per-PR scales.
+const PLAN_HUB_IN_LINKS: usize = 20;
+
+/// The document the plan mix deletes, which no link names.
+const PLAN_DELETED: &str = "memory-plan-delete/memory-plan-lonely.md";
+
+/// What each planned write of the planning child writes, as the apply
+/// answers its targets: the set's matches, the hub with its in-links' rewrites
+/// and its new place, and the deleted document.
+const PLAN_WRITES: [(&str, usize); 3] = [
+    ("set", PLAN_SET_MATCHES),
+    ("move", PLAN_HUB_IN_LINKS + 2),
+    ("delete", 1),
+];
+
+/// Plant the planning child's subjects into `vault`'s tree, before anything
+/// attaches it: [`PLAN_SET_MATCHES`] documents carrying [`PLAN_SET_FIELD`],
+/// the hub with [`PLAN_HUB_IN_LINKS`] documents linking it by its bare stem,
+/// and the document the mix deletes.
+fn plant_plan_subjects(vault: &attach::Vault) {
+    let plant = |at: &str, content: &[u8]| {
+        let path = vault.path().join(at);
+        std::fs::create_dir_all(path.parent().expect("a planted document's folder"))
+            .expect("creating a planted document's folder");
+        std::fs::write(&path, content).expect("writing a planted document");
+    };
+    for at in 0..PLAN_SET_MATCHES {
+        plant(
+            &format!("memory-plan-set/{at:04}.md"),
+            format!("---\n{PLAN_SET_FIELD}: flip\n---\na matched document\n").as_bytes(),
+        );
+    }
+    plant(&format!("memory-plan-hub/{PLAN_HUB_STEM}.md"), b"the hub\n");
+    for at in 0..PLAN_HUB_IN_LINKS {
+        plant(
+            &format!("{PLAN_HUB_LINKS_DIR}/{at:04}.md"),
+            format!("See [[{PLAN_HUB_STEM}]].\n").as_bytes(),
+        );
+    }
+    plant(PLAN_DELETED, b"no link names me\n");
+}
+
+/// **The plan ceiling**, and the harness a planning child runs.
+///
+/// With [`HARNESS_ENV`] and its token set this process is the child: it
+/// attaches the tree the variable names with the plan subjects planted beside
+/// it, keeps it attached, and previews and applies every write of
+/// [`PLAN_WRITES`] through the host's write verbs instead of measuring
+/// anything. The peak this bars is the highest the process reached across the
+/// attach and every plan.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_gate_profile_plans_inside_its_memory_bar() {
+    if let Some(root) = std::env::var_os(HARNESS_ENV) {
+        plan_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
+        return;
+    }
+
+    let peak = plan_child("plan-gate", "realistic").peak_rss;
+    baselines::record(
+        "gate profile plans",
+        &[
+            ("peak resident set (MiB)", baselines::mebibytes(peak)),
+            (
+                "peak resident set ceiling (MiB)",
+                baselines::mebibytes(baselines::PLAN_PEAK_RSS_CEILING_BYTES),
+            ),
+        ],
+    );
+    assert!(
+        peak > 0,
+        "the planning child reported no peak resident set, so the ceiling holds no reading"
+    );
+    assert!(
+        baselines::fits(peak, baselines::PLAN_PEAK_RSS_CEILING_BYTES),
+        "attaching `realistic` and planning over it peaked at {} MiB against a {} MiB bar",
+        baselines::mebibytes(peak),
+        baselines::mebibytes(baselines::PLAN_PEAK_RSS_CEILING_BYTES)
+    );
+}
+
+/// **Planning holds its operations and a fixed record per target, never the
+/// vault**, as a difference in heap bytes across the two per-PR scales, read
+/// before anything is applied.
+///
+/// A planning child at each profile marks the heap once the attachment is
+/// ready, previews a `set --where` matching [`PLAN_SET_MATCHES`] documents, a
+/// move of a hub whose [`PLAN_HUB_IN_LINKS`] in-links its cascade rewrites,
+/// and a delete, holding the three resolved plans, and reads the most those
+/// previews raised the live heap above the mark before its first apply. Every
+/// write's targets are planted, the same at both profiles, so planning that
+/// holds its operations and a record per target holds the same bytes at
+/// `ambiguous` (300 documents) as at `realistic` (2000), and planning that
+/// held something for every document of the vault holds 1,700 more of it at
+/// `realistic`.
+///
+/// **No apply runs in the window**, so no watcher echo or commit moves the
+/// reading, and it is held at the read pair's resolution: an eight-byte id
+/// kept for every document while planning fails it, as
+/// [`PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records.
+///
+/// **The reading is a high-water**, the blind spot
+/// [`the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]
+/// declares: memory planning builds and frees under the previews' own peak,
+/// about 164 KB above the attach, never raises the reading. Work proportional to the vault while planning is
+/// the counter lane's to refuse, where
+/// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
+/// `set --where`'s steps flat across the same two scales. The high-water's
+/// limit is watched under NORN-131, as the read pair's is.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_plan_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile()
+ {
+    let small = plan_child("plan-previews-ambiguous", "ambiguous").previews;
+    let large = plan_child("plan-previews-realistic", "realistic").previews;
+    hold_plan_pair(
+        "the plan previews",
+        small,
+        large,
+        baselines::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **A plan applied through a live host holds its operations and a fixed
+/// record per target, never the vault**, as a difference in heap bytes across
+/// the two per-PR scales.
+///
+/// The same planning child as
+/// [`the_plan_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]
+/// goes on to apply each plan exactly as previewed, and reports the most the
+/// six requests raised the live heap above the same mark. An apply's
+/// publications reach the watcher's threads while it commits, which moves
+/// this reading between two states about 31 KB apart, so its allowance is
+/// coarser than the previews': it fails a retention of about 24 bytes a
+/// document where both readings sit in one state and about 43 where the
+/// excursion lands on `ambiguous` alone, so an id kept for every document
+/// passes it and only the previews' pair refuses one kept while planning, as
+/// [`PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records.
+///
+/// **The reading is a high-water, and the mix's peak is high.** Memory
+/// planning or applying builds and frees under it never raises the reading,
+/// which at these profiles leaves a working set of about 166 KB unseen, up to
+/// about 81 bytes for each of `realistic`'s documents. Work proportional to the vault is the counter
+/// lane's to refuse, where
+/// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
+/// `set --where`'s steps flat across the same two scales. The high-water's
+/// limit is watched under NORN-131, as the read pair's is.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn the_plan_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile() {
+    let small = plan_child("plan-heap-ambiguous", "ambiguous").mix;
+    let large = plan_child("plan-heap-realistic", "realistic").mix;
+    hold_plan_pair(
+        "the plan mix",
+        small,
+        large,
+        baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// Record a plan stretch's heap readings at the two per-PR scales and hold
+/// the `realistic` one to at most `allowance` bytes over the `ambiguous` one.
+fn hold_plan_pair(stretch: &str, small: u64, large: u64, allowance: u64) {
+    let growth = large.saturating_sub(small);
+    baselines::record(
+        &format!("heap {stretch} raised above the attach, across the two per-PR scales"),
+        &[
+            ("ambiguous, 300 documents (bytes)", small.to_string()),
+            ("realistic, 2000 documents (bytes)", large.to_string()),
+            (
+                "realistic minus ambiguous (bytes)",
+                (i128::from(large) - i128::from(small)).to_string(),
+            ),
+            ("growth allowance (bytes)", allowance.to_string()),
+        ],
+    );
+    assert!(
+        small > 0 && large > 0,
+        "a planning child reported no heap reading of {stretch} above its attach, so the pair \
+         compares nothing"
+    );
+    assert!(
+        baselines::fits(growth, allowance),
+        "going from `ambiguous` (300 documents) to `realistic` (2000 documents) grew the heap \
+         {stretch} raised by {growth} bytes, past the {allowance} byte allowance: `ambiguous` held \
+         {small} bytes and `realistic` {large}",
+    );
+}
+
+/// What a planning child's run comes to: the peak resident set the kernel
+/// accounted to it, and the most each measured stretch raised the heap above
+/// the mark set before it.
+struct PlanReading {
+    peak_rss: u64,
+    previews: u64,
+    mix: u64,
+}
+
+/// Generate `profile`'s tree with the plan subjects planted beside it, run the
+/// planning child over it, and hand back what the child's run came to.
+///
+/// **A reading is only a statement about plans that landed.** The child
+/// reports how many targets each write's apply wrote, and the parent holds
+/// that to [`PLAN_WRITES`]: a write that resolved nothing, or a report
+/// missing one, fails here rather than reading as a cheap plan.
+fn plan_child(label: &str, profile: &str) -> PlanReading {
+    let documents = norn_fixtures::Profile::by_name(profile)
+        .unwrap_or_else(|| panic!("no profile named `{profile}`"))
+        .docs;
+    let (peak_rss, reported) = child_run(label, profile, PLAN_HARNESS_CASE, plant_plan_subjects);
+    let report = PlanReport::from_stdout(&reported).unwrap_or_else(|problem| panic!("{problem}"));
+    if let Err(problem) = report.writes_as_pinned() {
+        panic!("over `{profile}`, {problem}");
+    }
+    // Every planted subject stands once the plans land, save the one the
+    // mix deletes.
+    let planted = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1;
+    assert!(
+        reported.contains(&report_line(documents + planted - 1)),
+        "`{profile}` holds {documents} documents, {planted} plan subjects were planted beside \
+         them and the mix deletes one, and the harness reported: {reported}"
+    );
+    let heap =
+        |subject: &str| u64::try_from(report.heap(subject)).expect("a heap reading fits a u64");
+    let reading = PlanReading {
+        peak_rss,
+        previews: heap("previews"),
+        mix: heap("mix"),
+    };
+    baselines::record(
+        &format!("heap each plan stretch held ({label}, {profile})"),
+        &[
+            ("previews (bytes)", reading.previews.to_string()),
+            ("mix (bytes)", reading.mix.to_string()),
+            (
+                "peak resident set (MiB)",
+                baselines::mebibytes(reading.peak_rss),
+            ),
+        ],
+    );
+    reading
+}
+
+/// The planning harness: adopt the tree at `root`, attach it, keep it
+/// attached, and preview then apply each write of [`PLAN_WRITES`] through the
+/// host's write verbs, each apply landing exactly the plan its preview
+/// answered.
+///
+/// **One heap mark, read twice.** It is set once the attachment is ready and
+/// read once the three previews have resolved, before the first apply, and
+/// again once the three applies have landed. Each reading is the most the
+/// requests up to it raised the live heap above what the attached host held
+/// as the first began.
+///
+/// **The mix previews all three writes before it applies any.** An apply's
+/// publication comes back to the live host as a watcher echo, which the host
+/// reads to confirm it as the apply's own, and that confirmation runs as a
+/// job on the entry's one worker slot whenever the watcher delivers it. A
+/// preview runs on this thread beside it, so a preview after an apply stacks
+/// on that echo or not by timing alone, and the mix read up to 66 KB apart
+/// across runs that way. With every preview ahead of every apply, the
+/// previews' reading holds no apply's work at all, and what is left to move
+/// the mix's is the watcher's own threads taking an apply's publications in
+/// while it commits, which moves it between two states about 31 KB apart.
+/// The three resolved plans are held together across the applies, which is
+/// what the mix holds of them.
+#[allow(clippy::disallowed_macros)] // The child's report is a machine-consumed stream its parent reads.
+fn plan_and_report(root: &Path) {
+    let vault = attach::Vault::adopt(root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let address = || VaultAddress::name(vault.name().clone());
+    let document = |at: &str| DocumentPath::new(at).expect("a document path");
+    let mut lines = Vec::new();
+    let mut landed = |write: &str, plan: ResolvedPlan| {
+        let targets = applied_plan(write, &host, plan);
+        lines.push(format!("plan {write} wrote {targets}"));
+    };
+
+    let mark = heap::Mark::set();
+    let set = previewed_plan(
+        "set",
+        host.set(SetParams::new(
+            address(),
+            ApplyMode::Preview,
+            WriteTarget::matching([Predicate::equal_to(PLAN_SET_FIELD, "flip")]),
+            vec![FieldChange::set(
+                PLAN_SET_FIELD,
+                AuthoredValue::string("flipped"),
+            )],
+        )),
+    );
+    let hub = previewed_plan(
+        "move",
+        host.move_path(MoveParams::new(
+            address(),
+            ApplyMode::Preview,
+            MoveSubject::document(
+                document(&format!("memory-plan-hub/{PLAN_HUB_STEM}.md")),
+                document(&format!("memory-plan-moved/{PLAN_MOVED_HUB_STEM}.md")),
+            ),
+        )),
+    );
+    assert_eq!(
+        hub.operations[0].cascade.len(),
+        PLAN_HUB_IN_LINKS,
+        "the hub's move planned a cascade other than one rewrite per in-link"
+    );
+    let deleted = previewed_plan(
+        "delete",
+        host.delete(DeleteParams::new(
+            address(),
+            ApplyMode::Preview,
+            document(PLAN_DELETED),
+        )),
+    );
+    let previews = mark.peak_above();
+    landed("set", set);
+    landed("move", hub);
+    landed("delete", deleted);
+    let mix = mark.peak_above();
+
+    let mut store = vault.store();
+    println!("{}", report_line(attach::derived_documents(&mut store)));
+    for line in lines {
+        println!("{line}");
+    }
+    println!("plan heap previews {previews}");
+    println!("plan heap mix {mix}");
+}
+
+/// The plan a write verb's preview answered.
+fn previewed_plan(
+    write: &str,
+    answered: Result<norn_host::PendingApply, ErrorEnvelope>,
+) -> ResolvedPlan {
+    let answered = answered
+        .unwrap_or_else(|refusal| panic!("the {write} preview was refused: {refusal:?}"))
+        .wait()
+        .unwrap_or_else(|refusal| panic!("the {write} preview was refused: {refusal:?}"));
+    let ApplyReport::Previewed { plan, .. } = answered.report else {
+        panic!("the {write} preview answered {:?}", answered.report);
+    };
+    plan
+}
+
+/// Apply `plan` through `host`, exactly as previewed, and hand back how many
+/// targets it wrote.
+///
+/// **Every target must come back as written.** An apply answers a target
+/// that already stood at its after-state as found rather than written, and
+/// such a target cost the apply no write; counting it would let a plan that
+/// landed nothing pass as one that landed its targets.
+fn applied_plan(write: &str, host: &attach::ServingHost, plan: ResolvedPlan) -> usize {
+    let answered = host
+        .apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::resolved(plan),
+        ))
+        .unwrap_or_else(|refusal| panic!("the {write} apply was refused: {refusal:?}"))
+        .wait()
+        .unwrap_or_else(|refusal| panic!("the {write} apply was refused: {refusal:?}"));
+    let ApplyReport::Applied {
+        changeset, targets, ..
+    } = answered.report
+    else {
+        panic!("the {write} apply answered {:?}", answered.report);
+    };
+    assert_eq!(
+        changeset,
+        ChangesetOutcome::Committed,
+        "the {write} apply committed no changeset"
+    );
+    let unwritten: Vec<_> = targets
+        .iter()
+        .filter(|target| target.result != TargetResult::Wrote)
+        .collect();
+    assert!(
+        unwritten.is_empty(),
+        "the {write} apply came back with targets it did not write: {unwritten:?}"
+    );
+    targets.len()
+}
+
+/// What a planning child reports: how many targets each write of
+/// [`PLAN_WRITES`] wrote, and the heap each measured stretch raised.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct PlanReport {
+    wrote: std::collections::BTreeMap<String, usize>,
+    heap: std::collections::BTreeMap<String, usize>,
+}
+
+impl PlanReport {
+    /// The heap stretches a planning child measures.
+    const STRETCHES: [&str; 2] = ["previews", "mix"];
+
+    /// The report a child's output carries, refused where a `plan` line is
+    /// no report, where a write or a stretch is missing, or where one the
+    /// child does not run is present.
+    fn from_stdout(stdout: &str) -> Result<Self, String> {
+        let mut report = PlanReport::default();
+        for line in stdout.lines().filter(|line| line.starts_with("plan ")) {
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let number = |text: &str| {
+                text.parse::<usize>()
+                    .map_err(|problem| format!("the plan harness reported `{line}`: {problem}"))
+            };
+            match tokens.as_slice() {
+                ["plan", "heap", stretch, bytes] => {
+                    report.heap.insert((*stretch).to_string(), number(bytes)?);
+                }
+                ["plan", write, "wrote", targets] => {
+                    report.wrote.insert((*write).to_string(), number(targets)?);
+                }
+                _ => {
+                    return Err(format!(
+                        "the plan harness reported `{line}`, which is no plan report"
+                    ));
+                }
+            }
+        }
+        let writes: Vec<&str> = PLAN_WRITES.iter().map(|(write, _)| *write).collect();
+        let named = |names: &[&str], held: &std::collections::BTreeMap<String, usize>| {
+            names.len() == held.len() && names.iter().all(|name| held.contains_key(*name))
+        };
+        if !named(&writes, &report.wrote) || !named(&Self::STRETCHES, &report.heap) {
+            return Err(format!(
+                "the plan harness reported writes {:?} and heap stretches {:?} where it runs \
+                 {writes:?} and {:?}: {stdout}",
+                report.wrote.keys().collect::<Vec<_>>(),
+                report.heap.keys().collect::<Vec<_>>(),
+                Self::STRETCHES,
+            ));
+        }
+        Ok(report)
+    }
+
+    /// Refuse a report whose writes did not write [`PLAN_WRITES`], naming the
+    /// first that wrote otherwise.
+    fn writes_as_pinned(&self) -> Result<(), String> {
+        for (write, expected) in PLAN_WRITES {
+            let wrote = self.wrote.get(write).copied().unwrap_or(0);
+            if wrote != expected {
+                return Err(format!(
+                    "the plan harness's {write} wrote {wrote} targets where its plan writes \
+                     {expected}, so the reading is not a reading over the plan: {:?}",
+                    self.wrote
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The heap `stretch` raised, which a parsed report carries.
+    fn heap(&self, stretch: &str) -> usize {
+        self.heap[stretch]
+    }
+}
+
+/// **The parent refuses a plan reading it cannot tie to every write landing
+/// as pinned.** A report missing a write or a heap stretch, or one whose write
+/// landed other than its plan writes, fails the bar rather than passing as a
+/// cheap plan.
+#[test]
+fn a_plan_reading_stands_only_on_a_report_of_every_write_landing_as_pinned() {
+    let printed = |wrote: &dyn Fn(&str, usize) -> Option<usize>, stretches: &[&str]| {
+        PLAN_WRITES
+            .iter()
+            .filter_map(|(write, targets)| {
+                wrote(write, *targets).map(|targets| format!("plan {write} wrote {targets}"))
+            })
+            .chain(
+                stretches
+                    .iter()
+                    .map(|stretch| format!("plan heap {stretch} 4096")),
+            )
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let whole = PlanReport::from_stdout(&printed(
+        &|_, targets| Some(targets),
+        &PlanReport::STRETCHES,
+    ))
+    .expect("a report of every write and stretch");
+    assert_eq!(whole.writes_as_pinned(), Ok(()));
+    assert_eq!(whole.heap("previews"), 4096);
+
+    let short = PlanReport::from_stdout(&printed(
+        &|write, targets| (write != "delete").then_some(targets),
+        &PlanReport::STRETCHES,
+    ))
+    .expect_err("a write the child never ran");
+    assert!(short.contains("where it runs"), "{short}");
+
+    let unmeasured = PlanReport::from_stdout(&printed(&|_, targets| Some(targets), &["mix"]))
+        .expect_err("a stretch the child never measured");
+    assert!(unmeasured.contains("heap stretches"), "{unmeasured}");
+
+    let nothing = PlanReport::from_stdout(&printed(
+        &|write, targets| Some(if write == "set" { 0 } else { targets }),
+        &PlanReport::STRETCHES,
+    ))
+    .expect("a report of every write and stretch")
+    .writes_as_pinned()
+    .expect_err("a write that wrote nothing");
+    assert!(nothing.contains("set wrote 0 targets"), "{nothing}");
+
+    let garbled = PlanReport::from_stdout("plan everything\n").expect_err("no plan report");
+    assert!(garbled.contains("no plan report"), "{garbled}");
+}
+
 /// Generate `profile`'s tree under the minimal schema, attach it in a child,
 /// and hand back the peak resident set the kernel accounted to that child.
 fn attach_peak(label: &str, profile: &str) -> u64 {
@@ -668,11 +1220,26 @@ fn read_child(label: &str, profile: &str) -> ReadReading {
 /// Generate `profile`'s tree under `schema`, run `case` over it in a child, and
 /// hand back the peak resident set the kernel accounted to that child with what
 /// it printed.
+fn child_peak(label: &str, profile: &str, schema: &[u8], case: &str) -> (u64, String) {
+    child_run(label, profile, case, |vault| {
+        std::fs::write(vault.path().join(".norn/schema.yaml"), schema)
+            .expect("write the vault schema");
+    })
+}
+
+/// Generate `profile`'s tree, let `prepare` add to it, run `case` over it in a
+/// child, and hand back the peak resident set the kernel accounted to that
+/// child with what it printed.
 ///
 /// The harness binary is installed into the sandbox before it runs, because the
 /// artifact cargo built is a file a concurrent build may rewrite. The tree goes
 /// inside the sandbox too, so it is removed with it.
-fn child_peak(label: &str, profile: &str, schema: &[u8], case: &str) -> (u64, String) {
+fn child_run(
+    label: &str,
+    profile: &str,
+    case: &str,
+    prepare: impl FnOnce(&attach::Vault),
+) -> (u64, String) {
     baselines::assert_the_profile_the_bars_were_authored_on();
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
     let harness = sandbox
@@ -680,7 +1247,7 @@ fn child_peak(label: &str, profile: &str, schema: &[u8], case: &str) -> (u64, St
         .expect("installing the harness");
     let root: PathBuf = sandbox.work_dir().join("attached");
     let vault = attach::Vault::generate(&root, profile);
-    std::fs::write(vault.path().join(".norn/schema.yaml"), schema).expect("write the vault schema");
+    prepare(&vault);
     let token = attach::issue_harness_token(&root);
 
     let outcome = Run::new(&sandbox, &harness)
