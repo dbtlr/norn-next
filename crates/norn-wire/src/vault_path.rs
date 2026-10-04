@@ -10,8 +10,8 @@
 //!
 //! **Three altitudes of one grammar.** [`PathProblem::of_place`] is the floor
 //! every vault-relative path keeps, the folder and file paths that name places
-//! on disk included: it names something and does not start at a filesystem
-//! root. [`PathProblem::of_segments`] adds the segment rules, which a
+//! on disk included: it names something, does not start at a filesystem
+//! root, and carries no NUL. [`PathProblem::of_segments`] adds the segment rules, which a
 //! directory prefix the store ranges over keeps. [`PathProblem::of_document`]
 //! adds the leaf's rule, which only a document has.
 //!
@@ -49,13 +49,18 @@ pub enum PathProblem {
 
 impl PathProblem {
     /// Why `text` names no place in a vault, or `None` where it names one:
-    /// it is not empty and does not start at a filesystem root.
+    /// it is not empty, does not start at a filesystem root, and carries no NUL.
     pub fn of_place(text: &str) -> Option<Self> {
         if text.is_empty() {
             return Some(PathProblem::Empty);
         }
         if text.starts_with(SEPARATOR) {
             return Some(PathProblem::Absolute);
+        }
+        // NUL names no filesystem entry. Other controls can occur in folder
+        // and attachment names, so the floor refuses only this character.
+        if text.contains('\0') {
+            return Some(PathProblem::ControlCharacter);
         }
         None
     }

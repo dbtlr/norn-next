@@ -27,10 +27,10 @@
 //! document.** Folders are not transitions, and the forecast and the applied
 //! report name the folders a plan makes and removes. A document path's grammar
 //! would fit a folder, but its published description says it is where a
-//! document stands, so a folder path is the same two rules under a name and a
+//! document stands, so a folder path keeps the path floor under a name and a
 //! description of its own. A folder move takes only the documents its folder
 //! holds, and the forecast names every other file it leaves there — an
-//! attachment, a file the vault does not read — by a file path: the same two
+//! attachment, a file the vault does not read — by a file path: the same floor
 //! rules again, since neither a document path nor a folder path describes it.
 //!
 //! **A link advisory names its link as the change set would, rather than
@@ -61,8 +61,8 @@ use crate::vault_path::PathProblem;
 
 /// A path relative to the vault root under a name and a description of its
 /// own, read through on every door by the floor every vault-relative path
-/// keeps ([`PathProblem::of_place`]): it names something, and it does not
-/// start at a filesystem root. A folder or file path names a place on disk at
+/// keeps ([`PathProblem::of_place`]): it names something, does not start at a
+/// filesystem root, and carries no NUL. A folder or file path names a place on disk at
 /// the spelling the tree lists it, which the document grammar does not
 /// govern, so it keeps the floor alone.
 macro_rules! vault_relative_path {
@@ -120,8 +120,8 @@ macro_rules! vault_relative_path {
             }
 
             /// A string with a floor of one character, and the rule against a
-            /// leading slash stated in the description, as a document path
-            /// states it.
+            /// leading slash or NUL stated in the description, as a document
+            /// path states its grammar.
             fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
                 json_schema!({
                     "type": "string",
@@ -137,10 +137,10 @@ vault_relative_path!(
     /// Where a folder stands in its vault, relative to the vault root.
     ///
     /// On the wire a folder path is the string itself: `"notes/archive"`. It is
-    /// not empty and it does not start with a slash.
+    /// not empty, it does not start with a slash, and it carries no NUL.
     FolderPath,
     "folder path",
-    "Where a folder stands in its vault, relative to the vault root. Not empty, and never starting with a slash."
+    "Where a folder stands in its vault, relative to the vault root. Not empty, never starting with a slash, and never carrying NUL."
 );
 
 vault_relative_path!(
@@ -149,10 +149,10 @@ vault_relative_path!(
     /// read as a document.
     ///
     /// On the wire a file path is the string itself: `"notes/diagram.png"`. It
-    /// is not empty and it does not start with a slash.
+    /// is not empty, it does not start with a slash, and it carries no NUL.
     FilePath,
     "file path",
-    "Where a file that is not a vault document stands in its vault, relative to the vault root. Not empty, and never starting with a slash."
+    "Where a file that is not a vault document stands in its vault, relative to the vault root. Not empty, never starting with a slash, and never carrying NUL."
 );
 
 /// What a plan does to one link that a caller should look at.

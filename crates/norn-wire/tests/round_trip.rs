@@ -8309,6 +8309,34 @@ fn file(text: &str) -> FilePath {
     FilePath::new(text).expect("a legal file path")
 }
 
+/// NUL cannot name a place on disk. Other control characters can, so folder
+/// and file paths retain them rather than adopting the document grammar.
+#[test]
+fn folder_and_file_paths_refuse_nul_before_they_reach_the_filesystem() {
+    for text in ["\0", "notes/nu\0l", "é🦀\n\0"] {
+        let encoded = serde_json::to_string(text).expect("a JSON string");
+        assert!(FolderPath::new(text).is_err(), "a folder admitted {text:?}");
+        assert!(FilePath::new(text).is_err(), "a file admitted {text:?}");
+        assert!(serde_json::from_str::<FolderPath>(&encoded).is_err());
+        assert!(serde_json::from_str::<FilePath>(&encoded).is_err());
+    }
+    for text in ["notes/tab\t", "notes/line\n", "notes/control\u{1}"] {
+        let encoded = serde_json::to_string(text).expect("a JSON string");
+        assert_eq!(FolderPath::new(text).unwrap().as_str(), text);
+        assert_eq!(FilePath::new(text).unwrap().as_str(), text);
+        assert_eq!(
+            serde_json::from_str::<FolderPath>(&encoded)
+                .unwrap()
+                .as_str(),
+            text
+        );
+        assert_eq!(
+            serde_json::from_str::<FilePath>(&encoded).unwrap().as_str(),
+            text
+        );
+    }
+}
+
 /// **A link advisory points into the change set by the link's key**, never
 /// repeating a resolution, and a folder move's left-behind file is named by a
 /// path of its own.
