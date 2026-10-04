@@ -553,6 +553,16 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "plan-move-preview-size-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
+        name: "plan-move-apply-over-derivation-heap-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
         name: "soak-host-peak-rss-ceiling",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
         armed: true,
