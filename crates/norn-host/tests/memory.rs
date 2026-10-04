@@ -59,8 +59,9 @@
 //! is coarser, because an apply through a live host moves its reading by
 //! about 31 KB. Both readings are high-waters, so neither sees what planning
 //! builds and frees under its own peak: work proportional to the vault while
-//! planning is the counter lane's to refuse. A move's size-independence,
-//! holding no copy of the document it moves, is barred by NORN-345, not here.
+//! planning is the counter lane's to refuse. A move's size-independence — a
+//! move that changes no bytes holding no copy of the document it moves, and
+//! one rewriting its own links at most one — is barred by NORN-345, not here.
 //!
 //! # What the measurement charges to whom
 //!

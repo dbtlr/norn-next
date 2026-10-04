@@ -1161,8 +1161,8 @@ an absolute peak ceiling. Both heap readings are high-waters: memory planning bu
 under its own peak, about 164 KB at these profiles, is not seen, and work proportional to the
 vault while planning is the counter lane's to refuse, which holds a `set --where`'s steps flat
 across the two scales. NORN-131 watches the high-water limit, as it does the read bar's. A
-move's size-independence, holding no copy of the document it moves, is barred by NORN-345,
-not here.
+move's size-independence — a move that changes no bytes holding no copy of the document it
+moves, and one rewriting its own links at most one — is barred by NORN-345, not here.
 
 ### 4. One obvious path
 
