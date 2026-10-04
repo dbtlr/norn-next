@@ -1147,10 +1147,11 @@ counted by the process's own allocator, at the 300-document and ~2k-document pro
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the
 whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
-stays under the find's pages is not seen. No query shape carries a timing bar. Five `plan-`
+stays under the find's pages is not seen. No query shape carries a timing bar. Six `plan-`
 bars hold one process that previews a move of a 4 KiB document and of a 4 MiB one that change
-no bytes, then previews a `set --where`, a hub move with its cascade and a delete, applies each
-of those three as previewed, and then applies the two moves, because a plan's memory is its
+no bytes and the same pair of moves that rewrite their own links, then previews a `set
+--where`, a hub move with its cascade and a delete, applies each of those three as previewed,
+and then applies the four moves, because a plan's memory is its
 operations and a fixed record per target, never the vault and never the bytes of a file it did
 not author. The heap the mix's previews raise above the attached host, read before its first
 apply, is bounded in bytes across the two profiles at the read bar's resolution, so planning
@@ -1159,7 +1160,7 @@ applies is bounded the same way but more coarsely, because an apply's publicatio
 watcher's threads while it commits and move that reading by about 31 KB: it fails a retention
 from about 24 bytes a document, or about 43 where that excursion lands on the 300-document
 profile alone. Both readings are high-waters: memory planning builds and frees under its own
-peak, about 171 KB at these profiles, is not seen, and work proportional to the vault while
+peak, about 161 KB at these profiles, is not seen, and work proportional to the vault while
 planning is the counter lane's to refuse, which holds a `set --where`'s steps flat across the
 two scales. NORN-131 watches the high-water limit, as it does the read bar's. **A move that
 changes no bytes holds no copy of its document once the vault has indexed it**: the heap the
@@ -1175,12 +1176,18 @@ that keeps a copy of the landed document across its commit fails it by about one
 echoes are a timing hazard these bars avoid rather than read**: the host handles an apply's
 publication and a write from outside on its own threads after the request answers, and the
 echo of a large landed document costs about its body, so every size-pair mark is set once the
-live heap has stopped moving and every preview runs before the first apply. The declared limits
-are not barred: a move over a vault whose index does not vouch for the moved document reads it
-whole once, and a move that rewrites the moved document's own links reads it whole and holds
-the bytes it authors. The ~2k-document profile's process carries an absolute peak ceiling,
-which the 4 MiB documents raise through the attach heal and the commit's derivation, not
-through a plan.
+live heap has stopped moving and every preview runs before the first apply. A move over a vault
+whose index does not vouch for the moved document reads it whole once, a declared limit not
+barred. **A move that rewrites the moved document's own links is barred at its measured floor,
+not at one copy**: its 4 MiB preview may exceed its 4 KiB one by five bodies and 64 KiB, the
+three allocations live together while the rewrite verifies itself — the held before-body, the
+rewritten bytes, and pulldown-cmark's first-pass tree over them, about three bodies. The
+verification re-scans the rewritten document whole, because a backtick, HTML, a reference
+definition or the frontmatter reaches content far from an edit, and pulldown-cmark
+materialises that tree before it yields an event. The bar refuses a regression from that
+floor; it is not a target. The ~2k-document profile's process carries an absolute peak ceiling,
+which the 4 MiB documents raise through the attach heal, the commit's derivation and the
+relinking move's floor.
 
 ### 4. One obvious path
 
@@ -2590,9 +2597,10 @@ the plan's hash, one copy, and take its links from its bytes** — a declared li
 because a plan and its re-send must finish over a vault whose index lags its files (ADR
 0032), as a move did before it carried anything. A move an edit, a link rewrite or its own
 cascade lands on is not carried: it reads the moved document whole, once, and composes from
-that one held copy, and the rewrite it composes is new bytes the plan authors — the
-rewritten copy and the text layer's scans of it stand beside the held one, so such a move's
-peak is several times its document, not one; where its own cascade lands, planning has
+that one held copy, and the rewrite it composes is new bytes the plan authors. Verifying a
+rewrite re-scans those bytes whole beside the held copy, so a move that rewrites its own
+links peaks at about five times its document — the held copy, the rewritten bytes and the
+parser's tree over them — which a memory bar holds as a regression floor; where its own cascade lands, planning has
 already streamed it once, so it opens the file twice. Every template value
 resolves at planning, so the applier recomposes each target as a pure function of the
 before-states and the operations: before staging anything it runs the plan's operations

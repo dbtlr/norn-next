@@ -155,10 +155,12 @@
 //! index lags its files plans as it always did. A moved document an edit, a
 //! link rewrite or a cascade lands on is no carried one: it is read whole
 //! once and composed from that held copy, and the rewrite composed from it
-//! is bytes the plan authors, held with the text layer's scans of them
-//! beside the original, so its peak is several times the document; where its
-//! own cascade lands, an earlier pass streamed it, so the file is opened
-//! twice.
+//! is bytes the plan authors. Verifying that rewrite re-scans the rewritten
+//! bytes whole beside the held copy, so a move that rewrites its own links
+//! peaks at about five times its document — the held copy, the rewritten
+//! bytes and the parser's tree over them — which the memory lane bars as a
+//! regression floor, not a target; where its own cascade lands, an earlier
+//! pass streamed it, so the file is opened twice.
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's

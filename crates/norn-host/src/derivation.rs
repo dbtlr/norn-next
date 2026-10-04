@@ -1096,7 +1096,9 @@ pub(crate) fn parsed_links(document: &Document<'_>) -> Vec<LinkFact> {
 /// The document `source` spells, as the text layer parses it: the one parse
 /// a plan's reading of a document's links, and its respelling of them, go
 /// through, counted on a test's thread so a case can hold planning to one
-/// parse of a body ([`PARSES`]).
+/// parse of a body ([`PARSES`]). The body scans the text layer runs on that
+/// document, and the re-scan of the rewritten bytes a respelling verifies
+/// itself by, are its own and not counted here.
 pub(crate) fn parsed(source: &str) -> Document<'_> {
     #[cfg(test)]
     PARSES.with(|parses| parses.set(parses.get() + 1));
