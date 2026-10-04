@@ -27,9 +27,12 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::TargetNaming;
-use norn_wire::{Backlinks, LinkFamily, Operation, OperationId, OperationKind};
+use norn_wire::{
+    AuthorCondition, Backlinks, DocumentPath, LinkFamily, Operation, OperationId, OperationKind,
+};
 
 use super::compose::touches;
+use super::control::role_at;
 use super::links::rewrite_destination;
 
 /// Where the content a file holds was drawn from.
@@ -386,12 +389,6 @@ impl Lineage {
         self.edited.get(&position)
     }
 
-    /// Every file whose before-state an edit or an authored link rewrite of
-    /// the plan acted on ([`Self::edited`]), once per edit.
-    pub(crate) fn edited_sources(&self) -> impl Iterator<Item = &NormalizedPath> {
-        self.edited.values()
-    }
-
     /// Each file whose content at the end of the plan is another file's
     /// before-state, and where that content was drawn from.
     pub(crate) fn drawing(&self) -> impl Iterator<Item = (&NormalizedPath, &Drawn)> {
@@ -418,6 +415,134 @@ impl Lineage {
     fn drawing_map(&self) -> BTreeMap<&NormalizedPath, &Drawn> {
         self.drawing().collect()
     }
+}
+
+/// **The one rule for which documents a plan carries byte for byte**: the
+/// files whose before-state no operation of the plan composes from, so
+/// planning and the applier read them streamed and hold none of their
+/// bytes, and a target whose content is one of them is written as the write
+/// kernel's copy of it (`norn_fs::Content::CopyOf`).
+///
+/// **Who reads it.** Composition reads a carried file streamed and carries
+/// its content unread ([`super::compose::After::Carried`]), wherever the
+/// plan's moves take it; the applier observes a target streamed where it
+/// holds no byte composition reads on either side ([`Carried::streams`]),
+/// and its recomposition answers a carried file only streamed. Both build
+/// it here, from the operations and their lineage, so the two never decide
+/// apart: what planning composes as carried is what the applier observes
+/// streamed and stages as a copy.
+///
+/// **A file is carried** where some move names it as an end, and:
+/// - every operation naming it names it as a move's end alone
+///   ([`moved_only`]) — an edit, a create, a delete or a control-file write
+///   naming it reads it whole, as does an author's expected value on it;
+/// - no edit or authored link rewrite acts on its before-state wherever the
+///   plan's moves take it ([`Lineage::edited`]), and no cascade rewrites the
+///   holder its content ends at ([`Lineage::source`]);
+/// - no case-only rename publishes it at another file's spelling: the write
+///   kernel's respell takes held bytes or none
+///   (`norn_fs::Transition::Respell`), so content a respell lands that is
+///   not the renamed file's own is held.
+///
+/// A target refilled by a later move — a chain, `[b→c, a→b]` — is a copy as
+/// a create is, the write kernel staging a replace from a copy as it stages
+/// a create, so a chain carries end to end.
+#[derive(Debug, Default)]
+pub(crate) struct Carried {
+    files: BTreeSet<NormalizedPath>,
+}
+
+impl Carried {
+    /// The files `operations`, followed as `lineage` follows them, carry.
+    pub(crate) fn of(
+        operations: &[Operation],
+        lineage: &Lineage,
+        normalizer: &PathNormalizer,
+    ) -> Carried {
+        let identity = |path: &str| normalizer.normalize(Path::new(path)).ok();
+        let mut files = moved_only(operations, normalizer);
+        for file in lineage.edited.values() {
+            files.remove(file);
+        }
+        for operation in operations {
+            for rewrite in &operation.cascade {
+                if let Some(drawn) =
+                    identity(rewrite.path.as_str()).and_then(|holder| lineage.source(&holder))
+                {
+                    files.remove(&drawn.from);
+                }
+            }
+            if let OperationKind::MoveDocument { from, to } = &operation.kind
+                && let (Some(from), Some(to)) = (identity(from.as_str()), identity(to.as_str()))
+                && from == to
+                && let Some(drawn) = lineage.source(&from)
+                && drawn.from != from
+            {
+                files.remove(&drawn.from);
+            }
+        }
+        Carried { files }
+    }
+
+    /// Whether the plan carries what `file` held before it.
+    pub(crate) fn carries(&self, file: &NormalizedPath) -> bool {
+        self.files.contains(file)
+    }
+
+    /// Whether a target at `file` holds no byte composition reads on either
+    /// side, so the applier observes it streamed: its before-state absent
+    /// (`before` false) or carried, and its after-state absent (`after`
+    /// false) or the content of a carried file, as `lineage` follows it.
+    pub(crate) fn streams(
+        &self,
+        file: &NormalizedPath,
+        before: bool,
+        after: bool,
+        lineage: &Lineage,
+    ) -> bool {
+        (!before || self.carries(file))
+            && (!after
+                || lineage
+                    .source(file)
+                    .is_some_and(|drawn| self.carries(&drawn.from)))
+    }
+}
+
+/// Each file some move of `operations` names as an end and no operation
+/// names otherwise — no edit, create, delete, control-file write or authored
+/// link rewrite names it, nor an author's expected value — and that is no
+/// control file: the part of [`Carried`]'s rule that needs no order, so a
+/// look taken before the plan is ordered (`super::order`) reads such a file
+/// streamed as composition will.
+pub(crate) fn moved_only(
+    operations: &[Operation],
+    normalizer: &PathNormalizer,
+) -> BTreeSet<NormalizedPath> {
+    let identity = |path: &DocumentPath| normalizer.normalize(Path::new(path.as_str())).ok();
+    let mut ends = BTreeSet::new();
+    let mut named_otherwise = BTreeSet::new();
+    for operation in operations {
+        let moves = matches!(operation.kind, OperationKind::MoveDocument { .. });
+        for path in touches(&operation.kind) {
+            let Some(file) = identity(path) else {
+                continue;
+            };
+            if moves && role_at(path.as_str()).is_none() {
+                ends.insert(file);
+            } else {
+                named_otherwise.insert(file);
+            }
+        }
+        for condition in &operation.conditions {
+            if let AuthorCondition::ExpectedValue { path, .. } = condition
+                && let Some(file) = identity(path)
+            {
+                named_otherwise.insert(file);
+            }
+        }
+    }
+    ends.retain(|file| !named_otherwise.contains(file));
+    ends
 }
 
 /// The cycle among `drawing` whose moves hold the lowest position, counting

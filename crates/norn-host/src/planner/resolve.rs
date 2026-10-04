@@ -134,7 +134,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         if let Some(cycle) = lineage.content_cycle() {
             return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
         }
-        if leave_out_unvouched(
+        if read_carried_links(
             &operations,
             &order,
             &composition,
@@ -142,9 +142,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             &mut left_out,
             view,
             links,
-        )
-        .map_err(PlanningFailure::Links)?
-        {
+        )? {
             continue;
         }
         // Each move that resolves generates its cascade from the plan as it
@@ -175,7 +173,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             // left out in the composition's words, in every build, rather
             // than planned with a transition its cascade does not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
-            if leave_out_unvouched(
+            if read_carried_links(
                 &operations,
                 &order,
                 &composition,
@@ -183,9 +181,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
                 &mut left_out,
                 view,
                 links,
-            )
-            .map_err(PlanningFailure::Links)?
-            {
+            )? {
                 for operation in &mut operations {
                     operation.cascade.clear();
                 }
@@ -276,22 +272,25 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     })
 }
 
-/// Leave out each move carrying a document unread whose links `links`
-/// cannot vouch for ([`vouch_for_carried`]), with what falls with it, and
-/// answer whether any was; take the links of every other carried document
-/// into `carried`.
+/// Take into `carried` the links of each document a move carries unread
+/// that it does not yet hold, and answer whether any move was left out.
 ///
-/// **A move never reads the body it carries to learn its links.** Where the
-/// index holds the document at another hash than the file — changed since
-/// the vault's index saw it, or not yet indexed — the move that reads it
-/// first is left unresolved, saying to re-send the plan once the vault has
-/// indexed the change, as a `where` target's match resting on facts the
-/// index has not taken in is (`super::expand`). A document that does not
-/// decode holds no link, and is carried whatever the index holds.
+/// **The index's links where it vouches for them, the file's otherwise.**
+/// Where the index holds the document at the hash planning read
+/// ([`vouch_for_carried`]), its links are those, and no byte of the document
+/// is read. Where it does not — the file changed since the vault's index saw
+/// it, or the index has not taken it in yet — the file is read whole once,
+/// at that hash, and its links read from its bytes: the one copy planning
+/// held of every moved document before it carried any, so such a move plans
+/// exactly as it always did. The no-copy guarantee holds once the vault has
+/// indexed the file. A file no longer at the hash planning first read
+/// changed while the plan was read ([`Remembered`]), and the move that reads
+/// it first is left out, with what falls with it, as an edit whose text no
+/// longer occurs is.
 ///
 /// Answers whether any operation was left out, so planning composes again
 /// only where this pass's plan changed.
-fn leave_out_unvouched<V: VaultView, I: LinkIndex + ?Sized>(
+fn read_carried_links<V: VaultView, I: LinkIndex + ?Sized>(
     operations: &[Operation],
     order: &[usize],
     composition: &Composition,
@@ -299,14 +298,26 @@ fn leave_out_unvouched<V: VaultView, I: LinkIndex + ?Sized>(
     left_out: &mut BTreeMap<usize, UnresolvedReason>,
     view: &V,
     links: &I,
-) -> Result<bool, I::Error> {
-    let unvouched = vouch_for_carried(composition, carried, links)?;
-    if unvouched.is_empty() {
-        return Ok(false);
-    }
+) -> Result<bool, PlanningFailure<V::Error, I::Error>> {
+    let unvouched =
+        vouch_for_carried(composition, carried, links).map_err(PlanningFailure::Links)?;
     let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
     let standing = left_out.len();
-    for source in unvouched {
+    for (source, state) in unvouched {
+        let read = match identity(&source) {
+            Some(file) => Some(view.entry(&file).map_err(PlanningFailure::View)?),
+            None => None,
+        };
+        if let Some(view::Entry::Document {
+            hash,
+            body: view::Body::Held(bytes),
+            ..
+        }) = read
+            && state.hash() == Some(&hash)
+        {
+            carried.insert(source, crate::derivation::document_links(&bytes));
+            continue;
+        }
         let first = order.iter().copied().find(|&position| {
             matches!(
                 &operations[position].kind,
@@ -317,17 +328,18 @@ fn leave_out_unvouched<V: VaultView, I: LinkIndex + ?Sized>(
         if let Some(position) = first {
             left_out.entry(position).or_insert_with(|| {
                 UnresolvedReason::no_longer_resolves(format!(
-                    "`{source}` holds other bytes than the vault's index saw there, so the links \
-                     it holds cannot be read without reading the document the move carries; \
-                     re-send the plan once the vault has indexed the change"
+                    "`{source}` changed while the plan was read"
                 ))
             });
         }
     }
+    if left_out.len() == standing {
+        return Ok(false);
+    }
     leave_out_what_falls_with(operations, left_out, view);
-    // Only a move's source is carried, so each unvouched one names a move
-    // that is left out here and the next pass composes without it.
-    Ok(left_out.len() > standing)
+    // Only a move's source is carried, so each source read changed names a
+    // move that is left out here and the next pass composes without it.
+    Ok(true)
 }
 
 /// The operations of this pass that did not resolve: each that met a state it
@@ -654,6 +666,44 @@ mod tests {
     fn authored(operations: Vec<Operation>) -> AuthoredPlan {
         let name = VaultName::new("notes").expect("a legal vault name");
         AuthoredPlan::new(VaultAddress::name(name), operations)
+    }
+
+    /// **A chain of moves holds no moved body while it plans.** `b.md`
+    /// moves on to `c.md` and `a.md` into the name it vacates: neither
+    /// document needs a byte changed, so planning — the look that orders the
+    /// moves by whether a document stands at `b.md`, every pass of
+    /// composition, and the links the index vouches for — reads each
+    /// streamed and neither whole.
+    #[test]
+    fn a_chain_of_moves_plans_without_reading_a_moved_document_whole() {
+        let files = [("a.md", "# A\n"), ("b.md", "# B [[x]]\n")];
+        let vault = MemoryVault::with(&files).streaming();
+        let index = super::super::links::testing::IndexedFiles::of(&files);
+        let resolution = super::resolve(
+            authored(vec![
+                Operation::new(OperationKind::move_document(path("b.md"), path("c.md"))),
+                Operation::new(OperationKind::move_document(path("a.md"), path("b.md"))),
+            ]),
+            root(),
+            &BTreeSet::new(),
+            &vault,
+            &index,
+        )
+        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
+        assert_eq!(resolution.unresolved, Vec::new());
+        assert_eq!(
+            resolution.plan.transitions,
+            vec![
+                Transition::new(path("a.md"), present("# A\n"), FileState::absent()),
+                Transition::new(path("b.md"), present("# B [[x]]\n"), present("# A\n")),
+                Transition::new(path("c.md"), FileState::absent(), present("# B [[x]]\n")),
+            ]
+        );
+        for at in ["a.md", "b.md"] {
+            let reads = vault.reads.borrow().get(at).copied().unwrap_or_default();
+            let streamed = vault.streamed.borrow().get(at).copied().unwrap_or_default();
+            assert_eq!(reads - streamed, 0, "{at} is read whole");
+        }
     }
 
     fn planned(vault: &MemoryVault, operations: Vec<Operation>) -> Resolution {

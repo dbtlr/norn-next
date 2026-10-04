@@ -33,11 +33,11 @@ use norn_wire::{
     AuthorCondition, DocumentPath, ExpectedField, FileState, PlanCondition, PlanFault, ResolvedPlan,
 };
 
-use super::observe::{TargetState, carried, identity};
+use super::observe::{TargetState, identity};
 use crate::derivation::decodes;
 use crate::planner::compose::{Composition, compose, edits_in_place, touched};
 use crate::planner::edit;
-use crate::planner::lineage::Lineage;
+use crate::planner::lineage::{Carried, Lineage};
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
 use crate::planner::view::{Body, Entry, VaultView};
@@ -49,6 +49,32 @@ pub(super) enum Recomposed {
     /// The plan's own shape is wrong: its operations', or its transitions
     /// disagree with them.
     Invalid(PlanFault),
+}
+
+/// Why the before-states a recomposition reads answered nothing.
+#[derive(Debug)]
+pub(super) enum Unread<E> {
+    /// The vault could not be read.
+    View(E),
+    /// Composition asked for the bytes of a file the plan carries unread
+    /// ([`Carried`]). The plan's one rule reads such a file streamed in
+    /// planning and here alike, so composition never asks; one that did
+    /// would read a body the apply promises not to hold, and is refused as
+    /// the host's own fault rather than read.
+    Carried(NormalizedPath),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for Unread<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unread::View(error) => error.fmt(formatter),
+            Unread::Carried(file) => write!(
+                formatter,
+                "the recomposition asked for the bytes of `{}`, which the plan carries unread",
+                file.as_path().display()
+            ),
+        }
+    }
 }
 
 /// The fault of a plan whose transitions disagree with its operations at
@@ -81,7 +107,7 @@ pub(super) fn recompose<V: VaultView>(
     states: &[TargetState],
     lineage: &Lineage,
     view: &V,
-) -> Result<Recomposed, V::Error> {
+) -> Result<Recomposed, Unread<V::Error>> {
     let before = BeforeStates::over(plan, states, lineage, view);
     let count = plan.operations.len();
     let dependencies = match dependencies(&plan.operations, &BTreeSet::new(), &before) {
@@ -232,7 +258,7 @@ fn conditions_differ<V: VaultView>(
     plan: &ResolvedPlan,
     composition: &Composition,
     before: &BeforeStates<'_, V>,
-) -> Result<Vec<DocumentPath>, V::Error> {
+) -> Result<Vec<DocumentPath>, Unread<V::Error>> {
     let normalizer = before.normalizer();
     let carried: Vec<(NormalizedPath, &norn_wire::ContentHash)> = plan
         .conditions
@@ -290,7 +316,7 @@ fn expectation_held<V: VaultView>(
     composition: &Composition,
     before: &BeforeStates<'_, V>,
     carries: &impl Fn(&NormalizedPath, Option<&norn_wire::ContentHash>) -> bool,
-) -> Result<bool, V::Error> {
+) -> Result<bool, Unread<V::Error>> {
     let written = composition.before(file).is_some();
     if written && before.unseen.contains(file) {
         return Ok(true);
@@ -336,11 +362,12 @@ fn condition_path(condition: &AuthorCondition) -> &DocumentPath {
 /// target named at one, and any other name an operation carries is read from
 /// the vault as it stands, which reads it as what it is.
 ///
-/// **A carried target reads as it was observed, streamed** (`super::observe::carried`):
-/// a document with the before-state's hash and decode verdict and no bytes,
-/// seen or not, which composition carries unread. Asked for whole, one this
-/// apply can see is read whole from the vault; composition asks that of no
-/// carried target, since no edit lands on one.
+/// **A file the plan carries reads only streamed** ([`Carried`]): a document
+/// with the before-state's hash and decode verdict, seen or not, which
+/// composition carries unread whatever body it is handed. Composition asks
+/// for such a file whole nowhere — the plan's one rule reads it streamed in
+/// planning and here alike — so a whole read of one is refused
+/// ([`Unread::Carried`]), never answered from the vault.
 struct BeforeStates<'a, V> {
     view: &'a V,
     plan: &'a ResolvedPlan,
@@ -350,8 +377,8 @@ struct BeforeStates<'a, V> {
     identities: Vec<Option<NormalizedPath>>,
     /// Every target whose before-state this apply cannot see.
     unseen: BTreeSet<NormalizedPath>,
-    /// Whether each target's content is carried, by index.
-    streamed: Vec<bool>,
+    /// The files the plan carries byte for byte.
+    carried: Carried,
 }
 
 impl<'a, V: VaultView> BeforeStates<'a, V> {
@@ -382,7 +409,7 @@ impl<'a, V: VaultView> BeforeStates<'a, V> {
             by_identity,
             identities,
             unseen,
-            streamed: carried(plan, lineage, view.normalizer()),
+            carried: Carried::of(&plan.operations, lineage, view.normalizer()),
         }
     }
 }
@@ -414,7 +441,7 @@ impl<V: VaultView> BeforeStates<'_, V> {
             {
                 body.clone()
             }
-            _ if self.streamed[index] => Body::Streamed {
+            _ if self.carried.carries(path) => Body::Streamed {
                 decodes: !*quarantined,
             },
             _ => Body::Held(stand_in(*quarantined)),
@@ -428,63 +455,70 @@ impl<V: VaultView> BeforeStates<'_, V> {
 }
 
 impl<V: VaultView> VaultView for BeforeStates<'_, V> {
-    type Error = V::Error;
+    type Error = Unread<V::Error>;
 
     fn normalizer(&self) -> &PathNormalizer {
         self.view.normalizer()
     }
 
-    fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+    fn entry(&self, path: &NormalizedPath) -> Result<Entry, Unread<V::Error>> {
+        let carried = self.carried.carries(path);
+        debug_assert!(
+            !carried,
+            "composition asked for `{}` whole, which the plan carries unread",
+            path.as_path().display()
+        );
+        if carried {
+            return Err(Unread::Carried(path.clone()));
+        }
         match self.recorded(path) {
-            Some(Entry::Document {
-                body: Body::Streamed { .. },
-                ..
-            }) => self.view.entry(path),
             Some(entry) => Ok(entry),
-            None => self.view.entry(path),
+            None => self.view.entry(path).map_err(Unread::View),
         }
     }
 
-    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, Unread<V::Error>> {
         match self.recorded(path) {
             Some(entry) => Ok(entry),
-            None => self.view.streamed_entry(path),
+            None => self.view.streamed_entry(path).map_err(Unread::View),
         }
     }
 
     /// A control target reads as its recorded before-state, as a document
     /// target does; any other control file as the vault holds it.
-    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+    fn control_entry(&self, path: &NormalizedPath) -> Result<Entry, Unread<V::Error>> {
         match self.recorded(path) {
             Some(entry) => Ok(entry),
-            None => self.view.control_entry(path),
+            None => self.view.control_entry(path).map_err(Unread::View),
         }
     }
 
-    fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, V::Error> {
-        self.view.folder_stands(folder)
+    fn folder_stands(&self, folder: &NormalizedPath) -> Result<bool, Unread<V::Error>> {
+        self.view.folder_stands(folder).map_err(Unread::View)
     }
 
     fn visit_folder_names(
         &self,
         folder: &NormalizedPath,
         visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
-    ) -> Result<(), V::Error> {
-        self.view.visit_folder_names(folder, visit)
+    ) -> Result<(), Unread<V::Error>> {
+        self.view
+            .visit_folder_names(folder, visit)
+            .map_err(Unread::View)
     }
 
     fn visit_root_names(
         &self,
         visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
-    ) -> Result<(), V::Error> {
-        self.view.visit_root_names(visit)
+    ) -> Result<(), Unread<V::Error>> {
+        self.view.visit_root_names(visit).map_err(Unread::View)
     }
 
     fn folder_contents(
         &self,
         folder: &NormalizedPath,
-    ) -> Result<Option<crate::planner::view::FolderContents>, V::Error> {
-        self.view.folder_contents(folder)
+    ) -> Result<Option<crate::planner::view::FolderContents>, Unread<V::Error>> {
+        self.view.folder_contents(folder).map_err(Unread::View)
     }
 }
 

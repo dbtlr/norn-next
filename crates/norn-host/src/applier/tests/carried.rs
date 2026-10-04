@@ -5,36 +5,19 @@
 
 use std::collections::BTreeSet;
 
-use norn_wire::{
-    AuthoredPlan, FileState, Operation, RefusedCheck, RootIdentity, TargetResult, UnresolvedReason,
-};
+use norn_wire::{AuthoredPlan, FileState, Operation, RefusedCheck, RootIdentity, TargetResult};
 
 use super::{
-    Fixture, UNDECODABLE, applied, editing, moving, path, quarantined_fixture, refused, results,
+    Fixture, UNDECODABLE, applied, breaking, editing, moving, path, quarantined_fixture, refused,
+    results,
 };
 use crate::applier::observe::{TargetState, observe, units};
 use crate::applier::stage::{Stop, check, stage};
 use crate::applier::{Applier, OwnWriteLedger};
 use crate::planner::compose::content_hash;
-use crate::planner::resolve::Resolution;
-use crate::planner::view::{Body, TreeView, VaultView};
+use crate::planner::view::{Body, Entry, TreeView, VaultView};
 
 impl Fixture {
-    /// `operations` resolved against the vault, its links judged on the
-    /// store as it stands, whatever of them resolves.
-    fn resolved_as_it_stands(&self, operations: Vec<Operation>) -> Resolution {
-        let view = TreeView::open(&self.vault, &self.exclusions, &self.schema).expect("a vault");
-        let links = self.links();
-        crate::planner::resolve::resolve(
-            AuthoredPlan::new(crate::planner::links::testing::vault(), operations),
-            self.root_identity(),
-            &BTreeSet::new(),
-            &view,
-            &links.index(),
-        )
-        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"))
-    }
-
     /// The applier over this fixture, its links judged on `links`.
     fn applier<'a>(&'a self, links: &'a crate::apply::PlanSnapshot<'a>) -> Applier<'a> {
         Applier {
@@ -124,34 +107,76 @@ const PINNED_PLAN: &str = include_str!("pinned/byte-identical-move.plan.json");
 /// Its forecast, captured with it.
 const PINNED_FORECAST: &str = include_str!("pinned/byte-identical-move.forecast.json");
 
-/// **A move of a document changed since the vault's index saw it does not
-/// resolve, and writes nothing.** The move carries its document unread, so
-/// the links it holds are the index's, and the index holds them for other
-/// bytes than the file's: the move is left unresolved, saying to re-send
-/// once the vault has indexed the change, never planned from a body read
-/// instead. The plan it leaves applies nothing, and the file stands where
-/// it stood; once the index takes the change in, the move resolves.
+/// **A move of a document the vault's index has not taken in plans and
+/// applies exactly as it did before a move carried anything, holding one
+/// copy of it.** The index holds the moved document at other bytes than the
+/// file, so it vouches for none of the links the document holds: planning
+/// reads the file whole once, beside the streamed read that found its hash,
+/// and reads its links from those bytes; the plan it answers is the one it
+/// answers once the index has taken the change in. The applier observes the
+/// file streamed and reads it whole once, for its links, where the index
+/// still lags; the plan applies, writing each target.
 #[test]
-fn a_move_of_a_document_changed_since_its_indexing_is_unresolved_and_writes_nothing() {
+fn a_move_of_a_document_changed_since_its_indexing_plans_and_applies_holding_one_copy() {
+    let changed = "# A, changed behind the index [[h]]\n";
     let mut fixture = Fixture::new(&[("notes/a.md", "# A\n"), ("h.md", "[[a]]\n")]);
-    fixture.write("notes/a.md", "# A, changed behind the index\n");
-    let resolution = fixture.resolved_as_it_stands(vec![moving("notes/a.md", "archive/a.md")]);
-    let [unresolved] = &resolution.unresolved[..] else {
-        panic!("the move is unresolved: {:?}", resolution.unresolved);
-    };
-    let UnresolvedReason::NoLongerResolves { detail, .. } = &unresolved.reason else {
-        panic!("no longer resolves: {:?}", unresolved.reason);
-    };
-    assert!(
-        detail.contains("`notes/a.md`") && detail.contains("index"),
-        "{detail}"
-    );
-    assert_eq!(resolution.plan.transitions, Vec::new());
-    applied(fixture.apply(resolution.plan));
-    assert_eq!(fixture.tree(), vec!["h.md", "notes", "notes/a.md"]);
-    fixture.foreign("notes/a.md", "# A, changed behind the index\n");
-    let resolution = fixture.resolved_as_it_stands(vec![moving("notes/a.md", "archive/a.md")]);
+    fixture.write("notes/a.md", changed);
+    let operations = vec![moving("notes/a.md", "archive/a.md")];
+
+    let tree =
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+    let counted = Counted::over(&tree);
+    let links = fixture.links();
+    let resolution = crate::planner::resolve::resolve(
+        AuthoredPlan::new(crate::planner::links::testing::vault(), operations.clone()),
+        fixture.root_identity(),
+        &BTreeSet::new(),
+        &counted,
+        &links.index(),
+    )
+    .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
     assert_eq!(resolution.unresolved, Vec::new());
+    assert_eq!(
+        counted.reads("notes/a.md"),
+        Reads {
+            whole: 1,
+            streamed: 1
+        },
+        "planning holds one copy"
+    );
+
+    let declared = crate::derivation::Declared::unpinned();
+    let counted = Counted::over(&tree);
+    check(&resolution.plan, &counted, &declared, &links.index()).expect("the plan checks");
+    assert_eq!(
+        counted.reads("notes/a.md"),
+        Reads {
+            whole: 1,
+            streamed: 1
+        },
+        "the applier holds one copy"
+    );
+    drop(links);
+
+    let finished = applied(fixture.apply(resolution.plan.clone()));
+    assert!(
+        results(&finished)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Wrote),
+        "{:?}",
+        results(&finished)
+    );
+    assert_eq!(fixture.read("archive/a.md").as_deref(), Some(changed));
+    fixture.assert_store_is_a_build_from_zero();
+
+    let mut indexed = Fixture::new(&[("notes/a.md", "# A\n"), ("h.md", "[[a]]\n")]);
+    indexed.foreign("notes/a.md", changed);
+    let mut as_indexed = indexed.resolution(operations).plan;
+    as_indexed.root = resolution.plan.root.clone();
+    assert_eq!(
+        resolution.plan, as_indexed,
+        "the plan is the one planned once the index took the change in"
+    );
 }
 
 /// **A moved file whose bytes do not decode keeps its quarantined flag and
@@ -265,15 +290,24 @@ fn a_moved_document_naming_itself_is_respelled_with_its_in_links() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **A chain of moves carries its document through every name.** `b.md`
-/// moves on to `c.md` and `a.md` into the name it vacates — the latter a
-/// replace of `b.md`, which the write kernel publishes from bytes, so its
-/// source is read whole for the apply — and `[[b]]` in `h.md`, naming the
+/// **A chain of moves carries each document end to end.** `b.md` moves on
+/// to `c.md` and `a.md` into the name it vacates — a replace of `b.md`,
+/// which the write kernel stages as a copy of `a.md` as it stages the create
+/// of `c.md` as a copy of `b.md` — so the applier observes every target of
+/// the chain streamed and holds no moved body; `[[b]]` in `h.md`, naming the
 /// document carried to `c.md`, follows it.
 #[test]
 fn a_chain_of_moves_carries_each_document_where_it_lands() {
     let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n"), ("h.md", "[[b]]\n")]);
     let plan = fixture.plan(vec![moving("b.md", "c.md"), moving("a.md", "b.md")]);
+    let tree =
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+    let counted = Counted::over(&tree);
+    let units = units(&plan, tree.normalizer());
+    observe(&plan, &units, &counted).expect("a readable vault");
+    for at in ["a.md", "b.md", "c.md"] {
+        assert_eq!(counted.reads(at).whole, 0, "{at} is read whole");
+    }
     applied(fixture.apply(plan));
     assert_eq!(fixture.read("b.md").as_deref(), Some("# A\n"));
     assert_eq!(fixture.read("c.md").as_deref(), Some("# B\n"));
@@ -450,4 +484,281 @@ fn a_carried_move_whose_index_moved_on_is_checked_from_the_file() {
     );
     assert_eq!(fixture.read("archive/a.md"), Some(original));
     fixture.assert_store_is_a_build_from_zero();
+}
+
+/// How many times a view was asked for one name, whole and streamed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Reads {
+    whole: usize,
+    streamed: usize,
+}
+
+/// A view over `inner` that counts what it is asked for, name by name: what
+/// a case holds planning and the applier to, by the reads they take.
+struct Counted<'a, V> {
+    inner: &'a V,
+    reads: std::cell::RefCell<std::collections::BTreeMap<String, Reads>>,
+}
+
+impl<'a, V: VaultView> Counted<'a, V> {
+    fn over(inner: &'a V) -> Self {
+        Counted {
+            inner,
+            reads: std::cell::RefCell::default(),
+        }
+    }
+
+    /// The reads of the name `at` spells.
+    fn reads(&self, at: &str) -> Reads {
+        self.reads.borrow().get(at).copied().unwrap_or_default()
+    }
+
+    /// Every name read whole.
+    fn whole(&self) -> BTreeSet<String> {
+        self.read_by(|reads| reads.whole > 0)
+    }
+
+    /// Every name read streamed.
+    fn streamed(&self) -> BTreeSet<String> {
+        self.read_by(|reads| reads.streamed > 0)
+    }
+
+    fn read_by(&self, read: impl Fn(&Reads) -> bool) -> BTreeSet<String> {
+        self.reads
+            .borrow()
+            .iter()
+            .filter(|(_, reads)| read(reads))
+            .map(|(at, _)| at.clone())
+            .collect()
+    }
+
+    fn count(&self, path: &norn_fs::NormalizedPath, streamed: bool) {
+        let mut reads = self.reads.borrow_mut();
+        let reads = reads
+            .entry(path.as_path().to_string_lossy().into_owned())
+            .or_default();
+        if streamed {
+            reads.streamed += 1;
+        } else {
+            reads.whole += 1;
+        }
+    }
+}
+
+impl<V: VaultView> VaultView for Counted<'_, V> {
+    type Error = V::Error;
+
+    fn normalizer(&self) -> &norn_fs::PathNormalizer {
+        self.inner.normalizer()
+    }
+
+    fn entry(&self, path: &norn_fs::NormalizedPath) -> Result<Entry, V::Error> {
+        self.count(path, false);
+        self.inner.entry(path)
+    }
+
+    fn streamed_entry(&self, path: &norn_fs::NormalizedPath) -> Result<Entry, V::Error> {
+        self.count(path, true);
+        self.inner.streamed_entry(path)
+    }
+
+    fn control_entry(&self, path: &norn_fs::NormalizedPath) -> Result<Entry, V::Error> {
+        self.inner.control_entry(path)
+    }
+
+    fn folder_stands(&self, folder: &norn_fs::NormalizedPath) -> Result<bool, V::Error> {
+        self.inner.folder_stands(folder)
+    }
+
+    fn visit_folder_names(
+        &self,
+        folder: &norn_fs::NormalizedPath,
+        visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.inner.visit_folder_names(folder, visit)
+    }
+
+    fn visit_root_names(
+        &self,
+        visit: &mut dyn FnMut(&std::ffi::OsStr) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), V::Error> {
+        self.inner.visit_root_names(visit)
+    }
+
+    fn folder_contents(
+        &self,
+        folder: &norn_fs::NormalizedPath,
+    ) -> Result<Option<crate::planner::view::FolderContents>, V::Error> {
+        self.inner.folder_contents(folder)
+    }
+}
+
+/// **A document moved away and back plans, previews and applies as found.**
+/// Its content ends where it began, drawn from its own before-state, so the
+/// plan carries it unread end to end — through one name, and through two
+/// names, one of them in a folder the plan makes and takes away again — and
+/// the applier, holding the same rule, observes it streamed: the preview
+/// answers the plan, and the apply finds every target landed and writes
+/// nothing.
+#[test]
+fn a_document_moved_away_and_back_previews_and_applies_found() {
+    for operations in [
+        vec![moving("a.md", "z.md"), moving("z.md", "a.md")],
+        vec![
+            moving("a.md", "x/z.md"),
+            moving("x/z.md", "y.md"),
+            moving("y.md", "a.md"),
+        ],
+    ] {
+        let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "x\n")]);
+        let plan = fixture.plan(operations.clone());
+        let (previewed, _) = fixture
+            .preview(plan.clone())
+            .unwrap_or_else(|refused| panic!("{operations:?} previews: {refused:?}"));
+        assert_eq!(previewed, plan, "{operations:?}");
+        let finished = applied(fixture.apply(plan));
+        assert!(
+            results(&finished)
+                .iter()
+                .all(|(_, result)| *result == TargetResult::Found),
+            "{operations:?}: {:?}",
+            results(&finished)
+        );
+        assert_eq!(fixture.tree(), vec!["a.md", "b.md"], "{operations:?}");
+        assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n"));
+    }
+}
+
+/// **Planning and the applier carry the same documents.** Over a corpus of
+/// plans — chains, a rotation through a temporary name, a document moved
+/// away and back, a move beside an edit or a delete of what it moved, a move
+/// whose cascade rewrites holders, a moved document naming itself — the
+/// targets planning composes as carried are exactly those the applier's
+/// recomposition does, and the applier observes a target streamed exactly
+/// where planning held no byte of it: its before-state absent or read
+/// streamed, and its after-state absent or carried.
+#[test]
+fn planning_and_the_applier_carry_the_same_documents() {
+    let files = [
+        ("a.md", "# A [[c]]\n"),
+        ("b.md", "# B\n"),
+        ("c.md", "# C\n"),
+        ("me.md", "[me](me.md) and [[me]]\n"),
+        ("h.md", "[[a]] [[b]] [x](c.md)\n"),
+    ];
+    let corpus: Vec<Vec<Operation>> = vec![
+        vec![moving("b.md", "n.md"), moving("a.md", "b.md")],
+        vec![
+            moving("c.md", "n.md"),
+            moving("b.md", "c.md"),
+            moving("a.md", "b.md"),
+        ],
+        vec![
+            moving("a.md", "t.md"),
+            moving("b.md", "a.md"),
+            moving("t.md", "n.md"),
+        ],
+        vec![moving("a.md", "z.md"), moving("z.md", "a.md")],
+        vec![
+            moving("a.md", "x/z.md"),
+            moving("x/z.md", "y.md"),
+            moving("y.md", "a.md"),
+        ],
+        vec![moving("a.md", "m.md"), editing("m.md", "# A", "# M")],
+        vec![editing("a.md", "# A", "# M"), moving("a.md", "m.md")],
+        vec![moving("a.md", "m.md"), breaking("m.md")],
+        vec![moving("a.md", "m.md"), breaking("b.md")],
+        vec![
+            moving("b.md", "n.md"),
+            moving("a.md", "b.md"),
+            editing("n.md", "# B", "# N"),
+        ],
+        vec![moving("c.md", "archive/c2.md")],
+        vec![moving("me.md", "archive/me2.md")],
+        vec![moving("me.md", "archive/me2.md"), moving("b.md", "me.md")],
+    ];
+    for operations in corpus {
+        let fixture = Fixture::new(&files);
+        let tree =
+            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+        let links = fixture.links();
+        let planning = Counted::over(&tree);
+        let resolution = crate::planner::resolve::resolve(
+            AuthoredPlan::new(crate::planner::links::testing::vault(), operations.clone()),
+            fixture.root_identity(),
+            &BTreeSet::new(),
+            &planning,
+            &links.index(),
+        )
+        .unwrap_or_else(|failure| panic!("{operations:?} is planned: {failure:?}"));
+        assert_eq!(resolution.unresolved, Vec::new(), "{operations:?}");
+        let plan = resolution.plan;
+        let recorded: Vec<usize> = (0..plan.operations.len()).collect();
+        let planned = crate::planner::compose::compose(
+            &plan.operations,
+            &recorded,
+            &crate::planner::view::Remembered::over(&tree),
+        )
+        .expect("a readable vault");
+
+        let applying = Counted::over(&tree);
+        let units = units(&plan, tree.normalizer());
+        let (states, _) = observe(&plan, &units, &applying).expect("a readable vault");
+        let lineage = crate::applier::observe::recorded_lineage(&plan, tree.normalizer());
+        let crate::applier::recompose::Recomposed::Sound(recomposed) =
+            crate::applier::recompose::recompose(&plan, &states, &lineage, &applying)
+                .expect("a readable vault")
+        else {
+            panic!("{operations:?} recomposes");
+        };
+        assert_eq!(
+            carried_in(&planned),
+            carried_in(&recomposed),
+            "{operations:?}"
+        );
+
+        let streamed_in_planning = planning.streamed();
+        let whole_in_planning = planning.whole();
+        let carried = carried_in(&planned);
+        let held_nothing: BTreeSet<String> = plan
+            .transitions
+            .iter()
+            .filter(|transition| {
+                let at = transition.path.as_str();
+                let before = transition.before == FileState::absent()
+                    || (streamed_in_planning.contains(at) && !whole_in_planning.contains(at));
+                let after = transition.after == FileState::absent()
+                    || carried.iter().any(|(path, _)| path == at);
+                before && after
+            })
+            .map(|transition| transition.path.as_str().to_string())
+            .collect();
+        let observed_streamed: BTreeSet<String> = plan
+            .transitions
+            .iter()
+            .map(|transition| transition.path.as_str().to_string())
+            .filter(|at| applying.reads(at).streamed > 0)
+            .collect();
+        assert_eq!(observed_streamed, held_nothing, "{operations:?}");
+        assert!(
+            observed_streamed
+                .iter()
+                .all(|at| applying.reads(at).whole == 0),
+            "{operations:?}: a target observed streamed is read whole too"
+        );
+    }
+}
+
+/// Each target `composition` carries unread, and the file it carries.
+fn carried_in(composition: &crate::planner::compose::Composition) -> Vec<(String, String)> {
+    composition
+        .targets
+        .iter()
+        .filter_map(|(path, target)| match &target.after {
+            crate::planner::compose::After::Carried { from, .. } => {
+                Some((path.as_str().to_string(), from.as_str().to_string()))
+            }
+            _ => None,
+        })
+        .collect()
 }

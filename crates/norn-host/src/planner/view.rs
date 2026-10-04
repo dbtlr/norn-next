@@ -19,7 +19,11 @@ use super::control::SchemaPlace;
 /// **Files, not the store.** A before-state is the hash of the bytes a target
 /// is composed from, and the applier recomposes from what the file holds, so
 /// both read the file: the store holds no document's exact bytes, and a hash
-/// read from it could name bytes nobody composed against.
+/// read from it could name bytes nobody composed against. Two derived facts
+/// are read from the store's index instead, each held to a file read here:
+/// a `where` target's match, and a carried document's own links, which the
+/// index vouches for only at the hash read from the file (see the
+/// planner's module documentation, `super`).
 ///
 /// **One identity rule.** Every name the planner compares is produced by
 /// [`normalizer`](Self::normalizer) — `norn-fs`'s one path-spelling
@@ -42,15 +46,11 @@ pub(crate) trait VaultView {
     /// [`Body::Held`] where the view holds the bytes anyway — a view over
     /// bytes in memory, or one that already read the file whole.
     ///
-    /// **What a move reads its document by.** A move whose document the
-    /// plan carries byte for byte needs only its hash and whether its bytes
-    /// decode, so composition reads a move's two ends here and reads the
-    /// bytes whole only where an edit lands on the document it carries
-    /// (`super::compose`). A view that cannot stream answers as
-    /// [`entry`](Self::entry) does.
-    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error> {
-        self.entry(path)
-    }
+    /// **What a carried document is read by.** A document the plan carries
+    /// byte for byte needs only its hash and whether its bytes decode, so
+    /// composition reads one here (`super::lineage::Carried`), as does the
+    /// applier's look at a target holding no byte composition reads.
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
 
     /// What stands at `path`, the in-vault path a control file lives at
     /// ([`super::control`]), read as that control file rather than as a
@@ -232,13 +232,19 @@ pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
 /// read once however many passes it takes. A name is remembered by its
 /// identity, so two spellings of one file are one read.
 ///
-/// **A streamed read is remembered without a body**, so a document a move
-/// carries is never held here. A whole read of a name remembered streamed
-/// reads the file again, once, and remembers the bytes in its place: the one
-/// copy of a carried document an edit landing on it needs. Every later read,
-/// streamed or whole, answers with those bytes. Where the file changed
-/// between the two reads, the whole read answers what it found, and the
-/// caller holding the streamed hash tells the two apart.
+/// **A streamed read is remembered without a body**, so a document a plan
+/// carries is never held here. A whole read of a name remembered streamed —
+/// a pass whose cascade now lands on a document an earlier pass carried, or
+/// planning reading a carried document's links where the index does not
+/// vouch for them — reads the file again, once, and remembers the bytes in
+/// its place: the one copy that read needs, answering every later read,
+/// streamed or whole.
+///
+/// **The first read fixes the before-state.** Where the file no longer
+/// hashes to what the streamed read found, it changed while the plan was
+/// read: the whole read answers the remembered streamed entry, its bytes not
+/// to be had at that state, so no pass composes from a before-state another
+/// pass did not read, and the caller wanting bytes does not resolve on it.
 pub(crate) struct Remembered<'view, V> {
     view: &'view V,
     entries: RefCell<BTreeMap<NormalizedPath, Entry>>,
@@ -265,20 +271,32 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
     }
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
-        if let Some(read) = self.entries.borrow().get(path)
-            && !matches!(
-                read,
-                Entry::Document {
-                    body: Body::Streamed { .. },
-                    ..
-                }
-            )
-        {
-            return Ok(read.clone());
-        }
+        let remembered = self.entries.borrow().get(path).cloned();
+        let first = match remembered {
+            Some(Entry::Document {
+                hash,
+                body: Body::Streamed { .. },
+                ..
+            }) => hash,
+            Some(read) => return Ok(read),
+            None => {
+                let read = self.view.entry(path)?;
+                self.entries.borrow_mut().insert(path.clone(), read.clone());
+                return Ok(read);
+            }
+        };
         let read = self.view.entry(path)?;
-        self.entries.borrow_mut().insert(path.clone(), read.clone());
-        Ok(read)
+        Ok(match read {
+            Entry::Document {
+                ref hash,
+                body: Body::Held(_),
+                ..
+            } if *hash == first => {
+                self.entries.borrow_mut().insert(path.clone(), read.clone());
+                read
+            }
+            _ => self.entries.borrow()[path].clone(),
+        })
     }
 
     fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {

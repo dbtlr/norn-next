@@ -40,6 +40,22 @@ pub use evidence::{LinkJudgmentCost, ReadReading, ReadsSince};
 /// feature as the rest of [`Host`]'s harness-reachable readers.
 #[cfg(feature = "induced-failure")]
 pub use lifecycle::WorkInFlight;
+
+/// **Which targets of a resolved plan the applier copies another target
+/// from**, unread, through the write kernel (`norn_fs::Content::CopyOf`):
+/// the files the plan carries byte for byte whose content another target
+/// ends holding, under the root's `sensitivity`. Each is read once more than
+/// its own transition reads it, by the copy, so the counter lane budgets its
+/// reads by this — the applier's own rule — rather than by a rule of its
+/// own. Behind the same feature as the rest of the harness-reachable
+/// readers.
+#[cfg(feature = "induced-failure")]
+pub fn copied_sources(
+    plan: &norn_wire::ResolvedPlan,
+    sensitivity: norn_fs::CaseSensitivity,
+) -> Vec<norn_wire::DocumentPath> {
+    applier::copied_sources(plan, &norn_fs::PathNormalizer::for_sensitivity(sensitivity))
+}
 pub use lifecycle::{
     ApplyEnd, ApplyEnding, ApplyProgress, Demand, DemandLease, EntryOps, EntryReloadFailure,
     Established, Healing, HoldReading, Host, HostError, JobFailure, LifecyclePolicy,

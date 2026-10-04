@@ -5,14 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
-use norn_wire::{
-    AuthorCondition, ContentHash, DocumentPath, FileState, OperationKind, PlanCondition,
-    ResolvedPlan, Transition,
-};
+use norn_wire::{ContentHash, DocumentPath, FileState, PlanCondition, ResolvedPlan, Transition};
 
-use crate::planner::compose::{standing, touched};
+use crate::planner::compose::standing;
 use crate::planner::control::role_at;
-use crate::planner::lineage::Lineage;
+use crate::planner::lineage::{Carried, Lineage};
 use crate::planner::view::{Barrier, Body, Entry, VaultView};
 
 /// One publication the kernel makes: a transition on its own, or the two
@@ -42,7 +39,7 @@ impl Unit {
 ///
 /// **What the read kept of a document is its body**: its bytes, or — for a
 /// target whose content the plan carries byte for byte, read streamed
-/// ([`carried`]) — only whether they decode.
+/// ([`streamed`]) — only whether they decode.
 #[derive(Clone, Debug)]
 pub(super) enum TargetState {
     /// It holds its before-state: the body where it is a document.
@@ -154,7 +151,7 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
 /// holding what it holds, and the moves that carry it are named. A chain is
 /// followed whole, through names the plan makes and takes away again.
 ///
-/// **A target whose content the plan carries is read streamed** ([`carried`]):
+/// **A target whose content the plan carries is read streamed** ([`streamed`]):
 /// its hash and whether its bytes decode are all its judgment and the
 /// recomposition read of it, so its body is never held.
 pub(super) fn observe<V: VaultView>(
@@ -163,7 +160,7 @@ pub(super) fn observe<V: VaultView>(
     view: &V,
 ) -> Result<(Vec<TargetState>, Vec<usize>), V::Error> {
     let lineage = recorded_lineage(plan, view.normalizer());
-    let streamed = carried(plan, &lineage, view.normalizer());
+    let streamed = streamed(plan, &lineage, view.normalizer());
     let mut states: Vec<Option<TargetState>> = vec![None; plan.transitions.len()];
     for unit in units {
         match *unit {
@@ -190,124 +187,58 @@ pub(super) fn observe<V: VaultView>(
     Ok((states, sources))
 }
 
-/// Whether each target of `plan`, by transition index, holds content the
-/// plan carries byte for byte, so it is read streamed and its body never
-/// held.
-///
-/// **A document is carried where nothing composes from its bytes**: a file
-/// every operation naming it names as a move's end, which no author's
-/// expected value names, whose before-state no edit, authored link rewrite
-/// or cascade rewrite acts on wherever the plan's moves take it
-/// ([`Lineage::edited`], and each cascade holder's [`Lineage::source`]), and
-/// every file drawing on it is created by the plan — a create is the one
-/// publication the write kernel stages as a copy of another file
-/// (`norn_fs::Content::CopyOf`). A target is read streamed where its
-/// before-state is absent or carried, and its after-state absent or drawn
-/// from a carried document, and a carried document is one whose every
-/// target is read streamed — so a document carried into a name whose content
-/// is read whole for another reason is read whole too. Composition reads a
-/// carried document streamed and nothing else of it, so the recomposition
-/// finds every byte it needs held, and a target read whole is read as it
-/// always was.
-pub(super) fn carried(
+/// Whether each target of `plan`, by transition index, holds no byte
+/// composition reads on either side, so it is read streamed and its body
+/// never held: the plan's one rule for what it carries byte for byte
+/// ([`Carried`]), built from the operations and `lineage` as planning builds
+/// it, so the applier observes streamed exactly the targets planning held no
+/// byte of.
+pub(super) fn streamed(
     plan: &ResolvedPlan,
     lineage: &Lineage,
     normalizer: &PathNormalizer,
 ) -> Vec<bool> {
-    let identity_of = |path: &DocumentPath| identity(normalizer, path.as_str());
-    let mut composed_from: BTreeSet<NormalizedPath> = lineage.edited_sources().cloned().collect();
-    let mut named_otherwise: BTreeSet<NormalizedPath> = BTreeSet::new();
-    for operation in &plan.operations {
-        let ends: Vec<&DocumentPath> = match &operation.kind {
-            OperationKind::MoveDocument { from, to } => vec![from, to],
-            _ => Vec::new(),
-        };
-        for path in touched(operation) {
-            if !ends.contains(&path)
-                && let Some(file) = identity_of(path)
-            {
-                named_otherwise.insert(file);
-            }
-        }
-        for rewrite in &operation.cascade {
-            if let Some(source) =
-                identity_of(&rewrite.path).and_then(|holder| lineage.source(&holder))
-            {
-                composed_from.insert(source.from);
-            }
-        }
-        for condition in &operation.conditions {
-            if let AuthorCondition::ExpectedValue { path, .. } = condition
-                && let Some(file) = identity_of(path)
-            {
-                named_otherwise.insert(file);
-            }
-        }
-    }
-    let index_of = transition_index(plan, normalizer);
-    let mut drawn_into_existing: BTreeSet<NormalizedPath> = BTreeSet::new();
-    for (file, drawn) in lineage.drawing() {
-        let created = index_of
-            .get(file)
-            .is_some_and(|&index| plan.transitions[index].before == FileState::absent());
-        if !created {
-            drawn_into_existing.insert(drawn.from.clone());
-        }
-    }
-    // Each file the rules above leave carryable, narrowed until every one is
-    // read streamed on both of its sides: a file whose own content is drawn
-    // from one read whole is read whole itself, and so then is what draws on
-    // it.
-    let mut carryable: BTreeSet<NormalizedPath> = plan
-        .transitions
-        .iter()
-        .filter_map(|transition| identity_of(&transition.path))
-        .filter(|file| {
-            !named_otherwise.contains(file)
-                && !composed_from.contains(file)
-                && !drawn_into_existing.contains(file)
-        })
-        .collect();
-    loop {
-        let streamed = streamed_over(plan, lineage, normalizer, &carryable);
-        let whole: BTreeSet<NormalizedPath> = plan
-            .transitions
-            .iter()
-            .zip(&streamed)
-            .filter(|(_, streamed)| !**streamed)
-            .filter_map(|(transition, _)| identity_of(&transition.path))
-            .collect();
-        let before = carryable.len();
-        carryable.retain(|file| !whole.contains(file));
-        if carryable.len() == before {
-            return streamed;
-        }
-    }
-}
-
-/// Whether each target of `plan` is read streamed, by transition index,
-/// where `carryable` names the files whose content is carried: a target
-/// whose before-state is absent or carryable, and whose after-state is
-/// absent or drawn from a carryable file.
-fn streamed_over(
-    plan: &ResolvedPlan,
-    lineage: &Lineage,
-    normalizer: &PathNormalizer,
-    carryable: &BTreeSet<NormalizedPath>,
-) -> Vec<bool> {
+    let carried = Carried::of(&plan.operations, lineage, normalizer);
     plan.transitions
         .iter()
         .map(|transition| {
-            let Some(file) = identity(normalizer, transition.path.as_str()) else {
-                return false;
-            };
-            let before = transition.before == FileState::absent() || carryable.contains(&file);
-            let after = transition.after == FileState::absent()
-                || lineage
-                    .source(&file)
-                    .is_some_and(|drawn| carryable.contains(&drawn.from));
-            role_at(transition.path.as_str()).is_none() && before && after
+            identity(normalizer, transition.path.as_str()).is_some_and(|file| {
+                role_at(transition.path.as_str()).is_none()
+                    && carried.streams(
+                        &file,
+                        transition.before != FileState::absent(),
+                        transition.after != FileState::absent(),
+                        lineage,
+                    )
+            })
         })
+        .collect()
+}
+
+/// Every target of `plan` whose before-state the applier stages into
+/// another target as the write kernel's copy of it
+/// (`norn_fs::Content::CopyOf`): a file the plan carries byte for byte
+/// ([`Carried`]) whose content another target of the plan ends holding.
+///
+/// **The counter lane's reading of the rule.** Such a file is read once
+/// more than its own transition reads it, by the copy, so the counter lane
+/// classifies it by this and never by a rule of its own
+/// (`crate::copied_sources`).
+#[cfg(feature = "induced-failure")]
+pub(crate) fn copied_sources(
+    plan: &ResolvedPlan,
+    normalizer: &PathNormalizer,
+) -> Vec<DocumentPath> {
+    let lineage = recorded_lineage(plan, normalizer);
+    let carried = Carried::of(&plan.operations, &lineage, normalizer);
+    plan.transitions
+        .iter()
+        .filter(|transition| transition.before != FileState::absent())
+        .filter(|transition| {
+            identity(normalizer, transition.path.as_str())
+                .is_some_and(|file| carried.carries(&file) && lineage.carried_to(&file).is_some())
+        })
+        .map(|transition| transition.path.clone())
         .collect()
 }
 
@@ -315,7 +246,7 @@ fn streamed_over(
 /// ([`VaultView::control_entry`]) where the target is at the path a control
 /// file is named at — the schema read where the registration reads it — and
 /// a document otherwise, read streamed where its content is carried
-/// ([`carried`]).
+/// ([`streamed`]).
 fn one<V: VaultView>(
     transition: &Transition,
     streamed: bool,
@@ -380,7 +311,7 @@ fn judged(transition: &Transition, holds: FileState, bytes: Option<Body>) -> Tar
 /// its before-state), halfway (the old spelling at the new one's
 /// after-state), landed (the new spelling at its after-state), or drift;
 /// read streamed where the rename carries its content unchanged
-/// ([`carried`]).
+/// ([`streamed`]).
 fn respell<V: VaultView>(
     old: &Transition,
     new: &Transition,

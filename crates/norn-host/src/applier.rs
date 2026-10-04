@@ -99,6 +99,8 @@ use crate::planner::control::{SchemaPlace, role_at};
 use crate::planner::forecast::forecast;
 use crate::planner::view::{TreeView, VaultView};
 use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
+#[cfg(feature = "induced-failure")]
+pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 pub(crate) use stage::Links;

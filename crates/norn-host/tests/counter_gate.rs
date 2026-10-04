@@ -2216,8 +2216,8 @@ enum Fate {
     /// Standing before and absent after.
     Removed,
     /// Standing before and absent after, a move having carried its bytes
-    /// unchanged to a name the plan creates: the write kernel stages that
-    /// create as a copy of this file, which reads it once more.
+    /// unchanged to another target: the write kernel stages that target as
+    /// a copy of this file, which reads it once more.
     CopiedAway,
 }
 
@@ -2261,28 +2261,17 @@ struct Touched {
 
 #[cfg(feature = "induced-failure")]
 impl Touched {
-    /// What `plan`'s transitions do, file by file. A removed file a move
-    /// takes to a name the plan creates holding the very bytes it held is
-    /// copied away: the applier carries such a move byte for byte.
+    /// What `plan`'s transitions do, file by file. A removed file the
+    /// applier copies another target from is copied away, by the applier's
+    /// own rule ([`norn_host::copied_sources`]) — the lane's names differ by
+    /// more than case, so they are read under a sensitive root. A replaced
+    /// file copied from — a chain's middle — has no budget authored, so a
+    /// plan holding one fails here until one is.
     fn of(plan: &norn_wire::ResolvedPlan) -> Touched {
-        let state_at = |path: &norn_wire::DocumentPath| {
-            plan.transitions
-                .iter()
-                .find(|transition| transition.path == *path)
-        };
-        let copied_away: std::collections::BTreeSet<&str> = plan
-            .operations
+        let copied_sources = norn_host::copied_sources(plan, norn_fs::CaseSensitivity::Sensitive);
+        let copied_away: std::collections::BTreeSet<&str> = copied_sources
             .iter()
-            .filter_map(|operation| match &operation.kind {
-                norn_wire::OperationKind::MoveDocument { from, to } => {
-                    let (from_state, to_state) = (state_at(from)?, state_at(to)?);
-                    (to_state.before == norn_wire::FileState::absent()
-                        && from_state.after == norn_wire::FileState::absent()
-                        && to_state.after == from_state.before)
-                        .then_some(from.as_str())
-                }
-                _ => None,
-            })
+            .map(norn_wire::DocumentPath::as_str)
             .collect();
         let mut touched = Touched::default();
         for transition in &plan.transitions {
@@ -2290,6 +2279,10 @@ impl Touched {
                 matches!(state, norn_wire::FileState::Present { .. })
             };
             let fate = match (present(&transition.before), present(&transition.after)) {
+                (true, true) if copied_away.contains(transition.path.as_str()) => panic!(
+                    "`{}` is replaced and copied from, a fate no budget is authored for",
+                    transition.path.as_str()
+                ),
                 (true, true) => Fate::Replaced,
                 (false, true) => Fate::Created,
                 (true, false) if copied_away.contains(transition.path.as_str()) => Fate::CopiedAway,

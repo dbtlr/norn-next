@@ -14,6 +14,7 @@ use norn_wire::{
 
 use super::control::{control_path, unreadable_as_role};
 use super::edit;
+use super::lineage::{Carried, Lineage};
 use super::links::{self, wire_family};
 use super::view::{Body, Entry, VaultView, document_path, wire_hash};
 use crate::derivation::{decodes, document_links};
@@ -172,7 +173,9 @@ pub(crate) fn compose<V: VaultView>(
     order: &[usize],
     view: &V,
 ) -> Result<Composition, V::Error> {
-    let mut vault = Simulated::over(view);
+    let lineage = Lineage::of(operations, order, view.normalizer());
+    let carried = Carried::of(operations, &lineage, view.normalizer());
+    let mut vault = Simulated::over(view, carried);
     let mut unresolvable = Vec::new();
     for &position in order {
         if let Err(detail) = vault.apply(&operations[position].kind)? {
@@ -229,10 +232,10 @@ pub(crate) fn compose<V: VaultView>(
         }
     }
     for (holder, (rewrites, mut carriers)) in holders {
-        // A holder's bytes read whole are those it was carried at, but for
-        // a file changed while the plan was read: then every operation
-        // writing into it is left out, as one whose text no longer occurs.
-        if let Err(detail) = vault.rewrite(&holder, &rewrites)? {
+        // A holder's bytes are held, but for a file changed while the plan
+        // was read ([`Simulated::held`]): then every operation writing into
+        // it is left out, as one whose text no longer occurs.
+        if let Err(detail) = vault.rewrite(&holder, &rewrites) {
             carriers.sort_unstable();
             carriers.dedup();
             unresolvable.extend(carriers.into_iter().map(|position| Unresolvable {
@@ -261,6 +264,9 @@ pub(crate) fn compose<V: VaultView>(
 /// spelling and takes it away at its old one.
 struct Simulated<'view, V> {
     view: &'view V,
+    /// The files the plan carries byte for byte, read streamed and never
+    /// held ([`Carried`]).
+    carried: Carried,
     targets: BTreeMap<DocumentPath, ComposedTarget>,
     /// The spelling each identity was first read at.
     read_at: BTreeMap<NormalizedPath, DocumentPath>,
@@ -292,16 +298,6 @@ pub(crate) type Unresolved = String;
 /// Each rewrite of a cascade beside the spelling of the holder it names.
 type HeldRewrites<'c> = Vec<(DocumentPath, &'c LinkRewrite)>;
 
-/// How a name an operation carries is first read.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Read {
-    /// Whole, its bytes held: what an edit composes from.
-    Whole,
-    /// Streamed, keeping no bytes where the view can stream: what a move
-    /// needs of its two ends ([`VaultView::streamed_entry`]).
-    Streamed,
-}
-
 /// Where one name an operation carries leads.
 enum Place {
     /// A file the plan composes, at the spelling it is written at.
@@ -311,9 +307,10 @@ enum Place {
 }
 
 impl<'view, V: VaultView> Simulated<'view, V> {
-    fn over(view: &'view V) -> Self {
+    fn over(view: &'view V, carried: Carried) -> Self {
         Simulated {
             view,
+            carried,
             targets: BTreeMap::new(),
             read_at: BTreeMap::new(),
             spelled: BTreeMap::new(),
@@ -336,12 +333,15 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// is a place the vault's walk does not enter, with every name beneath
     /// it, which the view answers as blocked.
     ///
-    /// **The first read decides what is held.** `read` says how the file is
-    /// read the first time the plan touches its identity: a move reads its
-    /// two ends streamed, and every other operation reads its file whole. A
-    /// document read streamed is carried ([`After::Carried`]) until an edit
-    /// lands on it ([`Self::held`]).
-    fn place(&mut self, path: &DocumentPath, read: Read) -> Result<Place, V::Error> {
+    /// **The plan's one rule decides what is held** ([`Carried`]): a file
+    /// the plan carries byte for byte is read streamed and carried unread
+    /// ([`After::Carried`]) wherever its moves take it, whatever the view
+    /// hands back, and every other file is read whole and held. A file the
+    /// view cannot hand whole at the state it first read — one that changed
+    /// between a streamed read of it and this whole one
+    /// ([`super::view::Remembered`]) — is carried at that first state too,
+    /// so an edit landing on it does not resolve ([`Self::held`]).
+    fn place(&mut self, path: &DocumentPath) -> Result<Place, V::Error> {
         let identity = match self.view.normalizer().normalize(Path::new(path.as_str())) {
             Ok(identity) => identity,
             Err(error) => {
@@ -368,16 +368,18 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         if let Some(spelling) = self.spelled.get(&identity) {
             return Ok(Place::File(identity, spelling.clone()));
         }
-        let entry = match read {
-            Read::Whole => self.view.entry(&identity)?,
-            Read::Streamed => self.view.streamed_entry(&identity)?,
+        let carried = self.carried.carries(&identity);
+        let entry = if carried {
+            self.view.streamed_entry(&identity)?
+        } else {
+            self.view.entry(&identity)?
         };
         let (spelling, before, after) = match entry {
             Entry::Document { at, hash, body } => {
                 let before = standing(&body, hash);
                 let after = match body {
-                    Body::Held(bytes) => After::Bytes(bytes),
-                    Body::Streamed { .. } => After::Carried {
+                    Body::Held(bytes) if !carried => After::Bytes(bytes),
+                    Body::Held(_) | Body::Streamed { .. } => After::Carried {
                         state: before.clone(),
                         from: at.clone(),
                     },
@@ -430,63 +432,54 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     }
 
     /// The document standing so far at the file `path` leads to, or why none
-    /// does, its file first read as `read` says.
+    /// does.
     fn standing(
         &mut self,
         path: &DocumentPath,
-        read: Read,
     ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
-        Ok(match self.place(path, read)? {
+        Ok(match self.place(path)? {
             Place::NoFile(detail) => Err(detail),
             Place::File(_, spelling) if self.targets[&spelling].after.stands() => Ok(spelling),
             Place::File(..) => Err(format!("no document stands at `{path}`")),
         })
     }
 
-    /// The bytes the document standing at `spelling` holds so far, read
-    /// whole where it is carried, or why they cannot be read.
+    /// The bytes the document standing at `spelling` holds so far, or why
+    /// they cannot be had.
     ///
-    /// **The one place a carried document's bytes are read.** An edit, an
-    /// authored link rewrite and a cascade's rewrite each compose from the
-    /// bytes, so a carried document they land on is read whole from where it
-    /// stood, once — the view remembers the read — and held from then on, at
-    /// this target alone. Bytes that no longer hash to the state it was
-    /// carried at were changed while the plan was read, and the operation
-    /// does not resolve on them.
-    fn held(&mut self, spelling: &DocumentPath) -> Result<Result<Arc<[u8]>, Unresolved>, V::Error> {
-        let (state, from) = match &self.targets[spelling].after {
-            After::Bytes(bytes) => return Ok(Ok(bytes.clone())),
-            After::Absent => return Ok(Err(format!("no document stands at `{spelling}`"))),
-            After::Carried { state, from } => (state.clone(), from.clone()),
-        };
-        let changed = || format!("`{from}` changed while the plan was read");
-        let Ok(identity) = self.view.normalizer().normalize(Path::new(from.as_str())) else {
-            return Ok(Err(changed()));
-        };
-        Ok(match self.view.entry(&identity)? {
-            Entry::Document {
-                hash,
-                body: Body::Held(bytes),
-                ..
-            } if state.hash() == Some(&hash) => {
-                self.target(spelling).after = After::Bytes(bytes.clone());
-                Ok(bytes)
+    /// **An edit composes only on bytes held.** An edit, an authored link
+    /// rewrite and a cascade's rewrite each compose from the bytes, and the
+    /// plan's one rule reads whole every file one of them lands on
+    /// ([`Carried`]), so the document they meet holds its bytes. One carried
+    /// instead is a file the view could not hand whole at the state it first
+    /// read ([`Self::place`]): it changed while the plan was read, and the
+    /// operation does not resolve on it.
+    fn held(&mut self, spelling: &DocumentPath) -> Result<Arc<[u8]>, Unresolved> {
+        match &self.targets[spelling].after {
+            After::Bytes(bytes) => Ok(bytes.clone()),
+            After::Absent => Err(format!("no document stands at `{spelling}`")),
+            After::Carried { from, .. } => {
+                debug_assert!(
+                    self.view
+                        .normalizer()
+                        .normalize(Path::new(from.as_str()))
+                        .is_ok_and(|file| !self.carried.carries(&file)),
+                    "an edit lands on `{from}`, which the plan's rule carries unread"
+                );
+                Err(format!("`{from}` changed while the plan was read"))
             }
-            _ => Err(changed()),
-        })
+        }
     }
 
     /// The file a document can be put at for `path`, or why none can: the
     /// name holds a document, a folder the plan makes, or lies beneath a
     /// document; or `path` spells a folder above it differently from the tree
-    /// or from the operation that made it. Its file is first read as `read`
-    /// says.
+    /// or from the operation that made it.
     fn vacant(
         &mut self,
         path: &DocumentPath,
-        read: Read,
     ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
-        let (identity, spelling) = match self.place(path, read)? {
+        let (identity, spelling) = match self.place(path)? {
             Place::NoFile(detail) => return Ok(Err(detail)),
             Place::File(identity, spelling) => (identity, spelling),
         };
@@ -587,7 +580,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     fn apply(&mut self, kind: &OperationKind) -> Result<Result<(), Unresolved>, V::Error> {
         Ok(match kind {
             OperationKind::CreateDocument { path, content } => {
-                self.vacant(path, Read::Whole)?.map(|spelling| {
+                self.vacant(path)?.map(|spelling| {
                     self.set_after(&spelling, After::Bytes(Arc::from(content.as_bytes())));
                 })
             }
@@ -595,9 +588,9 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 path,
                 old_str,
                 new_str,
-            } => match self.standing(path, Read::Whole)? {
+            } => match self.standing(path)? {
                 Err(detail) => Err(detail),
-                Ok(spelling) => match self.held(&spelling)? {
+                Ok(spelling) => match self.held(&spelling) {
                     Err(detail) => Err(detail),
                     Ok(bytes) => replace_once(&bytes, old_str, new_str).map(|replaced| {
                         self.target(&spelling).after = After::Bytes(replaced);
@@ -610,7 +603,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             // to judge (`super::cascade`): the removal is the same whatever
             // the delete says of them.
             OperationKind::DeleteDocument { path, .. } => {
-                self.standing(path, Read::Whole)?.map(|spelling| {
+                self.standing(path)?.map(|spelling| {
                     self.set_after(&spelling, After::Absent);
                 })
             }
@@ -721,11 +714,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         if let Some(detail) = edit::refused_whatever_the_document(kind) {
             return Ok(Err(detail));
         }
-        let spelling = match self.standing(path, Read::Whole)? {
+        let spelling = match self.standing(path)? {
             Ok(spelling) => spelling,
             Err(detail) => return Ok(Err(detail)),
         };
-        let bytes = match self.held(&spelling)? {
+        let bytes = match self.held(&spelling) {
             Ok(bytes) => bytes,
             Err(detail) => return Ok(Err(detail)),
         };
@@ -744,15 +737,16 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// spelling is the source's own is a move onto itself, which names no
     /// change.
     ///
-    /// **Both ends are read streamed** ([`Read::Streamed`]): a move puts what
-    /// its source holds at its destination, carried unread where nothing
-    /// before it held the source's bytes.
+    /// **A move reads nothing it does not hold already**: it puts what its
+    /// source holds so far at its destination, bytes or content carried
+    /// unread ([`After::Carried`]), as the plan's one rule read the source
+    /// ([`Self::place`]).
     fn move_document(
         &mut self,
         from: &DocumentPath,
         to: &DocumentPath,
     ) -> Result<Result<(), Unresolved>, V::Error> {
-        let source = match self.standing(from, Read::Streamed)? {
+        let source = match self.standing(from)? {
             Ok(source) => source,
             Err(detail) => return Ok(Err(detail)),
         };
@@ -787,7 +781,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
             self.spelled.insert(to_identity, respelled.clone());
             respelled
         } else {
-            match self.vacant(to, Read::Streamed)? {
+            match self.vacant(to)? {
                 Ok(destination) => destination,
                 Err(detail) => return Ok(Err(detail)),
             }
@@ -806,7 +800,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     ) -> Result<Result<HeldRewrites<'c>, Unresolved>, V::Error> {
         let mut named = Vec::with_capacity(cascade.len());
         for rewrite in cascade {
-            match self.standing(&rewrite.path, Read::Whole)? {
+            match self.standing(&rewrite.path)? {
                 Ok(spelling) => named.push((spelling, rewrite)),
                 Err(detail) => {
                     return Ok(Err(format!(
@@ -827,11 +821,11 @@ impl<'view, V: VaultView> Simulated<'view, V> {
         &mut self,
         rewrite: &LinkRewrite,
     ) -> Result<Result<DocumentPath, Unresolved>, V::Error> {
-        let spelling = match self.standing(&rewrite.path, Read::Whole)? {
+        let spelling = match self.standing(&rewrite.path)? {
             Ok(spelling) => spelling,
             Err(detail) => return Ok(Err(detail)),
         };
-        let bytes = match self.held(&spelling)? {
+        let bytes = match self.held(&spelling) {
             Ok(bytes) => bytes,
             Err(detail) => return Ok(Err(detail)),
         };
@@ -857,16 +851,13 @@ impl<'view, V: VaultView> Simulated<'view, V> {
     /// `rewrites` names, all at once, recording each matching link the text
     /// layer leaves as written under the address it is still written with,
     /// and each link no rewrite matches at an address one of them writes; or
-    /// say why its bytes cannot be read ([`Self::held`]).
+    /// say why its bytes cannot be had ([`Self::held`]).
     fn rewrite(
         &mut self,
         spelling: &DocumentPath,
         rewrites: &[&LinkRewrite],
-    ) -> Result<Result<(), Unresolved>, V::Error> {
-        let bytes = match self.held(spelling)? {
-            Ok(bytes) => bytes,
-            Err(detail) => return Ok(Err(detail)),
-        };
+    ) -> Result<(), Unresolved> {
+        let bytes = self.held(spelling)?;
         let kept = kept_at_written(&bytes, rewrites);
         let (rewritten, skipped) = edit::rewritten(&bytes, rewrites.iter().copied());
         self.target(spelling).after = After::Bytes(rewritten);
@@ -888,7 +879,7 @@ impl<'view, V: VaultView> Simulated<'view, V> {
                 syntax,
                 address,
             }));
-        Ok(Ok(()))
+        Ok(())
     }
 
     fn target(&mut self, spelling: &DocumentPath) -> &mut ComposedTarget {
@@ -1430,10 +1421,11 @@ mod tests {
             composition.targets[&path("archive/a.md")].before,
             FileState::absent()
         );
-        assert_eq!(
-            after_text(&composition, "archive/a.md").as_deref(),
-            Some("moved")
-        );
+        assert!(matches!(
+            &composition.targets[&path("archive/a.md")].after,
+            After::Carried { state, from }
+                if *state == FileState::present(content_hash(b"moved")) && *from == path("a.md")
+        ));
     }
 
     /// The whole reads and the streamed reads `vault` took of `at`.
@@ -1472,13 +1464,13 @@ mod tests {
         assert_eq!(reads_of(&vault, "a.md"), (0, 1));
     }
 
-    /// **An edit landing on a carried document reads it whole, once, and
-    /// composes on it.** The moved document is carried until the edit of it
-    /// at its destination reads its source whole; the edit composes there,
-    /// and a cascade rewrite of the same document after it reads nothing
-    /// more.
+    /// **A moved document an edit lands on is read whole, once, and never
+    /// streamed.** The plan's one rule carries no document an edit composes
+    /// from, so its source is read whole the first time the plan touches it;
+    /// the edit composes at its destination, and a cascade rewrite of the
+    /// same document after it reads nothing more.
     #[test]
-    fn an_edit_landing_on_a_carried_document_reads_it_whole_once() {
+    fn a_moved_document_an_edit_lands_on_is_read_whole_once() {
         let vault = MemoryVault::with(&[("a.md", "draft [[a]]\n")]).streaming();
         let operations = [
             Operation::new(OperationKind::move_document(path("a.md"), path("b.md")))
@@ -1492,7 +1484,7 @@ mod tests {
             after_text(&composition, "b.md").as_deref(),
             Some("final [[b]]\n")
         );
-        assert_eq!(reads_of(&vault, "a.md"), (1, 1));
+        assert_eq!(reads_of(&vault, "a.md"), (1, 0));
     }
 
     #[test]

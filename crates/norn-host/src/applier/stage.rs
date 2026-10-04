@@ -203,12 +203,13 @@ pub(super) struct Checked {
 
 /// What a written target publishes.
 ///
-/// **A carried document is published as a copy, never held.** A create
-/// whose content the plan carries byte for byte from another file is staged
-/// by the write kernel streaming that file into its shadow, held to the hash
-/// the transition names (`norn_fs::Content::CopyOf`); the source stands at
-/// that hash until every target drawing on it has landed, since a source
-/// publishes after them.
+/// **A carried document is published as a copy, never held.** A create or
+/// a replace whose content the plan carries byte for byte from another file
+/// is staged by the write kernel streaming that file into its shadow, held to
+/// the hash the transition names (`norn_fs::Content::CopyOf`); the source
+/// stands at that hash while every target is staged, since staging ends
+/// before anything publishes and a source publishes after the targets
+/// drawing on it.
 #[derive(Clone, Debug)]
 pub(super) enum Written {
     /// These bytes.
@@ -255,12 +256,15 @@ pub(super) enum Written {
 /// [`judge`], which asks the kernel that same judgment and stages nothing. So
 /// what a caller previewed is what an apply of the same plan over the same
 /// files does.
-pub(super) fn check(
+pub(super) fn check<V: VaultView>(
     plan: &ResolvedPlan,
-    view: &TreeView,
+    view: &V,
     declared: &Declared,
     links: Links<'_>,
-) -> Result<Checked, Unfit> {
+) -> Result<Checked, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
     // before it could pass unread; so is a creation by rule, which names no
@@ -588,14 +592,17 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
 /// half taken in, leaves it, the file standing at that hash is read whole and
 /// its links read from its bytes: a check never refuses a plan for what its
 /// index has not yet seen. A file no longer at that hash is drift.
-fn copied_links(
+fn copied_links<V: VaultView>(
     plan: &ResolvedPlan,
     units: &[Unit],
     contents: &[Option<Written>],
     states: &[TargetState],
-    view: &TreeView,
+    view: &V,
     links: Links<'_>,
-) -> Result<Vec<Option<Vec<LinkFact>>>, Unfit> {
+) -> Result<Vec<Option<Vec<LinkFact>>>, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     let index_of = transition_index(plan, view.normalizer());
     let mut copied = Vec::with_capacity(units.len());
     for (unit, content) in units.iter().zip(contents) {
@@ -630,11 +637,14 @@ fn copied_links(
 
 /// The links the document at `at` holds, read from its bytes whole where it
 /// stands at `state`; drift where it holds anything else.
-fn read_links(
+fn read_links<V: VaultView>(
     at: &DocumentPath,
     state: &FileState,
-    view: &TreeView,
-) -> Result<Vec<LinkFact>, Unfit> {
+    view: &V,
+) -> Result<Vec<LinkFact>, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     let drifted = |holds: FileState| Unfit::Refused(vec![RefusedCheck::drifted(at.clone(), holds)]);
     let Some(file) = identity(view.normalizer(), at.as_str()) else {
         return Err(drifted(FileState::absent()));
@@ -663,8 +673,9 @@ fn read_links(
 /// after-state's bytes, and those are its content where they were read; every
 /// other written target takes the recomposed result, which [`recompose`] held
 /// to its after-state — bytes, or a copy of the document the plan carries
-/// there, which only a create publishes. A written target the operations
-/// leave nothing at, or a carried document at a target that is no create, is
+/// there. A written target the operations leave nothing at, or a case-only
+/// rename landing a carried document that is not its own — which the write
+/// kernel's respell cannot copy, and the plan's one rule never carries — is
 /// returned as the path its transition disagrees at.
 fn content(
     plan: &ResolvedPlan,
@@ -695,9 +706,9 @@ fn content(
         return Ok(Some(Written::Bytes(bytes)));
     }
     let copies = match unit {
-        Unit::One(_) => transition.before == FileState::absent(),
-        // A respell carrying its content unchanged publishes none.
-        Unit::Respell { .. } => true,
+        Unit::One(_) => true,
+        // A respell carrying its own content unchanged publishes none.
+        Unit::Respell { old, .. } => transition.after.same_content(&plan.transitions[old].before),
     };
     match composition
         .targets
@@ -931,7 +942,7 @@ fn refused_at(refusal: &Refusal) -> Option<&std::path::PathBuf> {
 
 /// The plan path the kernel is asked about for `unit`, and the transition it
 /// is asked for there; `None` for a target whose two states are absence. A
-/// copy is asked for as a create whose content is its source's
+/// copy is asked for as a create or a replace whose content is its source's
 /// (`norn_fs::Content::CopyOf`), its source named below the vault root as the
 /// plan names it.
 fn kernel_transition<'p>(
@@ -946,33 +957,29 @@ fn kernel_transition<'p>(
     Some(match unit {
         Unit::One(index) => {
             let transition = &plan.transitions[index];
-            let kernel = match (&transition.before, &transition.after, content) {
-                (FileState::Absent {}, FileState::Present { .. }, Some(Written::Bytes(bytes))) => {
+            // A copy publishes the write's after-state, which is its
+            // source's before-state.
+            let written = |after: &'p norn_wire::ContentHash| match content {
+                Some(Written::Bytes(bytes)) => Some(norn_fs::Content::Held(bytes)),
+                Some(Written::Copy { source, .. }) => Some(norn_fs::Content::CopyOf {
+                    source: Path::new(source.as_str()),
+                    hash: kernel_hash(after),
+                }),
+                None => None,
+            };
+            let kernel = match (&transition.before, &transition.after) {
+                (FileState::Absent {}, FileState::Present { hash, .. }) => {
                     norn_fs::Transition::Create {
-                        content: norn_fs::Content::Held(bytes),
+                        content: written(hash)?,
                     }
                 }
-                // The copy publishes the create's after-state, which is its
-                // source's before-state.
-                (
-                    FileState::Absent {},
-                    FileState::Present { hash, .. },
-                    Some(Written::Copy { source, .. }),
-                ) => norn_fs::Transition::Create {
-                    content: norn_fs::Content::CopyOf {
-                        source: Path::new(source.as_str()),
-                        hash: kernel_hash(hash),
-                    },
-                },
-                (
-                    FileState::Present { hash, .. },
-                    FileState::Present { .. },
-                    Some(Written::Bytes(content)),
-                ) => norn_fs::Transition::Replace {
-                    before: kernel_hash(hash),
-                    content: norn_fs::Content::Held(content),
-                },
-                (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
+                (FileState::Present { hash, .. }, FileState::Present { hash: after, .. }) => {
+                    norn_fs::Transition::Replace {
+                        before: kernel_hash(hash),
+                        content: written(after)?,
+                    }
+                }
+                (FileState::Present { hash, .. }, FileState::Absent {}) => {
                     norn_fs::Transition::Remove {
                         before: kernel_hash(hash),
                     }

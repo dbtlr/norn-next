@@ -216,8 +216,7 @@ impl CarriedLinks {
         self.held.get(from).map(Vec::as_slice)
     }
 
-    /// Take in the links `links` says the document carried from `from` at
-    /// `state` holds.
+    /// Take in `links` as the links the document carried from `from` holds.
     pub(crate) fn insert(&mut self, from: DocumentPath, links: Vec<LinkFact>) {
         self.held.insert(from, links);
     }
@@ -231,9 +230,12 @@ impl CarriedLinks {
 /// [`document_links`] reads from a file's bytes only where the hash it
 /// derived them from is the file's, so a document whose state hashes
 /// otherwise — changed since the vault's index saw it, or never indexed — is
-/// vouched for by nothing, and the caller never reads its body instead: a
-/// move planning carries is left unresolved, saying to re-send once the
-/// index has taken the change in.
+/// vouched for by nothing. The caller then reads the file whole at that
+/// state and its links from its bytes, one copy, as planning read every
+/// moved document before it carried any: planning where it composes
+/// (`super::resolve`), the applier where it checks (`crate::applier`). So a
+/// carried move holds no copy of its document once the vault has indexed
+/// it, and one copy where the index lags the file.
 ///
 /// **A document whose bytes do not decode holds no link**, the answer
 /// [`document_links`] gives any bytes that do not decode, so it is vouched
@@ -258,23 +260,24 @@ pub(crate) fn vouched<I: LinkIndex + ?Sized>(
 
 /// The source of every document `composition` carries whose links `known`
 /// does not yet hold, read into it through `index` ([`vouched`]); and each
-/// source the index could not vouch for, at the spelling it stood at.
+/// source the index could not vouch for, at the spelling it stood at and the
+/// state it is carried at.
 pub(crate) fn vouch_for_carried<I: LinkIndex + ?Sized>(
     composition: &Composition,
     known: &mut CarriedLinks,
     index: &I,
-) -> Result<Vec<DocumentPath>, I::Error> {
-    let mut unvouched = Vec::new();
+) -> Result<Vec<(DocumentPath, FileState)>, I::Error> {
+    let mut unvouched: Vec<(DocumentPath, FileState)> = Vec::new();
     for target in composition.targets.values() {
         let After::Carried { state, from } = &target.after else {
             continue;
         };
-        if known.of(from).is_some() || unvouched.contains(from) {
+        if known.of(from).is_some() || unvouched.iter().any(|(source, _)| source == from) {
             continue;
         }
         match vouched(from, state, index)? {
             Some(links) => known.insert(from.clone(), links),
-            None => unvouched.push(from.clone()),
+            None => unvouched.push((from.clone(), state.clone())),
         }
     }
     Ok(unvouched)
@@ -1588,6 +1591,70 @@ pub(crate) mod testing {
                 .index()
                 .held_links(holder)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+    }
+
+    /// The empty store's index, answering the links each of `files` holds as
+    /// an index that took every one of them in would: what a planning case
+    /// over files in memory vouches for a carried document by, reading none
+    /// of the vault's files to answer.
+    pub(crate) struct IndexedFiles {
+        store: EmptyStore,
+        held: std::collections::BTreeMap<String, norn_store::HeldLinks>,
+    }
+
+    impl IndexedFiles {
+        pub(crate) fn of(files: &[(&str, &str)]) -> Self {
+            IndexedFiles {
+                store: EmptyStore::new(),
+                held: files
+                    .iter()
+                    .map(|(at, content)| {
+                        (
+                            at.to_string(),
+                            norn_store::HeldLinks {
+                                content_hash: norn_fs::ContentHash::of(content.as_bytes()).to_hex(),
+                                links: crate::derivation::document_links(content.as_bytes()),
+                            },
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl LinkIndex for IndexedFiles {
+        type Error = std::convert::Infallible;
+
+        fn changes(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            probed: &[norn_store::ProbedLink],
+            each: &mut dyn FnMut(norn_store::LinkChange),
+        ) -> Result<(), Self::Error> {
+            self.store
+                .index()
+                .changes(overlay, probed, each)
+                .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+
+        fn target(
+            &self,
+            overlay: &norn_store::PathOverlay,
+            address: &str,
+            headed: norn_store::PlanSide,
+        ) -> Result<norn_store::TargetNaming, Self::Error> {
+            self.store
+                .index()
+                .target(overlay, address, headed)
+                .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+
+        fn held_links(
+            &self,
+            holder: &norn_wire::DocumentPath,
+        ) -> Result<Option<norn_store::HeldLinks>, Self::Error> {
+            Ok(self.held.get(holder.as_str()).cloned())
         }
     }
 
