@@ -12,7 +12,7 @@
 //! [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
 //! the watcher's echo check through [`uncounted_echo_hashed_from`], which
 //! says in its name that it is not counted, a streamed observation through
-//! [`hashed_and_checked_from`], and a create's copy of its source through
+//! [`hashed_and_checked_from`], and a copy of its source for a create or a replace through
 //! [`copied_and_hashed`], which hashes the bytes it writes as it writes them
 //! and counts itself as the kernel's read of a target does.
 //! [`crate::read_and_hash`] is the configured-path form which returns both
@@ -239,7 +239,7 @@ pub(crate) fn hashed_and_checked_from(
     })
 }
 
-/// The write kernel's copy of a create's source at `path`, read through
+/// The write kernel's copy of a source at `path`, read through
 /// `source` and written into `sink` a chunk at a time: the hash and the length
 /// of exactly the bytes written, from one forward pass.
 ///

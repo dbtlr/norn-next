@@ -387,6 +387,11 @@ impl DeclaredField {
 /// A name and what it is for. What a folder *requires* of the documents inside
 /// it is a rule family with its own invalidation key — a document's path — and
 /// the declaration arrives with the derivation that reads it.
+///
+/// **A folder-scoped rule reopens a carried move's schema check.** The host's
+/// applier does not judge a document a move carries byte for byte again,
+/// because no rule yet concludes about a document from its folder; one that
+/// did would make that skip unsound (`norn-host`'s `applier::stage`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredFolder {
     path: String,

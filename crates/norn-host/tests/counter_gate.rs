@@ -1635,7 +1635,12 @@ fn moved_in_place_hub_path() -> String {
 /// - **a `set` by path** replaces one document's frontmatter;
 /// - **the hub's move** to a new stem replaces each of its [`HUB_IN_LINKS`]
 ///   holders with its link rewritten, creates the hub at its new name and
-///   removes it from its old one;
+///   removes it from its old one — a move carrying the hub byte for byte,
+///   whose create the write kernel stages as a copy of the hub's old file,
+///   so that file's fate is copied away
+///   ([`baselines::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET`]): one target
+///   read more than a removed file's, for the copy, and no read of the hub's
+///   content before the changeset's read-back of its new name;
 /// - **a delete of a document no link names** removes one document;
 /// - **the moved hub's delete leaving its links broken** removes one
 ///   document, and its changeset re-decides the twenty links that named it.
@@ -2210,6 +2215,10 @@ enum Fate {
     Created,
     /// Standing before and absent after.
     Removed,
+    /// Standing before and absent after, a move having carried its bytes
+    /// unchanged to another target: the write kernel stages that target as
+    /// a copy of this file, which reads it once more.
+    CopiedAway,
 }
 
 #[cfg(feature = "induced-failure")]
@@ -2220,6 +2229,7 @@ impl Fate {
             Fate::Replaced => baselines::APPLY_DOCUMENT_READS_PER_REPLACED_TARGET,
             Fate::Created => baselines::APPLY_DOCUMENT_READS_PER_CREATED_TARGET,
             Fate::Removed => baselines::APPLY_DOCUMENT_READS_PER_REMOVED_TARGET,
+            Fate::CopiedAway => baselines::APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET,
         }
     }
 
@@ -2230,6 +2240,7 @@ impl Fate {
             Fate::Replaced => baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET,
             Fate::Created => baselines::APPLY_TARGET_READS_PER_CREATED_TARGET,
             Fate::Removed => baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET,
+            Fate::CopiedAway => baselines::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET,
         }
     }
 
@@ -2250,16 +2261,31 @@ struct Touched {
 
 #[cfg(feature = "induced-failure")]
 impl Touched {
-    /// What `plan`'s transitions do, file by file.
+    /// What `plan`'s transitions do, file by file. A removed file the
+    /// applier copies another target from is copied away, by the applier's
+    /// own rule ([`norn_host::copied_sources`]) — the lane's names differ by
+    /// more than case, so they are read under a sensitive root. A replaced
+    /// file copied from — a chain's middle — has no budget authored, so a
+    /// plan holding one fails here until one is.
     fn of(plan: &norn_wire::ResolvedPlan) -> Touched {
+        let copied_sources = norn_host::copied_sources(plan, norn_fs::CaseSensitivity::Sensitive);
+        let copied_away: std::collections::BTreeSet<&str> = copied_sources
+            .iter()
+            .map(norn_wire::DocumentPath::as_str)
+            .collect();
         let mut touched = Touched::default();
         for transition in &plan.transitions {
             let present = |state: &norn_wire::FileState| {
                 matches!(state, norn_wire::FileState::Present { .. })
             };
             let fate = match (present(&transition.before), present(&transition.after)) {
+                (true, true) if copied_away.contains(transition.path.as_str()) => panic!(
+                    "`{}` is replaced and copied from, a fate no budget is authored for",
+                    transition.path.as_str()
+                ),
                 (true, true) => Fate::Replaced,
                 (false, true) => Fate::Created,
+                (true, false) if copied_away.contains(transition.path.as_str()) => Fate::CopiedAway,
                 (true, false) => Fate::Removed,
                 (false, false) => panic!(
                     "a transition at `{}` names no file before or after it",
@@ -2281,6 +2307,11 @@ impl Touched {
         self.fates.values().filter(|&&each| each == fate).count() as u64
     }
 
+    /// How many files the plan removes, copied away or not.
+    fn removed(&self) -> u64 {
+        self.count(Fate::Removed) + self.count(Fate::CopiedAway)
+    }
+
     /// The files written, each through a shadow of its own.
     fn written(&self) -> u64 {
         self.fates.values().filter(|fate| fate.written()).count() as u64
@@ -2300,10 +2331,11 @@ impl Touched {
     /// The plan's files counted by fate, for a message.
     fn summary(&self) -> String {
         format!(
-            "{} replaced, {} created and {} removed",
+            "{} replaced, {} created, {} removed and {} copied away",
             self.count(Fate::Replaced),
             self.count(Fate::Created),
-            self.count(Fate::Removed)
+            self.count(Fate::Removed),
+            self.count(Fate::CopiedAway)
         )
     }
 }
@@ -2422,12 +2454,12 @@ fn one_apply(
         (
             "documents_deleted",
             spent.documents_deleted,
-            touched.count(Fate::Removed),
+            touched.removed(),
         ),
         (
             "tombstones_recorded",
             spent.tombstones_recorded,
-            touched.count(Fate::Removed),
+            touched.removed(),
         ),
         ("apply_full_scan_steps", spent.apply_full_scan_steps, 0),
     ] {
@@ -2453,7 +2485,7 @@ fn one_apply(
     [
         ("replaced", touched.count(Fate::Replaced)),
         ("created", touched.count(Fate::Created)),
-        ("removed", touched.count(Fate::Removed)),
+        ("removed", touched.removed()),
         ("document_opens", spent.document_opens),
         ("target_reads", spent.target_reads),
         ("shadow_reads", spent.shadow_reads),
@@ -2601,7 +2633,7 @@ fn the_reads_name_the_touched_files(
     );
     let mut not_read_back_once = Vec::new();
     for (path, fate) in &touched.fates {
-        if *fate == Fate::Removed {
+        if !fate.written() {
             continue;
         }
         let of_this = |read: &&norn_fs::reads::FileRead| {

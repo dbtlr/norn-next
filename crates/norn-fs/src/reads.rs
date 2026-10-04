@@ -10,7 +10,7 @@
 //! of a file's content through a descriptor `open_regular_at` handed back, the
 //! stats that open and the walk take along the way, the directory entries a
 //! walk pulls off a stream, and the write kernel's reads of a target (a
-//! create's source copied among them) and of a staged shadow — and [`ReadTally`]'s fields name them one at a time, each
+//! copy's source among them) and of a staged shadow — and [`ReadTally`]'s fields name them one at a time, each
 //! with what it leaves out. An act outside those fields is outside the tally
 //! by construction: no call site elsewhere reaches the counters.
 //!
@@ -65,7 +65,7 @@ pub struct ReadTally {
     /// also the opens that reached a regular file and were read. A directory
     /// opened to descend into is not one of these, and neither is a file any
     /// other protocol in this crate opens — a target hashed to judge it, a
-    /// create's source copied, or a shadow.
+    /// copy's source, or a shadow.
     pub document_opens: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
@@ -98,7 +98,7 @@ pub struct ReadTally {
     /// Vault files the write kernel read through its own open: one per hash
     /// of a regular file opened at a target's name, taken by staging, by
     /// publication's verification again, and by a landing's confirmation, and
-    /// one per copy of a create's source into its shadow, which staging hashes
+    /// one per copy of a create's or a replace's source into its shadow, which staging hashes
     /// as it copies. A name holding no regular file — a create's absent target
     /// among them — opens nothing to hash and is not one.
     ///
@@ -139,7 +139,7 @@ thread_local! {
 pub enum ReadAct {
     /// A read of a file's content, [`ReadTally::document_opens`].
     Document,
-    /// The write kernel's read of a target, or of a create's source it
+    /// The write kernel's read of a target, or of a copy's source it
     /// copies, [`ReadTally::target_reads`].
     Target,
     /// The write kernel's read of a staged shadow, [`ReadTally::shadow_reads`].

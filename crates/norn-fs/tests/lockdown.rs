@@ -165,7 +165,7 @@ fn run_scenario(root: &Path) {
             DOCUMENT,
             Transition::Replace {
                 before,
-                content: NEW,
+                content: norn_fs::Content::Held(NEW),
             },
         )],
         "create" => vec![(

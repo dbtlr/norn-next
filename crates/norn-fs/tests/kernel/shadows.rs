@@ -21,7 +21,7 @@ fn a_landed_publication_leaves_no_shadow() {
                 "note.md",
                 Transition::Replace {
                     before: hash(previous.as_bytes()),
-                    content: next.as_bytes(),
+                    content: norn_fs::Content::Held(next.as_bytes()),
                 },
             )
             .expect("a replacement");
@@ -58,7 +58,7 @@ fn a_leaked_aliased_shadow_is_never_reopened() {
             "note.md",
             Transition::Replace {
                 before: hash(b"live bytes"),
-                content: b"published bytes",
+                content: norn_fs::Content::Held(b"published bytes"),
             },
         )
         .expect("a replacement");
@@ -94,7 +94,7 @@ fn residue_in_the_shadow_home_neither_blocks_nor_is_taken() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
         )
         .expect("a replacement over a dead writer's residue");
@@ -140,7 +140,7 @@ fn a_shadow_that_cannot_be_staged_refuses_staging() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
         )
         .expect_err("a shadow home nothing may write into");
@@ -172,7 +172,7 @@ fn a_discarded_target_leaves_no_shadow_and_publishes_nothing() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("staged"),
@@ -226,7 +226,7 @@ fn no_descriptor_survives_staging() {
                     "folder/note.md",
                     Transition::Replace {
                         before: hash(b"old"),
-                        content: b"new",
+                        content: norn_fs::Content::Held(b"new"),
                     },
                 )
                 .expect("a replacement stages"),

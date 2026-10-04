@@ -54,12 +54,12 @@
 //!    shadow home — reached, where the home is the fallback under the vault
 //!    root, by the same no-follow descent from that root — given a replaced
 //!    file's permission bits before a byte of content goes in, and fsynced. [`Staged`] records the shadow's name and
-//!    `(device, inode)` and nothing that holds it open. A create's content is
-//!    bytes its caller holds, or a copy of another file below the root
-//!    ([`Content::CopyOf`]): that source is reached by the same anchored
-//!    descent as a target, streamed into the shadow a chunk at a time and
-//!    hashed as it goes, and a source not at the hash the create names
-//!    refuses as drift before the shadow is synced.
+//!    `(device, inode)` and nothing that holds it open. A create's or a
+//!    replace's content is bytes its caller holds, or a copy of another file
+//!    below the root ([`Content::CopyOf`]): that source is reached by the
+//!    same anchored descent as a target, streamed into the shadow a chunk at
+//!    a time and hashed as it goes, and a source not at the hash the
+//!    transition names refuses as drift before the shadow is synced.
 //!
 //! A staging refusal leaves no shadow behind.
 //!
@@ -238,10 +238,13 @@ pub enum Transition<'a> {
     /// exception: the moved document lands at the default mode, as the
     /// one-shot move did before the split.
     Create { content: Content<'a> },
-    /// The file must hash to `before`, and `content` is what will be there.
+    /// The file must hash to `before`, and `content` is what will be there:
+    /// bytes the caller holds, or a streamed copy of another file below the
+    /// same root, judged, staged and refused exactly as a create's copy is
+    /// ([`Content`]).
     Replace {
         before: ContentHash,
-        content: &'a [u8],
+        content: Content<'a>,
     },
     /// The file must hash to `before`, and nothing will be there.
     Remove { before: ContentHash },
@@ -258,16 +261,17 @@ pub enum Transition<'a> {
     },
 }
 
-/// What a create's name will hold once it is published.
+/// What a create's or a replace's name will hold once it is published.
 ///
 /// **Two sources of one after-state, and still one transition.** Either way
 /// the after-state is a content hash, and everything staging and publication
 /// ask of the target and the shadow is asked of that hash; the variant decides
 /// only where the bytes that go into the shadow come from.
 ///
-/// A copy exists so a create whose bytes are another vault file's — a move's
-/// destination — is staged without the caller holding the file: the peak a
-/// staging holds is one 64 KiB chunk, not the document.
+/// A copy exists so a write whose bytes are another vault file's — a move's
+/// destination, a create where nothing stood or a replace where the plan
+/// vacates the name first — is staged without the caller holding the file:
+/// the peak a staging holds is one 64 KiB chunk, not the document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Content<'a> {
     /// These bytes.
@@ -299,16 +303,17 @@ pub enum Content<'a> {
     ///
     /// Whether `source` still names the file that was copied is not asked;
     /// the hash of the bytes copied is the whole question, because they are
-    /// what the create publishes. For the same reason the source may be
+    /// what the write publishes. For the same reason the source may be
     /// reached at a spelling a case-folding volume folds onto another entry's
     /// name — staging does not confirm the spelling against its folder's
     /// listing as it does a target's — because the hash, not the spelling,
     /// decides what is copied.
     ///
-    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-    /// applier staging a move's destination from the file the move leaves,
-    /// without holding it. The applier still stages every create from bytes
-    /// the plan composed, so nothing in the current call graph builds one yet.
+    /// **How a move's destination is staged.** The applier stages the
+    /// destination of a move whose document the plan carries byte for byte
+    /// from the file the move leaves, without holding it: a create where
+    /// nothing stood, and a replace where another move of the plan vacates
+    /// the name, as a chain of moves does.
     CopyOf { source: &'a Path, hash: ContentHash },
 }
 
@@ -597,12 +602,12 @@ pub fn stage(
 /// changes nothing.
 ///
 /// **A copy's source is judged as far as no byte of it decides**, and only
-/// where the create proceeds, since a landed target is staged without its
-/// source. Shared with [`stage`]: a source name that is not one below the
+/// where the create or the replace proceeds, since a landed target is staged
+/// without its source. Shared with [`stage`]: a source name that is not one below the
 /// root, a linked folder on its path, a link at its name and something there
 /// that is not a regular file each refuse as staging would, told by the
 /// descent and a no-follow stat, with no file opened. Not shared: a source
-/// that is absent or holds bytes other than the create's hash, which staging
+/// that is absent or holds bytes other than the copy's hash, which staging
 /// refuses as drift once it copies, and one the process may not open, which
 /// staging refuses at the open, are answered ready here. Telling either takes
 /// opening the source, and a source's state is the plan's own transition's
@@ -620,13 +625,17 @@ pub fn judge(
     transition: Transition<'_>,
 ) -> Result<(), Refusal> {
     let (root_fd, looked) = look(anchor, root, path, &anchor.join(path), &transition)?;
-    // Staging reaches a copy's source only where the create proceeds, so a
+    // Staging reaches a copy's source only where the write proceeds, so a
     // landed target is judged without it, as it is staged without it.
     match (looked, transition) {
         (
             Looked::One(Judged::Proceed { .. }),
             Transition::Create {
                 content: Content::CopyOf { source, .. },
+            }
+            | Transition::Replace {
+                content: Content::CopyOf { source, .. },
+                ..
             },
         ) => judge_source(root_fd.as_fd(), anchor, source),
         _ => Ok(()),
@@ -791,7 +800,7 @@ fn stage_where(
         (Transition::Replace { before, content }, Some(after)) => Pending::Replace {
             before,
             after,
-            shadow: stage_shadow(&at, Content::Held(content), mode)?,
+            shadow: stage_shadow(&at, content, mode)?,
         },
         (Transition::Remove { before }, _) => Pending::Remove { before },
         (
@@ -866,7 +875,7 @@ struct StageAt<'a> {
 fn after_of(transition: &Transition<'_>) -> Option<ContentHash> {
     match transition {
         Transition::Create { content } => Some(content.hash()),
-        Transition::Replace { content, .. } => Some(ContentHash::of(content)),
+        Transition::Replace { content, .. } => Some(content.hash()),
         Transition::Respell {
             before, content, ..
         } => Some(content.map_or(*before, ContentHash::of)),
@@ -1221,7 +1230,7 @@ fn open_source(at: &StageAt<'_>, source: &Path, hash: ContentHash) -> Result<Sou
     }
 }
 
-/// Where a create's source stands, reached from the root as a target is.
+/// Where a copy's source stands, reached from the root as a target is.
 struct SourceAt<'r, 'p> {
     /// The source's path, the anchor joined with the name below it.
     full: PathBuf,
@@ -1230,7 +1239,7 @@ struct SourceAt<'r, 'p> {
     reached: Option<(Chain<'r>, &'p OsStr)>,
 }
 
-/// Reach the folder a create's `source` sits in below `anchor`, refusing
+/// Reach the folder a copy's `source` sits in below `anchor`, refusing
 /// what both staging and [`judge`] refuse of a source's path: a name that is
 /// not one below the root, as an invalid request before anything is opened,
 /// and a linked folder on the way as [`Refusal::LinkedAncestor`]. The descent
@@ -1249,7 +1258,7 @@ fn reach_source<'r, 'p>(
     Ok(SourceAt { full, reached })
 }
 
-/// [`judge`]'s look at a create's source: every refusal [`open_source`]
+/// [`judge`]'s look at a copy's source: every refusal [`open_source`]
 /// meets before it opens the file — the path's shape, a linked folder on the
 /// way, a link at the source's name ([`Refusal::SymlinkDestination`]) and
 /// something there that is not a regular file ([`Refusal::NotRegularFile`])
@@ -1257,7 +1266,7 @@ fn reach_source<'r, 'p>(
 /// opened.
 ///
 /// **The source's state is not asked, nor whether it opens.** A source that
-/// is absent, or holds bytes other than the create's hash, refuses staging as
+/// is absent, or holds bytes other than the copy's hash, refuses staging as
 /// drift, and one the process may not open refuses it at the open; telling
 /// the drift takes reading the file and telling the open takes opening it. A
 /// source's state is judged by the plan's own transition on it — a move's
@@ -1282,7 +1291,7 @@ fn judge_source(root_fd: BorrowedFd<'_>, anchor: &Path, source: &Path) -> Result
 /// Put `content` in an already-open handle and get it onto the disk.
 ///
 /// A copy streams its source into the handle a chunk at a time and hashes
-/// what it writes; bytes that are not the hash the create names refuse as
+/// what it writes; bytes that are not the hash the write names refuse as
 /// drift naming the source, before the shadow is synced.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn fill(
@@ -2812,7 +2821,7 @@ mod tests {
     fn replace_old_with_new() -> Transition<'static> {
         Transition::Replace {
             before: ContentHash::of(b"old"),
-            content: b"new",
+            content: Content::Held(b"new"),
         }
     }
 
@@ -3411,7 +3420,7 @@ mod tests {
         scratch.place("ready.md", b"old");
         let replace = Transition::Replace {
             before: ContentHash::of(b"old"),
-            content: b"new",
+            content: Content::Held(b"new"),
         };
         let judged = |relative: &str, transition| {
             judge(

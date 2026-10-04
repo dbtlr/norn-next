@@ -378,7 +378,7 @@ fn a_contended_vault_is_fully_workable() {
         "fresh.md",
         Transition::Replace {
             before: ContentHash::of(b"one"),
-            content: b"two",
+            content: norn_fs::Content::Held(b"two"),
         },
     );
     apply(

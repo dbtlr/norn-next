@@ -19,7 +19,11 @@ use super::control::SchemaPlace;
 /// **Files, not the store.** A before-state is the hash of the bytes a target
 /// is composed from, and the applier recomposes from what the file holds, so
 /// both read the file: the store holds no document's exact bytes, and a hash
-/// read from it could name bytes nobody composed against.
+/// read from it could name bytes nobody composed against. Two derived facts
+/// are read from the store's index instead, each held to a file read here:
+/// a `where` target's match, and a carried document's own links, which the
+/// index vouches for only at the hash read from the file (see the
+/// planner's module documentation, `super`).
 ///
 /// **One identity rule.** Every name the planner compares is produced by
 /// [`normalizer`](Self::normalizer) — `norn-fs`'s one path-spelling
@@ -33,8 +37,20 @@ pub(crate) trait VaultView {
     /// The root's identity rule.
     fn normalizer(&self) -> &PathNormalizer;
 
-    /// What stands at `path`.
+    /// What stands at `path`, a document read whole: its body is always
+    /// [`Body::Held`].
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
+
+    /// What stands at `path`, a document read without holding its bytes
+    /// where the view can stream them: its body [`Body::Streamed`], or
+    /// [`Body::Held`] where the view holds the bytes anyway — a view over
+    /// bytes in memory, or one that already read the file whole.
+    ///
+    /// **What a carried document is read by.** A document the plan carries
+    /// byte for byte needs only its hash and whether its bytes decode, so
+    /// composition reads one here (`super::lineage::Carried`), as does the
+    /// applier's look at a target holding no byte composition reads.
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, Self::Error>;
 
     /// What stands at `path`, the in-vault path a control file lives at
     /// ([`super::control`]), read as that control file rather than as a
@@ -132,12 +148,12 @@ pub(crate) enum Entry {
     /// Nothing. `at` is the spelling a document made here takes: each folder
     /// above it that stands, as its parent lists it, and the rest as asked.
     Absent { at: DocumentPath },
-    /// A document, at the spelling the tree lists, with its bytes and their
-    /// hash from one read.
+    /// A document, at the spelling the tree lists, with the hash of its
+    /// bytes and what the read kept of them, from one read.
     Document {
         at: DocumentPath,
-        bytes: Arc<[u8]>,
         hash: ContentHash,
+        body: Body,
     },
     /// A folder.
     Folder,
@@ -145,6 +161,36 @@ pub(crate) enum Entry {
     /// neither a document nor a folder, a name beneath one that is not a
     /// folder, or a place the vault's walk does not enter.
     Blocked { detail: String, barrier: Barrier },
+}
+
+/// What one read of a document kept of its bytes.
+#[derive(Clone, Debug)]
+pub(crate) enum Body {
+    /// The bytes, held.
+    Held(Arc<[u8]>),
+    /// None of them: the read streamed the file, keeping only whether its
+    /// bytes decode as a vault document
+    /// ([`streamed_decodes`](crate::derivation::streamed_decodes)).
+    Streamed { decodes: bool },
+}
+
+impl Body {
+    /// The bytes, where the read held them.
+    pub(crate) fn held(&self) -> Option<&Arc<[u8]>> {
+        match self {
+            Body::Held(bytes) => Some(bytes),
+            Body::Streamed { .. } => None,
+        }
+    }
+
+    /// Whether the bytes decode as a vault document, by the derivation's one
+    /// rule, whichever way they were read.
+    pub(crate) fn decodes(&self) -> bool {
+        match self {
+            Body::Held(bytes) => crate::derivation::decodes(bytes),
+            Body::Streamed { decodes } => *decodes,
+        }
+    }
 }
 
 /// What keeps a document from a name.
@@ -177,14 +223,30 @@ pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
     DocumentPath::new(path.to_str()?).ok()
 }
 
-/// A view that reads each name once and answers every later read of it with
-/// what the first read found.
+/// A view that reads each name once — or, for a name first read streamed and
+/// later wanted whole, twice — and answers every later read of it with what
+/// those reads found.
 ///
 /// Planning orders its operations, composes them, and composes again after
 /// leaving an operation out, and one planning is one observation of each
-/// file: every pass then composes from the same before-states, and a file is
-/// read once however many passes it takes. A name is remembered by its
+/// file: every pass then composes from the same before-states, the first
+/// read's, and a file is read once however many passes it takes — but for a
+/// streamed read followed by a whole one, below. A name is remembered by its
 /// identity, so two spellings of one file are one read.
+///
+/// **A streamed read is remembered without a body**, so a document a plan
+/// carries is never held here. A whole read of a name remembered streamed —
+/// a pass whose cascade now lands on a document an earlier pass carried, or
+/// planning reading a carried document's links where the index does not
+/// vouch for them — reads the file again, once, and remembers the bytes in
+/// its place: the one copy that read needs, answering every later read,
+/// streamed or whole.
+///
+/// **The first read fixes the before-state.** Where the file no longer
+/// hashes to what the streamed read found, it changed while the plan was
+/// read: the whole read answers the remembered streamed entry, its bytes not
+/// to be had at that state, so no pass composes from a before-state another
+/// pass did not read, and the caller wanting bytes does not resolve on it.
 pub(crate) struct Remembered<'view, V> {
     view: &'view V,
     entries: RefCell<BTreeMap<NormalizedPath, Entry>>,
@@ -211,10 +273,39 @@ impl<V: VaultView> VaultView for Remembered<'_, V> {
     }
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+        let remembered = self.entries.borrow().get(path).cloned();
+        let first = match remembered {
+            Some(Entry::Document {
+                hash,
+                body: Body::Streamed { .. },
+                ..
+            }) => hash,
+            Some(read) => return Ok(read),
+            None => {
+                let read = self.view.entry(path)?;
+                self.entries.borrow_mut().insert(path.clone(), read.clone());
+                return Ok(read);
+            }
+        };
+        let read = self.view.entry(path)?;
+        Ok(match read {
+            Entry::Document {
+                ref hash,
+                body: Body::Held(_),
+                ..
+            } if *hash == first => {
+                self.entries.borrow_mut().insert(path.clone(), read.clone());
+                read
+            }
+            _ => self.entries.borrow()[path].clone(),
+        })
+    }
+
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
         if let Some(read) = self.entries.borrow().get(path) {
             return Ok(read.clone());
         }
-        let read = self.view.entry(path)?;
+        let read = self.view.streamed_entry(path)?;
         self.entries.borrow_mut().insert(path.clone(), read.clone());
         Ok(read)
     }
@@ -411,14 +502,16 @@ impl TreeView {
     }
 }
 
-impl VaultView for TreeView {
-    type Error = TreeViewError;
-
-    fn normalizer(&self) -> &PathNormalizer {
-        self.vault.normalizer()
-    }
-
-    fn entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
+impl TreeView {
+    /// What stands at `path`, a document's content read by `read`: the
+    /// vault's descent to the name, then the document's contained read below
+    /// the root, which answers its hash and what it kept of its bytes, or
+    /// nothing where the file was taken away since the descent.
+    fn entry_read(
+        &self,
+        path: &NormalizedPath,
+        read: impl FnOnce(&Path, &Path) -> Result<Option<(ContentHash, Body)>, Refusal>,
+    ) -> Result<Entry, TreeViewError> {
         let (kind, at) = match self.reach(path.as_path())? {
             Reach::Refused(skip) => {
                 let root = skip.path().as_path().display();
@@ -461,22 +554,55 @@ impl VaultView for TreeView {
                 let Some(spelling) = document_path(at.as_path()) else {
                     return Ok(not_a_document_path(at.as_path()));
                 };
-                match norn_fs::read_optional_and_hash(&self.root, at.as_path())
-                    .map_err(TreeViewError::Read)?
-                {
+                match read(&self.root, at.as_path()).map_err(TreeViewError::Read)? {
                     // Taken away between the descent and the read: nothing
                     // stands there now.
                     None => self.spelled_where_absent(path)?,
-                    Some(read) => {
-                        let (bytes, hash) = read.into_parts();
-                        Entry::Document {
-                            at: spelling,
-                            bytes: Arc::from(bytes),
-                            hash: wire_hash(hash),
-                        }
-                    }
+                    Some((hash, body)) => Entry::Document {
+                        at: spelling,
+                        hash,
+                        body,
+                    },
                 }
             }
+        })
+    }
+}
+
+impl VaultView for TreeView {
+    type Error = TreeViewError;
+
+    fn normalizer(&self) -> &PathNormalizer {
+        self.vault.normalizer()
+    }
+
+    fn entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
+        self.entry_read(path, |root, at| {
+            Ok(norn_fs::read_optional_and_hash(root, at)?.map(|read| {
+                let (bytes, hash) = read.into_parts();
+                (wire_hash(hash), Body::Held(Arc::from(bytes)))
+            }))
+        })
+    }
+
+    /// **Streamed through `norn-fs`'s contained read that keeps no bytes**:
+    /// one pass of 64 KiB chunks answers the hash and whether the bytes are
+    /// UTF-8, held to the decode rule by
+    /// [`streamed_decodes`](crate::derivation::streamed_decodes). The file is
+    /// reached as [`entry`](Self::entry) reaches it, so the two answer alike
+    /// but for the body.
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, TreeViewError> {
+        self.entry_read(path, |root, at| {
+            Ok(
+                norn_fs::stream_optional_and_hash(root, at)?.map(|streamed| {
+                    (
+                        wire_hash(streamed.content_hash()),
+                        Body::Streamed {
+                            decodes: crate::derivation::streamed_decodes(&streamed),
+                        },
+                    )
+                }),
+            )
         })
     }
 
@@ -520,8 +646,8 @@ impl VaultView for TreeView {
                 let (bytes, hash) = read.into_parts();
                 Entry::Document {
                     at,
-                    bytes: Arc::from(bytes),
                     hash: wire_hash(hash),
+                    body: Body::Held(Arc::from(bytes)),
                 }
             }
             Ok(None) => Entry::Absent { at },
@@ -607,7 +733,7 @@ pub(crate) mod memory {
 
     use norn_fs::{CaseSensitivity, NormalizedPath, PathNormalizer};
 
-    use super::{Entry, VaultView, document_path, wire_hash};
+    use super::{Body, Entry, VaultView, document_path, wire_hash};
 
     /// Files by spelling, and folders standing empty. A folder stands where it
     /// was made empty or where anything stands below it. Names are compared
@@ -616,8 +742,13 @@ pub(crate) mod memory {
         normalizer: PathNormalizer,
         files: BTreeMap<String, Arc<[u8]>>,
         empty_folders: BTreeSet<String>,
-        /// How many times each name was read.
+        /// Whether a streamed read keeps no body, as a vault on disk streams
+        /// one; by default it answers with the bytes it holds anyway.
+        streams: bool,
+        /// How many times each name was read, whole or streamed.
         pub(crate) reads: RefCell<BTreeMap<String, usize>>,
+        /// How many of those reads were streamed reads.
+        pub(crate) streamed: RefCell<BTreeMap<String, usize>>,
         /// How many times each folder was listed, the root as the empty
         /// name.
         pub(crate) listings: RefCell<BTreeMap<String, usize>>,
@@ -629,7 +760,9 @@ pub(crate) mod memory {
                 normalizer: PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive),
                 files: BTreeMap::new(),
                 empty_folders: BTreeSet::new(),
+                streams: false,
                 reads: RefCell::default(),
+                streamed: RefCell::default(),
                 listings: RefCell::default(),
             }
         }
@@ -658,6 +791,13 @@ pub(crate) mod memory {
         /// This vault on a root that folds ASCII case.
         pub(crate) fn folding_case(mut self) -> Self {
             self.normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+            self
+        }
+
+        /// This vault streaming a document a streamed read asks for, as a
+        /// vault on disk does: its body is kept nowhere.
+        pub(crate) fn streaming(mut self) -> Self {
+            self.streams = true;
             self
         }
 
@@ -713,57 +853,30 @@ pub(crate) mod memory {
         }
 
         fn entry(&self, path: &NormalizedPath) -> Result<Entry, Infallible> {
+            self.standing_at(path)
+        }
+
+        /// A streamed read keeps no body where the vault streams, and is
+        /// counted among the streamed reads either way.
+        fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, Infallible> {
             *self
-                .reads
+                .streamed
                 .borrow_mut()
                 .entry(path.as_path().to_string_lossy().into_owned())
                 .or_default() += 1;
-            let asked = path.as_path();
-            for above in asked.ancestors().skip(1) {
-                if above.as_os_str().is_empty() {
-                    break;
-                }
-                let above = self.identity(&above.to_string_lossy());
-                if self.files.keys().any(|name| self.identity(name) == above) {
-                    return Ok(Entry::Blocked {
-                        detail: format!(
-                            "`{}` lies beneath an entry that is not a folder",
-                            asked.display()
-                        ),
-                        barrier: super::Barrier::Occupied,
-                    });
-                }
-            }
-            if let Some((name, bytes)) = self
-                .files
-                .iter()
-                .find(|(name, _)| self.identity(name) == *path)
-            {
-                return Ok(Entry::Document {
-                    at: document_path(Path::new(name)).expect("a stored document path"),
-                    bytes: bytes.clone(),
-                    hash: wire_hash(norn_fs::ContentHash::of(bytes)),
-                });
-            }
-            if self.folder_stands(path)? {
-                return Ok(Entry::Folder);
-            }
-            for above in asked.ancestors().skip(1) {
-                if above.as_os_str().is_empty() {
-                    break;
-                }
-                if let Some(spelled) =
-                    self.folder_spelling(&self.identity(&above.to_string_lossy()))
-                {
-                    let rest = asked.strip_prefix(above).expect("an ancestor prefixes it");
-                    let at = spelled.join(rest);
-                    return Ok(Entry::Absent {
-                        at: document_path(&at).expect("a document path"),
-                    });
-                }
-            }
-            Ok(Entry::Absent {
-                at: document_path(asked).expect("a document path"),
+            Ok(match self.standing_at(path)? {
+                Entry::Document {
+                    at,
+                    hash,
+                    body: Body::Held(bytes),
+                } if self.streams => Entry::Document {
+                    at,
+                    hash,
+                    body: Body::Streamed {
+                        decodes: crate::derivation::decodes(&bytes),
+                    },
+                },
+                other => other,
             })
         }
 
@@ -833,6 +946,64 @@ pub(crate) mod memory {
         }
     }
 
+    impl MemoryVault {
+        /// What stands at `path`, one read counted.
+        fn standing_at(&self, path: &NormalizedPath) -> Result<Entry, Infallible> {
+            *self
+                .reads
+                .borrow_mut()
+                .entry(path.as_path().to_string_lossy().into_owned())
+                .or_default() += 1;
+            let asked = path.as_path();
+            for above in asked.ancestors().skip(1) {
+                if above.as_os_str().is_empty() {
+                    break;
+                }
+                let above = self.identity(&above.to_string_lossy());
+                if self.files.keys().any(|name| self.identity(name) == above) {
+                    return Ok(Entry::Blocked {
+                        detail: format!(
+                            "`{}` lies beneath an entry that is not a folder",
+                            asked.display()
+                        ),
+                        barrier: super::Barrier::Occupied,
+                    });
+                }
+            }
+            if let Some((name, bytes)) = self
+                .files
+                .iter()
+                .find(|(name, _)| self.identity(name) == *path)
+            {
+                return Ok(Entry::Document {
+                    at: document_path(Path::new(name)).expect("a stored document path"),
+                    hash: wire_hash(norn_fs::ContentHash::of(bytes)),
+                    body: Body::Held(bytes.clone()),
+                });
+            }
+            if self.folder_stands(path)? {
+                return Ok(Entry::Folder);
+            }
+            for above in asked.ancestors().skip(1) {
+                if above.as_os_str().is_empty() {
+                    break;
+                }
+                if let Some(spelled) =
+                    self.folder_spelling(&self.identity(&above.to_string_lossy()))
+                {
+                    let rest = asked.strip_prefix(above).expect("an ancestor prefixes it");
+                    let at = spelled.join(rest);
+                    return Ok(Entry::Absent {
+                        at: document_path(&at).expect("a document path"),
+                    });
+                }
+            }
+            Ok(Entry::Absent {
+                at: document_path(asked).expect("a document path"),
+            })
+        }
+    }
+
     /// Hand `visit` each of `names`, in byte order, until it breaks.
     fn visited(names: BTreeSet<OsString>, visit: &mut dyn FnMut(&OsStr) -> ControlFlow<()>) {
         for name in names {
@@ -875,12 +1046,56 @@ mod tests {
     #[test]
     fn the_tree_view_reads_a_document_with_the_hash_of_its_bytes() {
         let (_scratch, view) = tree();
-        let Entry::Document { at, bytes, hash } = entry(&view, "folder/a.md") else {
+        let Entry::Document {
+            at,
+            hash,
+            body: Body::Held(bytes),
+        } = entry(&view, "folder/a.md")
+        else {
             panic!("a document stands at folder/a.md");
         };
         assert_eq!(at.as_str(), "folder/a.md");
         assert_eq!(&*bytes, b"A");
         assert_eq!(hash, wire_hash(norn_fs::ContentHash::of(b"A")));
+    }
+
+    /// **A streamed read answers what a whole read does, holding no body**:
+    /// the same spelling and hash, and whether the bytes decode, for a
+    /// document that does and one that does not.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case reads.
+    fn the_tree_view_streams_a_document_as_it_reads_one_whole() {
+        let (scratch, view) = tree();
+        std::fs::write(scratch.join("folder/q.md"), b"\xff\n").expect("a quarantined file");
+        for (at, decodes) in [("folder/a.md", true), ("folder/q.md", false)] {
+            let identity = view
+                .normalizer()
+                .normalize(Path::new(at))
+                .expect("a vault path");
+            let Entry::Document {
+                at: whole_at,
+                hash: whole,
+                body: Body::Held(bytes),
+            } = view.entry(&identity).expect("a readable tree")
+            else {
+                panic!("{at} reads whole");
+            };
+            let Entry::Document {
+                at: streamed_at,
+                hash: streamed,
+                body:
+                    Body::Streamed {
+                        decodes: streamed_decodes,
+                    },
+            } = view.streamed_entry(&identity).expect("a readable tree")
+            else {
+                panic!("{at} streams");
+            };
+            assert_eq!(streamed_at, whole_at, "{at}");
+            assert_eq!(streamed, whole, "{at}");
+            assert_eq!(streamed_decodes, decodes, "{at}");
+            assert_eq!(crate::derivation::decodes(&bytes), decodes, "{at}");
+        }
     }
 
     #[test]
@@ -928,8 +1143,11 @@ mod tests {
                 ..
             }
         ));
-        let Entry::Document { at, bytes, hash } =
-            view.control_entry(&schema).expect("a readable tree")
+        let Entry::Document {
+            at,
+            hash,
+            body: Body::Held(bytes),
+        } = view.control_entry(&schema).expect("a readable tree")
         else {
             panic!("the schema reads as the control file it is");
         };
@@ -999,7 +1217,12 @@ mod tests {
             ),
             (outside(&shared), "outside\n"),
         ] {
-            let Entry::Document { at, bytes, .. } = read(&place) else {
+            let Entry::Document {
+                at,
+                body: Body::Held(bytes),
+                ..
+            } = read(&place)
+            else {
                 panic!("the schema stands at {place:?}");
             };
             assert_eq!(at.as_str(), ".norn/schema.yaml");
@@ -1018,6 +1241,37 @@ mod tests {
             };
             assert!(detail.contains(says), "{detail}");
         }
+    }
+
+    /// **What a planning remembers of a document is what it read of it.**
+    /// A streamed read is remembered without a body, and answers every later
+    /// streamed read; the first whole read reads the file again and is
+    /// remembered in its place, answering every read after it, streamed or
+    /// whole, with the one copy it holds.
+    #[test]
+    fn a_remembered_streamed_read_holds_no_body_until_one_is_read_whole() {
+        let vault = memory::MemoryVault::with(&[("a.md", "A")]).streaming();
+        let remembered = Remembered::over(&vault);
+        let a = vault
+            .normalizer()
+            .normalize(Path::new("a.md"))
+            .expect("a vault path");
+        let body = |entry: Entry| match entry {
+            Entry::Document { body, .. } => body,
+            other => panic!("a document: {other:?}"),
+        };
+        for _ in 0..2 {
+            let streamed = body(remembered.streamed_entry(&a).expect("an infallible view"));
+            assert!(matches!(streamed, Body::Streamed { decodes: true }));
+        }
+        for _ in 0..2 {
+            let whole = body(remembered.entry(&a).expect("an infallible view"));
+            assert!(matches!(whole, Body::Held(bytes) if &*bytes == b"A"));
+            let streamed = body(remembered.streamed_entry(&a).expect("an infallible view"));
+            assert!(matches!(streamed, Body::Held(_)));
+        }
+        assert_eq!(vault.streamed.borrow().get("a.md"), Some(&1));
+        assert_eq!(vault.reads.borrow().get("a.md"), Some(&2));
     }
 
     #[test]

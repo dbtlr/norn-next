@@ -56,6 +56,17 @@
 //! staged record per target: no handle, and no byte of any file. The
 //! observed and composed bytes are held only while staging, as planning holds
 //! them, and the changeset reads each landed document back when it commits.
+//! A document a move carries byte for byte — by the planner's one rule,
+//! `crate::planner::lineage::Carried` — is observed streamed ([`observe`]),
+//! recomposed unread, and staged as the write kernel's streamed copy of its
+//! source, a create's or a refilled name's replace. **No copy once
+//! indexed**: its links are read from the index where the index derived
+//! them from the bytes the plan carries; where the index does not vouch for
+//! them, the file standing at the plan's hash — the source, or a re-send's
+//! landed destination — is read whole once, one copy, as planning reads it
+//! where its index lags. A re-sent plan must finish over a vault whose index
+//! has not taken in what the vault holds (ADR 0032), so a check never
+//! refuses a plan for what the index has not yet seen.
 //!
 //! **Who applies here.** The apply job, which takes the entry's claim,
 //! derives the facts delivered by then, plans an authored plan through the
@@ -96,6 +107,8 @@ use crate::planner::control::{SchemaPlace, role_at};
 use crate::planner::forecast::forecast;
 use crate::planner::view::{TreeView, VaultView};
 use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
+#[cfg(feature = "induced-failure")]
+pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
 pub(crate) use stage::Links;

@@ -1,0 +1,157 @@
+{
+  "plan": "resolved",
+  "vault": {
+    "by": "name",
+    "name": "notes"
+  },
+  "root": "00000000000000010000000000000002",
+  "operations": [
+    {
+      "kind": "move_document",
+      "fields": {
+        "from": "notes/a.md",
+        "to": "archive/a.md"
+      },
+      "cascade": [
+        {
+          "path": "h.md",
+          "syntax": "markdown",
+          "from": "notes/a.md",
+          "to": "archive/a.md"
+        }
+      ]
+    },
+    {
+      "kind": "move_document",
+      "fields": {
+        "from": "notes/r.md",
+        "to": "notes/s.md"
+      },
+      "cascade": [
+        {
+          "path": "h.md",
+          "syntax": "wikilink",
+          "from": "notes/r",
+          "to": "notes/s"
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "path": "archive/a.md",
+      "before": {
+        "state": "absent"
+      },
+      "after": {
+        "state": "present",
+        "hash": "sha256:3e7b8e91702b8d8162ecbb93ade7bad32fcc717d0bd032ddf043dfd105338a46"
+      }
+    },
+    {
+      "path": "h.md",
+      "before": {
+        "state": "present",
+        "hash": "sha256:63222f5c63c9ab73a17de244889e061dff34b89e49a7f98c24415cc72a7cabc3"
+      },
+      "after": {
+        "state": "present",
+        "hash": "sha256:5f9b692e53198ad7c3b7cf911b211684fed6e3189f863a302fcd0743d2eaa593"
+      }
+    },
+    {
+      "path": "notes/a.md",
+      "before": {
+        "state": "present",
+        "hash": "sha256:3e7b8e91702b8d8162ecbb93ade7bad32fcc717d0bd032ddf043dfd105338a46"
+      },
+      "after": {
+        "state": "absent"
+      }
+    },
+    {
+      "path": "notes/r.md",
+      "before": {
+        "state": "present",
+        "hash": "sha256:304b173c5b2c08e61281debfc2d7a83d8e25dc430fa219236d70e0e41a656931"
+      },
+      "after": {
+        "state": "absent"
+      }
+    },
+    {
+      "path": "notes/s.md",
+      "before": {
+        "state": "absent"
+      },
+      "after": {
+        "state": "present",
+        "hash": "sha256:304b173c5b2c08e61281debfc2d7a83d8e25dc430fa219236d70e0e41a656931"
+      }
+    }
+  ],
+  "conditions": [
+    {
+      "condition": "link_resolution",
+      "link": {
+        "holder": "h.md",
+        "syntax": "markdown",
+        "address": "archive/a.md"
+      },
+      "before": {
+        "resolves": "none"
+      },
+      "after": {
+        "resolves": "one",
+        "path": "archive/a.md"
+      }
+    },
+    {
+      "condition": "link_resolution",
+      "link": {
+        "holder": "h.md",
+        "syntax": "wikilink",
+        "address": "a"
+      },
+      "before": {
+        "resolves": "one",
+        "path": "notes/a.md"
+      },
+      "after": {
+        "resolves": "one",
+        "path": "archive/a.md"
+      }
+    },
+    {
+      "condition": "link_resolution",
+      "link": {
+        "holder": "h.md",
+        "syntax": "wikilink",
+        "address": "notes/s"
+      },
+      "before": {
+        "resolves": "none"
+      },
+      "after": {
+        "resolves": "one",
+        "path": "notes/s.md"
+      }
+    },
+    {
+      "condition": "link_resolution",
+      "link": {
+        "holder": "notes/s.md",
+        "syntax": "wikilink",
+        "address": "a"
+      },
+      "before": {
+        "resolves": "one",
+        "path": "notes/a.md"
+      },
+      "after": {
+        "resolves": "one",
+        "path": "archive/a.md"
+      }
+    }
+  ]
+}

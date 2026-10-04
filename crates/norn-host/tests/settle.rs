@@ -319,6 +319,12 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "APPLY_TARGET_READS_PER_REMOVED_TARGET" => {
                 always_authored(baselines::APPLY_TARGET_READS_PER_REMOVED_TARGET)
             }
+            "APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET" => {
+                always_authored(baselines::APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET)
+            }
+            "APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET" => {
+                always_authored(baselines::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET)
+            }
             "APPLY_SHADOW_READS_PER_WRITTEN_TARGET" => {
                 always_authored(baselines::APPLY_SHADOW_READS_PER_WRITTEN_TARGET)
             }

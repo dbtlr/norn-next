@@ -1063,12 +1063,10 @@ pub(crate) fn decodes(bytes: &[u8]) -> bool {
 /// holds the two to one answer over a corpus of encodings, and a rule that
 /// grew past UTF-8 would fail it until this grew with it.
 ///
-/// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-/// planning of a move whose document the plan carries byte for byte, which
-/// records the moved document's decodability without holding its body. The
-/// planner still reads a moved document whole and asks [`decodes`], so
-/// nothing in the current call graph calls this yet.
-#[cfg_attr(not(test), allow(dead_code))] // A dormant carrier, as stated above.
+/// **Where it is asked.** A move whose document the plan carries byte for
+/// byte records the moved document's decodability from here, planning and
+/// the applier alike, without holding its body
+/// (`crate::planner::view::Body::Streamed`).
 pub(crate) fn streamed_decodes(streamed: &norn_fs::StreamedHash) -> bool {
     streamed.is_utf8()
 }
@@ -1085,8 +1083,30 @@ pub(crate) fn document_links(bytes: &[u8]) -> Vec<LinkFact> {
     let Ok(source) = document_source(bytes) else {
         return Vec::new();
     };
-    let document = Document::parse(source);
-    links_of(&document, &document.scan_body())
+    parsed_links(&parsed(source))
+}
+
+/// The links the parsed `document` holds, as [`document_links`] reads them
+/// from its bytes: for a caller that parsed the document for another reason
+/// and reads its links off that one parse.
+pub(crate) fn parsed_links(document: &Document<'_>) -> Vec<LinkFact> {
+    links_of(document, &document.scan_body())
+}
+
+/// The document `source` spells, as the text layer parses it: the one parse
+/// a plan's reading of a document's links, and its respelling of them, go
+/// through, counted on a test's thread so a case can hold planning to one
+/// parse of a body ([`PARSES`]).
+pub(crate) fn parsed(source: &str) -> Document<'_> {
+    #[cfg(test)]
+    PARSES.with(|parses| parses.set(parses.get() + 1));
+    Document::parse(source)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many documents [`parsed`] has parsed on this thread.
+    pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The links `document`, whose body `scan` read, holds: its frontmatter's

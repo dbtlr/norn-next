@@ -8,6 +8,7 @@ use std::path::Path;
 use norn_fs::NormalizedPath;
 use norn_wire::{DocumentPath, Operation, OperationId, OperationKind, PlanFault};
 
+use super::lineage::moved_only;
 use super::resolve::PlanningFailure;
 use super::view::{Entry, VaultView};
 
@@ -177,6 +178,16 @@ fn explicit_requirements(
 /// there is the one it moves, and no other operation has to vacate it first.
 /// An operation vacating that name later in the plan — a removal, a move on,
 /// a rename back — acts on the document at its new spelling, in plan order.
+///
+/// **Whether a document stands is all this reads of a name**, so a name only
+/// moves name ([`moved_only`]) is read streamed, and no body of a chain's
+/// moved documents is held for it; every other name is read whole, as
+/// composition will read it next, and read once. The plan's order is not yet
+/// settled here, so the streamed read follows the part of the carried rule
+/// that needs none: a name only moves name that the plan still does not
+/// carry — a moved document holding a link a cascade rewrites — is read
+/// whole again by composition, two opens of the file and one copy of it
+/// (see the planner's `Remembered` view).
 fn vacating_requirements<V: VaultView>(
     operations: &[Operation],
     view: &V,
@@ -187,6 +198,7 @@ fn vacating_requirements<V: VaultView>(
         vacaters: Vec<usize>,
     }
     let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let streamed = moved_only(operations, view.normalizer());
     let mut traffic: BTreeMap<NormalizedPath, Traffic> = BTreeMap::new();
     for (position, operation) in operations.iter().enumerate() {
         let arrives = arrives_at(&operation.kind).and_then(identity);
@@ -206,7 +218,12 @@ fn vacating_requirements<V: VaultView>(
         if arrivals.is_empty() || vacaters.is_empty() {
             continue;
         }
-        let standing = matches!(view.entry(name)?, Entry::Document { .. });
+        let entry = if streamed.contains(name) {
+            view.streamed_entry(name)?
+        } else {
+            view.entry(name)?
+        };
+        let standing = matches!(entry, Entry::Document { .. });
         // Vacaters not yet paired, in plan order. The document standing at
         // planning takes the first wherever it sits; each arrival takes the
         // first after it, and one it passes over stays unpaired.

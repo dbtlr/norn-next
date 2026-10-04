@@ -102,12 +102,10 @@ impl Snapshot {
     /// ([`HeldLinksStatement`]). A store that holds a link row it cannot read
     /// refuses as damaged.
     ///
-    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-    /// planning of a move whose document the plan carries byte for byte,
-    /// which takes the moved document's own links from here where the hash
-    /// it streamed is the hash answered. The planner still parses a moved
-    /// document's bytes for its links, so nothing in the current call graph
-    /// reads this yet.
+    /// **What a moved document's links are read from.** A move whose
+    /// document the plan carries byte for byte holds no body to parse, so
+    /// the host's planner and applier take the moved document's own links
+    /// from here where the hash they streamed is the hash answered.
     pub fn held_links(&self, path: &DocumentPath) -> Result<Option<HeldLinks>, StoreError> {
         self.read_held_links(path, &mut Vec::new())
     }

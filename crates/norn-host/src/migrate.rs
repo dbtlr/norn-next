@@ -327,8 +327,8 @@ fn in_vault(
         .control_entry(&identity)
         .map_err(|error| unreadable(name, error))?
     {
-        Entry::Document { bytes, hash, .. } => Ok(Some(Standing {
-            bytes: bytes.to_vec(),
+        Entry::Document { hash, body, .. } => Ok(Some(Standing {
+            bytes: body.held().expect("a control file is read whole").to_vec(),
             hash,
         })),
         Entry::Absent { .. } => Ok(None),

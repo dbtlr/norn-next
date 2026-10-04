@@ -117,9 +117,14 @@
 //! through a [`view::VaultView`]: the store holds no document's exact bytes,
 //! and a hash read from it could name bytes nobody composed against. The
 //! request's one snapshot is what an operation that reads derived facts plans
-//! against: a `where` target, which [`expand`] matches there. The match names
-//! documents; the files then say what each holds, and a matched document the
-//! files no longer hold does not resolve.
+//! against, and two do: a `where` target, which [`expand`] matches there, and
+//! a carried move's own links, which [`links::vouched`] reads there in place
+//! of the body the move never holds. Each is held to the files: the match
+//! names documents, the files then say what each holds, and a matched
+//! document the files no longer hold does not resolve; the index's links of
+//! a carried document are taken only where the hash it derived them from is
+//! the hash streamed from the file, and read from the file itself otherwise
+//! ([`resolve`]), so no plan rests on a fact the files contradict.
 //!
 //! **A create publishes before any removal.** ADR 0032 publishes creates
 //! first and removals last, so a name a removal of this plan vacates still
@@ -139,7 +144,21 @@
 //! **Memory.** A resolved plan carries its operations and one fixed-size
 //! transition per target, never the bytes of a file it did not author.
 //! Planning itself holds the bytes of every file the plan touches until it
-//! answers.
+//! answers, but for a document a move carries byte for byte by the one rule
+//! planning and the applier share ([`lineage::Carried`]): that one is read
+//! streamed and carried unread ([`compose::After::Carried`]), its links taken
+//! from the store's index where the index derived them from those very bytes
+//! ([`links::vouch_for_carried`]). **No copy once indexed**: where the index
+//! does not vouch for them, planning reads the file whole once at the hash
+//! it streamed and takes its links from its bytes — one copy, as it read
+//! every moved document before it carried any — so a move over a vault whose
+//! index lags its files plans as it always did. A moved document an edit, a
+//! link rewrite or a cascade lands on is no carried one: it is read whole
+//! once and composed from that held copy, and the rewrite composed from it
+//! is bytes the plan authors, held with the text layer's scans of them
+//! beside the original, so its peak is several times the document; where its
+//! own cascade lands, an earlier pass streamed it, so the file is opened
+//! twice.
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's

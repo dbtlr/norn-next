@@ -181,10 +181,15 @@ pub(crate) fn edited(kind: &OperationKind, bytes: &[u8]) -> Result<Arc<[u8]>, Un
 /// ([`document_source`]) hold no link the index derives, so they are returned
 /// as they are, and a rewrite of a syntax the text layer reads no link of
 /// matches nothing.
+///
+/// **One parse.** The links `bytes` hold are read off the same parse the
+/// batch respells ([`crate::derivation::parsed_links`]) and handed back
+/// beside the result, so a caller reading them as well — the batch's links
+/// kept at an address it writes (`super::compose`) — parses the holder once.
 pub(crate) fn rewritten<'r>(
     bytes: &Arc<[u8]>,
     rewrites: impl IntoIterator<Item = &'r LinkRewrite>,
-) -> (Arc<[u8]>, Vec<SkippedLink>) {
+) -> Rewritten {
     let batch: Vec<AddressRewrite> = rewrites
         .into_iter()
         .filter_map(|rewrite| {
@@ -196,17 +201,40 @@ pub(crate) fn rewritten<'r>(
             Some(AddressRewrite::new(family, &rewrite.from, &rewrite.to))
         })
         .collect();
-    let Ok(text) = document_source(bytes) else {
-        return (bytes.clone(), Vec::new());
+    let unchanged = |links| Rewritten {
+        bytes: bytes.clone(),
+        skipped: Vec::new(),
+        links,
     };
+    let Ok(text) = document_source(bytes) else {
+        return unchanged(Vec::new());
+    };
+    let document = crate::derivation::parsed(text);
+    let links = crate::derivation::parsed_links(&document);
     if batch.is_empty() {
-        return (bytes.clone(), Vec::new());
+        return unchanged(links);
     }
-    let rewritten = Document::parse(text).rewrite_links(&batch);
-    if rewritten.rewritten == 0 {
-        return (bytes.clone(), rewritten.skipped);
+    let rewritten = document.rewrite_links(&batch);
+    Rewritten {
+        bytes: if rewritten.rewritten == 0 {
+            bytes.clone()
+        } else {
+            Arc::from(rewritten.text.into_bytes())
+        },
+        skipped: rewritten.skipped,
+        links,
     }
-    (Arc::from(rewritten.text.into_bytes()), rewritten.skipped)
+}
+
+/// What a holder's batch of rewrites came to ([`rewritten`]).
+pub(crate) struct Rewritten {
+    /// The holder's bytes with every link the batch respells respelled.
+    pub(crate) bytes: Arc<[u8]>,
+    /// Each link a rewrite matched and the text layer left as written.
+    pub(crate) skipped: Vec<SkippedLink>,
+    /// Every link the holder held before the batch, read off the parse the
+    /// batch respelled.
+    pub(crate) links: Vec<norn_store::LinkFact>,
 }
 
 /// An edit refusal in the words an unresolved operation carries.

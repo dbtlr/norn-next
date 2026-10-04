@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
+use norn_store::LinkFact;
 use norn_wire::{
     DocumentPath, FileState, LinkAdvisory, OperationKind, PlanCondition, PlanFault, RefusedCheck,
     ResolvedPlan, SchemaViolation, Transition,
@@ -22,11 +23,12 @@ use super::recompose::{Recomposed, disagreement, recompose};
 use super::schema;
 use super::shape::shape_disagrees;
 use crate::derivation::Declared;
-use crate::planner::compose::Composition;
+use crate::derivation::document_links;
+use crate::planner::compose::{After, Composition};
 use crate::planner::control::role_at;
 use crate::planner::lineage::Lineage;
-use crate::planner::links::{LinkIndex, Target, change_set, entry_key};
-use crate::planner::view::{TreeView, VaultView, wire_hash};
+use crate::planner::links::{Holding, LinkIndex, Target, change_set, entry_key, vouched};
+use crate::planner::view::{Body, Entry, TreeView, VaultView, wire_hash};
 use crate::refusal::PageRefused;
 
 /// Where a plan's resolution change set is computed again: the snapshot the
@@ -193,10 +195,32 @@ pub(super) struct Checked {
     /// resolution change set computed again.
     pub(super) links: Vec<LinkAdvisory>,
     units: Vec<Unit>,
-    contents: Vec<Option<Arc<[u8]>>>,
+    contents: Vec<Option<Written>>,
     phases: Vec<Phase>,
     lineage: Lineage,
     stored: Vec<norn_store::DocumentPath>,
+}
+
+/// What a written target publishes.
+///
+/// **A carried document is published as a copy, never held.** A create or
+/// a replace whose content the plan carries byte for byte from another file
+/// is staged by the write kernel streaming that file into its shadow, held to
+/// the hash the transition names (`norn_fs::Content::CopyOf`); the source
+/// stands at that hash while every target is staged, since staging ends
+/// before anything publishes and a source publishes after the targets
+/// drawing on it.
+#[derive(Clone, Debug)]
+pub(super) enum Written {
+    /// These bytes.
+    Bytes(Arc<[u8]>),
+    /// The bytes the file `source` holds at `state`, unread.
+    Copy {
+        /// The file the content stood at before the plan.
+        source: DocumentPath,
+        /// Its before-state, which is this target's after-state.
+        state: FileState,
+    },
 }
 
 /// Check every target of `plan`, reading the vault and writing nothing.
@@ -232,12 +256,15 @@ pub(super) struct Checked {
 /// [`judge`], which asks the kernel that same judgment and stages nothing. So
 /// what a caller previewed is what an apply of the same plan over the same
 /// files does.
-pub(super) fn check(
+pub(super) fn check<V: VaultView>(
     plan: &ResolvedPlan,
-    view: &TreeView,
+    view: &V,
     declared: &Declared,
     links: Links<'_>,
-) -> Result<Checked, Unfit> {
+) -> Result<Checked, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
     // An operation whose target planning never expanded touches no file the
     // shape check or the recomposition could name, so it is refused first,
     // before it could pass unread; so is a creation by rule, which names no
@@ -291,7 +318,7 @@ pub(super) fn check(
         Recomposed::Sound(composition) => composition,
         Recomposed::Invalid(fault) => return Err(Unfit::Invalid(fault)),
     };
-    let contents: Vec<Option<Arc<[u8]>>> = units
+    let contents: Vec<Option<Written>> = units
         .iter()
         .map(|unit| content(plan, *unit, &states, &composition))
         .collect::<Result<_, _>>()
@@ -305,13 +332,18 @@ pub(super) fn check(
     let skipped = std::mem::take(&mut composition.skipped);
     let kept = std::mem::take(&mut composition.kept);
     drop(composition);
-    let mut after: Vec<Option<&[u8]>> = vec![None; plan.transitions.len()];
-    for (unit, content) in units.iter().zip(&contents) {
+    let copied = copied_links(plan, &units, &contents, &states, view, links)?;
+    let mut after: Vec<Option<Holding<'_>>> = vec![None; plan.transitions.len()];
+    for ((unit, content), links) in units.iter().zip(&contents).zip(&copied) {
         let written = match unit {
             Unit::One(index) => *index,
             Unit::Respell { new, .. } => *new,
         };
-        after[written] = content.as_deref();
+        after[written] = match (content, links) {
+            (Some(Written::Bytes(bytes)), _) => Some(Holding::Bytes(bytes)),
+            (Some(Written::Copy { .. }), Some(links)) => Some(Holding::Links(links)),
+            _ => None,
+        };
     }
     let targets: Vec<Target<'_>> = plan
         .transitions
@@ -422,7 +454,7 @@ pub(super) fn stage(
     let mut staged: Vec<StagedTarget> = Vec::with_capacity(units.len());
     for position in order {
         let unit = units[position];
-        let content = contents[position].as_deref();
+        let content = contents[position].as_ref();
         let held = match stage_one(ground, shadows, plan, unit, content) {
             Ok(held) => held,
             Err(stop) => {
@@ -548,19 +580,110 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
     checks
 }
 
-/// The bytes `unit` publishes, where it writes any.
+/// The links each written target of `units` that publishes a copy holds
+/// after the plan, by position, read without its body; `None` for every
+/// other target.
+///
+/// **Read where planning read them** ([`vouched`]): the index's links of the
+/// copy's source, where it holds them at the hash the copy publishes — or of
+/// the target, where a re-sent plan's copy already landed and the index took
+/// it in there. Where the index holds neither at that hash — it lags the
+/// file, as planning may have met it, or has half taken in a landing — the
+/// file standing at that hash is read whole, one copy, and its links read
+/// from its bytes, as planning reads them where its index lags: a check
+/// never refuses a plan for what its index has not yet seen, so a re-sent
+/// plan finishes (ADR 0032). A file no longer at that hash is drift.
+fn copied_links<V: VaultView>(
+    plan: &ResolvedPlan,
+    units: &[Unit],
+    contents: &[Option<Written>],
+    states: &[TargetState],
+    view: &V,
+    links: Links<'_>,
+) -> Result<Vec<Option<Vec<LinkFact>>>, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
+    let index_of = transition_index(plan, view.normalizer());
+    let mut copied = Vec::with_capacity(units.len());
+    for (unit, content) in units.iter().zip(contents) {
+        let Some(Written::Copy { source, state }) = content else {
+            copied.push(None);
+            continue;
+        };
+        let written = &plan.transitions[match unit {
+            Unit::One(index) => *index,
+            Unit::Respell { new, .. } => *new,
+        }]
+        .path;
+        let mut held = None;
+        for at in [source, written] {
+            if held.is_none() {
+                held = vouched(at, state, links).map_err(Unfit::Unread)?;
+            }
+        }
+        if held.is_none() {
+            // The source where this apply still sees it at that hash, else
+            // the target the copy landed at.
+            let seen = identity(view.normalizer(), source.as_str())
+                .and_then(|file| index_of.get(&file))
+                .is_some_and(|&index| matches!(states[index], TargetState::AtBefore(Some(_))));
+            let at = if seen { source } else { written };
+            held = Some(read_links(at, state, view)?);
+        }
+        copied.push(held);
+    }
+    Ok(copied)
+}
+
+/// The links the document at `at` holds, read from its bytes whole where it
+/// stands at `state`; drift where it holds anything else.
+fn read_links<V: VaultView>(
+    at: &DocumentPath,
+    state: &FileState,
+    view: &V,
+) -> Result<Vec<LinkFact>, Unfit>
+where
+    V::Error: std::fmt::Display,
+{
+    let drifted = |holds: FileState| Unfit::Refused(vec![RefusedCheck::drifted(at.clone(), holds)]);
+    let Some(file) = identity(view.normalizer(), at.as_str()) else {
+        return Err(drifted(FileState::absent()));
+    };
+    match view
+        .entry(&file)
+        .map_err(|error| Unfit::Failed(error.to_string()))?
+    {
+        Entry::Document {
+            at: spelled,
+            hash,
+            body: Body::Held(bytes),
+        } if spelled == *at && state.hash() == Some(&hash) => Ok(document_links(&bytes)),
+        Entry::Document {
+            at: spelled,
+            hash,
+            body,
+        } if spelled == *at => Err(drifted(crate::planner::compose::standing(&body, hash))),
+        _ => Err(drifted(FileState::absent())),
+    }
+}
+
+/// What `unit` publishes, where it writes anything.
 ///
 /// A target already holding its after-state, and a respell halfway, hold the
-/// after-state's bytes, and those are its content; every other written target
-/// takes the recomposed bytes, which [`recompose`] held to its after-state.
-/// A written target the operations leave nothing at is returned as the path
-/// its transition disagrees at.
+/// after-state's bytes, and those are its content where they were read; every
+/// other written target takes the recomposed result, which [`recompose`] held
+/// to its after-state — bytes, or a copy of the document the plan carries
+/// there. A written target the operations leave nothing at, or a case-only
+/// rename landing a carried document that is not its own — which the write
+/// kernel's respell cannot copy, and the plan's one rule never carries — is
+/// returned as the path its transition disagrees at.
 fn content(
     plan: &ResolvedPlan,
     unit: Unit,
     states: &[TargetState],
     composition: &Composition,
-) -> Result<Option<Arc<[u8]>>, DocumentPath> {
+) -> Result<Option<Written>, DocumentPath> {
     let written = match unit {
         Unit::One(index) => index,
         Unit::Respell { new, .. } => new,
@@ -571,25 +694,35 @@ fn content(
     }
     let held = match unit {
         Unit::Respell { old, .. } => match (&states[old], &states[written]) {
-            (TargetState::Halfway(bytes), _) | (_, TargetState::Landed(Some(bytes))) => {
-                Some(bytes.clone())
-            }
+            (TargetState::Halfway(Body::Held(bytes)), _)
+            | (_, TargetState::Landed(Some(Body::Held(bytes)))) => Some(bytes.clone()),
             _ => None,
         },
         Unit::One(_) => match &states[written] {
-            TargetState::Landed(Some(bytes)) => Some(bytes.clone()),
+            TargetState::Landed(Some(Body::Held(bytes))) => Some(bytes.clone()),
             _ => None,
         },
     };
     if let Some(bytes) = held {
-        return Ok(Some(bytes));
+        return Ok(Some(Written::Bytes(bytes)));
     }
-    composition
+    let copies = match unit {
+        Unit::One(_) => true,
+        // A respell carrying its own content unchanged publishes none.
+        Unit::Respell { old, .. } => transition.after.same_content(&plan.transitions[old].before),
+    };
+    match composition
         .targets
         .get(&transition.path)
-        .and_then(|target| target.after.clone())
-        .map(Some)
-        .ok_or_else(|| transition.path.clone())
+        .map(|target| &target.after)
+    {
+        Some(After::Bytes(bytes)) => Ok(Some(Written::Bytes(bytes.clone()))),
+        Some(After::Carried { state, from }) if copies => Ok(Some(Written::Copy {
+            source: from.clone(),
+            state: state.clone(),
+        })),
+        _ => Err(transition.path.clone()),
+    }
 }
 
 /// What the schema check reads: the plan, what its targets hold, where each
@@ -620,13 +753,26 @@ impl Judging<'_> {
     /// kinds write at its path, or at the path its content came from, since
     /// an operation composes on the document before or after a move carries
     /// it.
-    fn violations(&self, units: &[Unit], contents: &[Option<Arc<[u8]>>]) -> Vec<SchemaViolation> {
+    ///
+    /// **A carried document is not judged again.** Its bytes are the moved
+    /// document's own, unchanged, and the vault schema concludes about a
+    /// document from its path only through the path grammar
+    /// (`crate::derivation::map_document`'s `document_path`), which the
+    /// destination already passes as a document path; its tags rules are
+    /// vault-wide, and a declared folder carries no rules. So what the moved
+    /// document violates at its destination is what it violated where it
+    /// stood, and the violations it introduces are none by construction. A
+    /// schema rule scoped to a folder would make this judgment necessary
+    /// again: the same bytes could violate it in one folder and not another.
+    fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
         let written_fields = schema::written_fields(self.plan, self.normalizer);
         let no_field = BTreeSet::new();
         let mut checks = Vec::new();
         for (unit, content) in units.iter().zip(contents) {
-            let Some(after) = content else { continue };
+            let Some(Written::Bytes(after)) = content else {
+                continue;
+            };
             let (source, written) = match *unit {
                 Unit::One(index) => (index, index),
                 Unit::Respell { old, new } => (old, new),
@@ -654,7 +800,7 @@ impl Judging<'_> {
                 .collect();
             let before: Vec<schema::Judged> = drawn_from
                 .and_then(|index| match &self.states[index] {
-                    TargetState::AtBefore(Some(bytes)) => Some(schema::judge(
+                    TargetState::AtBefore(Some(Body::Held(bytes))) => Some(schema::judge(
                         &self.plan.transitions[index].path,
                         bytes,
                         self.declared,
@@ -677,7 +823,7 @@ fn stage_one(
     shadows: &ShadowHome,
     plan: &ResolvedPlan,
     unit: Unit,
-    content: Option<&[u8]>,
+    content: Option<&Written>,
 ) -> Result<Held, Stop> {
     let staged = through_kernel(
         ground,
@@ -718,7 +864,7 @@ pub(super) fn judge(
         normalizer,
     );
     for position in order {
-        let content = checked.contents[position].as_deref();
+        let content = checked.contents[position].as_ref();
         through_kernel(
             ground,
             plan,
@@ -734,11 +880,17 @@ pub(super) fn judge(
 /// or judging it as staging would — at the place it lands, and answer why
 /// the plan stops where the kernel refuses. `None` for a target whose two
 /// states are absence, which the kernel is not asked about.
+///
+/// **A copy's source answers for itself.** The kernel refuses a copy whose
+/// source is not at the hash it names — other bytes, nothing, a link, a
+/// linked folder above it — naming the source, so the drift is the source's
+/// and is reported at the source's path, the one its removal transition
+/// names, never as the target drifting.
 fn through_kernel<T, K>(
     ground: &Ground<'_>,
     plan: &ResolvedPlan,
     unit: Unit,
-    content: Option<&[u8]>,
+    content: Option<&Written>,
     kernel: K,
 ) -> Result<Option<T>, Stop>
 where
@@ -757,7 +909,15 @@ where
         Ok(answer) => Ok(Some(answer)),
         Err(refusal) => Err(match classify(&refusal) {
             Classified::Drift(holds) => {
-                Stop::Refused(vec![RefusedCheck::drifted(path.clone(), holds)])
+                let source = match content {
+                    Some(Written::Copy { source, .. })
+                        if refused_at(&refusal) == Some(&landing.anchor.join(source.as_str())) =>
+                    {
+                        source
+                    }
+                    _ => path,
+                };
+                Stop::Refused(vec![RefusedCheck::drifted(source.clone(), holds)])
             }
             Classified::NameTaken => Stop::Refused(vec![RefusedCheck::name_taken(path.clone())]),
             Classified::RootReplaced => landing
@@ -768,29 +928,59 @@ where
     }
 }
 
+/// The path a kernel refusal names, where it names the file it refused.
+fn refused_at(refusal: &Refusal) -> Option<&std::path::PathBuf> {
+    match refusal {
+        Refusal::FoldersLeft { refusal, .. } => refused_at(refusal),
+        Refusal::Drifted { path, .. }
+        | Refusal::Republished { path, .. }
+        | Refusal::NotRegularFile { path }
+        | Refusal::SymlinkDestination { path }
+        | Refusal::LinkedAncestor { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
 /// The plan path the kernel is asked about for `unit`, and the transition it
-/// is asked for there; `None` for a target whose two states are absence.
+/// is asked for there; `None` for a target whose two states are absence. A
+/// copy is asked for as a create or a replace whose content is its source's
+/// (`norn_fs::Content::CopyOf`), its source named below the vault root as the
+/// plan names it.
 fn kernel_transition<'p>(
     plan: &'p ResolvedPlan,
     unit: Unit,
-    content: Option<&'p [u8]>,
+    content: Option<&'p Written>,
 ) -> Option<(&'p DocumentPath, norn_fs::Transition<'p>)> {
+    let bytes = match content {
+        Some(Written::Bytes(bytes)) => Some(&bytes[..]),
+        _ => None,
+    };
     Some(match unit {
         Unit::One(index) => {
             let transition = &plan.transitions[index];
-            let kernel = match (&transition.before, &transition.after, content) {
-                (FileState::Absent {}, FileState::Present { .. }, Some(content)) => {
+            // A copy publishes the write's after-state, which is its
+            // source's before-state.
+            let written = |after: &'p norn_wire::ContentHash| match content {
+                Some(Written::Bytes(bytes)) => Some(norn_fs::Content::Held(bytes)),
+                Some(Written::Copy { source, .. }) => Some(norn_fs::Content::CopyOf {
+                    source: Path::new(source.as_str()),
+                    hash: kernel_hash(after),
+                }),
+                None => None,
+            };
+            let kernel = match (&transition.before, &transition.after) {
+                (FileState::Absent {}, FileState::Present { hash, .. }) => {
                     norn_fs::Transition::Create {
-                        content: norn_fs::Content::Held(content),
+                        content: written(hash)?,
                     }
                 }
-                (FileState::Present { hash, .. }, FileState::Present { .. }, Some(content)) => {
+                (FileState::Present { hash, .. }, FileState::Present { hash: after, .. }) => {
                     norn_fs::Transition::Replace {
                         before: kernel_hash(hash),
-                        content,
+                        content: written(after)?,
                     }
                 }
-                (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
+                (FileState::Present { hash, .. }, FileState::Absent {}) => {
                     norn_fs::Transition::Remove {
                         before: kernel_hash(hash),
                     }
@@ -807,7 +997,7 @@ fn kernel_transition<'p>(
             let content = if new.after.same_content(&old.before) {
                 None
             } else {
-                content
+                bytes
             };
             (
                 &old.path,

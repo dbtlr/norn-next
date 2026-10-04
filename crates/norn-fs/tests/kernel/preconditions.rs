@@ -26,7 +26,7 @@ fn a_before_state_is_checked_against_the_bytes_that_are_there_now() {
     for transition in [
         Transition::Replace {
             before: stale,
-            content: b"what the caller composed",
+            content: norn_fs::Content::Held(b"what the caller composed"),
         },
         Transition::Remove { before: stale },
     ] {
@@ -69,7 +69,7 @@ fn a_replacement_onto_nothing_is_drift() {
                 relative,
                 Transition::Replace {
                     before: hash(b"what was there"),
-                    content: b"ours",
+                    content: norn_fs::Content::Held(b"ours"),
                 },
             )
             .expect_err("a replacement onto nothing");
@@ -126,12 +126,12 @@ fn a_target_at_its_after_state_stages_as_landed_with_no_shadow() {
         },
         Transition::Replace {
             before: hash(b"the before-state"),
-            content: b"the after-state",
+            content: norn_fs::Content::Held(b"the after-state"),
         },
         // A replacement whose content is what it read is landed too.
         Transition::Replace {
             before: hash(b"the after-state"),
-            content: b"the after-state",
+            content: norn_fs::Content::Held(b"the after-state"),
         },
     ] {
         let staging = scratch
@@ -225,7 +225,7 @@ fn a_symlinked_target_is_refused_whether_or_not_it_resolves() {
             },
             Transition::Replace {
                 before: hash(b"the target's bytes"),
-                content: b"ours",
+                content: norn_fs::Content::Held(b"ours"),
             },
             Transition::Remove {
                 before: hash(b"the target's bytes"),
@@ -266,7 +266,7 @@ fn an_unreadable_target_is_an_environmental_refusal() {
             "note.md",
             Transition::Replace {
                 before: hash(b"bytes nobody can read"),
-                content: b"ours",
+                content: norn_fs::Content::Held(b"ours"),
             },
         )
         .expect_err("an unreadable target");
@@ -304,7 +304,7 @@ fn a_pipe_at_a_target_refuses_without_waiting() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect_err("a pipe is not a document to replace");

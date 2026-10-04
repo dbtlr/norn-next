@@ -523,6 +523,16 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "apply-document-reads-per-copied-away-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_DOCUMENT_READS_PER_COPIED_AWAY_TARGET",
+        armed: true,
+    },
+    ExitBar {
+        name: "apply-target-reads-per-copied-away-target",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_TARGET_READS_PER_COPIED_AWAY_TARGET",
+        armed: true,
+    },
+    ExitBar {
         name: "apply-shadow-reads-per-written-target",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::APPLY_SHADOW_READS_PER_WRITTEN_TARGET",
         armed: true,
