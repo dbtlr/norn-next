@@ -307,3 +307,135 @@ fn a_copy_reads_its_source_once_and_names_it() {
     assert!(matches!(published.after, AfterState::Present(_)));
     assert_eq!(bytes_at(&scratch.at("dest.md")), body);
 }
+
+/// **The bar on a preview that answers a copy's source as staging does.**
+/// For every shape of source staging refuses before it reads a byte — a
+/// parent name, an absolute name, an empty name, a link at the source's name,
+/// a linked folder on its path, a folder and a pipe where a file would be —
+/// [`norn_fs::judge`] answers the refusal staging meets, and reads no file to
+/// reach it. Where the target has already landed, neither asks after the
+/// source at all, so both answer as for the landing.
+///
+/// The forbidden shape is a preview that answers ready where the apply of the
+/// same plan refuses: a move previewed clean whose destination's copy then
+/// refuses for a source that was never containable.
+#[test]
+fn judge_refuses_a_sources_shape_as_staging_does_and_reads_nothing() {
+    let scratch = Scratch::new("copy-judged-shape");
+    let body = long_body();
+    let outside = scratch.vault().with_extension("outside");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a folder outside the vault.
+    std::fs::create_dir_all(&outside).expect("a folder outside the vault");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a document outside the vault.
+    std::fs::write(outside.join("secret.md"), &body).expect("a document outside the vault");
+    symlink(&outside.join("secret.md"), &scratch.at("escape.md"));
+    symlink(&outside, &scratch.at("linked"));
+    scratch.directory("folder.md");
+    let made = std::process::Command::new("mkfifo")
+        .arg(scratch.at("pipe.md"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+    scratch.place("landed.md", &body);
+    let parent = format!(
+        "../{}/secret.md",
+        outside.file_name().unwrap().to_string_lossy()
+    );
+    let absolute = outside.join("secret.md").to_string_lossy().into_owned();
+
+    let shapes = [
+        parent.as_str(),
+        absolute.as_str(),
+        "",
+        ".",
+        "escape.md",
+        "linked/secret.md",
+        "folder.md",
+        "pipe.md",
+    ];
+    for source in shapes {
+        let window = ReadWindow::open();
+        let judged = judge(&scratch, "dest.md", copy_of(source, &body));
+        let tally = window.finish();
+        assert_eq!(
+            (tally.document_opens, tally.target_reads, tally.shadow_reads),
+            (0, 0, 0),
+            "judging a copy of {source:?} read a file: {tally:?}"
+        );
+        let staged = scratch.stage("dest.md", copy_of(source, &body)).map(drop);
+        assert!(
+            judged.is_err(),
+            "{source:?} judged ready, staged {staged:?}"
+        );
+        assert_eq!(judged, staged, "{source:?}");
+    }
+
+    for source in shapes {
+        assert_eq!(
+            judge(&scratch, "landed.md", copy_of(source, &body)),
+            Ok(()),
+            "{source:?}"
+        );
+        assert!(
+            matches!(
+                scratch.stage("landed.md", copy_of(source, &body)),
+                Ok(Staging::Landed(_))
+            ),
+            "{source:?}"
+        );
+    }
+
+    assert!(!exists(&scratch.at("dest.md")));
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a shadow was left behind"
+    );
+}
+
+/// **A source's state is its own transition's question, not the create's.**
+/// Where the source is absent — no file, a missing folder, a file where a
+/// folder would be — or holds bytes other than the create's hash, staging
+/// refuses as drift when it reaches the source to copy it, but
+/// [`norn_fs::judge`] answers the create ready: telling what a file holds
+/// takes reading it, and a judgment reads no source. A move's source carries a
+/// transition of its own, a removal held to the same hash, and that
+/// transition's judgment is what refuses the plan.
+#[test]
+fn judge_leaves_a_sources_state_to_its_own_transition() {
+    let scratch = Scratch::new("copy-judged-state");
+    let body = long_body();
+    let edited = [body.as_slice(), b"an edit"].concat();
+    scratch.place("source.md", &edited);
+    scratch.place("file", b"a file where a folder would be");
+
+    for source in [
+        "source.md",
+        "absent.md",
+        "missing/source.md",
+        "file/source.md",
+    ] {
+        assert_eq!(
+            judge(&scratch, "dest.md", copy_of(source, &body)),
+            Ok(()),
+            "{source:?}"
+        );
+        assert!(
+            matches!(
+                scratch.stage("dest.md", copy_of(source, &body)),
+                Err(Refusal::Drifted { .. })
+            ),
+            "{source:?}"
+        );
+    }
+    assert!(matches!(
+        norn_fs::judge(
+            &scratch.vault(),
+            scratch.root(),
+            Path::new("source.md"),
+            Transition::Remove {
+                before: hash(&body)
+            },
+        ),
+        Err(Refusal::Drifted { .. })
+    ));
+}

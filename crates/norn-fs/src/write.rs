@@ -65,7 +65,10 @@
 //!
 //! [`judge`] is the first three steps alone: staging's own judgment of a
 //! target, reaching the refusal [`stage`] would and writing nothing, which a
-//! preview of a plan answers from.
+//! preview of a plan answers from. Of a copy's source it shares only the
+//! refusals no byte of the source decides — the name's shape, a linked
+//! folder, a link or a non-file at the name — and leaves the source's state,
+//! absent or at other bytes, to the plan's own transition on the source.
 //!
 //! # Publication
 //!
@@ -274,19 +277,33 @@ pub enum Content<'a> {
     ///
     /// **`hash` is the after-state, and nothing reads the source to learn
     /// it**: a target already at `hash` is landed without the source being
-    /// opened, and [`judge`] — staging's look — never reaches the source,
-    /// since what it judges is the target. Staging reaches the source only to
-    /// fill the shadow: through the same anchored descent as a target, through
-    /// no link and by no name that leaves the root, it copies the source into
-    /// the shadow a chunk at a time, hashing as it copies. A source that is
-    /// not at `hash` — other bytes, nothing, or nothing reachable — refuses as
-    /// [`Refusal::Drifted`] naming the source, a source that is a link as
-    /// [`Refusal::SymlinkDestination`] and one that is not a regular file as
-    /// [`Refusal::NotRegularFile`], each before the shadow is synced and with
-    /// the shadow removed: the content the caller composed against is not
-    /// there. Whether `source` still names the file that was copied is not
-    /// asked; the hash of the bytes copied is the whole question, because
-    /// they are what the create publishes.
+    /// opened, and [`judge`] — staging's look — never reads the source's
+    /// bytes: it refuses the source's shape as staging does and leaves its
+    /// state to the plan's own transition on it. Staging reaches the source
+    /// only to fill the shadow: through the same anchored descent as a
+    /// target, through no link and by no name that leaves the root, it
+    /// copies the source into the shadow a chunk at a time, hashing as it
+    /// copies.
+    ///
+    /// **A source that cannot be copied refuses before any shadow is made**:
+    /// a name that leaves the root as an invalid request, a linked folder on
+    /// its path as [`Refusal::LinkedAncestor`], nothing there — no file, a
+    /// missing folder, a file where a folder would be — as
+    /// [`Refusal::Drifted`] onto absence, a link as
+    /// [`Refusal::SymlinkDestination`] and something that is not a regular
+    /// file as [`Refusal::NotRegularFile`]. **A source whose bytes are not at
+    /// `hash` refuses as [`Refusal::Drifted`] naming the source, found during
+    /// the copy, before the shadow is synced and with the shadow removed**, as
+    /// is a failure to write the shadow: the content the caller composed
+    /// against is not there.
+    ///
+    /// Whether `source` still names the file that was copied is not asked;
+    /// the hash of the bytes copied is the whole question, because they are
+    /// what the create publishes. For the same reason the source may be
+    /// reached at a spelling a case-folding volume folds onto another entry's
+    /// name — staging does not confirm the spelling against its folder's
+    /// listing as it does a target's — because the hash, not the spelling,
+    /// decides what is copied.
     ///
     /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
     /// applier staging a move's destination from the file the move leaves,
@@ -579,6 +596,18 @@ pub fn stage(
 /// the bytes written into it, which are the write. It reads and opens, and
 /// changes nothing.
 ///
+/// **A copy's source is judged as far as no byte of it decides**, and only
+/// where the create proceeds, since a landed target is staged without its
+/// source. Shared with [`stage`]: a source name that is not one below the
+/// root, a linked folder on its path, a link at its name and something there
+/// that is not a regular file each refuse as staging would, told by the
+/// descent and a no-follow stat, with no file opened. Not shared: a source
+/// that is absent or holds bytes other than the create's hash, which staging
+/// refuses as drift once it copies, is answered ready here. Telling the
+/// second takes reading the source, and a source's state is the plan's own
+/// transition's to judge — a move's removal of its source, held to the same
+/// hash, refuses the plan where the source has drifted or gone.
+///
 /// **Its caller is the one applier's preview** (`norn-host`'s `applier`,
 /// Layer 4 plan-apply), which judges a resolved plan as an apply of it would
 /// and answers the refusal staging would meet, or the plan.
@@ -588,7 +617,18 @@ pub fn judge(
     path: &Path,
     transition: Transition<'_>,
 ) -> Result<(), Refusal> {
-    look(anchor, root, path, &anchor.join(path), &transition).map(drop)
+    let (root_fd, looked) = look(anchor, root, path, &anchor.join(path), &transition)?;
+    // Staging reaches a copy's source only where the create proceeds, so a
+    // landed target is judged without it, as it is staged without it.
+    match (looked, transition) {
+        (
+            Looked::One(Judged::Proceed { .. }),
+            Transition::Create {
+                content: Content::CopyOf { source, .. },
+            },
+        ) => judge_source(root_fd.as_fd(), anchor, source),
+        _ => Ok(()),
+    }
 }
 
 /// Publish what [`stage`] staged.
@@ -1156,13 +1196,17 @@ struct Source {
 /// name — a missing folder, a folder that is a file, an absent file — is drift
 /// onto absence; something that is not a regular file is
 /// [`Refusal::NotRegularFile`].
+///
+/// **The spelling is not confirmed**: unlike [`observe`], this never asks
+/// [`listed_as_asked`], so on a folding volume a source reached at a folded
+/// spelling is copied. That is deliberate — the copy is held to the hash, and
+/// the hash, not the spelling, decides what is published.
 fn open_source(at: &StageAt<'_>, source: &Path, hash: ContentHash) -> Result<Source, Refusal> {
-    let full = at.anchor.join(source);
-    let target = Target::of(source, &full)?;
-    let Folder::Reached(chain) = descend(at.root_fd, &target, at.anchor, &full)? else {
+    let SourceAt { full, reached } = reach_source(at.root_fd, at.anchor, source)?;
+    let Some((chain, name)) = reached else {
         return Err(drifted(&full, hash, None));
     };
-    match open_at_name(chain.last(), target.name, &full)? {
+    match open_at_name(chain.last(), name, &full)? {
         AtName::Regular(file, metadata) => Ok(Source {
             file,
             metadata,
@@ -1172,6 +1216,62 @@ fn open_source(at: &StageAt<'_>, source: &Path, hash: ContentHash) -> Result<Sou
         AtName::Absent => Err(drifted(&full, hash, None)),
         AtName::Link => Err(symlink_destination(&full)),
         AtName::Other => Err(not_regular(&full)),
+    }
+}
+
+/// Where a create's source stands, reached from the root as a target is.
+struct SourceAt<'r, 'p> {
+    /// The source's path, the anchor joined with the name below it.
+    full: PathBuf,
+    /// The source's own folder and its name there, or `None` where a folder
+    /// on the way is missing or is a file, so nothing can be at the source.
+    reached: Option<(Chain<'r>, &'p OsStr)>,
+}
+
+/// Reach the folder a create's `source` sits in below `anchor`, refusing
+/// what both staging and [`judge`] refuse of a source's path: a name that is
+/// not one below the root, as an invalid request before anything is opened,
+/// and a linked folder on the way as [`Refusal::LinkedAncestor`]. The descent
+/// opens folders and reads no file.
+fn reach_source<'r, 'p>(
+    root_fd: BorrowedFd<'r>,
+    anchor: &Path,
+    source: &'p Path,
+) -> Result<SourceAt<'r, 'p>, Refusal> {
+    let full = anchor.join(source);
+    let target = Target::of(source, &full)?;
+    let reached = match descend(root_fd, &target, anchor, &full)? {
+        Folder::Reached(chain) => Some((chain, target.name)),
+        Folder::Missing(_) | Folder::Blocked { .. } => None,
+    };
+    Ok(SourceAt { full, reached })
+}
+
+/// [`judge`]'s look at a create's source: every refusal [`open_source`]
+/// meets that needs no byte of the source — the path's shape, a linked
+/// folder on the way, a link at the source's name
+/// ([`Refusal::SymlinkDestination`]) and something there that is not a
+/// regular file ([`Refusal::NotRegularFile`]) — told by the descent and one
+/// no-follow stat of the name, so no file is opened.
+///
+/// **The source's state is not asked.** A source that is absent, or holds
+/// bytes other than the create's hash, refuses staging as drift, but telling
+/// the second takes reading the file; a source's state is judged by the
+/// plan's own transition on it — a move's removal of its source, held to the
+/// same hash — so this answers ready for both.
+fn judge_source(root_fd: BorrowedFd<'_>, anchor: &Path, source: &Path) -> Result<(), Refusal> {
+    let SourceAt { full, reached } = reach_source(root_fd, anchor, source)?;
+    let Some((chain, name)) = reached else {
+        return Ok(());
+    };
+    match statat(chain.last(), name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        Err(errno) => Err(errno_refusal("reading the kind of", &full, errno)),
+        Ok(stat) => match rustix::fs::FileType::from_raw_mode(stat.st_mode as _) {
+            rustix::fs::FileType::RegularFile => Ok(()),
+            rustix::fs::FileType::Symlink => Err(symlink_destination(&full)),
+            _ => Err(not_regular(&full)),
+        },
     }
 }
 
