@@ -761,8 +761,9 @@ pub const PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 64 * 1024;
 /// about four bodies: the first negative control above, an apply that reads
 /// the moved document whole while staging, passes it. What holds the applier
 /// to no copy of a carried document is its seam tests in
-/// `norn-host`'s `applier/tests/carried.rs`: their counting view asserts the
-/// applier reads such a document whole zero times
+/// `norn-host`'s `applier/tests/carried.rs`: their counting view asserts a
+/// fresh apply reads such a document whole zero times (a re-send that finds
+/// the change already landed reads the landed document whole once)
 /// (`a_chain_of_moves_carries_each_document_where_it_lands`,
 /// `a_carried_name_refilled_by_a_composed_document_is_read_streamed`,
 /// `a_carried_name_a_respell_refills_is_read_streamed`), and
