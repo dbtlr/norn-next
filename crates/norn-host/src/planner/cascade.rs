@@ -253,9 +253,9 @@ impl Deletes {
 /// of its holder matches the text the holder held.
 ///
 /// **A document a move carries unread is read by its links**, which
-/// `carried` holds as the index vouched for them
-/// ([`super::links::vouch_for_carried`]), so generating a move's cascade
-/// reads no moved body.
+/// `carried` holds — as the index vouched for them
+/// ([`super::links::vouch_for_carried`]), or read from the file where it did
+/// not — so generating a move's cascade reads no moved body.
 ///
 /// Empty, and the index never asked, where no move carries a document, no
 /// delete forbids or rewrites the links naming its own, and no wikilink

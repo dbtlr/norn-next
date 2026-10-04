@@ -58,12 +58,13 @@ pub(crate) struct Drawn {
 /// nothing.
 ///
 /// **One derivation, two consumers.** The planner reads it for the content
-/// cycle alone, on the order a resolved plan's operations compose in. The
+/// cycle and for which documents the plan carries byte for byte
+/// ([`Carried`]), on the order a resolved plan's operations compose in. The
 /// applier reads it on a resolved plan's operations in their recorded order,
-/// for the same content cycle and for what else follows content through
-/// moves: drift of a source a target that has not landed draws on, the
-/// schema baseline each result is judged against, and the stand-in for a
-/// before-state an apply cannot see.
+/// for the same content cycle, the same carried documents, and what else
+/// follows content through moves: drift of a source a target that has not
+/// landed draws on, the schema baseline each result is judged against, and
+/// the stand-in for a before-state an apply cannot see.
 #[derive(Debug, Default)]
 pub(crate) struct Lineage {
     /// Each file an operation touches, and the source of what it holds at

@@ -88,15 +88,17 @@ pub(crate) struct ComposedTarget {
 
 /// What a file holds after the plan, as composition leaves it.
 ///
-/// **A document a move carries byte for byte is never held.** Its content is
+/// **A document a move carries byte for byte is never held here.** Which
+/// documents those are is the plan's one rule ([`Carried`]). Its content is
 /// another file's before-state, unchanged, so it is named by where it stood
 /// and the state it stood at — the hash of its bytes and whether they
-/// decode — and nothing reads its bytes: not composition, which only puts it
-/// somewhere; not the plan's transitions, which carry that state; and not
-/// the change set, which reads the links it holds from the store's index
-/// where the index read it at that hash (`super::links::CarriedLinks`).
-/// Where an edit, a link rewrite or a cascade lands on it, composition reads
-/// the bytes whole, once, and from then on holds them ([`After::Bytes`]).
+/// decode — and nothing here reads its bytes: not composition, which only
+/// puts it somewhere; not the plan's transitions, which carry that state;
+/// and not the change set, which reads the links it holds from the store's
+/// index where the index read it at that hash, or from the file read whole
+/// once where it did not (`super::links::CarriedLinks`). A document an edit,
+/// a link rewrite or a cascade lands on is no carried one: it is read whole
+/// and held ([`After::Bytes`]).
 #[derive(Clone, Debug)]
 pub(crate) enum After {
     /// No file stands there.

@@ -2555,14 +2555,23 @@ A plan is a self-contained value naming its vault by address and carrying the va
 identity: the host holds no plan between requests. A resolved plan carries its operations,
 each target's before- and after-state — absent, or the hash of the bytes present and
 whether those bytes decode as a document, by the derivation's own rule — and the conditions
-its planning read, never the bytes of a file it did not author. A move whose document the
-plan carries byte for byte holds no copy of it anywhere: planning and the applier read its
-source streamed, keeping its hash and whether its bytes decode; the links it holds are the
-store index's, taken only where the index derived them from those very bytes — elsewhere the
-move is unresolved, to be re-sent once the vault has indexed the change, and its body is
-never read instead; and its destination is staged as the write kernel's streamed copy of
-the source, held to the hash the plan carries. A move an edit, a link rewrite or its own
-cascade lands on reads the moved document whole, once. Every template value
+its planning read, never the bytes of a file it did not author. Which documents a plan
+carries byte for byte is one rule, read from its operations and their lineage by planning
+and the applier alike: a file some move names, which no other operation or expected value
+names, on whose before-state no edit, link rewrite or cascade composes, and which no
+case-only rename lands at another file's spelling. Planning and the applier read a carried
+document streamed, keeping its hash and whether its bytes decode, and the write kernel
+stages every target holding it — a create, or a replace where a chain of moves refills a
+name — as a streamed copy of its source, held to the hash the plan carries. The links a
+carried document holds are the store index's, taken where the index derived them from those
+very bytes. **A carried move holds no copy of its document once the vault has indexed it;
+where the index does not vouch for it, planning and the applier each read the file whole at
+the plan's hash, one copy, and take its links from its bytes** — a declared limit, kept
+because a plan and its re-send must finish over a vault whose index lags its files (ADR
+0032), as a move did before it carried anything. A move an edit, a link rewrite or its own
+cascade lands on reads the moved document whole, once, and holds that one copy, parsed once;
+where its own cascade lands, planning has already streamed it once, so it opens the file
+twice and holds it once. Every template value
 resolves at planning, so the applier recomposes each target as a pure function of the
 before-states and the operations: before staging anything it runs the plan's operations
 again, through the planner's own ordering and composition, over the vault with every target
@@ -2896,7 +2905,8 @@ rewrite's `old` naming one names none, so it repairs the broken wikilinks naming
 bytes that start or stop decoding change
 whether a document stands though a file stands there throughout. A document the plan writes
 is read from the bytes planning composed — a document a move carries unread from the links
-the index holds for its source at the hash the plan carries — and a moved document's links from where its
+the index holds for its source at the hash the plan carries, or from the file read whole at
+that hash where the index does not vouch for them — and a moved document's links from where its
 content stood before the plan, whether or not its bytes decoded there, so a relative link a
 move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target
@@ -3088,7 +3098,9 @@ Four contracts inside that flow carry weight:
   target's state and every condition holds, every composed result passes the vault schema,
   and every written target, a create included, is staged as a shadow. A refusal in that
   phase publishes nothing. A plan refuses a violation on a field it writes or one that did
-  not stand before it. Publication is still a window: a crash, an I/O failure, a create
+  not stand before it; a carried result introduces none by construction — its bytes are
+  the document's own and the schema's rules are vault-wide — so it is not judged again.
+  Publication is still a window: a crash, an I/O failure, a create
   whose name another writer took after staging, or a foreign edit reaching a target after
   its staging can stop it part-way, and the apply report names every target that landed. A
   foreign write between a target's final verification and its rename is overwritten, the

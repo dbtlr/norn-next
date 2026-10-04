@@ -30,7 +30,8 @@
 //! bytes the plan composed, since the store holds its before-state — a
 //! document a move carries unread from the links the index holds for its
 //! source at the hash it carries, which are those bytes' links
-//! ([`vouched`]): each link
+//! ([`vouched`]), or from the source read whole at that hash where the index
+//! does not vouch for them: each link
 //! it holds is keyed at its after-state, and read before the plan from where
 //! the document's content stood — a moved document's source, whether or not
 //! its bytes decoded there — so a relative link a move breaks is seen

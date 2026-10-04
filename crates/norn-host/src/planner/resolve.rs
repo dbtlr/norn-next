@@ -116,9 +116,11 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
-    // The links of each document a move carries unread, as the index vouched
-    // for them, kept across passes: a pass composes the same documents from
-    // the same before-states.
+    // The links of each document a move carries unread — the index's where it
+    // vouched for them, the file's read whole where it did not — kept across
+    // passes: the view fixes each before-state at its first read, streamed or
+    // whole, so a pass composes the same documents from the same
+    // before-states.
     let mut carried = CarriedLinks::default();
     let (order, lineage, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));

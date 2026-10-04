@@ -223,13 +223,15 @@ pub(crate) fn document_path(path: &Path) -> Option<DocumentPath> {
     DocumentPath::new(path.to_str()?).ok()
 }
 
-/// A view that reads each name once and answers every later read of it with
-/// what the first read found.
+/// A view that reads each name once — or, for a name first read streamed and
+/// later wanted whole, twice — and answers every later read of it with what
+/// those reads found.
 ///
 /// Planning orders its operations, composes them, and composes again after
 /// leaving an operation out, and one planning is one observation of each
-/// file: every pass then composes from the same before-states, and a file is
-/// read once however many passes it takes. A name is remembered by its
+/// file: every pass then composes from the same before-states, the first
+/// read's, and a file is read once however many passes it takes — but for a
+/// streamed read followed by a whole one, below. A name is remembered by its
 /// identity, so two spellings of one file are one read.
 ///
 /// **A streamed read is remembered without a body**, so a document a plan

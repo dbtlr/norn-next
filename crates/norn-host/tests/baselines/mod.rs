@@ -1230,11 +1230,15 @@ pub const APPLY_DOCUMENT_READS_PER_REMOVED_TARGET: u64 = 2;
 /// Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
 pub const APPLY_TARGET_READS_PER_REMOVED_TARGET: u64 = 2;
 
-/// A document a move carries byte for byte, its source's document reads: two
-/// — **planning**'s streamed read of its before-state and **the
-/// recomposition**'s, each a hash and a decode verdict from one pass that
-/// keeps no byte. Its destination, a created document, is never read for its
-/// content before the changeset's read-back. The same count as a removed
+/// A document a move carries byte for byte, its source's document reads,
+/// where the index vouches for the links it holds: two — **planning**'s
+/// streamed read of its before-state and **the recomposition**'s, each a hash
+/// and a decode verdict from one pass that keeps no byte. Where the index does
+/// not vouch for them, planning and the applier each read the file whole once
+/// more, for its links — the declared limit of a carried move — which the
+/// lane's vaults, indexed before each apply, never meet. Its destination, a
+/// created document, is never read for its content before the changeset's
+/// read-back. The same count as a removed
 /// document's ([`APPLY_DOCUMENT_READS_PER_REMOVED_TARGET`]), kept apart so a
 /// move's source is held to its own fate. Budgeted with
 /// [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].

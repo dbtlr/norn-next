@@ -587,11 +587,12 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
 /// **Read where planning read them** ([`vouched`]): the index's links of the
 /// copy's source, where it holds them at the hash the copy publishes — or of
 /// the target, where a re-sent plan's copy already landed and the index took
-/// it in there. Where the index holds neither at that hash, which only a
-/// file changed and changed back since planning, or a landing the index has
-/// half taken in, leaves it, the file standing at that hash is read whole and
-/// its links read from its bytes: a check never refuses a plan for what its
-/// index has not yet seen. A file no longer at that hash is drift.
+/// it in there. Where the index holds neither at that hash — it lags the
+/// file, as planning may have met it, or has half taken in a landing — the
+/// file standing at that hash is read whole, one copy, and its links read
+/// from its bytes, as planning reads them where its index lags: a check
+/// never refuses a plan for what its index has not yet seen, so a re-sent
+/// plan finishes (ADR 0032). A file no longer at that hash is drift.
 fn copied_links<V: VaultView>(
     plan: &ResolvedPlan,
     units: &[Unit],
