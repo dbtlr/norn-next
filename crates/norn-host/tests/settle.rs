@@ -325,6 +325,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "PLAN_PEAK_RSS_CEILING_BYTES" => {
                 always_authored(baselines::PLAN_PEAK_RSS_CEILING_BYTES)
             }
+            "PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES" => {
+                always_authored(baselines::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
+            }
             "PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES)
             }

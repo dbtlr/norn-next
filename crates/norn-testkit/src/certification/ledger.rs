@@ -533,6 +533,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
         armed: true,
     },
     ExitBar {
+        name: "plan-preview-pair-heap-growth-allowance",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
+        armed: true,
+    },
+    ExitBar {
         name: "plan-pair-heap-growth-allowance",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES",
         armed: true,

@@ -1147,12 +1147,22 @@ counted by the process's own allocator, at the 300-document and ~2k-document pro
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the
 whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
-stays under the find's pages is not seen. No query shape carries a timing bar. Two `plan-`
-bars hold a write plan the same way: one process previews and applies a `set --where`, a hub
-move with its cascade and a delete, and the heap they raise above the attached host is bounded
-in bytes across the two profiles, because a plan's memory is its operations and a fixed record
-per target, never the vault; and the ~2k-document profile's process carries an absolute peak
-ceiling.
+stays under the find's pages is not seen. No query shape carries a timing bar. Three `plan-`
+bars hold one process that previews a `set --where`, a hub move with its cascade and a delete,
+and then applies each as previewed, because a plan's memory is its operations and a fixed
+record per target, never the vault. The heap the previews raise above the attached host,
+read before the first apply, is bounded in bytes across the two profiles at the read bar's
+resolution, so planning that keeps an eight-byte id for every document fails it. The heap the
+whole mix raises with its applies is bounded the same way but more coarsely, because an
+apply's publications reach the watcher's threads while it commits and move that reading by
+about 31 KB: it fails a retention from about 24 bytes a document, or about 43 where that
+excursion lands on the 300-document profile alone. The ~2k-document profile's process carries
+an absolute peak ceiling. Both heap readings are high-waters: memory planning builds and frees
+under its own peak, about 164 KB at these profiles, is not seen, and work proportional to the
+vault while planning is the counter lane's to refuse, which holds a `set --where`'s steps flat
+across the two scales. NORN-131 watches the high-water limit, as it does the read bar's. A
+move's size-independence, holding no copy of the document it moves, is barred by NORN-345,
+not here.
 
 ### 4. One obvious path
 
