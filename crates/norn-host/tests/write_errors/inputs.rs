@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use norn_testkit::process::Sandbox;
 
@@ -200,7 +201,39 @@ struct Trial {
     _lease: norn_host::DemandLease<norn_host::ProductionEntryOps>,
     host: attach::ServingHost,
     identity: RootIdentity,
+    root: PathBuf,
+    baseline: BTreeMap<PathBuf, TreeEntry>,
     _sandbox: Sandbox,
+}
+
+#[derive(Eq, PartialEq)]
+enum TreeEntry {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+
+/// Judge fixture reuse from files, not the outcome's claim about writes.
+fn tree_at(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {
+    fn visit(root: &Path, folder: &Path, tree: &mut BTreeMap<PathBuf, TreeEntry>) {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            let fact = if kind.is_dir() {
+                visit(root, &path, tree);
+                TreeEntry::Directory
+            } else if kind.is_symlink() {
+                TreeEntry::Link(std::fs::read_link(&path).unwrap())
+            } else {
+                TreeEntry::File(std::fs::read(&path).unwrap())
+            };
+            tree.insert(path.strip_prefix(root).unwrap().to_owned(), fact);
+        }
+    }
+    let mut tree = BTreeMap::new();
+    visit(root, root, &mut tree);
+    tree
 }
 
 impl Trial {
@@ -213,12 +246,20 @@ impl Trial {
         let host = vault.host();
         let lease = attach::attach_and_wait(&host, vault.name());
         let identity = norn_fs::path_identity(vault.path()).unwrap().unwrap();
+        let root = vault.path().to_owned();
+        let baseline = tree_at(&root);
         Self {
             _lease: lease,
             host,
             identity: RootIdentity::from_device_and_inode(identity.dev, identity.ino),
+            root,
+            baseline,
             _sandbox: sandbox,
         }
+    }
+
+    fn unchanged(&self) -> bool {
+        tree_at(&self.root) == self.baseline
     }
 
     fn answer(
@@ -265,7 +306,7 @@ pub(super) fn run() {
                     }
                 }
                 let mut counts = (0, 0, 0);
-                let mut preview_trial: Option<Trial> = None;
+                let mut trial: Option<Trial> = None;
                 for subject in &subjects {
                     let seed_root: Option<RootIdentity> = subject["plan"]
                         .get("root")
@@ -279,18 +320,19 @@ pub(super) fn run() {
                                 continue;
                             }
                         };
-                        let answer = match decoded.mode() {
-                            ApplyMode::Preview => preview_trial
-                                .get_or_insert_with(|| Trial::new(verb))
-                                .answer(decoded, seed_root.as_ref()),
-                            ApplyMode::Apply => {
-                                // Release the preview's watcher lease before
-                                // taking another. Every apply gets a fresh tree,
-                                // so earlier writes cannot mask later inputs.
-                                drop(preview_trial.take());
-                                Trial::new(verb).answer(decoded, seed_root.as_ref())
-                            }
-                        };
+                        let held = trial.get_or_insert_with(|| Trial::new(verb));
+                        let mode = decoded.mode();
+                        let answer = held.answer(decoded, seed_root.as_ref());
+                        let unchanged = held.unchanged();
+                        if mode == ApplyMode::Preview {
+                            assert!(unchanged, "{label}: preview changed its fixture");
+                        }
+                        // Even a misreported landing cannot mask the next
+                        // request: any physical change retires the whole host
+                        // and tree, before another watcher lease is taken.
+                        if !unchanged {
+                            drop(trial.take());
+                        }
                         match answer {
                             Ok(_) => counts.1 += 1,
                             Err(error) => {
