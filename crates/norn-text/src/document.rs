@@ -1547,10 +1547,16 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
     out
 }
 
-/// `source` with each range in `edits` replaced by its text. The ranges are in
-/// document order and do not overlap.
+/// `source` with each range in `edits` replaced by its text, allocated once at
+/// the size the result actually is. The ranges are in document order and do
+/// not overlap.
 pub(crate) fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String {
-    let mut out = String::with_capacity(source.len());
+    let length = edits
+        .iter()
+        .fold(source.len(), |length, (range, replacement)| {
+            length - range.len() + replacement.len()
+        });
+    let mut out = String::with_capacity(length);
     let mut copied = 0;
     for (range, replacement) in edits {
         out.push_str(&source[copied..range.start]);
@@ -1618,5 +1624,46 @@ pub fn frontmatter_reads_back(content: &str, expected: &Value) -> bool {
         (Some(Value::Null), Value::Map(map)) => map.is_empty(),
         (Some(actual), expected) => &actual == expected,
         (None, _) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rewrite of a large document is held whole while it is verified, so
+    /// the splice allocates the output once at exactly its length: a capacity
+    /// sized to the source doubles on the first byte a lengthening edit adds,
+    /// and keeps a shortening edit's slack for as long as the bytes live.
+    #[test]
+    fn a_splice_allocates_exactly_the_bytes_it_writes() {
+        let source = "see [a](a.md) and [b](b.md) then [c](c.md)\n";
+        let at = |needle: &str| {
+            let start = source
+                .find(needle)
+                .expect("the needle stands in the source");
+            start..start + needle.len()
+        };
+        for (edit, edits) in [
+            ("a lengthening edit", vec![(at("a.md"), "../a.md")]),
+            ("a shortening edit", vec![(at("b.md"), "b")]),
+            (
+                "several edits",
+                vec![
+                    (at("a.md"), "../a.md"),
+                    (at("b.md"), "b"),
+                    (at("c.md"), "../../c.md"),
+                ],
+            ),
+        ] {
+            let spliced = splice_all(source, &edits);
+            assert_eq!(
+                spliced.capacity(),
+                spliced.len(),
+                "{edit} allocated {} bytes for {} it wrote: {spliced:?}",
+                spliced.capacity(),
+                spliced.len()
+            );
+        }
     }
 }
