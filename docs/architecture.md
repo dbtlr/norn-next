@@ -1147,47 +1147,60 @@ counted by the process's own allocator, at the 300-document and ~2k-document pro
 bounds in bytes how far the second reading may exceed the first: a shape that keeps an
 eight-byte id for every document while the find's pages are held fails it, even where the
 whole-process peak absorbs whole rows. The reading is a high-water, so a retention that
-stays under the find's pages is not seen. No query shape carries a timing bar. Six `plan-`
-bars hold one process that previews a move of a 4 KiB document and of a 4 MiB one that change
-no bytes and the same pair of moves that rewrite their own links, then previews a `set
---where`, a hub move with its cascade and a delete, applies each of those three as previewed,
-and then applies the four moves, because a plan's memory is its
-operations and a fixed record per target, never the vault and never the bytes of a file it did
-not author. The heap the mix's previews raise above the attached host, read before its first
-apply, is bounded in bytes across the two profiles at the read bar's resolution, so planning
-that keeps an eight-byte id for every document fails it. The heap the whole mix raises with its
-applies is bounded the same way but more coarsely, because an apply's publications reach the
-watcher's threads while it commits and move that reading by about 31 KB: it fails a retention
-from about 24 bytes a document, or about 43 where that excursion lands on the 300-document
-profile alone. Both readings are high-waters: memory planning builds and frees under its own
-peak, about 161 KB at these profiles, is not seen, and work proportional to the vault while
-planning is the counter lane's to refuse, which holds a `set --where`'s steps flat across the
-two scales. NORN-131 watches the high-water limit, as it does the read bar's. **A move that
-changes no bytes holds no copy of its document once the vault has indexed it**: the heap the
-4 MiB move's preview raises above its mark may exceed the 4 KiB move's by no more than one
-64 KiB chunk of the streamed hash, and a preview that reads the moved document whole fails it
-by about four bodies. **Its apply holds no more than the commit's derivation of the document it
-lands**: the commit re-reads and derives that document through the one derivation every heal
-runs, at about four times its body, and that cost is the derivation's, not the plan's. So the
-process also renames each document into the vault from outside it and reads what the live
-host's own derivation of it raises the heap by, and the 4 MiB move's apply may exceed the
-4 KiB one's by no more than that derivation pair's difference and the same 64 KiB; an apply
-that keeps a copy of the landed document across its commit fails it by about one body. **Watcher
-echoes are a timing hazard these bars avoid rather than read**: the host handles an apply's
-publication and a write from outside on its own threads after the request answers, and the
-echo of a large landed document costs about its body, so every size-pair mark is set once the
-live heap has stopped moving and every preview runs before the first apply. A move over a vault
-whose index does not vouch for the moved document reads it whole once, a declared limit not
-barred. **A move that rewrites the moved document's own links is barred at its measured floor,
-not at one copy**: its 4 MiB preview may exceed its 4 KiB one by five bodies and 64 KiB, the
-three allocations live together while the rewrite verifies itself — the held before-body, the
-rewritten bytes, and pulldown-cmark's first-pass tree over them, about three bodies. The
-verification re-scans the rewritten document whole, because a backtick, HTML, a reference
-definition or the frontmatter reaches content far from an edit, and pulldown-cmark
-materialises that tree before it yields an event. The bar refuses a regression from that
-floor; it is not a target. The ~2k-document profile's process carries an absolute peak ceiling,
-which the 4 MiB documents raise through the attach heal, the commit's derivation and the
-relinking move's floor.
+stays under the find's pages is not seen. No query shape carries a timing bar. Three `plan-`
+bars hold one process that previews a `set --where`, a hub move with its cascade and a
+delete, and then applies each as previewed, because a plan's memory is its operations and a
+fixed record per target, never the vault. The heap the previews raise above the attached
+host, read before the first apply, is bounded in bytes across the two profiles at the read
+bar's resolution, so planning that keeps an eight-byte id for every document fails it. The
+heap the whole mix raises with its applies is bounded the same way but more coarsely, because
+an apply's publications reach the watcher's threads while it commits and move that reading by
+about 31 KB: it fails a retention from about 24 bytes a document, or about 43 where that
+excursion lands on the 300-document profile alone. The ~2k-document profile's process carries
+an absolute peak ceiling. Both heap readings are high-waters: memory planning builds and frees
+under its own peak, about 171 KB at these profiles, is not seen, and work proportional to the
+vault while planning is the counter lane's to refuse, which holds a `set --where`'s steps flat
+across the two scales. NORN-131 watches the high-water limit, as it does the read bar's.
+
+**A plan never holds the bytes of a file it did not author**, and four size bars hold that in
+a second process of their own. Each compares a 4 MiB document's stretch with a 4 KiB one's in
+the same process, each under its own mark, so it needs nothing from the planning process; it
+is a separate process because the 4 MiB documents' freed allocations stay resident at the
+allocator's discretion and would set the planning process's peak, so its ceiling would measure
+the allocator rather than the plans. **A move that changes no bytes holds no copy of its
+document once the vault has indexed it**: the heap the 4 MiB move's preview raises above its
+mark may exceed the 4 KiB move's by no more than one 64 KiB chunk of the streamed hash, and a
+preview that reads the moved document whole fails it by about four bodies. **Its apply holds
+no more than the commit's derivation of the document it lands**: the commit re-reads and
+derives that document through the one derivation every heal runs, and that cost is the
+derivation's, not the plan's. So the process also renames each document into the vault from
+outside it and reads what the live host's own derivation of it raises the heap by, and the
+4 MiB move's apply may exceed the 4 KiB one's by no more than that derivation pair's difference
+and the same 64 KiB; an apply that keeps a copy of the landed document across its commit fails
+it by about one body. That bar sees only what the apply holds above the commit's own
+high-water, so an apply that reads the moved document whole while staging and frees it before
+the commit passes it: the applier's guarantee that it holds no copy of a carried document is
+carried by its seam tests in `applier/tests/carried.rs`, whose counting view asserts the
+applier reads such a document whole zero times and observes it streamed, and the write
+kernel's streamed copy (`Content::CopyOf`) holds one chunk by the construction of its one
+streaming loop, which no test bounds by heap. **The derivation pair is barred at its own
+measured floor**, four bodies and 64 KiB — the bytes read whole and pulldown-cmark's
+first-pass tree over them, about three bodies — so the apply bar's yardstick cannot grow
+unseen. **Watcher echoes are a timing hazard these bars avoid rather than read**: the host
+handles an apply's publication and a write from outside on its own threads after the request
+answers, and the echo of a large landed document costs about its body, so every size mark is
+set once the live heap has stopped moving and every preview runs before the first apply. A
+move over a vault whose index does not vouch for the moved document reads it whole once, a
+declared limit not barred. **A move that rewrites the moved document's own links is barred at
+its measured floor, not at one copy**: its 4 MiB preview may exceed its 4 KiB one by five
+bodies and 64 KiB, the three allocations live together while the rewrite verifies itself — the
+held before-body, the rewritten bytes, and pulldown-cmark's first-pass tree over them, about
+three bodies of the fixture's plain prose lines. The verification re-scans the rewritten
+document whole, because a backtick, HTML, a reference definition or the frontmatter reaches
+content far from an edit, and pulldown-cmark materialises that tree before it yields an event.
+Both floors are regression bars, not targets, and both are this fixture's: the parser's tree
+grows with how densely a document packs Markdown nodes, so short-line or list-heavy documents
+hold more than these five and four bodies.
 
 ### 4. One obvious path
 

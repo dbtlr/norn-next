@@ -346,6 +346,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES" => always_authored(
                 baselines::PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
             ),
+            "DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
+                always_authored(baselines::DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+            }
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"
