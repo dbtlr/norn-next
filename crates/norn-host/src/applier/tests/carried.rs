@@ -425,3 +425,29 @@ fn a_carried_move_whose_source_another_writer_changed_is_refused_with_a_fresh_pl
     assert_eq!(fixture.read("notes/a.md").as_deref(), Some("# A, again\n"));
     assert_eq!(fixture.read("archive/a.md"), None);
 }
+
+/// **A check whose index no longer vouches for a carried document reads it
+/// whole rather than refuse it.** Planned while the index held the moved
+/// document at its bytes, the plan meets an index that took in another
+/// writer's change since, though the file is back at the bytes the plan
+/// carries: the source stands at its before-state, so nothing drifted, and
+/// the check reads the links it holds from the file itself. The plan
+/// applies, and the store equals a build from zero.
+#[test]
+fn a_carried_move_whose_index_moved_on_is_checked_from_the_file() {
+    let mut fixture = carried_fixture();
+    let plan = fixture.plan(vec![moving("notes/a.md", "archive/a.md")]);
+    let original = fixture.read("notes/a.md").expect("the source");
+    fixture.foreign("notes/a.md", "# A, for a moment\n");
+    fixture.write("notes/a.md", &original);
+    let finished = applied(fixture.apply(plan));
+    assert!(
+        results(&finished)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Wrote),
+        "{:?}",
+        results(&finished)
+    );
+    assert_eq!(fixture.read("archive/a.md"), Some(original));
+    fixture.assert_store_is_a_build_from_zero();
+}
