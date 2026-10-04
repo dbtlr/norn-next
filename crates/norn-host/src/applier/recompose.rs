@@ -33,16 +33,14 @@ use norn_wire::{
     AuthorCondition, DocumentPath, ExpectedField, FileState, PlanCondition, PlanFault, ResolvedPlan,
 };
 
-use super::observe::{TargetState, identity};
+use super::observe::{TargetState, carried, identity};
 use crate::derivation::decodes;
-use crate::planner::compose::{
-    Composition, compose, content_hash, edits_in_place, holding, touched,
-};
+use crate::planner::compose::{Composition, compose, edits_in_place, touched};
 use crate::planner::edit;
 use crate::planner::lineage::Lineage;
 use crate::planner::order::dependencies;
 use crate::planner::resolve::PlanningFailure;
-use crate::planner::view::{Entry, VaultView};
+use crate::planner::view::{Body, Entry, VaultView};
 
 /// What running a plan's operations again from its before-states found.
 pub(super) enum Recomposed {
@@ -84,7 +82,7 @@ pub(super) fn recompose<V: VaultView>(
     lineage: &Lineage,
     view: &V,
 ) -> Result<Recomposed, V::Error> {
-    let before = BeforeStates::over(plan, states, view);
+    let before = BeforeStates::over(plan, states, lineage, view);
     let count = plan.operations.len();
     let dependencies = match dependencies(&plan.operations, &BTreeSet::new(), &before) {
         Ok(dependencies) => dependencies,
@@ -173,11 +171,7 @@ fn transitions_differ<V>(
             differing.push((*path).clone());
             continue;
         }
-        let after = match &composed.after {
-            Some(bytes) => holding(bytes, content_hash(bytes)),
-            None => FileState::absent(),
-        };
-        if after == transition.after {
+        if composed.after.state() == transition.after {
             continue;
         }
         #[cfg(feature = "induced-failure")]
@@ -305,7 +299,11 @@ fn expectation_held<V: VaultView>(
         return Ok(false);
     }
     Ok(match before.entry(file)? {
-        Entry::Document { bytes, hash, .. } if written || carries(file, Some(&hash)) => {
+        Entry::Document {
+            hash,
+            body: Body::Held(bytes),
+            ..
+        } if written || carries(file, Some(&hash)) => {
             edit::expectation_unmet(path, &bytes, field, expect).is_none()
         }
         // A carried condition the file does not meet refused before
@@ -337,6 +335,12 @@ fn condition_path(condition: &AuthorCondition) -> &DocumentPath {
 /// the vault reads no documents at never reaches here: observing refuses a
 /// target named at one, and any other name an operation carries is read from
 /// the vault as it stands, which reads it as what it is.
+///
+/// **A carried target reads as it was observed, streamed** (`super::observe::carried`):
+/// a document with the before-state's hash and decode verdict and no bytes,
+/// seen or not, which composition carries unread. Asked for whole, one this
+/// apply can see is read whole from the vault; composition asks that of no
+/// carried target, since no edit lands on one.
 struct BeforeStates<'a, V> {
     view: &'a V,
     plan: &'a ResolvedPlan,
@@ -346,10 +350,17 @@ struct BeforeStates<'a, V> {
     identities: Vec<Option<NormalizedPath>>,
     /// Every target whose before-state this apply cannot see.
     unseen: BTreeSet<NormalizedPath>,
+    /// Whether each target's content is carried, by index.
+    streamed: Vec<bool>,
 }
 
 impl<'a, V: VaultView> BeforeStates<'a, V> {
-    fn over(plan: &'a ResolvedPlan, states: &'a [TargetState], view: &'a V) -> Self {
+    fn over(
+        plan: &'a ResolvedPlan,
+        states: &'a [TargetState],
+        lineage: &Lineage,
+        view: &'a V,
+    ) -> Self {
         let identities: Vec<Option<NormalizedPath>> = plan
             .transitions
             .iter()
@@ -371,13 +382,16 @@ impl<'a, V: VaultView> BeforeStates<'a, V> {
             by_identity,
             identities,
             unseen,
+            streamed: carried(plan, lineage, view.normalizer()),
         }
     }
 }
 
 impl<V: VaultView> BeforeStates<'_, V> {
     /// What the target at `path` held at its recorded before-state, or
-    /// `None` where no transition of the plan is at `path`.
+    /// `None` where no transition of the plan is at `path`: held as it was
+    /// observed, and for a target this apply cannot see, carried unread
+    /// where its content is carried and as the stand-in otherwise.
     fn recorded(&self, path: &NormalizedPath) -> Option<Entry> {
         let indices = self.by_identity.get(path)?;
         // A case-only rename's identity has two transitions: the document
@@ -393,19 +407,22 @@ impl<V: VaultView> BeforeStates<'_, V> {
                 at: transition.path.clone(),
             });
         };
-        let bytes = match &self.states[index] {
-            TargetState::AtBefore(Some(bytes)) => bytes.clone(),
-            TargetState::Landed(Some(bytes))
+        let body = match &self.states[index] {
+            TargetState::AtBefore(Some(body)) => body.clone(),
+            TargetState::Landed(Some(body))
                 if transition.after.same_content(&transition.before) =>
             {
-                bytes.clone()
+                body.clone()
             }
-            _ => stand_in(*quarantined),
+            _ if self.streamed[index] => Body::Streamed {
+                decodes: !*quarantined,
+            },
+            _ => Body::Held(stand_in(*quarantined)),
         };
         Some(Entry::Document {
             at: transition.path.clone(),
-            bytes,
             hash: hash.clone(),
+            body,
         })
     }
 }
@@ -419,8 +436,19 @@ impl<V: VaultView> VaultView for BeforeStates<'_, V> {
 
     fn entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
         match self.recorded(path) {
+            Some(Entry::Document {
+                body: Body::Streamed { .. },
+                ..
+            }) => self.view.entry(path),
             Some(entry) => Ok(entry),
             None => self.view.entry(path),
+        }
+    }
+
+    fn streamed_entry(&self, path: &NormalizedPath) -> Result<Entry, V::Error> {
+        match self.recorded(path) {
+            Some(entry) => Ok(entry),
+            None => self.view.streamed_entry(path),
         }
     }
 

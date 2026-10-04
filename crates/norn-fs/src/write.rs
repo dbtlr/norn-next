@@ -305,10 +305,9 @@ pub enum Content<'a> {
     /// listing as it does a target's — because the hash, not the spelling,
     /// decides what is copied.
     ///
-    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-    /// applier staging a move's destination from the file the move leaves,
-    /// without holding it. The applier still stages every create from bytes
-    /// the plan composed, so nothing in the current call graph builds one yet.
+    /// **How a move's destination is staged.** The applier stages the
+    /// destination of a move whose document the plan carries byte for byte
+    /// from the file the move leaves, without holding it.
     CopyOf { source: &'a Path, hash: ContentHash },
 }
 

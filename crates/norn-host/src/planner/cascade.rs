@@ -126,11 +126,11 @@ use norn_wire::{
 use super::compose::{Composition, Skipped};
 use super::lineage::{Lineage, Removal, Retarget};
 use super::links::{
-    Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Target, WrittenLinks, address,
-    decider, family_name, left_as_written, reach, reaching, removed_by, respells, retarget_namings,
-    rewrite_destination, rewrite_targets, selecting, spelled, stored_path, wire_family,
+    CarriedLinks, Decider, EntryKey, LinkIndex, Named, Reached, RetargetNaming, Target,
+    WrittenLinks, address, decider, family_name, left_as_written, reach, reaching, removed_by,
+    respells, retarget_namings, rewrite_destination, rewrite_targets, selecting, spelled,
+    stored_path, wire_family,
 };
-use crate::derivation::document_links;
 
 /// What a plan's moves, deletes and wikilink rewrites generate from the
 /// links naming what they carry away, remove or retarget.
@@ -252,11 +252,17 @@ impl Deletes {
 /// selects it and no delete counts it, as the batch composing every rewrite
 /// of its holder matches the text the holder held.
 ///
+/// **A document a move carries unread is read by its links**, which
+/// `carried` holds as the index vouched for them
+/// ([`super::links::vouch_for_carried`]), so generating a move's cascade
+/// reads no moved body.
+///
 /// Empty, and the index never asked, where no move carries a document, no
 /// delete forbids or rewrites the links naming its own, and no wikilink
 /// rewrite stands.
 pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
     composition: &Composition,
+    carried: &CarriedLinks,
     lineage: &Lineage,
     operations: impl IntoIterator<Item = &'o Operation>,
     normalizer: &PathNormalizer,
@@ -280,7 +286,7 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         namings: BTreeMap::new(),
         destinations: BTreeMap::new(),
     };
-    let targets = Target::of(composition);
+    let targets = Target::of(composition, carried);
     let Reached {
         overlay, probed, ..
     } = reach(&targets, lineage, normalizer, &cascade.written);
@@ -424,7 +430,8 @@ pub(crate) fn generate<'o, I: LinkIndex + ?Sized>(
         }
     }
 
-    let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> = cascade.own_relative_links();
+    let mut rewrites: BTreeMap<EntryKey, (usize, LinkRewrite)> =
+        cascade.own_relative_links(&targets);
 
     // Every spelling each breaking link could take, probed from its holder
     // in one judgment; a link written twice in one holder is one key, asked
@@ -764,8 +771,16 @@ impl<'a> Cascade<'a> {
     /// lands, the file the link must name after the plan
     /// ([`Self::final_document`]), keyed as the change set keys the link,
     /// each on the move that lands its holder: read from where the document
-    /// stood, spelled from where it lands.
-    fn own_relative_links(&self) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
+    /// stood, spelled from where it lands. The links are `targets`' own, read
+    /// once for the change set's probes too.
+    fn own_relative_links(
+        &self,
+        targets: &[Target<'_>],
+    ) -> BTreeMap<EntryKey, (usize, LinkRewrite)> {
+        let held: BTreeMap<&DocumentPath, &[LinkFact]> = targets
+            .iter()
+            .filter_map(|target| Some((target.path(), target.links()?)))
+            .collect();
         let mut rewrites = BTreeMap::new();
         for (file, drawn) in self.lineage.drawing() {
             let (Some(owner), Some(landed), Some(stood)) = (
@@ -776,20 +791,15 @@ impl<'a> Cascade<'a> {
                 continue;
             };
             let (holder, source) = (stored_path(landed), stored_path(stood));
-            let Some(bytes) = self
-                .composition
-                .targets
-                .get(landed)
-                .and_then(|target| target.after.as_deref())
-            else {
+            let Some(links) = held.get(landed) else {
                 continue;
             };
             let file = self.identity(landed.as_str());
-            for link in document_links(bytes) {
+            for link in links.iter() {
                 let authored = file
                     .as_ref()
-                    .is_some_and(|file| self.written.holds(file, &link))
-                    && !self.kept.contains(&entry(landed, &link));
+                    .is_some_and(|file| self.written.holds(file, link))
+                    && !self.kept.contains(&entry(landed, link));
                 if authored {
                     continue;
                 }
@@ -804,10 +814,10 @@ impl<'a> Cascade<'a> {
                 if !relative {
                     continue;
                 }
-                let [named] = &norn_store::named_paths(&link, &source)[..] else {
+                let [named] = &norn_store::named_paths(link, &source)[..] else {
                     continue;
                 };
-                let destination = self.final_document(&holder, &link, Named::One(named));
+                let destination = self.final_document(&holder, link, Named::One(named));
                 if destination
                     .as_ref()
                     .is_some_and(|destination| matches!(destination.by, Decider::Authored(_)))
@@ -820,7 +830,7 @@ impl<'a> Cascade<'a> {
                     .unwrap_or_else(|| named.clone());
                 // A spelling that still reaches the file from where the
                 // document lands is kept, however short another would be.
-                if norn_store::named_paths(&link, &holder) == [named.as_str()] {
+                if norn_store::named_paths(link, &holder) == [named.as_str()] {
                     continue;
                 }
                 let Some(respelled) = norn_store::relative_spelling(&holder, &named, &link.target)
@@ -830,11 +840,11 @@ impl<'a> Cascade<'a> {
                 let rewrite = LinkRewrite::new(
                     landed.clone(),
                     LinkFamily::Markdown,
-                    address(&link),
+                    address(link),
                     respelled,
                 );
                 rewrites
-                    .entry(entry(landed, &link))
+                    .entry(entry(landed, link))
                     .or_insert((*owner, rewrite));
             }
         }

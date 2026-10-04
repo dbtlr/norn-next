@@ -2555,7 +2555,14 @@ A plan is a self-contained value naming its vault by address and carrying the va
 identity: the host holds no plan between requests. A resolved plan carries its operations,
 each target's before- and after-state — absent, or the hash of the bytes present and
 whether those bytes decode as a document, by the derivation's own rule — and the conditions
-its planning read, never the bytes of a file it did not author. Every template value
+its planning read, never the bytes of a file it did not author. A move whose document the
+plan carries byte for byte holds no copy of it anywhere: planning and the applier read its
+source streamed, keeping its hash and whether its bytes decode; the links it holds are the
+store index's, taken only where the index derived them from those very bytes — elsewhere the
+move is unresolved, to be re-sent once the vault has indexed the change, and its body is
+never read instead; and its destination is staged as the write kernel's streamed copy of
+the source, held to the hash the plan carries. A move an edit, a link rewrite or its own
+cascade lands on reads the moved document whole, once. Every template value
 resolves at planning, so the applier recomposes each target as a pure function of the
 before-states and the operations: before staging anything it runs the plan's operations
 again, through the planner's own ordering and composition, over the vault with every target
@@ -2888,7 +2895,8 @@ no entry, its move generates no cascade, its delete is never refused for backlin
 rewrite's `old` naming one names none, so it repairs the broken wikilinks naming its place;
 bytes that start or stop decoding change
 whether a document stands though a file stands there throughout. A document the plan writes
-is read from the bytes planning composed, and a moved document's links from where its
+is read from the bytes planning composed — a document a move carries unread from the links
+the index holds for its source at the hash the plan carries — and a moved document's links from where its
 content stood before the plan, whether or not its bytes decoded there, so a relative link a
 move breaks is recorded breaking. Every other link is
 reached through the link index, by an equality seek of each key that could name a target

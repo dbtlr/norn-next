@@ -12,11 +12,11 @@ use norn_wire::{
 };
 
 use super::cascade::generate;
-use super::compose::{Composition, compose, content_hash, holding, touched, touches};
+use super::compose::{Composition, compose, touched, touches};
 use super::edit;
 use super::forecast::forecast;
 use super::lineage::Lineage;
-use super::links::{LinkIndex, Target, change_set};
+use super::links::{CarriedLinks, LinkIndex, Target, change_set, vouch_for_carried};
 use super::order::dependencies;
 use super::view::{self, Remembered, VaultView};
 
@@ -116,6 +116,10 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     let view = &Remembered::over(view);
     let dependencies = dependencies(&operations, met, view).map_err(PlanningFailure::widen)?;
     leave_out_what_falls_with(&operations, &mut left_out, view);
+    // The links of each document a move carries unread, as the index vouched
+    // for them, kept across passes: a pass composes the same documents from
+    // the same before-states.
+    let mut carried = CarriedLinks::default();
     let (order, lineage, composition) = loop {
         let order = dependencies.order(|position| !left_out.contains_key(&position));
         let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
@@ -130,6 +134,19 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         if let Some(cycle) = lineage.content_cycle() {
             return Err(PlanningFailure::Fault(PlanFault::content_cycle(cycle)));
         }
+        if leave_out_unvouched(
+            &operations,
+            &order,
+            &composition,
+            &mut carried,
+            &mut left_out,
+            view,
+            links,
+        )
+        .map_err(PlanningFailure::Links)?
+        {
+            continue;
+        }
         // Each move that resolves generates its cascade from the plan as it
         // composes without any, and a holder a left-out operation touches
         // takes the move down with it, as any file two operations share
@@ -138,6 +155,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         // nothing more falls.
         let generated = generate(
             &composition,
+            &carried,
             &lineage,
             order.iter().map(|&position| &operations[position]),
             view.normalizer(),
@@ -157,6 +175,22 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
             // left out in the composition's words, in every build, rather
             // than planned with a transition its cascade does not make.
             let composition = compose(&operations, &order, view).map_err(PlanningFailure::View)?;
+            if leave_out_unvouched(
+                &operations,
+                &order,
+                &composition,
+                &mut carried,
+                &mut left_out,
+                view,
+                links,
+            )
+            .map_err(PlanningFailure::Links)?
+            {
+                for operation in &mut operations {
+                    operation.cascade.clear();
+                }
+                continue;
+            }
             // Each delete is decided here, by the one rule its link choice
             // is held to, from the backlinks the composed plan leaves: one a
             // wikilink rewrite's cascade was to respell, and composition left
@@ -184,7 +218,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     // The resolution change set is recorded as the vault stands with every
     // target at its after-state, judged from the bytes composition wrote and
     // from whether the plan's file states say a document stands.
-    let targets = Target::of(&composition);
+    let targets = Target::of(&composition, &carried);
     let changed = change_set(
         &targets,
         &lineage,
@@ -201,10 +235,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         .targets
         .into_iter()
         .map(|(path, target)| {
-            let after = match &target.after {
-                Some(bytes) => holding(bytes, content_hash(bytes)),
-                None => FileState::absent(),
-            };
+            let after = target.after.state();
             Transition::new(path, target.before, after)
         })
         .collect::<Vec<_>>();
@@ -243,6 +274,60 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
         plan,
         unresolved,
     })
+}
+
+/// Leave out each move carrying a document unread whose links `links`
+/// cannot vouch for ([`vouch_for_carried`]), with what falls with it, and
+/// answer whether any was; take the links of every other carried document
+/// into `carried`.
+///
+/// **A move never reads the body it carries to learn its links.** Where the
+/// index holds the document at another hash than the file — changed since
+/// the vault's index saw it, or not yet indexed — the move that reads it
+/// first is left unresolved, saying to re-send the plan once the vault has
+/// indexed the change, as a `where` target's match resting on facts the
+/// index has not taken in is (`super::expand`). A document that does not
+/// decode holds no link, and is carried whatever the index holds.
+///
+/// Answers whether any operation was left out, so planning composes again
+/// only where this pass's plan changed.
+fn leave_out_unvouched<V: VaultView, I: LinkIndex + ?Sized>(
+    operations: &[Operation],
+    order: &[usize],
+    composition: &Composition,
+    carried: &mut CarriedLinks,
+    left_out: &mut BTreeMap<usize, UnresolvedReason>,
+    view: &V,
+    links: &I,
+) -> Result<bool, I::Error> {
+    let unvouched = vouch_for_carried(composition, carried, links)?;
+    if unvouched.is_empty() {
+        return Ok(false);
+    }
+    let identity = |path: &DocumentPath| view.normalizer().normalize(Path::new(path.as_str())).ok();
+    let standing = left_out.len();
+    for source in unvouched {
+        let first = order.iter().copied().find(|&position| {
+            matches!(
+                &operations[position].kind,
+                norn_wire::OperationKind::MoveDocument { from, .. }
+                    if identity(from).is_some() && identity(from) == identity(&source)
+            )
+        });
+        if let Some(position) = first {
+            left_out.entry(position).or_insert_with(|| {
+                UnresolvedReason::no_longer_resolves(format!(
+                    "`{source}` holds other bytes than the vault's index saw there, so the links \
+                     it holds cannot be read without reading the document the move carries; \
+                     re-send the plan once the vault has indexed the change"
+                ))
+            });
+        }
+    }
+    leave_out_what_falls_with(operations, left_out, view);
+    // Only a move's source is carried, so each unvouched one names a move
+    // that is left out here and the next pass composes without it.
+    Ok(left_out.len() > standing)
 }
 
 /// The operations of this pass that did not resolve: each that met a state it
@@ -375,7 +460,11 @@ fn unmet_expectation<V: VaultView>(
         return Ok(absent());
     }
     Ok(match view.entry(&identity)? {
-        view::Entry::Document { bytes, hash, .. } => {
+        view::Entry::Document {
+            hash,
+            body: view::Body::Held(bytes),
+            ..
+        } => {
             debug_assert!(
                 before.is_none_or(|before| before.hash() == Some(&hash)),
                 "the view remembers the bytes a written document's before-state hashes"
@@ -2111,11 +2200,15 @@ mod tests {
             creating("b.md/c.md", "beneath a document"),
             creating("folder", "onto a folder"),
         ];
-        let resolution = match resolve(
+        // The move carries its document unread, so the store is derived
+        // from the tree: its index vouches for the links it holds.
+        let store = super::super::links::testing::TreeStore::over(scratch.root());
+        let resolution = match super::resolve(
             authored(operations.clone()),
             root(),
             &BTreeSet::new(),
             &view,
+            &store.index(),
         ) {
             Ok(resolution) => resolution,
             Err(failure) => panic!("the plan resolves: {failure:?}"),

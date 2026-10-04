@@ -27,7 +27,10 @@
 //! holds the flag to every side whose bytes it does hold.
 //!
 //! **What is judged where.** A document the plan writes is read from the
-//! bytes the plan composed, since the store holds its before-state: each link
+//! bytes the plan composed, since the store holds its before-state — a
+//! document a move carries unread from the links the index holds for its
+//! source at the hash it carries, which are those bytes' links
+//! ([`vouched`]): each link
 //! it holds is keyed at its after-state, and read before the plan from where
 //! the document's content stood — a moved document's source, whether or not
 //! its bytes decoded there — so a relative link a move breaks is seen
@@ -101,6 +104,7 @@
 //! or mislabel that holder's skip advisory, while the condition entries the
 //! applier checks stay exact.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -114,7 +118,7 @@ use norn_wire::{
     LinkKey, Operation, OperationKind, PlanCondition, Resolves,
 };
 
-use super::compose::{Composition, Kept, Skipped, content_hash, holding};
+use super::compose::{After, Composition, Kept, Skipped};
 use super::control::role_at;
 use super::lineage::{Drawn, Lineage, Relink, Removal, Retarget};
 use crate::derivation::document_links;
@@ -157,13 +161,10 @@ pub(crate) trait LinkIndex {
     /// order; where it is not, they are another file's, and the caller reads
     /// the file itself or leaves the question unresolved.
     ///
-    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-    /// planning of a move whose document the plan carries byte for byte,
-    /// which reads the moved document's own links from here rather than
-    /// parsing a body it never holds. The planner still reads a moved
-    /// document whole and parses it, so nothing in the current call graph
-    /// asks this yet.
-    #[cfg_attr(not(test), allow(dead_code))] // A dormant carrier, as stated above.
+    /// **What a carried document's links are read from.** A move whose
+    /// document the plan carries byte for byte holds no body to parse, so
+    /// planning and the applier read its links here, vouched for by the hash
+    /// ([`vouched`]).
     fn held_links(&self, holder: &DocumentPath) -> Result<Option<HeldLinks>, Self::Error>;
 
     /// Say the index will not be read again for the plan at hand, so a handle
@@ -200,6 +201,93 @@ fn reads_links_over<'o>(
         })
 }
 
+/// The links each document a plan carries byte for byte holds, by the
+/// spelling it stood at before the plan ([`After::Carried`]): what the change
+/// set and a move's cascade read of it in place of its bytes.
+#[derive(Debug, Default)]
+pub(crate) struct CarriedLinks {
+    held: BTreeMap<DocumentPath, Vec<LinkFact>>,
+}
+
+impl CarriedLinks {
+    /// The links the document carried from `from` holds, where they were
+    /// read.
+    pub(crate) fn of(&self, from: &DocumentPath) -> Option<&[LinkFact]> {
+        self.held.get(from).map(Vec::as_slice)
+    }
+
+    /// Take in the links `links` says the document carried from `from` at
+    /// `state` holds.
+    pub(crate) fn insert(&mut self, from: DocumentPath, links: Vec<LinkFact>) {
+        self.held.insert(from, links);
+    }
+}
+
+/// **The one guard on a carried document's links**: the links the document
+/// at `from`, standing at `state`, holds, read through `index` without its
+/// body, or `None` where the index cannot vouch for them.
+///
+/// **The index vouches only for the bytes it read.** Its links are the ones
+/// [`document_links`] reads from a file's bytes only where the hash it
+/// derived them from is the file's, so a document whose state hashes
+/// otherwise — changed since the vault's index saw it, or never indexed — is
+/// vouched for by nothing, and the caller never reads its body instead: a
+/// move planning carries is left unresolved, saying to re-send once the
+/// index has taken the change in.
+///
+/// **A document whose bytes do not decode holds no link**, the answer
+/// [`document_links`] gives any bytes that do not decode, so it is vouched
+/// for with none and no index is asked: the store derives no document from
+/// it, so the index holds no row to compare.
+pub(crate) fn vouched<I: LinkIndex + ?Sized>(
+    from: &DocumentPath,
+    state: &FileState,
+    index: &I,
+) -> Result<Option<Vec<LinkFact>>, I::Error> {
+    if !state.is_document() {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(hash) = state.hash() else {
+        return Ok(None);
+    };
+    Ok(index
+        .held_links(from)?
+        .filter(|held| held.content_hash == hash.hex())
+        .map(|held| held.links))
+}
+
+/// The source of every document `composition` carries whose links `known`
+/// does not yet hold, read into it through `index` ([`vouched`]); and each
+/// source the index could not vouch for, at the spelling it stood at.
+pub(crate) fn vouch_for_carried<I: LinkIndex + ?Sized>(
+    composition: &Composition,
+    known: &mut CarriedLinks,
+    index: &I,
+) -> Result<Vec<DocumentPath>, I::Error> {
+    let mut unvouched = Vec::new();
+    for target in composition.targets.values() {
+        let After::Carried { state, from } = &target.after else {
+            continue;
+        };
+        if known.of(from).is_some() || unvouched.contains(from) {
+            continue;
+        }
+        match vouched(from, state, index)? {
+            Some(links) => known.insert(from.clone(), links),
+            None => unvouched.push(from.clone()),
+        }
+    }
+    Ok(unvouched)
+}
+
+/// What a file holds after a plan, as the change set reads it: its bytes,
+/// or the links a document carried unread holds ([`CarriedLinks`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Holding<'a> {
+    Bytes(&'a [u8]),
+    Links(&'a [LinkFact]),
+}
+
 /// One file a plan writes, as the change set reads it.
 ///
 /// **A document stands where a file's bytes decode as one**, which is what
@@ -212,6 +300,12 @@ fn reads_links_over<'o>(
 /// whatever its bytes: the vault derives none from it, so it is no link's
 /// candidate and holds no link the vault reads, and a plan writing one reads
 /// no link.
+///
+/// **A document's links are read once per target.** Built from bytes, a
+/// target reads their links here, once ([`document_links`]); built from a
+/// carried document, it takes the links the index vouched for. Every reader
+/// of a target's links — the change set's probes, and a move's own relative
+/// links in its cascade — reads them off the target.
 pub(crate) struct Target<'a> {
     /// The file, at the spelling the plan writes it.
     path: &'a DocumentPath,
@@ -220,46 +314,64 @@ pub(crate) struct Target<'a> {
     stood: bool,
     /// Whether a document stands there before the plan.
     before: bool,
-    /// What the document there holds after the plan, or `None` where none
-    /// stands.
-    after: Option<&'a [u8]>,
+    /// The links the document there holds after the plan, or `None` where
+    /// none stands.
+    after: Option<Cow<'a, [LinkFact]>>,
 }
 
 impl<'a> Target<'a> {
-    /// The file at `path`, going from `before` to `after`, holding `bytes`
+    /// The file at `path`, going from `before` to `after`, holding `holding`
     /// after the plan where a file stands there then: a document on each
     /// side only where that side's state says its bytes decode.
     pub(crate) fn new(
         path: &'a DocumentPath,
         before: &FileState,
         after: &FileState,
-        bytes: Option<&'a [u8]>,
+        holding: Option<Holding<'a>>,
     ) -> Self {
         let document = role_at(path.as_str()).is_none();
         Target {
             path,
             stood: before.hash().is_some(),
             before: document && before.is_document(),
-            after: bytes.filter(|_| document && after.is_document()),
+            after: holding.filter(|_| document && after.is_document()).map(
+                |holding| match holding {
+                    Holding::Bytes(bytes) => Cow::Owned(document_links(bytes)),
+                    Holding::Links(links) => Cow::Borrowed(links),
+                },
+            ),
         }
     }
 
     /// Every file `composition` writes, as the change set reads it: its
-    /// before-state as composition read it, and the bytes it composed for
-    /// after, whose state is read from them as the plan records it
-    /// ([`holding`]).
-    pub(crate) fn of(composition: &'a Composition) -> Vec<Target<'a>> {
+    /// before-state as composition read it, and what it composed for after —
+    /// bytes, or a document carried unread, whose links `carried` holds —
+    /// whose state is the one the plan records ([`After::state`]).
+    pub(crate) fn of(composition: &'a Composition, carried: &'a CarriedLinks) -> Vec<Target<'a>> {
         composition
             .targets
             .iter()
             .map(|(path, target)| {
-                let bytes = target.after.as_deref();
-                let after = bytes.map_or_else(FileState::absent, |bytes| {
-                    holding(bytes, content_hash(bytes))
-                });
-                Target::new(path, &target.before, &after, bytes)
+                let holding = match &target.after {
+                    After::Absent => None,
+                    After::Bytes(bytes) => Some(crate::planner::links::Holding::Bytes(bytes)),
+                    After::Carried { from, .. } => Some(Holding::Links(carried.of(from).expect(
+                        "planning vouches for every carried document's links before reading them",
+                    ))),
+                };
+                Target::new(path, &target.before, &target.after.state(), holding)
             })
             .collect()
+    }
+
+    /// The file, at the spelling the plan writes it.
+    pub(crate) fn path(&self) -> &DocumentPath {
+        self.path
+    }
+
+    /// The links the document there holds after the plan, where one stands.
+    pub(crate) fn links(&self) -> Option<&[LinkFact]> {
+        self.after.as_deref()
     }
 }
 
@@ -582,7 +694,7 @@ pub(crate) fn reach(
         } else {
             overlay.with(stored.clone(), target.before, target.after.is_some())
         };
-        let Some(bytes) = target.after else {
+        let Some(links) = target.links() else {
             continue;
         };
         let before_holder = file
@@ -591,7 +703,7 @@ pub(crate) fn reach(
             .and_then(|drawn| stood.get(&drawn.from).copied())
             .map(stored_path)
             .unwrap_or_else(|| stored.clone());
-        for link in document_links(bytes) {
+        for link in links.iter().cloned() {
             let rewritten = file.as_ref().is_some_and(|file| written.holds(file, &link));
             if let (true, Some(file)) = (rewritten, file.as_ref()) {
                 originals.extend(written.originals(file, &link).map(|original| ProbedLink {
@@ -1479,6 +1591,42 @@ pub(crate) mod testing {
         }
     }
 
+    /// A store derived from the tree at `root`, pinning no schema, and a
+    /// snapshot over it: the index a planning case over a tree on disk
+    /// judges its links on, holding every document the tree holds as the
+    /// vault's own index would — what a move's carried document is vouched
+    /// for by.
+    pub(crate) struct TreeStore {
+        snapshot: Snapshot,
+        declared: ContentModel,
+        _store: Store,
+        _scratch: Scratch,
+    }
+
+    impl TreeStore {
+        pub(crate) fn over(root: &std::path::Path) -> Self {
+            let scratch = Scratch::new("planner-links-tree");
+            let mut store = Store::open_throwaway(
+                scratch.join("store.sqlite3"),
+                StoredPathOrder::Sensitive,
+                crate::DERIVATION_VERSION,
+            )
+            .expect("a throwaway store");
+            crate::production::heal_from_zero(&mut store, root, &[]).expect("a heal");
+            TreeStore {
+                snapshot: snapshot_of(&store),
+                declared: ContentModel::none(),
+                _store: store,
+                _scratch: scratch,
+            }
+        }
+
+        /// The index over the derived store.
+        pub(crate) fn index(&self) -> PlanSnapshot<'_> {
+            PlanSnapshot::held(vault(), &self.snapshot, &self.declared)
+        }
+    }
+
     /// `authored` planned as [`crate::planner::resolve::resolve`] plans it
     /// over `view`, its links judged on an empty store: a case over files
     /// alone, every link a plan reaches being one its own targets hold. An
@@ -1662,7 +1810,7 @@ mod tests {
                 &holder,
                 &FileState::present(crate::planner::compose::content_hash(before)),
                 &FileState::present(crate::planner::compose::content_hash(after)),
-                Some(after),
+                Some(crate::planner::links::Holding::Bytes(after)),
             )],
             &lineage,
             &normalizer,
@@ -1710,13 +1858,18 @@ mod tests {
         let set = change_set(
             &[
                 Target::new(&a, &present(b"A\n"), &FileState::absent(), None),
-                Target::new(&b, &FileState::absent(), &present(b"A\n"), Some(b"A\n")),
+                Target::new(
+                    &b,
+                    &FileState::absent(),
+                    &present(b"A\n"),
+                    Some(crate::planner::links::Holding::Bytes(b"A\n")),
+                ),
                 Target::new(&h, &present(b"[[a]]\n"), &FileState::absent(), None),
                 Target::new(
                     &moved_h,
                     &FileState::absent(),
                     &present(b"[[b]]\n"),
-                    Some(b"[[b]]\n"),
+                    Some(crate::planner::links::Holding::Bytes(b"[[b]]\n")),
                 ),
             ],
             &lineage,

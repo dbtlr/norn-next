@@ -56,6 +56,9 @@
 //! staged record per target: no handle, and no byte of any file. The
 //! observed and composed bytes are held only while staging, as planning holds
 //! them, and the changeset reads each landed document back when it commits.
+//! A document a move carries byte for byte is never held at all: it is
+//! observed streamed ([`observe`]), recomposed unread, its links read from
+//! the index, and staged as the write kernel's streamed copy of its source.
 //!
 //! **Who applies here.** The apply job, which takes the entry's claim,
 //! derives the facts delivered by then, plans an authored plan through the

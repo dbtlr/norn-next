@@ -139,7 +139,12 @@
 //! **Memory.** A resolved plan carries its operations and one fixed-size
 //! transition per target, never the bytes of a file it did not author.
 //! Planning itself holds the bytes of every file the plan touches until it
-//! answers.
+//! answers, but for a document a move carries byte for byte: that one is
+//! read streamed and carried unread ([`compose::After::Carried`]), its links
+//! taken from the store's index where the index derived them from those
+//! very bytes ([`links::vouch_for_carried`]) and the move left unresolved
+//! where it did not, so planning holds none of it. An edit, a link rewrite
+//! or a cascade landing on such a document reads it whole, once.
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's

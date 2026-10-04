@@ -1063,12 +1063,10 @@ pub(crate) fn decodes(bytes: &[u8]) -> bool {
 /// holds the two to one answer over a corpus of encodings, and a rule that
 /// grew past UTF-8 would fail it until this grew with it.
 ///
-/// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
-/// planning of a move whose document the plan carries byte for byte, which
-/// records the moved document's decodability without holding its body. The
-/// planner still reads a moved document whole and asks [`decodes`], so
-/// nothing in the current call graph calls this yet.
-#[cfg_attr(not(test), allow(dead_code))] // A dormant carrier, as stated above.
+/// **Where it is asked.** A move whose document the plan carries byte for
+/// byte records the moved document's decodability from here, planning and
+/// the applier alike, without holding its body
+/// (`crate::planner::view::Body::Streamed`).
 pub(crate) fn streamed_decodes(streamed: &norn_fs::StreamedHash) -> bool {
     streamed.is_utf8()
 }

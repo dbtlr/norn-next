@@ -1174,7 +1174,9 @@ fn deleting_a_quarantined_document_records_no_link_change() {
 /// the file's bytes, so the check refuses the drift and the operations,
 /// resolved afresh, move a document `[[apply-quarantined]]` resolves to. The
 /// apply answers `vault/plan-refused` with that fresh plan, carrying the
-/// link condition it now needs, and writes nothing.
+/// link condition it now needs, and writes nothing. The repair is derived
+/// before the apply is sent: the fresh plan's move carries the repaired
+/// document unread, so the index must hold its links at its new bytes.
 #[test]
 fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
     let (_sandbox, vault) = a_vault_linking_a_quarantined_file("host-applies-quarantine-repaired");
@@ -1205,6 +1207,7 @@ fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
     assert!(!reads_links(&plan), "{:?}", plan.conditions);
     std::fs::write(vault.path().join("apply-quarantined.md"), "# Repaired\n")
         .expect("another writer repairs the quarantined file");
+    derived(&vault, "apply-quarantined.md");
 
     let refused = host
         .apply(ApplyParams::new(
@@ -1224,6 +1227,21 @@ fn an_apply_whose_plan_read_no_links_refuses_with_a_fresh_plan_reading_them() {
         "# Repaired\n"
     );
     assert!(!vault.path().join("elsewhere/apply-quarantined.md").exists());
+}
+
+/// Wait until the attachment has derived the document another writer wrote
+/// at `at`, as the watcher delivers it.
+fn derived(vault: &attach::Vault, at: &str) {
+    let document = norn_store::DocumentPath::new(at).expect("a stored document path");
+    norn_testkit::wait::wait_until(
+        "the other writer's document is derived",
+        attach::state_budget(std::time::Duration::from_secs(10)),
+        || match vault.store().begin_request().stored_facts(&document) {
+            Ok(Some(_)) => norn_testkit::wait::Observed::Met(()),
+            _ => norn_testkit::wait::Observed::pending("not derived yet"),
+        },
+    )
+    .expect("the other writer's document is derived");
 }
 
 /// **Moving a quarantined document records no link change**: no document

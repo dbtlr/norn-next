@@ -386,6 +386,12 @@ impl Lineage {
         self.edited.get(&position)
     }
 
+    /// Every file whose before-state an edit or an authored link rewrite of
+    /// the plan acted on ([`Self::edited`]), once per edit.
+    pub(crate) fn edited_sources(&self) -> impl Iterator<Item = &NormalizedPath> {
+        self.edited.values()
+    }
+
     /// Each file whose content at the end of the plan is another file's
     /// before-state, and where that content was drawn from.
     pub(crate) fn drawing(&self) -> impl Iterator<Item = (&NormalizedPath, &Drawn)> {
