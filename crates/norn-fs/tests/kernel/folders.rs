@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use norn_fs::{Refusal, Transition, remove_empty_folders};
+use norn_fs::{Content, Refusal, Transition, remove_empty_folders};
 
 use crate::common::{Scratch, bytes_at, exists, names_in, staged, symlink};
 
@@ -14,7 +14,12 @@ fn staging_a_create_under_missing_folders_makes_none() {
     let scratch = Scratch::new("folders-staging");
     let staged = staged(
         scratch
-            .stage("a/b/fresh.md", Transition::Create { content: b"fresh" })
+            .stage(
+                "a/b/fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
+            )
             .expect("a create under missing folders stages"),
     );
 
@@ -31,7 +36,12 @@ fn a_create_makes_its_missing_folders_and_reports_them() {
     let scratch = Scratch::new("folders-made");
     scratch.directory("a");
     let published = scratch
-        .stage_and_publish("a/b/c/fresh.md", Transition::Create { content: b"fresh" })
+        .stage_and_publish(
+            "a/b/c/fresh.md",
+            Transition::Create {
+                content: Content::Held(b"fresh"),
+            },
+        )
         .expect("a create under missing folders");
 
     assert_eq!(bytes_at(&scratch.at("a/b/c/fresh.md")), b"fresh");
@@ -50,7 +60,12 @@ fn a_create_into_an_existing_folder_reports_no_folder() {
     let scratch = Scratch::new("folders-none");
     scratch.directory("a");
     let published = scratch
-        .stage_and_publish("a/fresh.md", Transition::Create { content: b"fresh" })
+        .stage_and_publish(
+            "a/fresh.md",
+            Transition::Create {
+                content: Content::Held(b"fresh"),
+            },
+        )
         .expect("a create into a folder");
     assert!(published.made_folders.is_empty(), "{published:?}");
 }
@@ -62,7 +77,12 @@ fn a_create_whose_missing_folder_became_a_file_refuses_and_leaves_nothing() {
     let scratch = Scratch::new("folders-file");
     let staged = staged(
         scratch
-            .stage("a/b/fresh.md", Transition::Create { content: b"fresh" })
+            .stage(
+                "a/b/fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
+            )
             .expect("staged"),
     );
     scratch.directory("a");
@@ -90,7 +110,12 @@ fn a_create_whose_missing_folder_became_a_link_refuses() {
     let scratch = Scratch::new("folders-link");
     let staged = staged(
         scratch
-            .stage("a/b/fresh.md", Transition::Create { content: b"fresh" })
+            .stage(
+                "a/b/fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
+            )
             .expect("staged"),
     );
     let outside = scratch.vault().with_extension("outside");

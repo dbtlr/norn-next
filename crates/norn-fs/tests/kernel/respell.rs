@@ -11,7 +11,8 @@
 use std::path::Path;
 
 use norn_fs::{
-    AfterState, CaseSensitivity, PathNormalizer, Refusal, Staging, Transition, confirm_landed,
+    AfterState, CaseSensitivity, Content, PathNormalizer, Refusal, Staging, Transition,
+    confirm_landed,
 };
 use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
 
@@ -311,7 +312,12 @@ fn a_target_under_another_spelling_is_not_this_target() {
     scratch.place("Note.md", b"old");
 
     let create = scratch
-        .stage("note.md", Transition::Create { content: b"old" })
+        .stage(
+            "note.md",
+            Transition::Create {
+                content: Content::Held(b"old"),
+            },
+        )
         .expect_err("a create whose content stands under another spelling");
     assert!(
         matches!(create, Refusal::DestinationExists { .. }),

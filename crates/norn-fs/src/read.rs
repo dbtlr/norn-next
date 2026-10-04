@@ -1,4 +1,6 @@
-//! Atomic observation of one file below one anchor directory.
+//! Atomic observation of one file below one anchor directory: its bytes and
+//! their hash, or — streamed, holding no bytes — its hash and whether it is
+//! UTF-8.
 
 use std::io::{self, Read};
 use std::os::fd::AsFd;
@@ -6,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, open};
 
-use crate::hash::{ContentHash, read_bytes_and_hash};
+use crate::hash::{ContentHash, hashed_and_checked_from, read_bytes_and_hash};
 use crate::open::{Reached, Unreached, anchor_flags, open_regular_at};
 use crate::refusal::{Refusal, environment, environment_at};
 
@@ -100,6 +102,85 @@ pub fn read_optional_and_hash(
         Observed::Read(read) => Some(read),
         Observed::Nothing(_) => None,
     })
+}
+
+/// A file's content hash, its length, and whether its bytes are UTF-8, from
+/// one streamed read of one held file descriptor that kept none of them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamedHash {
+    path: PathBuf,
+    content_hash: ContentHash,
+    len: u64,
+    utf8: bool,
+}
+
+impl StreamedHash {
+    /// The path that was opened, spelled as the caller named it: the anchor
+    /// with the relative name below it.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The content hash of every byte the read streamed.
+    pub fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+
+    /// How many bytes the read streamed.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the read streamed no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Whether the bytes streamed are UTF-8: the verdict
+    /// [`std::str::from_utf8`] gives the whole buffer.
+    pub fn is_utf8(&self) -> bool {
+        self.utf8
+    }
+}
+
+/// Streams the regular file `relative` names below `anchor` once, keeping
+/// none of its bytes, or answers that there is no such file to read.
+///
+/// **The same observation as [`read_optional_and_hash`], less the bytes.**
+/// The same contained open, the same answer for a name that reaches no
+/// regular file — absent, a link, through a linked folder, a folder or a pipe
+/// are all `None` — the same refusals, and the same count: one
+/// [`crate::reads::ReadTally::document_opens`] per file read. What it answers
+/// of a file is what the whole read's bytes answer: their hash, their length,
+/// and whether they are UTF-8. Peak memory is one 64 KiB chunk whatever the
+/// file weighs.
+///
+/// **For a caller that needs a file's identity and not its text** — a
+/// document a plan carries unchanged, whose hash and UTF-8 verdict are all the
+/// plan records of it.
+///
+/// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+/// planning of a move whose document the plan carries byte for byte, which
+/// needs the document's hash and UTF-8 verdict and never its body. The planner
+/// still reads a moved document whole, so nothing in the current call graph
+/// calls this yet.
+pub fn stream_optional_and_hash(
+    anchor: &Path,
+    relative: &Path,
+) -> Result<Option<StreamedHash>, Refusal> {
+    let path = anchor.join(relative);
+    let mut file = match reach(anchor, relative, &path)? {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let checked = hashed_and_checked_from(&mut file, &path)
+        .map_err(|error| environment("reading", &path, &error))?;
+    Ok(Some(StreamedHash {
+        path,
+        content_hash: checked.hash,
+        len: checked.len,
+        utf8: checked.utf8,
+    }))
 }
 
 /// Reads a regular file, or returns `None` when its contained path is missing.
@@ -232,9 +313,10 @@ mod tests {
     use crate::reads::ReadWindow;
     use crate::scratch::Scratch;
 
-    /// **A contained read counts its reads, not its opens.** Each of the three
-    /// readers reads the file once and is one `document_opens`; a name holding
-    /// no file is read by none of them and counts nothing. Under
+    /// **A contained read counts its reads, not its opens.** Each of the four
+    /// readers — the streamed one among them — reads the file once and is one
+    /// `document_opens`; a name holding no file is read by none of them and
+    /// counts nothing. Under
     /// `induced-failure` each read names the file it read, spelled as the
     /// anchor joined with the name below it.
     #[test]
@@ -252,22 +334,24 @@ mod tests {
         read_and_hash(&anchor, Path::new("notes/note.md")).expect("a read");
         read_optional_and_hash(&anchor, Path::new("notes/note.md")).expect("a read");
         read_if_present_bounded(&anchor, Path::new("notes/note.md"), 64).expect("a read");
+        stream_optional_and_hash(&anchor, Path::new("notes/note.md")).expect("a read");
         read_optional_and_hash(&anchor, Path::new("notes/absent.md")).expect("an answer");
+        stream_optional_and_hash(&anchor, Path::new("notes/absent.md")).expect("an answer");
         #[cfg(feature = "induced-failure")]
         {
             let (tally, files) = window.finish_with_files();
-            assert_eq!(tally.document_opens, 3, "{tally:?}");
+            assert_eq!(tally.document_opens, 4, "{tally:?}");
             let read = crate::reads::FileRead {
                 act: crate::reads::ReadAct::Document,
                 path: anchor.join("notes/note.md"),
             };
-            assert_eq!(files, vec![read.clone(), read.clone(), read]);
+            assert_eq!(files, vec![read.clone(), read.clone(), read.clone(), read]);
             assert_eq!(note, anchor.join("notes/note.md"));
         }
         #[cfg(not(feature = "induced-failure"))]
         {
             let _ = note;
-            assert_eq!(window.finish().document_opens, 3);
+            assert_eq!(window.finish().document_opens, 4);
         }
     }
 }

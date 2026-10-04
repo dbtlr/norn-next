@@ -22,6 +22,7 @@
 mod common;
 
 mod anchoring;
+mod copied;
 mod folders;
 mod preconditions;
 mod publication;

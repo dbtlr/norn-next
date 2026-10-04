@@ -21,8 +21,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use norn_fs::{
-    Acquisition, ContentHash, Incumbent, Maintainership, MaintainershipKey, Refusal, ShadowHome,
-    Staging, Transition, publish, stage, try_acquire,
+    Acquisition, Content, ContentHash, Incumbent, Maintainership, MaintainershipKey, Refusal,
+    ShadowHome, Staging, Transition, publish, stage, try_acquire,
 };
 use norn_testkit::process::{Outcome, Run, RunStatus, Sandbox};
 use norn_testkit::scratch;
@@ -368,7 +368,12 @@ fn a_contended_vault_is_fully_workable() {
         };
         let _ = publish(&vault, staged, &shadows).expect("published under a held lock");
     };
-    apply("fresh.md", Transition::Create { content: b"one" });
+    apply(
+        "fresh.md",
+        Transition::Create {
+            content: Content::Held(b"one"),
+        },
+    );
     apply(
         "fresh.md",
         Transition::Replace {
@@ -376,7 +381,12 @@ fn a_contended_vault_is_fully_workable() {
             content: b"two",
         },
     );
-    apply("moved.md", Transition::Create { content: b"two" });
+    apply(
+        "moved.md",
+        Transition::Create {
+            content: Content::Held(b"two"),
+        },
+    );
     apply(
         "fresh.md",
         Transition::Remove {

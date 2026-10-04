@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use norn_fs::{
-    CaseSensitivity, ContentHash, Durability, MaintainershipKey, PathNormalizer, Placement,
-    Publication, Refusal, ShadowHome, Staging, Transition,
+    CaseSensitivity, Content, ContentHash, Durability, MaintainershipKey, PathNormalizer,
+    Placement, Publication, Refusal, ShadowHome, Staging, Transition,
 };
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
@@ -168,8 +168,18 @@ fn run_scenario(root: &Path) {
                 content: NEW,
             },
         )],
-        "create" => vec![("fresh.md", Transition::Create { content: NEW })],
-        "create-deep" => vec![("a/b/fresh.md", Transition::Create { content: NEW })],
+        "create" => vec![(
+            "fresh.md",
+            Transition::Create {
+                content: Content::Held(NEW),
+            },
+        )],
+        "create-deep" => vec![(
+            "a/b/fresh.md",
+            Transition::Create {
+                content: Content::Held(NEW),
+            },
+        )],
         "remove" => vec![(DOCUMENT, Transition::Remove { before })],
         "respell" => vec![(
             DOCUMENT,
@@ -189,7 +199,14 @@ fn run_scenario(root: &Path) {
         )],
         "three" => ["one.md", "two.md", "three.md"]
             .into_iter()
-            .map(|name| (name, Transition::Create { content: NEW }))
+            .map(|name| {
+                (
+                    name,
+                    Transition::Create {
+                        content: Content::Held(NEW),
+                    },
+                )
+            })
             .collect(),
         "rmdir" => {
             let removed =

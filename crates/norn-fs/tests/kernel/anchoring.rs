@@ -3,14 +3,16 @@
 
 use std::path::Path;
 
-use norn_fs::{Refusal, Staging, Transition};
+use norn_fs::{Content, Refusal, Staging, Transition};
 
 use crate::common::{Scratch, bytes_at, exists, hash, staged, swap_folder_for_link, symlink};
 
 /// Every kind of transition, over a document that holds `b"old"`.
 fn every_kind() -> [Transition<'static>; 3] {
     [
-        Transition::Create { content: b"fresh" },
+        Transition::Create {
+            content: Content::Held(b"fresh"),
+        },
         Transition::Replace {
             before: hash(b"old"),
             content: b"new",

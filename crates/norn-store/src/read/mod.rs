@@ -150,6 +150,9 @@ pub enum ReadStatement {
     /// change set runs on a snapshot, shared with the changeset's link-health
     /// re-decision.
     Resolution(crate::ResolutionStatement),
+    /// A statement [`crate::HeldLinksStatement`] names: the links one
+    /// document holds, read without its body.
+    HeldLinks(crate::HeldLinksStatement),
 }
 
 impl From<SearchStatement> for ReadStatement {

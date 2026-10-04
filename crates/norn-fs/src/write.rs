@@ -54,13 +54,21 @@
 //!    shadow home — reached, where the home is the fallback under the vault
 //!    root, by the same no-follow descent from that root — given a replaced
 //!    file's permission bits before a byte of content goes in, and fsynced. [`Staged`] records the shadow's name and
-//!    `(device, inode)` and nothing that holds it open.
+//!    `(device, inode)` and nothing that holds it open. A create's content is
+//!    bytes its caller holds, or a copy of another file below the root
+//!    ([`Content::CopyOf`]): that source is reached by the same anchored
+//!    descent as a target, streamed into the shadow a chunk at a time and
+//!    hashed as it goes, and a source not at the hash the create names
+//!    refuses as drift before the shadow is synced.
 //!
 //! A staging refusal leaves no shadow behind.
 //!
 //! [`judge`] is the first three steps alone: staging's own judgment of a
 //! target, reaching the refusal [`stage`] would and writing nothing, which a
-//! preview of a plan answers from.
+//! preview of a plan answers from. Of a copy's source it shares only the
+//! refusals no byte of the source decides — the name's shape, a linked
+//! folder, a link or a non-file at the name — and leaves the source's state,
+//! absent or at other bytes, to the plan's own transition on the source.
 //!
 //! # Publication
 //!
@@ -188,7 +196,9 @@ use rustix::fs::{
 use rustix::io::Errno;
 
 use crate::faults::{Faults, Stage, Window};
-use crate::hash::{ContentHash, shadow_hashed_from, target_hashed_from};
+use crate::hash::{
+    ContentHash, CopyFailed, copied_and_hashed, shadow_hashed_from, target_hashed_from,
+};
 use crate::identity::{Identity, PostState, identity_of, identity_of_stat, post_state};
 use crate::open::{Step, Stopped, anchor_flags, contained_names, regular_flags, step_into};
 use crate::path::{
@@ -218,14 +228,16 @@ use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transition<'a> {
-    /// Nothing may be at the name, and `content` is what will be.
+    /// Nothing may be at the name, and `content` is what will be: bytes the
+    /// caller holds, or a streamed copy of another file below the same root
+    /// that must hash to what the caller names ([`Content`]).
     ///
     /// A create publishes at the mode an ordinary create takes under the
     /// process's umask, because there is no file to carry a mode from — and a
     /// move's destination, which a plan resolves into a create, is no
     /// exception: the moved document lands at the default mode, as the
     /// one-shot move did before the split.
-    Create { content: &'a [u8] },
+    Create { content: Content<'a> },
     /// The file must hash to `before`, and `content` is what will be there.
     Replace {
         before: ContentHash,
@@ -244,6 +256,70 @@ pub enum Transition<'a> {
         before: ContentHash,
         content: Option<&'a [u8]>,
     },
+}
+
+/// What a create's name will hold once it is published.
+///
+/// **Two sources of one after-state, and still one transition.** Either way
+/// the after-state is a content hash, and everything staging and publication
+/// ask of the target and the shadow is asked of that hash; the variant decides
+/// only where the bytes that go into the shadow come from.
+///
+/// A copy exists so a create whose bytes are another vault file's — a move's
+/// destination — is staged without the caller holding the file: the peak a
+/// staging holds is one 64 KiB chunk, not the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Content<'a> {
+    /// These bytes.
+    Held(&'a [u8]),
+    /// The bytes of the regular file `source` names below the same anchor as
+    /// the target, which must hash to `hash`.
+    ///
+    /// **`hash` is the after-state, and nothing reads the source to learn
+    /// it**: a target already at `hash` is landed without the source being
+    /// opened, and [`judge`] — staging's look — never reads the source's
+    /// bytes: it refuses the source's shape as staging does and leaves its
+    /// state to the plan's own transition on it. Staging reaches the source
+    /// only to fill the shadow: through the same anchored descent as a
+    /// target, through no link and by no name that leaves the root, it
+    /// copies the source into the shadow a chunk at a time, hashing as it
+    /// copies.
+    ///
+    /// **A source that cannot be copied refuses before any shadow is made**:
+    /// a name that leaves the root as an invalid request, a linked folder on
+    /// its path as [`Refusal::LinkedAncestor`], nothing there — no file, a
+    /// missing folder, a file where a folder would be — as
+    /// [`Refusal::Drifted`] onto absence, a link as
+    /// [`Refusal::SymlinkDestination`] and something that is not a regular
+    /// file as [`Refusal::NotRegularFile`]. **A source whose bytes are not at
+    /// `hash` refuses as [`Refusal::Drifted`] naming the source, found during
+    /// the copy, before the shadow is synced and with the shadow removed**, as
+    /// is a failure to write the shadow: the content the caller composed
+    /// against is not there.
+    ///
+    /// Whether `source` still names the file that was copied is not asked;
+    /// the hash of the bytes copied is the whole question, because they are
+    /// what the create publishes. For the same reason the source may be
+    /// reached at a spelling a case-folding volume folds onto another entry's
+    /// name — staging does not confirm the spelling against its folder's
+    /// listing as it does a target's — because the hash, not the spelling,
+    /// decides what is copied.
+    ///
+    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+    /// applier staging a move's destination from the file the move leaves,
+    /// without holding it. The applier still stages every create from bytes
+    /// the plan composed, so nothing in the current call graph builds one yet.
+    CopyOf { source: &'a Path, hash: ContentHash },
+}
+
+impl Content<'_> {
+    /// The after-state these contents publish, known without reading a file.
+    fn hash(&self) -> ContentHash {
+        match self {
+            Content::Held(bytes) => ContentHash::of(bytes),
+            Content::CopyOf { hash, .. } => *hash,
+        }
+    }
 }
 
 /// What staging found a target needs.
@@ -520,6 +596,20 @@ pub fn stage(
 /// the bytes written into it, which are the write. It reads and opens, and
 /// changes nothing.
 ///
+/// **A copy's source is judged as far as no byte of it decides**, and only
+/// where the create proceeds, since a landed target is staged without its
+/// source. Shared with [`stage`]: a source name that is not one below the
+/// root, a linked folder on its path, a link at its name and something there
+/// that is not a regular file each refuse as staging would, told by the
+/// descent and a no-follow stat, with no file opened. Not shared: a source
+/// that is absent or holds bytes other than the create's hash, which staging
+/// refuses as drift once it copies, and one the process may not open, which
+/// staging refuses at the open, are answered ready here. Telling either takes
+/// opening the source, and a source's state is the plan's own transition's
+/// to judge — a move's removal of its source, held to the same hash, opens it
+/// in its own look and refuses the plan where the source has drifted, gone or
+/// will not open.
+///
 /// **Its caller is the one applier's preview** (`norn-host`'s `applier`,
 /// Layer 4 plan-apply), which judges a resolved plan as an apply of it would
 /// and answers the refusal staging would meet, or the plan.
@@ -529,7 +619,18 @@ pub fn judge(
     path: &Path,
     transition: Transition<'_>,
 ) -> Result<(), Refusal> {
-    look(anchor, root, path, &anchor.join(path), &transition).map(drop)
+    let (root_fd, looked) = look(anchor, root, path, &anchor.join(path), &transition)?;
+    // Staging reaches a copy's source only where the create proceeds, so a
+    // landed target is judged without it, as it is staged without it.
+    match (looked, transition) {
+        (
+            Looked::One(Judged::Proceed { .. }),
+            Transition::Create {
+                content: Content::CopyOf { source, .. },
+            },
+        ) => judge_source(root_fd.as_fd(), anchor, source),
+        _ => Ok(()),
+    }
 }
 
 /// Publish what [`stage`] staged.
@@ -690,7 +791,7 @@ fn stage_where(
         (Transition::Replace { before, content }, Some(after)) => Pending::Replace {
             before,
             after,
-            shadow: stage_shadow(&at, content, mode)?,
+            shadow: stage_shadow(&at, Content::Held(content), mode)?,
         },
         (Transition::Remove { before }, _) => Pending::Remove { before },
         (
@@ -764,9 +865,8 @@ struct StageAt<'a> {
 /// bytes where it brings none, or absence.
 fn after_of(transition: &Transition<'_>) -> Option<ContentHash> {
     match transition {
-        Transition::Create { content } | Transition::Replace { content, .. } => {
-            Some(ContentHash::of(content))
-        }
+        Transition::Create { content } => Some(content.hash()),
+        Transition::Replace { content, .. } => Some(ContentHash::of(content)),
         Transition::Respell {
             before, content, ..
         } => Some(content.map_or(*before, ContentHash::of)),
@@ -906,7 +1006,9 @@ fn stage_respell(
         }
         Respelled::Halfway { .. } => None,
         Respelled::Before { mode, .. } => match content {
-            Some(content) if after != before => Some(stage_shadow(at, content, Some(mode))?),
+            Some(content) if after != before => {
+                Some(stage_shadow(at, Content::Held(content), Some(mode))?)
+            }
             _ => None,
         },
     };
@@ -971,15 +1073,22 @@ fn judge_respell(
 
 /// Write `content` into a fresh shadow and get it onto the disk.
 ///
-/// A failure after the shadow exists removes it while its name still means the
-/// file made here, so a staging refusal leaves nothing in the home; where the
-/// file cannot even be identified, the empty shadow is left to the home's sweep.
+/// A copy's source is reached before the shadow is made, so a source that is
+/// not there refuses with nothing to clean up. A failure after the shadow
+/// exists — a copy whose bytes are not the hash it names among them — removes
+/// it while its name still means the file made here, so a staging refusal
+/// leaves nothing in the home; where the file cannot even be identified, the
+/// empty shadow is left to the home's sweep.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn stage_shadow(
     at: &StageAt<'_>,
-    content: &[u8],
+    content: Content<'_>,
     mode: Option<u32>,
 ) -> Result<StagedShadow, Refusal> {
+    let content = match content {
+        Content::Held(bytes) => Fill::Held(bytes),
+        Content::CopyOf { source, hash } => Fill::Copy(Box::new(open_source(at, source, hash)?)),
+    };
     let shadows = at.shadows;
     let home = open_home(shadows, Some((at.root_fd, at.anchor)))?;
     let (name, file) = create_shadow(
@@ -1059,19 +1168,150 @@ fn create_shadow(
     Err(last.expect("a bound of at least one attempt"))
 }
 
+/// Where the bytes a shadow is filled with come from, once everything about
+/// them that can refuse before a shadow exists has been asked.
+enum Fill<'a> {
+    /// Bytes the caller holds.
+    Held(&'a [u8]),
+    /// A create's source, open for its copy: boxed, since it carries the
+    /// source's metadata and the held bytes carry a slice.
+    Copy(Box<Source>),
+}
+
+/// A create's source, opened for reading, and the hash its bytes must have.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+struct Source {
+    file: std::fs::File,
+    metadata: std::fs::Metadata,
+    full: PathBuf,
+    hash: ContentHash,
+}
+
+/// Open the source of a create's copy, `source` below the staged root,
+/// through the anchored descent every target takes.
+///
+/// **Containment is the target's own**: a name that leaves the root refuses
+/// as an invalid request before anything is opened, a linked folder on the way
+/// as [`Refusal::LinkedAncestor`], and a link at the source's own name as
+/// [`Refusal::SymlinkDestination`], so a copy never reads a file outside the
+/// vault, or one inside it under a name it was not asked for. Nothing at the
+/// name — a missing folder, a folder that is a file, an absent file — is drift
+/// onto absence; something that is not a regular file is
+/// [`Refusal::NotRegularFile`].
+///
+/// **The spelling is not confirmed**: unlike [`observe`], this never asks
+/// [`listed_as_asked`], so on a folding volume a source reached at a folded
+/// spelling is copied. That is deliberate — the copy is held to the hash, and
+/// the hash, not the spelling, decides what is published.
+fn open_source(at: &StageAt<'_>, source: &Path, hash: ContentHash) -> Result<Source, Refusal> {
+    let SourceAt { full, reached } = reach_source(at.root_fd, at.anchor, source)?;
+    let Some((chain, name)) = reached else {
+        return Err(drifted(&full, hash, None));
+    };
+    match open_at_name(chain.last(), name, &full)? {
+        AtName::Regular(file, metadata) => Ok(Source {
+            file,
+            metadata,
+            full,
+            hash,
+        }),
+        AtName::Absent => Err(drifted(&full, hash, None)),
+        AtName::Link => Err(symlink_destination(&full)),
+        AtName::Other => Err(not_regular(&full)),
+    }
+}
+
+/// Where a create's source stands, reached from the root as a target is.
+struct SourceAt<'r, 'p> {
+    /// The source's path, the anchor joined with the name below it.
+    full: PathBuf,
+    /// The source's own folder and its name there, or `None` where a folder
+    /// on the way is missing or is a file, so nothing can be at the source.
+    reached: Option<(Chain<'r>, &'p OsStr)>,
+}
+
+/// Reach the folder a create's `source` sits in below `anchor`, refusing
+/// what both staging and [`judge`] refuse of a source's path: a name that is
+/// not one below the root, as an invalid request before anything is opened,
+/// and a linked folder on the way as [`Refusal::LinkedAncestor`]. The descent
+/// opens folders and reads no file.
+fn reach_source<'r, 'p>(
+    root_fd: BorrowedFd<'r>,
+    anchor: &Path,
+    source: &'p Path,
+) -> Result<SourceAt<'r, 'p>, Refusal> {
+    let full = anchor.join(source);
+    let target = Target::of(source, &full)?;
+    let reached = match descend(root_fd, &target, anchor, &full)? {
+        Folder::Reached(chain) => Some((chain, target.name)),
+        Folder::Missing(_) | Folder::Blocked { .. } => None,
+    };
+    Ok(SourceAt { full, reached })
+}
+
+/// [`judge`]'s look at a create's source: every refusal [`open_source`]
+/// meets before it opens the file — the path's shape, a linked folder on the
+/// way, a link at the source's name ([`Refusal::SymlinkDestination`]) and
+/// something there that is not a regular file ([`Refusal::NotRegularFile`])
+/// — told by the descent and one no-follow stat of the name, so no file is
+/// opened.
+///
+/// **The source's state is not asked, nor whether it opens.** A source that
+/// is absent, or holds bytes other than the create's hash, refuses staging as
+/// drift, and one the process may not open refuses it at the open; telling
+/// the drift takes reading the file and telling the open takes opening it. A
+/// source's state is judged by the plan's own transition on it — a move's
+/// removal of its source, held to the same hash, whose own look opens it — so
+/// this answers ready for all three.
+fn judge_source(root_fd: BorrowedFd<'_>, anchor: &Path, source: &Path) -> Result<(), Refusal> {
+    let SourceAt { full, reached } = reach_source(root_fd, anchor, source)?;
+    let Some((chain, name)) = reached else {
+        return Ok(());
+    };
+    match statat(chain.last(), name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => Ok(()),
+        Err(errno) => Err(errno_refusal("reading the kind of", &full, errno)),
+        Ok(stat) => match rustix::fs::FileType::from_raw_mode(stat.st_mode as _) {
+            rustix::fs::FileType::RegularFile => Ok(()),
+            rustix::fs::FileType::Symlink => Err(symlink_destination(&full)),
+            _ => Err(not_regular(&full)),
+        },
+    }
+}
+
 /// Put `content` in an already-open handle and get it onto the disk.
+///
+/// A copy streams its source into the handle a chunk at a time and hashes
+/// what it writes; bytes that are not the hash the create names refuse as
+/// drift naming the source, before the shadow is synced.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the shadow's handle.
 fn fill(
     file: &mut std::fs::File,
-    content: &[u8],
+    content: Fill<'_>,
     path: &Path,
     faults: Faulted<'_>,
 ) -> Result<(), Refusal> {
     faults
         .check(Stage::ShadowWrite)
         .map_err(|error| environment("writing", path, &error))?;
-    file.write_all(content)
-        .map_err(|error| environment("writing", path, &error))?;
+    match content {
+        Fill::Held(bytes) => file
+            .write_all(bytes)
+            .map_err(|error| environment("writing", path, &error))?,
+        Fill::Copy(mut source) => {
+            let (copied, len) =
+                copied_and_hashed(&mut source.file, &source.full, file).map_err(|failed| {
+                    match failed {
+                        CopyFailed::Reading(error) => environment("reading", &source.full, &error),
+                        CopyFailed::Writing(error) => environment("writing", path, &error),
+                    }
+                })?;
+            if copied != source.hash {
+                let observed = post_state(copied, len, &source.metadata);
+                return Err(drifted(&source.full, source.hash, Some(observed)));
+            }
+        }
+    }
     faults
         .check(Stage::ShadowSync)
         .map_err(|error| environment("syncing", path, &error))?;
@@ -2081,10 +2321,10 @@ fn observe_target(
 /// Read the target `name` in `folder`, confirm the name still means the file
 /// that was read, and confirm the folder lists it under that spelling.
 ///
-/// Three flags carry the reader's discipline: `O_NOFOLLOW`, so a link is
-/// reported rather than read through; `O_NONBLOCK`, so a FIFO at a document's
-/// name does not hold this call inside `open` until somebody writes to it; and
-/// the kind proven through the descriptor before any byte is read.
+/// The open is [`open_at_name`]'s, whose three flags carry the reader's
+/// discipline: a link is reported rather than read through, a FIFO at a
+/// document's name does not hold this call inside `open`, and the kind is
+/// proven through the descriptor before any byte is read.
 ///
 /// **The identity comparison after the hash is what the hash cannot carry.** A
 /// foreign writer that renames a new document over the name while this call
@@ -2097,7 +2337,6 @@ fn observe_target(
 /// same file is what a folding folder does, and only then is the folder listed
 /// to see which spelling is the entry. A folder that tells spellings apart pays
 /// one lookup.
-#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn observe(
     folder: BorrowedFd<'_>,
     name: &OsStr,
@@ -2105,28 +2344,12 @@ fn observe(
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Found, Refusal> {
     use std::os::unix::fs::PermissionsExt;
-    let opened = match openat(folder, name, regular_flags(), Mode::empty()) {
-        Ok(opened) => opened,
-        Err(Errno::NOENT) => return Ok(Found::Absent),
-        Err(Errno::LOOP) => return Ok(Found::Link),
-        // A socket cannot be opened at all, and says so differently per
-        // platform; either way no regular file is there.
-        Err(Errno::NXIO | Errno::OPNOTSUPP) => return Ok(Found::Other),
-        Err(errno) => {
-            return if crate::open::is_link(folder, name) {
-                Ok(Found::Link)
-            } else {
-                Err(errno_refusal("opening", full, errno))
-            };
-        }
+    let (mut file, metadata) = match open_at_name(folder, name, full)? {
+        AtName::Regular(file, metadata) => (file, metadata),
+        AtName::Absent => return Ok(Found::Absent),
+        AtName::Link => return Ok(Found::Link),
+        AtName::Other => return Ok(Found::Other),
     };
-    let mut file = std::fs::File::from(opened);
-    let metadata = file
-        .metadata()
-        .map_err(|error| environment("reading the identity of", full, &error))?;
-    if !metadata.file_type().is_file() {
-        return Ok(Found::Other);
-    }
     let (hash, len) = target_hashed_from(&mut file, full)
         .map_err(|error| environment("reading", full, &error))?;
     disturb(Window::Verifying);
@@ -2152,6 +2375,51 @@ fn observe(
         state,
         mode: metadata.permissions().mode(),
     })
+}
+
+/// What a no-follow, non-blocking open of `name` in `folder` reached.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+enum AtName {
+    /// A regular file, proven through the descriptor it was opened as.
+    Regular(std::fs::File, std::fs::Metadata),
+    Absent,
+    /// A symbolic link, which this crate never reads or writes through.
+    Link,
+    /// Something that is not a regular file: a directory, a pipe, a device or
+    /// a socket.
+    Other,
+}
+
+/// Open `name` in `folder` the way the kernel opens every file it reads — a
+/// target to hash, a create's source to copy — or say what stands there
+/// instead: `O_NOFOLLOW`, so a link is reported rather than followed;
+/// `O_NONBLOCK`, so a FIFO does not hold the call inside `open`; and the kind
+/// proven through the descriptor. What the machine refuses is the error.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+fn open_at_name(folder: BorrowedFd<'_>, name: &OsStr, full: &Path) -> Result<AtName, Refusal> {
+    let opened = match openat(folder, name, regular_flags(), Mode::empty()) {
+        Ok(opened) => opened,
+        Err(Errno::NOENT) => return Ok(AtName::Absent),
+        Err(Errno::LOOP) => return Ok(AtName::Link),
+        // A socket cannot be opened at all, and says so differently per
+        // platform; either way no regular file is there.
+        Err(Errno::NXIO | Errno::OPNOTSUPP) => return Ok(AtName::Other),
+        Err(errno) => {
+            return if crate::open::is_link(folder, name) {
+                Ok(AtName::Link)
+            } else {
+                Err(errno_refusal("opening", full, errno))
+            };
+        }
+    };
+    let file = std::fs::File::from(opened);
+    let metadata = file
+        .metadata()
+        .map_err(|error| environment("reading the identity of", full, &error))?;
+    if !metadata.file_type().is_file() {
+        return Ok(AtName::Other);
+    }
+    Ok(AtName::Regular(file, metadata))
 }
 
 /// Whether `folder` lists the file `identity` under `name` itself.
@@ -2579,15 +2847,30 @@ mod tests {
     }
 
     /// **The bar on a full disk while staging.** A shadow that cannot take the
-    /// content refuses staging, for a create as for a replace, and the shadow
-    /// is cleaned up: a staging refusal publishes nothing and leaves nothing.
+    /// content refuses staging, for a create as for a replace and for a copy
+    /// as for held bytes, and the shadow is cleaned up: a staging refusal
+    /// publishes nothing and leaves nothing.
     #[test]
     fn a_shadow_that_cannot_take_the_content_refuses_staging_and_cleans_up() {
         let scratch = Scratch::new("write-shadow-write");
         let path = scratch.place("note.md", b"old");
         for (relative, transition) in [
             ("note.md", replace_old_with_new()),
-            ("fresh.md", Transition::Create { content: b"fresh" }),
+            (
+                "fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
+            ),
+            (
+                "fresh.md",
+                Transition::Create {
+                    content: Content::CopyOf {
+                        source: Path::new("note.md"),
+                        hash: ContentHash::of(b"old"),
+                    },
+                },
+            ),
         ] {
             let refusal = stage_in(
                 &scratch,
@@ -2615,7 +2898,9 @@ mod tests {
         let refusal = stage_in(
             &scratch,
             "fresh.md",
-            Transition::Create { content: b"fresh" },
+            Transition::Create {
+                content: Content::Held(b"fresh"),
+            },
             Faults::at(&[(
                 Stage::ShadowCreate,
                 Answer::Fails(std::io::ErrorKind::PermissionDenied),
@@ -2687,7 +2972,9 @@ mod tests {
             ("note.md", replace_old_with_new(), Some(&b"new"[..])),
             (
                 "fresh.md",
-                Transition::Create { content: b"fresh" },
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
                 Some(&b"fresh"[..]),
             ),
             (
@@ -2812,7 +3099,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let mut raced = false;
         let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
@@ -2896,7 +3185,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let names = scratch.shadow_names();
         let shadow = scratch.shadows().directory().join(&names[0]);
@@ -3041,7 +3332,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let publication = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
             if window == Window::Publishing {
@@ -3074,7 +3367,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let made = scratch.at("a");
         let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
@@ -3147,7 +3442,12 @@ mod tests {
         };
 
         let refused = [
-            ("linked/fresh.md", Transition::Create { content: b"ours" }),
+            (
+                "linked/fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"ours"),
+                },
+            ),
             ("drifted.md", replace),
         ]
         .map(|(relative, transition)| (relative, transition, judged(relative, transition)));
@@ -3189,7 +3489,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let shadow = scratch
             .shadows()
@@ -3230,7 +3532,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         publish_in(&scratch, staged, swap_fails, &mut |_| {}).expect_err("a refused create");
         assert!(
@@ -3241,7 +3545,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let foreign = scratch.at("a/theirs.md");
         publish_in(&scratch, staged, swap_fails, &mut |window| {
@@ -3266,7 +3572,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let published = written(
             publish_in(
@@ -3389,7 +3697,9 @@ mod tests {
         let Staging::Landed(landed) = stage_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
             Faults::NONE,
         )
         .expect("a landed create") else {
@@ -3421,7 +3731,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/one.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let (published, synced) =
             syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
@@ -3439,7 +3751,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/two.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         scratch.place("a/b/two.md", b"ours");
         let (found, synced) = syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
@@ -3464,7 +3778,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
 
         let (found, synced) = syncs_of(|| {
@@ -3496,7 +3812,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
 
         let refusal = publish_in(&scratch, staged, Faults::NONE, &mut |window| {
@@ -3529,7 +3847,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let (published, synced) =
             syncs_of(|| publish_in(&scratch, staged, Faults::NONE, &mut |_| {}));
@@ -3684,7 +4004,9 @@ mod tests {
         let staged = staged_in(
             &scratch,
             "a/b/fresh.md",
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
         );
         let refusal = publish_in(
             &scratch,

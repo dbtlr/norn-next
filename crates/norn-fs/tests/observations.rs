@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use norn_fs::{
     ContentHash, Refusal, path_identity, read_and_hash, read_if_present_and_hash,
-    read_optional_and_hash,
+    read_optional_and_hash, stream_optional_and_hash,
 };
 use norn_testkit::scratch;
 
@@ -76,6 +76,74 @@ fn configured_file_bytes_and_fingerprint_are_one_observation() {
     assert_eq!(observed.content_hash(), ContentHash::of(observed.bytes()));
     let (bytes, fingerprint) = observed.into_parts();
     assert_eq!(fingerprint, ContentHash::of(&bytes));
+}
+
+/// **The bar on a streamed observation.** Over every file, a streamed read
+/// answers the hash, the length and the UTF-8 verdict the whole-file read of the
+/// same file answers, and where the whole-file read finds nothing to read it
+/// finds nothing too: an absent name, a linked name, a name through a linked
+/// folder, a folder and a pipe. A name that leaves the anchor refuses both.
+///
+/// The files straddle the stream's 64 KiB chunk: a four-byte character split
+/// across the first boundary is UTF-8, and the same file cut inside that
+/// character is not. The forbidden shape is a second notion of a file's hash or
+/// of its decoding, which a caller choosing the streamed read to hold no body
+/// would then plan against.
+#[test]
+fn a_streamed_observation_answers_what_the_whole_read_answers() {
+    const CHUNK: usize = 64 * 1024;
+    let scratch = Scratch::new("streamed");
+    let straddling = [vec![b'a'; CHUNK - 2], "\u{1f600}".as_bytes().to_vec()].concat();
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("empty.md", Vec::new()),
+        ("ascii.md", b"# Title\n\n[[target]]\n".to_vec()),
+        ("straddling.md", straddling.clone()),
+        ("truncated.md", straddling[..straddling.len() - 1].to_vec()),
+        ("invalid.md", b"valid until \xff here".to_vec()),
+        ("long.md", "\u{e9}".repeat(CHUNK + 5).into_bytes()),
+    ];
+    for (name, bytes) in &files {
+        fs::write(scratch.at(name), bytes).expect("a document");
+    }
+    for (name, bytes) in &files {
+        let whole = read_optional_and_hash(scratch.anchor(), Path::new(name))
+            .expect("a whole read")
+            .expect("the document is there");
+        let streamed = stream_optional_and_hash(scratch.anchor(), Path::new(name))
+            .expect("a streamed read")
+            .expect("the document is there");
+        assert_eq!(streamed.path(), whole.path(), "{name}");
+        assert_eq!(streamed.content_hash(), whole.content_hash(), "{name}");
+        assert_eq!(streamed.len(), whole.bytes().len() as u64, "{name}");
+        assert_eq!(
+            streamed.is_utf8(),
+            std::str::from_utf8(whole.bytes()).is_ok(),
+            "{name}"
+        );
+        assert_eq!(streamed.content_hash(), ContentHash::of(bytes), "{name}");
+    }
+
+    fs::create_dir_all(scratch.at("real")).expect("a folder");
+    fs::write(scratch.at("real/doc.md"), b"body").expect("a document");
+    symlink("real", scratch.at("linked")).expect("a linked folder");
+    symlink("real/doc.md", scratch.at("link.md")).expect("a linked name");
+    scratch.fifo("pipe.md");
+    for name in ["absent.md", "link.md", "linked/doc.md", "real", "pipe.md"] {
+        let anchor = scratch.anchor().to_path_buf();
+        let answers = within_budget(move || {
+            (
+                read_optional_and_hash(&anchor, Path::new(name)).map(|read| read.is_none()),
+                stream_optional_and_hash(&anchor, Path::new(name)).map(|read| read.is_none()),
+            )
+        })
+        .unwrap_or_else(|_| panic!("a read of {name} never returned"));
+        assert_eq!(answers, (Ok(true), Ok(true)), "{name}");
+    }
+
+    let outside = Path::new("../outside.md");
+    let whole = read_optional_and_hash(scratch.anchor(), outside).expect_err("uncontained");
+    let streamed = stream_optional_and_hash(scratch.anchor(), outside).expect_err("uncontained");
+    assert_eq!(streamed, whole);
 }
 
 #[test]

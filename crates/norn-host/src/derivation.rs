@@ -1036,7 +1036,8 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
 /// The text a file's `bytes` spell as a vault document, or why they spell
 /// none: **the one rule by which bytes decode as a document.** Bytes that do
 /// not are quarantined — no row is derived for them, so no link resolves to
-/// them — wherever the path names a document.
+/// them — wherever the path names a document. A file streamed without its
+/// bytes is held to this rule through [`streamed_decodes`].
 pub(crate) fn document_source(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
     std::str::from_utf8(bytes)
 }
@@ -1047,6 +1048,29 @@ pub(crate) fn document_source(bytes: &[u8]) -> Result<&str, std::str::Utf8Error>
 /// store would derive a document from it.
 pub(crate) fn decodes(bytes: &[u8]) -> bool {
     document_source(bytes).is_ok()
+}
+
+/// Whether a file read as a stream, its bytes not kept, decodes as a vault
+/// document: [`decodes`] for a caller holding only what
+/// [`norn_fs::stream_optional_and_hash`] answers of the file.
+///
+/// **The one rule, in its streamed form.** [`document_source`] is the rule;
+/// this is the single place a streamed reading is held to it, so a caller
+/// that never holds a file's bytes reads its decodability here rather than
+/// from the stream's own UTF-8 verdict. The rule is
+/// [`std::str::from_utf8`]'s verdict over the whole buffer, which is the
+/// verdict the stream carries, so the form is thin; the test beside the rule
+/// holds the two to one answer over a corpus of encodings, and a rule that
+/// grew past UTF-8 would fail it until this grew with it.
+///
+/// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+/// planning of a move whose document the plan carries byte for byte, which
+/// records the moved document's decodability without holding its body. The
+/// planner still reads a moved document whole and asks [`decodes`], so
+/// nothing in the current call graph calls this yet.
+#[cfg_attr(not(test), allow(dead_code))] // A dormant carrier, as stated above.
+pub(crate) fn streamed_decodes(streamed: &norn_fs::StreamedHash) -> bool {
+    streamed.is_utf8()
 }
 
 /// Every link the document `bytes` spell holds, in the order its facts
@@ -1137,6 +1161,87 @@ fn map_value(value: &Value) -> FrontmatterValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The bar on one decode rule for held and streamed bytes.** For every
+    /// file in a corpus of encodings — valid characters of every width, an
+    /// overlong encoding, an encoded surrogate, a code point past U+10FFFF,
+    /// each width of character cut short at the end of the file, characters
+    /// valid and invalid split across the stream's 64 KiB chunk boundary, a
+    /// byte-order mark and a NUL — the streamed reading's verdict through
+    /// [`streamed_decodes`] is what [`decodes`] answers of the whole bytes.
+    ///
+    /// The forbidden shape is two decode rules: a moved document planned from
+    /// a stream as decoding where its derivation would quarantine it, or the
+    /// reverse, would record a file state the store never derives.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the files streamed.
+    fn a_streamed_reading_decodes_exactly_where_the_whole_bytes_do() {
+        // The stream's chunk, which norn-fs keeps private.
+        const CHUNK: usize = 64 * 1024;
+        let boundary = |bytes: &[u8]| {
+            let mut file = vec![b'a'; CHUNK - 1];
+            file.extend_from_slice(bytes);
+            file.extend_from_slice(b" tail\n");
+            file
+        };
+        let mut corpus: Vec<(String, Vec<u8>)> = vec![
+            ("empty".into(), Vec::new()),
+            ("ascii".into(), b"# Note\n\nplain\n".to_vec()),
+            (
+                "every width".into(),
+                "a \u{e9} \u{20ac} \u{1f600}\n".as_bytes().to_vec(),
+            ),
+            ("overlong two".into(), b"a\xc0\x80b".to_vec()),
+            ("overlong three".into(), b"a\xe0\x80\x80b".to_vec()),
+            ("overlong four".into(), b"a\xf0\x80\x80\x80b".to_vec()),
+            ("surrogate".into(), b"a\xed\xa0\x80b".to_vec()),
+            ("past U+10FFFF".into(), b"a\xf4\x90\x80\x80b".to_vec()),
+            ("lead past F4".into(), b"a\xf5\x80\x80\x80b".to_vec()),
+            ("stray continuation".into(), b"a\x80b".to_vec()),
+            ("bom".into(), b"\xef\xbb\xbf# Note\n".to_vec()),
+            ("nul".into(), b"a\0b\n".to_vec()),
+        ];
+        for character in ["\u{e9}", "\u{20ac}", "\u{1f600}"] {
+            let bytes = character.as_bytes();
+            for cut in 1..bytes.len() {
+                corpus.push((
+                    format!("{character:?} cut to {cut} at EOF"),
+                    [b"text ".as_slice(), &bytes[..cut]].concat(),
+                ));
+            }
+            corpus.push((
+                format!("{character:?} across the chunk boundary"),
+                boundary(bytes),
+            ));
+        }
+        for (name, bytes) in [
+            ("surrogate across the chunk boundary", &b"\xed\xa0\x80"[..]),
+            ("overlong across the chunk boundary", b"\xe0\x80\x80"),
+            ("cut character at the chunk boundary", b"\xe2\x82 "),
+        ] {
+            corpus.push((name.into(), boundary(bytes)));
+        }
+
+        let scratch = norn_testkit::scratch::Scratch::new("streamed-decodes");
+        let root = scratch.join("vault");
+        std::fs::create_dir_all(&root).expect("a vault root");
+        let mut verdicts = BTreeSet::new();
+        for (at, (name, bytes)) in corpus.iter().enumerate() {
+            let relative = format!("{at:02}.md");
+            std::fs::write(root.join(&relative), bytes).expect("a file");
+            let streamed = norn_fs::stream_optional_and_hash(&root, Path::new(&relative))
+                .expect("a streamed read")
+                .expect("the file is there");
+            assert_eq!(streamed.len(), bytes.len() as u64, "{name}");
+            assert_eq!(streamed_decodes(&streamed), decodes(bytes), "{name}");
+            verdicts.insert(decodes(bytes));
+        }
+        assert_eq!(
+            verdicts,
+            BTreeSet::from([false, true]),
+            "the corpus holds both verdicts"
+        );
+    }
 
     /// A vault that has declared nothing, which is what most cases here plan
     /// under: the observation alone decides the plan.

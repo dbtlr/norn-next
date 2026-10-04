@@ -43,7 +43,9 @@
 //!   through: anchored at a directory, one component at a time, no link
 //!   followed and no blocking on a name that is not a regular file.
 //!   [`read_and_hash`] and [`read_optional_and_hash`] are the one-open/one-read
-//!   content observation over it, and the walk's own reads take the same seam.
+//!   content observation over it, [`stream_optional_and_hash`] the same
+//!   observation streamed, holding no bytes, and the walk's own reads take the
+//!   same seam.
 //! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
 //!   by walks today and watcher invalidation roots next, and
 //!   [`canonical_spelling`], the one spelling an absolute path is resolved to
@@ -124,7 +126,8 @@ pub use path::{
     canonical_spelling, canonical_spelling_through_links,
 };
 pub use read::{
-    PathKind, ReadAndHash, read_and_hash, read_if_present_and_hash, read_optional_and_hash,
+    PathKind, ReadAndHash, StreamedHash, read_and_hash, read_if_present_and_hash,
+    read_optional_and_hash, stream_optional_and_hash,
 };
 pub use refusal::Refusal;
 pub use shadow::{
@@ -140,6 +143,7 @@ pub use watch::{
     watch, watch_polling,
 };
 pub use write::{
-    AfterState, Confirmed, Durability, Landed, Publication, Published, RemovedFolders, Staged,
-    Staging, Transition, confirm_landed, discard, judge, publish, remove_empty_folders, stage,
+    AfterState, Confirmed, Content, Durability, Landed, Publication, Published, RemovedFolders,
+    Staged, Staging, Transition, confirm_landed, discard, judge, publish, remove_empty_folders,
+    stage,
 };

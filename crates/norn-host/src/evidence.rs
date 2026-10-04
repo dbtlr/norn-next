@@ -119,9 +119,10 @@ pub struct EvidenceReading {
     pub stats: u64,
     /// Directory entries taken off a directory stream.
     pub walk_dirents: u64,
-    /// Targets the write kernel read and hashed to judge their state, by
-    /// staging, by publication's verification and by a landing's
-    /// confirmation ([`norn_fs::reads::ReadTally::target_reads`]).
+    /// Vault files the write kernel read and hashed through its own open: a
+    /// target judged by staging, by publication's verification and by a
+    /// landing's confirmation, and a create's source copied into its shadow
+    /// ([`norn_fs::reads::ReadTally::target_reads`]).
     pub target_reads: u64,
     /// Staged shadows the write kernel read and hashed to confirm before
     /// publishing them ([`norn_fs::reads::ReadTally::shadow_reads`]).

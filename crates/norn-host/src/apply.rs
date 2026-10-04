@@ -58,12 +58,12 @@ use std::sync::Arc;
 
 use norn_fs::WatchError;
 use norn_store::{
-    ContentModel, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink, Snapshot,
+    ContentModel, HeldLinks, LinkChange, PageRefusal, PathOverlay, PlanSide, ProbedLink, Snapshot,
     TargetNaming,
 };
 use norn_wire::{
-    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, EditParams, ErrorDetail,
-    ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate,
+    ApplyMode, ApplyParams, ApplyReport, AuthoredPlan, DeleteParams, DocumentPath, EditParams,
+    ErrorDetail, ErrorEnvelope, FindParams, MoveParams, NewParams, PlanDocument, Predicate,
     RewriteWikilinkParams, RootIdentity, SetParams, TrustState, UntrustedReason, VaultAddress,
     VaultAnswer, VaultName,
 };
@@ -453,6 +453,15 @@ impl LinkIndex for PlanSnapshot<'_> {
             .map_err(page_refusal)?;
         self.judged.set(self.judged.get().plus(work));
         Ok(naming)
+    }
+
+    /// The links the snapshot holds for `holder`, read by its path without
+    /// its body. What the read costs is the snapshot's own counters', as
+    /// every read on it is; it is no link judgment, so it adds nothing to
+    /// [`PlanSnapshot::link_judgment_cost`].
+    fn held_links(&self, holder: &DocumentPath) -> Result<Option<HeldLinks>, PageRefused> {
+        self.reading(|snapshot| snapshot.held_links(&holder.into()))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
     }
 
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
