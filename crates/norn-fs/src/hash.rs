@@ -13,7 +13,8 @@
 //! the watcher's echo check through [`uncounted_echo_hashed_from`], which
 //! says in its name that it is not counted, a streamed observation through
 //! [`hashed_and_checked_from`], and a create's copy of its source through
-//! [`copied_and_hashed`], which hashes the bytes it writes as it writes them.
+//! [`copied_and_hashed`], which hashes the bytes it writes as it writes them
+//! and counts itself as the kernel's read of a target does.
 //! [`crate::read_and_hash`] is the configured-path form which returns both
 //! the bytes and their hash from one opening, and
 //! [`crate::stream_optional_and_hash`] the form that keeps no bytes: the hash
@@ -242,17 +243,18 @@ pub(crate) fn hashed_and_checked_from(
 /// `source` and written into `sink` a chunk at a time: the hash and the length
 /// of exactly the bytes written, from one forward pass.
 ///
-/// **The read counts itself** as one [`crate::reads::ReadTally::document_opens`]:
-/// the source is a vault file read for its content, once, through the same
-/// contained descent a document read takes. The hash is what makes the copy a
-/// copy of *the* content the caller named — the kernel compares it with the
-/// hash the create carries before the shadow is synced.
+/// **The read counts itself** as one [`crate::reads::ReadTally::target_reads`],
+/// as [`target_hashed_from`] does: the source is read by the write kernel
+/// through its own no-follow open, and no byte of it reaches derivation —
+/// see that field for why the copy is counted there. The hash is what makes
+/// the copy a copy of *the* content the caller named — the kernel compares it
+/// with the hash the create carries before the shadow is synced.
 pub(crate) fn copied_and_hashed(
     source: &mut impl Read,
     path: &std::path::Path,
     sink: &mut impl std::io::Write,
 ) -> Result<(ContentHash, u64), CopyFailed> {
-    crate::reads::count_document_read(path);
+    crate::reads::count_target_read(path);
     streamed(source, &mut |chunk| sink.write_all(chunk))
 }
 

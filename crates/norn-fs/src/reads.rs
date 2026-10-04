@@ -7,11 +7,10 @@
 //! # The counted set is narrow, and the fields say what is in it
 //!
 //! This is not every stat the crate takes. Five acts are counted — the reads
-//! of a file's content through a descriptor `open_regular_at` handed back (and
-//! the write kernel's copy of a create's source, which is the same act), the
+//! of a file's content through a descriptor `open_regular_at` handed back, the
 //! stats that open and the walk take along the way, the directory entries a
-//! walk pulls off a stream, and the write kernel's reads of a target and of a
-//! staged shadow — and [`ReadTally`]'s fields name them one at a time, each
+//! walk pulls off a stream, and the write kernel's reads of a target (a
+//! create's source copied among them) and of a staged shadow — and [`ReadTally`]'s fields name them one at a time, each
 //! with what it leaves out. An act outside those fields is outside the tally
 //! by construction: no call site elsewhere reaches the counters.
 //!
@@ -63,12 +62,10 @@ pub struct ReadTally {
     /// own read of a file it enumerated take: one per read of the file's
     /// content, counted by the read itself, so a descriptor read twice counts
     /// twice. Every reader takes one open and reads it once, so the count is
-    /// also the opens that reached a regular file and were read. The write
-    /// kernel's copy of a create's source is one too: it reads a vault file
-    /// for its content, whole and once, through the same anchored descent,
-    /// though the open is the kernel's own. A directory opened to descend into
-    /// is not one of these, and neither is a file any other protocol in this
-    /// crate opens — a target hashed to judge it, or a shadow.
+    /// also the opens that reached a regular file and were read. A directory
+    /// opened to descend into is not one of these, and neither is a file any
+    /// other protocol in this crate opens — a target hashed to judge it, a
+    /// create's source copied, or a shadow.
     pub document_opens: u64,
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
@@ -98,16 +95,23 @@ pub struct ReadTally {
     /// written. A reader that needs the two apart splits the field rather than
     /// inferring the split.
     pub walk_dirents: u64,
-    /// Targets the write kernel read to judge their state: one per hash of a
-    /// regular file opened at a target's name, taken by staging, by
-    /// publication's verification again, and by a landing's confirmation. A
-    /// name holding no regular file — a create's absent target among them —
-    /// opens nothing to hash and is not one.
+    /// Vault files the write kernel read through its own open: one per hash
+    /// of a regular file opened at a target's name, taken by staging, by
+    /// publication's verification again, and by a landing's confirmation, and
+    /// one per copy of a create's source into its shadow, which staging hashes
+    /// as it copies. A name holding no regular file — a create's absent target
+    /// among them — opens nothing to hash and is not one.
     ///
     /// Apart from [`ReadTally::document_opens`] because the act is another
-    /// protocol's: the kernel reads a target to judge a transition, through
-    /// its own no-follow open, and no byte of it reaches derivation. The
-    /// hashing counts itself, so a descriptor hashed twice counts twice.
+    /// protocol's: the kernel reads a target to judge a transition, and a
+    /// source to hold a copy to the hash its create names, through its own
+    /// no-follow open rather than `open_regular_at`, and no byte of either
+    /// reaches derivation. **The copy is here, and not a document read, for
+    /// that reason**, and so it takes the write protocol's rule for stats as
+    /// a target does: the `fstat` the kernel's open proves a file's kind with
+    /// is not in [`ReadTally::stats`], which counts the stats of document
+    /// reads and walks alone. The hashing counts itself, so a descriptor
+    /// hashed twice counts twice.
     pub target_reads: u64,
     /// Staged shadows the write kernel read to confirm, just before a
     /// publication act, that the shadow is still the file staging made and
@@ -135,7 +139,8 @@ thread_local! {
 pub enum ReadAct {
     /// A read of a file's content, [`ReadTally::document_opens`].
     Document,
-    /// The write kernel's read of a target, [`ReadTally::target_reads`].
+    /// The write kernel's read of a target, or of a create's source it
+    /// copies, [`ReadTally::target_reads`].
     Target,
     /// The write kernel's read of a staged shadow, [`ReadTally::shadow_reads`].
     Shadow,
@@ -145,7 +150,8 @@ pub enum ReadAct {
 /// spelled as the read site holds it — the anchor joined with the relative
 /// name below it for a contained read, the walked root joined with the
 /// walked path for a walk's read, the vault root joined with the target's
-/// path — or a create's source's — for the write kernel, and the shadow home's own name for a shadow.
+/// path — or a copied source's — for the write kernel, and the shadow home's
+/// own name for a shadow.
 #[cfg(feature = "induced-failure")]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FileRead {

@@ -129,6 +129,7 @@ fn a_copys_after_state_is_known_without_reading_its_source() {
     let body = long_body();
     scratch.place("landed.md", &body);
 
+    let _recording = record_files();
     let window = ReadWindow::open();
     let staging = scratch
         .stage("landed.md", copy_of("gone.md", &body))
@@ -138,8 +139,15 @@ fn a_copys_after_state_is_known_without_reading_its_source() {
         judge(&scratch, "dest.md", copy_of("gone.md", &body)),
         Ok(())
     );
-    let tally = window.finish();
-    assert_eq!(tally.document_opens, 0, "a source was read: {tally:?}");
+    let (tally, files) = window.finish_with_files();
+    assert_eq!(
+        files,
+        vec![FileRead {
+            act: ReadAct::Target,
+            path: scratch.at("landed.md"),
+        }],
+        "only the landed target is read: {tally:?}"
+    );
 }
 
 /// **The bar on a source that is not the content the create names.** Staging
@@ -255,7 +263,12 @@ fn a_copy_never_reads_a_source_outside_the_root() {
             "{uncontained}: {refusal}"
         );
     }
-    assert_eq!(window.finish().document_opens, 0, "a source was read");
+    let tally = window.finish();
+    assert_eq!(
+        (tally.document_opens, tally.target_reads),
+        (0, 0),
+        "a source was read: {tally:?}"
+    );
 
     assert!(!exists(&scratch.at("dest.md")));
     assert!(
@@ -264,10 +277,11 @@ fn a_copy_never_reads_a_source_outside_the_root() {
     );
 }
 
-/// **A copy reads its source once, and counts it.** Staging a copy over an
-/// absent target is one read of the source's content — counted as a
-/// document read, named at the source's full path — and no target read,
-/// since nothing is at the target to hash; publication then reads the
+/// **A copy reads its source once, and counts it as the write kernel's
+/// read.** Staging a copy over an absent target is one read of the source —
+/// counted as a target read, the kernel's own no-follow open whose bytes
+/// reach no derivation, named at the source's full path — and no document
+/// read; the absent target opens nothing to hash. Publication then reads the
 /// target's name and the shadow as for any create.
 #[test]
 fn a_copy_reads_its_source_once_and_names_it() {
@@ -285,13 +299,13 @@ fn a_copy_reads_its_source_once_and_names_it() {
     let (tally, files) = window.finish_with_files();
     assert_eq!(
         (tally.document_opens, tally.target_reads, tally.shadow_reads),
-        (1, 0, 0),
+        (0, 1, 0),
         "a copy's staging reads: {tally:?}"
     );
     assert_eq!(
         files,
         vec![FileRead {
-            act: ReadAct::Document,
+            act: ReadAct::Target,
             path: source.clone(),
         }]
     );
