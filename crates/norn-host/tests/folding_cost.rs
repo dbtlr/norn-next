@@ -33,6 +33,8 @@ fn a_wide_replace_plan_pays_its_spelling_listing_limit() {
     }
 }
 
+/// Measure one fresh plan after attachment, with all targets among the S
+/// siblings. Replacements preserve S through both write-kernel phases.
 fn measure(targets: usize, siblings: usize) {
     let sandbox = Sandbox::new(
         Path::new(env!("CARGO_TARGET_TMPDIR")),

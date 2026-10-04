@@ -297,6 +297,7 @@ pub(crate) fn count_stat() {
     bump(|tally| tally.stats += 1);
 }
 
+/// Count a non-dot sibling, before filtering it by the target's folded name.
 pub(crate) fn count_write_dirent() {
     bump(|tally| tally.write_dirents += 1);
 }

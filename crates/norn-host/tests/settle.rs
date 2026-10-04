@@ -307,6 +307,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "APPLY_TARGET_READS_PER_REPLACED_TARGET" => {
                 always_authored(baselines::APPLY_TARGET_READS_PER_REPLACED_TARGET)
             }
+            "APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET" => {
+                always_authored(baselines::APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET)
+            }
             "APPLY_DOCUMENT_READS_PER_CREATED_TARGET" => {
                 always_authored(baselines::APPLY_DOCUMENT_READS_PER_CREATED_TARGET)
             }

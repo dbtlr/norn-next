@@ -1581,9 +1581,11 @@ pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
 /// limit, separate from the per-target content-read budgets above.
 ///
 /// `folding_cost.rs` crosses 32 and 128 targets with 256 and 2048 siblings.
-/// Its expected folding readings are 16,384, 65,536, 131,072 and 524,288.
-/// Hosted folding readings are recorded after the macOS counter run.
-/// The Linux run holds the distinct-root control at zero for all four cases.
+/// Observed on hosted macOS ARM64 (`macos-15`), CI run 37231397772 at
+/// 9318cef: 16,384, 65,536, 131,072 and 524,288 write dirents, respectively.
+/// The same run's Linux control (`ubuntu-latest`) read zero at all four sizes.
+/// Reproduce with `LANE_FEATURES=induced-failure .github/scripts/lane-suite.sh
+/// norn-host folding_cost --nocapture --test-threads=1` on a folding volume.
 /// The job-thread tally excludes the walk's path confirmation, normalization
 /// probes and watcher-thread echoes. This bar covers fresh replacements, not
 /// creates, removals, respells or interrupted-plan reapplication.
