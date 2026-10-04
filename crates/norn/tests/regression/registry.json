@@ -1590,13 +1590,10 @@
       "property": "Every failure carries a code drawn from the semantic domain of the operation actually attempted. Falsifiable as a total table: operation kind crossed with injected failure point maps to a code, asserted exhaustively under fault injection, with no code from another operation's domain reachable and no internal-error code reachable from any user-controlled input.",
       "sources": ["NRN-s8", "NRN-387", "NRN-436", "NRN-131", "NRN-414"],
       "binding": {
-        "status": "dormant",
-        "reason": "the subjects exist: every write runs through the host's single applier, crates/norn-host/src/applier.rs, which answers each outcome under a code from the taxonomy crates/norn-wire/src/error.rs declares, and crates/norn-fs/src/faults.rs injects a failure at every stage of the write protocol behind the `induced-failure` feature. What is missing is the table the property is falsified by: no test crosses every operation kind with every injected failure point and asserts the code each answers, nor that no user-controlled input reaches an internal-error code. Task NORN-342 authors that table, and it blocks the Layer 4 exit. Its name is pre-committed as crates/norn-host/src/applier/induced.rs::every_write_failure_answers_a_code_from_its_operations_domain, in the module the applier compiles only with the `induced-failure` feature on, so binding it cites the build a CI step runs the host's suites in.",
-        "grounds": [
-          { "present": "crates/norn-host/src/applier.rs" },
-          { "present": "crates/norn-wire/src/error.rs" },
-          { "present": "crates/norn-fs/src/faults.rs" },
-          { "symbol-absent": "crates/norn-host/src/applier/induced.rs::every_write_failure_answers_a_code_from_its_operations_domain" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/write_errors.rs::every_write_failure_answers_a_code_from_its_operations_domain",
+          "crates/norn-host/tests/write_errors.rs::generated_write_requests_answer_only_codes_from_their_operations_domain"
         ]
       }
     },
