@@ -153,9 +153,12 @@
 //! it streamed and takes its links from its bytes — one copy, as it read
 //! every moved document before it carried any — so a move over a vault whose
 //! index lags its files plans as it always did. A moved document an edit, a
-//! link rewrite or a cascade lands on is no carried one: it is read whole,
-//! once, held once and parsed once; where its own cascade lands, an earlier
-//! pass streamed it, so the file is opened twice — I/O, not memory.
+//! link rewrite or a cascade lands on is no carried one: it is read whole
+//! once and composed from that held copy, and the rewrite composed from it
+//! is bytes the plan authors, held with the text layer's scans of them
+//! beside the original, so its peak is several times the document; where its
+//! own cascade lands, an earlier pass streamed it, so the file is opened
+//! twice.
 //!
 //! **Who plans here.** The applier ([`crate::applier`]) recomposes every
 //! target through [`compose::compose`] and re-resolves a refused plan's

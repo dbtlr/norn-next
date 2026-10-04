@@ -2571,9 +2571,11 @@ where the index does not vouch for it, planning and the applier each read the fi
 the plan's hash, one copy, and take its links from its bytes** — a declared limit, kept
 because a plan and its re-send must finish over a vault whose index lags its files (ADR
 0032), as a move did before it carried anything. A move an edit, a link rewrite or its own
-cascade lands on reads the moved document whole, once, and holds that one copy, parsed once;
-where its own cascade lands, planning has already streamed it once, so it opens the file
-twice and holds it once. Every template value
+cascade lands on is not carried: it reads the moved document whole, once, and composes from
+that one held copy, and the rewrite it composes is new bytes the plan authors — the
+rewritten copy and the text layer's scans of it stand beside the held one, so such a move's
+peak is several times its document, not one; where its own cascade lands, planning has
+already streamed it once, so it opens the file twice. Every template value
 resolves at planning, so the applier recomposes each target as a pure function of the
 before-states and the operations: before staging anything it runs the plan's operations
 again, through the planner's own ordering and composition, over the vault with every target
