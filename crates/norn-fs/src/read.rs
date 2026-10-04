@@ -159,6 +159,12 @@ impl StreamedHash {
 /// **For a caller that needs a file's identity and not its text** — a
 /// document a plan carries unchanged, whose hash and decodability are all the
 /// plan records of it.
+///
+/// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+/// planning of a move whose document the plan carries byte for byte, which
+/// needs the document's hash and decodability and never its body. The planner
+/// still reads a moved document whole, so nothing in the current call graph
+/// calls this yet.
 pub fn stream_optional_and_hash(
     anchor: &Path,
     relative: &Path,

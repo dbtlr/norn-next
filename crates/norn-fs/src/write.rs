@@ -287,6 +287,11 @@ pub enum Content<'a> {
     /// there. Whether `source` still names the file that was copied is not
     /// asked; the hash of the bytes copied is the whole question, because
     /// they are what the create publishes.
+    ///
+    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+    /// applier staging a move's destination from the file the move leaves,
+    /// without holding it. The applier still stages every create from bytes
+    /// the plan composed, so nothing in the current call graph builds one yet.
     CopyOf { source: &'a Path, hash: ContentHash },
 }
 

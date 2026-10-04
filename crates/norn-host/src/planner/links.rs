@@ -105,7 +105,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{LinkChange, LinkFact, PathOverlay, PlanSide, ProbedLink, TargetNaming};
+use norn_store::{
+    HeldLinks, LinkChange, LinkFact, PathOverlay, PlanSide, ProbedLink, TargetNaming,
+};
 use norn_text::RewriteSkip;
 use norn_wire::{
     Backlinks, DocumentPath, FileState, LinkAddressKind, LinkAdvisory, LinkFamily, LinkHealth,
@@ -144,6 +146,25 @@ pub(crate) trait LinkIndex {
         address: &str,
         headed: PlanSide,
     ) -> Result<TargetNaming, Self::Error>;
+
+    /// The links the index holds for the document at `holder`, beside the
+    /// content hash of the bytes it derived them from; `None` where it holds
+    /// no document at that spelling.
+    ///
+    /// **A reading of a document's links without its body.** Where the hash
+    /// answered is the hash of the file a caller streamed, the links are
+    /// exactly what [`document_links`] reads from the file's bytes, in its
+    /// order; where it is not, they are another file's, and the caller reads
+    /// the file itself or leaves the question unresolved.
+    ///
+    /// **A dormant carrier.** Its consuming layer is Layer 4 plan-apply: the
+    /// planning of a move whose document the plan carries byte for byte,
+    /// which reads the moved document's own links from here rather than
+    /// parsing a body it never holds. The planner still reads a moved
+    /// document whole and parses it, so nothing in the current call graph
+    /// asks this yet.
+    #[cfg_attr(not(test), allow(dead_code))] // A dormant carrier, as stated above.
+    fn held_links(&self, holder: &DocumentPath) -> Result<Option<HeldLinks>, Self::Error>;
 
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
@@ -1352,6 +1373,16 @@ pub(crate) mod testing {
         ) -> Result<norn_store::TargetNaming, E> {
             panic!("a plan that rewrites no link to a target named `{address}`")
         }
+
+        fn held_links(
+            &self,
+            holder: &norn_wire::DocumentPath,
+        ) -> Result<Option<norn_store::HeldLinks>, E> {
+            panic!(
+                "a plan that moves no document's presence and writes no link read the links `{}` holds",
+                holder.as_str()
+            )
+        }
     }
 
     /// A snapshot established now over `store`, whose reader is the
@@ -1434,6 +1465,16 @@ pub(crate) mod testing {
             self.0
                 .index()
                 .target(overlay, address, headed)
+                .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
+        }
+
+        fn held_links(
+            &self,
+            holder: &norn_wire::DocumentPath,
+        ) -> Result<Option<norn_store::HeldLinks>, E> {
+            self.0
+                .index()
+                .held_links(holder)
                 .map_err(|refused| panic!("an empty store's index refused: {refused:?}"))
         }
     }
@@ -2024,5 +2065,93 @@ mod tests {
             resolves(&ends(one("a.md"), one("a.md")), &moved).as_deref(),
             Some("a.md")
         );
+    }
+
+    /// **The index's links of a document are the links its bytes hold.** For
+    /// documents holding wikilinks with heading and block anchors and an
+    /// alias, Markdown links with a title, a protocol and a relative path,
+    /// embeds of both syntaxes, frontmatter wikilinks, a link-shaped span
+    /// inside code, and none at all, the planner's snapshot answers the links
+    /// [`document_links`] reads from the file's bytes, in its order, beside
+    /// the hex of the hash a streamed read of the file answers. A file that
+    /// does not decode is no document, and the index holds nothing for it.
+    ///
+    /// The forbidden shape is a second reading of a document's links: a plan
+    /// that took its moved document's links from the index would otherwise
+    /// plan against links its bytes do not hold.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the vault the store is derived from.
+    fn the_indexed_links_of_a_document_are_the_links_its_bytes_hold() {
+        use super::LinkIndex;
+        use crate::derivation::document_links;
+        use crate::planner::links::testing::snapshot_of;
+
+        let scratch = norn_testkit::scratch::Scratch::new("held-links");
+        let root = scratch.join("vault");
+        let documents: [(&str, &[u8]); 6] = [
+            (
+                "notes/wiki.md",
+                b"# Wiki\n\nSee [[target#Some Heading]], [[target#^block-1|alias]] and [[sub/deep]].\n",
+            ),
+            (
+                "notes/markdown.md",
+                b"A [relative](../other/target.md \"title\"), a [site](https://example.com/x#y) \
+                  and [here](#local).\n",
+            ),
+            (
+                "notes/embeds.md",
+                b"![[diagram.png]]\n\n![alt](images/photo.jpg)\n\n![[target#Heading]]\n",
+            ),
+            (
+                "notes/frontmatter.md",
+                b"---\nrelated: \"[[target]]\"\nalso:\n  - \"[[other|Other]]\"\n---\n\nBody [[body-link]].\n",
+            ),
+            (
+                "notes/code.md",
+                b"`[[not-a-link]]`\n\n```\n[also](not-a-link.md)\n```\n\nBut [[real]].\n",
+            ),
+            ("notes/none.md", b"# Nothing\n\nNo links at all.\n"),
+        ];
+        for (at, bytes) in documents {
+            let full = root.join(at);
+            std::fs::create_dir_all(full.parent().unwrap()).expect("a folder");
+            std::fs::write(&full, bytes).expect("a document");
+        }
+        std::fs::write(root.join("notes/binary.md"), b"[[target]] \xff\n").expect("a file");
+        let mut store = norn_store::Store::open(
+            scratch.join("store.sqlite3"),
+            norn_store::StoredPathOrder::Sensitive,
+            crate::DERIVATION_VERSION,
+        )
+        .expect("a store");
+        crate::production::heal_from_zero(&mut store, &root, &[]).expect("a heal");
+        let snapshot = snapshot_of(&store);
+        let declared = norn_store::ContentModel::none();
+        let index = crate::apply::PlanSnapshot::held(vault(), &snapshot, &declared);
+
+        for (at, bytes) in documents {
+            let streamed = norn_fs::stream_optional_and_hash(&root, std::path::Path::new(at))
+                .expect("a streamed read")
+                .expect("the document is there");
+            let held = index
+                .held_links(&path(at))
+                .unwrap_or_else(|refused| panic!("the links {at} holds: {refused:?}"))
+                .unwrap_or_else(|| panic!("the index holds no document at {at}"));
+            assert_eq!(held.content_hash, streamed.content_hash().to_hex(), "{at}");
+            assert_eq!(held.links, document_links(bytes), "{at}");
+        }
+        assert!(
+            documents
+                .iter()
+                .filter(|(at, _)| *at != "notes/none.md" && *at != "notes/code.md")
+                .all(|(_, bytes)| document_links(bytes).len() >= 2),
+            "a case meant to hold links holds fewer than two"
+        );
+        for nothing in ["notes/binary.md", "notes/absent.md"] {
+            assert!(
+                matches!(index.held_links(&path(nothing)), Ok(None)),
+                "the index holds a document at {nothing}"
+            );
+        }
     }
 }

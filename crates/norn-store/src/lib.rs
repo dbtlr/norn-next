@@ -71,6 +71,9 @@
 //!   its caller hands it, since nothing here parses — or as one page of one
 //!   nested collection, and refused where the target names several documents
 //!   or none. [`Snapshot::get_plans`] explains what it ran.
+//! - [`Snapshot::held_links`] — the links one document holds, as derived,
+//!   beside the content hash they were derived from, read by its path
+//!   without its body. [`Snapshot::held_links_plans`] explains what it ran.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -118,6 +121,7 @@ mod find;
 mod get;
 mod hash;
 mod health;
+mod held_links;
 mod increment;
 mod json;
 mod link;
@@ -157,6 +161,7 @@ pub use health::resolution::{
 };
 pub use health::run::ResolutionStatement;
 pub use health::{KeySummaries, LinkSelection};
+pub use held_links::{HELD_LINKS_STATEMENTS, HeldLinks, HeldLinksPlan, HeldLinksStatement};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
