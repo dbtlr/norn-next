@@ -1554,7 +1554,7 @@ pub(crate) fn splice_all(source: &str, edits: &[(Range<usize>, &str)]) -> String
     let length = edits
         .iter()
         .fold(source.len(), |length, (range, replacement)| {
-            length - range.len() + replacement.len()
+            length + replacement.len() - range.len()
         });
     let mut out = String::with_capacity(length);
     let mut copied = 0;
@@ -1634,7 +1634,9 @@ mod tests {
     /// A rewrite of a large document is held whole while it is verified, so
     /// the splice allocates the output once at exactly its length: a capacity
     /// sized to the source doubles on the first byte a lengthening edit adds,
-    /// and keeps a shortening edit's slack for as long as the bytes live.
+    /// and keeps a shortening edit's slack for as long as the bytes live. It
+    /// writes the source with each edit in place, an empty set of edits
+    /// writing the source as it is and an edit at the first byte replacing it.
     #[test]
     fn a_splice_allocates_exactly_the_bytes_it_writes() {
         let source = "see [a](a.md) and [b](b.md) then [c](c.md)\n";
@@ -1644,9 +1646,23 @@ mod tests {
                 .expect("the needle stands in the source");
             start..start + needle.len()
         };
-        for (edit, edits) in [
-            ("a lengthening edit", vec![(at("a.md"), "../a.md")]),
-            ("a shortening edit", vec![(at("b.md"), "b")]),
+        for (edit, edits, expected) in [
+            ("no edit at all", vec![], source),
+            (
+                "an edit at the first byte",
+                vec![(0..3, "look at")],
+                "look at [a](a.md) and [b](b.md) then [c](c.md)\n",
+            ),
+            (
+                "a lengthening edit",
+                vec![(at("a.md"), "../a.md")],
+                "see [a](../a.md) and [b](b.md) then [c](c.md)\n",
+            ),
+            (
+                "a shortening edit",
+                vec![(at("b.md"), "b")],
+                "see [a](a.md) and [b](b) then [c](c.md)\n",
+            ),
             (
                 "several edits",
                 vec![
@@ -1654,9 +1670,11 @@ mod tests {
                     (at("b.md"), "b"),
                     (at("c.md"), "../../c.md"),
                 ],
+                "see [a](../a.md) and [b](b) then [c](../../c.md)\n",
             ),
         ] {
             let spliced = splice_all(source, &edits);
+            assert_eq!(spliced, expected, "{edit} wrote other bytes");
             assert_eq!(
                 spliced.capacity(),
                 spliced.len(),
