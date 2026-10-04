@@ -184,7 +184,7 @@ pub(super) fn refuse_and_refresh(
                 plan,
                 detail: error.to_string(),
                 healing: Vec::new(),
-                landed: Vec::new(),
+                landed,
             };
         }
         Err(PlanningFailure::Links(refusal)) => {

@@ -136,7 +136,9 @@ impl ApplyOutcome {
             Self::WriteFailed {
                 landed, healing, ..
             } => {
-                *landed = known_landed;
+                landed.extend(known_landed);
+                landed.sort();
+                landed.dedup();
                 *healing = targets;
             }
             Self::Unread { healing, .. } => *healing = targets,

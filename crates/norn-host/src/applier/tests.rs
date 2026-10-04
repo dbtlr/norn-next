@@ -3763,3 +3763,129 @@ fn an_interruption_does_not_claim_a_missing_move_source_before_its_destination_l
         "absent source while destination is unlanded is drift"
     );
 }
+
+// Keep index queries real and place an external root move at the read
+// whose missing indexed hash sends refresh back to the filesystem.
+
+struct RootMovedDuringUnvouchedRead<'a> {
+    inner: PlanSnapshot<'a>,
+    anchor: PathBuf,
+    fired: std::cell::Cell<bool>,
+}
+
+impl crate::planner::links::LinkIndex for RootMovedDuringUnvouchedRead<'_> {
+    type Error = crate::refusal::PageRefused;
+    fn changes(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        probed: &[norn_store::ProbedLink],
+        each: &mut dyn FnMut(norn_store::LinkChange),
+    ) -> Result<(), Self::Error> {
+        crate::planner::links::LinkIndex::changes(&self.inner, overlay, probed, each)
+    }
+    fn target(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        address: &str,
+        headed: norn_store::PlanSide,
+    ) -> Result<norn_store::TargetNaming, Self::Error> {
+        crate::planner::links::LinkIndex::target(&self.inner, overlay, address, headed)
+    }
+    fn held_links(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldLinks>, Self::Error> {
+        let held = crate::planner::links::LinkIndex::held_links(&self.inner, holder)?;
+        assert!(
+            held.is_none(),
+            "the actual index has not derived the foreign source"
+        );
+        assert_eq!(holder, &path("source.md"));
+        assert!(!self.fired.replace(true), "one carried source read");
+        std::fs::rename(
+            &self.anchor,
+            self.anchor.with_file_name("retired-delta-vault"),
+        )
+        .unwrap();
+        Ok(held)
+    }
+}
+
+#[test]
+fn observed_and_confirmed_progress_survives_a_refresh_read_failure() {
+    let fixture = Fixture::new(&[]);
+    fixture.write("source.md", "Source\n");
+    let plan = fixture.plan(vec![
+        creating("z.md", "Z\n"),
+        creating("a.md", "A\n"),
+        moving("source.md", "destination.md"),
+    ]);
+    let targets: Vec<_> = plan.transitions.iter().map(|t| t.path.clone()).collect();
+    fixture.write("z.md", "Z\n");
+    fixture.write("a.md", "A\n");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).unwrap();
+    let links = fixture.links();
+    let index = RootMovedDuringUnvouchedRead {
+        inner: links.index(),
+        anchor: fixture.vault.clone(),
+        fired: std::cell::Cell::new(false),
+    };
+    let outcome = super::refresh::refuse_and_refresh(
+        plan,
+        &view,
+        &crate::derivation::Declared::unpinned(),
+        Vec::new(),
+        &index,
+    );
+    assert!(
+        index.fired.get(),
+        "failure occurred after observation, during fresh resolve"
+    );
+    let ApplyOutcome::WriteFailed { landed, detail, .. } = &outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(
+        landed,
+        &vec![path("a.md"), path("z.md")],
+        "refresh retained both observed completions"
+    );
+    assert!(!detail.is_empty(), "real filesystem failure has detail");
+    let outcome = outcome.with_confirmed_progress(vec![path("z.md")], targets.clone());
+    assert!(outcome.owes_a_heal());
+    let expected = targets
+        .iter()
+        .map(|p| view.normalizer().normalize(Path::new(p.as_str())).unwrap())
+        .collect();
+    assert_eq!(outcome.heal(view.normalizer()).vault_roots(), &expected);
+    let envelope = outcome.into_wire().unwrap().unwrap_err();
+    let norn_wire::ErrorDetail::WriteFailed { landed, .. } = envelope.detail() else {
+        panic!("{envelope:?}")
+    };
+    assert_eq!(
+        landed,
+        &vec![path("a.md"), path("z.md")],
+        "confirmed subset merges without dropping observed paths or duplicating z"
+    );
+    let retired = fixture.vault.with_file_name("retired-delta-vault");
+    assert_eq!(
+        std::fs::read_to_string(retired.join("source.md")).unwrap(),
+        "Source\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(retired.join("a.md")).unwrap(),
+        "A\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(retired.join("z.md")).unwrap(),
+        "Z\n"
+    );
+    assert!(
+        !retired.join("destination.md").exists(),
+        "refresh published no target"
+    );
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "refresh recorded no own write"
+    );
+    assert!(fixture.shadows_left().is_empty());
+}
