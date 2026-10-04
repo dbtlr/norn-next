@@ -603,10 +603,12 @@ pub fn stage(
 /// that is not a regular file each refuse as staging would, told by the
 /// descent and a no-follow stat, with no file opened. Not shared: a source
 /// that is absent or holds bytes other than the create's hash, which staging
-/// refuses as drift once it copies, is answered ready here. Telling the
-/// second takes reading the source, and a source's state is the plan's own
-/// transition's to judge — a move's removal of its source, held to the same
-/// hash, refuses the plan where the source has drifted or gone.
+/// refuses as drift once it copies, and one the process may not open, which
+/// staging refuses at the open, are answered ready here. Telling either takes
+/// opening the source, and a source's state is the plan's own transition's
+/// to judge — a move's removal of its source, held to the same hash, opens it
+/// in its own look and refuses the plan where the source has drifted, gone or
+/// will not open.
 ///
 /// **Its caller is the one applier's preview** (`norn-host`'s `applier`,
 /// Layer 4 plan-apply), which judges a resolved plan as an apply of it would
@@ -1248,17 +1250,19 @@ fn reach_source<'r, 'p>(
 }
 
 /// [`judge`]'s look at a create's source: every refusal [`open_source`]
-/// meets that needs no byte of the source — the path's shape, a linked
-/// folder on the way, a link at the source's name
-/// ([`Refusal::SymlinkDestination`]) and something there that is not a
-/// regular file ([`Refusal::NotRegularFile`]) — told by the descent and one
-/// no-follow stat of the name, so no file is opened.
+/// meets before it opens the file — the path's shape, a linked folder on the
+/// way, a link at the source's name ([`Refusal::SymlinkDestination`]) and
+/// something there that is not a regular file ([`Refusal::NotRegularFile`])
+/// — told by the descent and one no-follow stat of the name, so no file is
+/// opened.
 ///
-/// **The source's state is not asked.** A source that is absent, or holds
-/// bytes other than the create's hash, refuses staging as drift, but telling
-/// the second takes reading the file; a source's state is judged by the
-/// plan's own transition on it — a move's removal of its source, held to the
-/// same hash — so this answers ready for both.
+/// **The source's state is not asked, nor whether it opens.** A source that
+/// is absent, or holds bytes other than the create's hash, refuses staging as
+/// drift, and one the process may not open refuses it at the open; telling
+/// the drift takes reading the file and telling the open takes opening it. A
+/// source's state is judged by the plan's own transition on it — a move's
+/// removal of its source, held to the same hash, whose own look opens it — so
+/// this answers ready for all three.
 fn judge_source(root_fd: BorrowedFd<'_>, anchor: &Path, source: &Path) -> Result<(), Refusal> {
     let SourceAt { full, reached } = reach_source(root_fd, anchor, source)?;
     let Some((chain, name)) = reached else {
