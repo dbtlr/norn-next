@@ -917,10 +917,45 @@ fn a_carried_name_a_respell_refills_applies_on_a_folding_root() {
 /// absent or carried. Every other target is read whole once.
 ///
 /// On a root that does not fold case, the case-only rename is a move to a
-/// name of its own; the plan on a folding root is held by
-/// `a_carried_name_a_respell_refills_is_read_streamed`.
+/// name of its own; on a root that folds case it is one respell, held on
+/// every host by
+/// `planning_and_the_applier_carry_the_same_documents_on_a_folding_root`.
 #[test]
 fn planning_and_the_applier_carry_the_same_documents() {
+    let (files, corpus) = carrying_corpus();
+    for operations in corpus {
+        let fixture = Fixture::new(&files);
+        let tree =
+            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+        let links = fixture.links();
+        assert_carried_alike(&tree, &links.index(), fixture.root_identity(), operations);
+    }
+}
+
+/// **On a root that folds case, planning and the applier carry the same
+/// documents.** The corpus of
+/// `planning_and_the_applier_carry_the_same_documents`, planned and observed
+/// over a vault in memory that folds case and streams as a vault on disk
+/// does, holds to the same rule on every host.
+#[test]
+fn planning_and_the_applier_carry_the_same_documents_on_a_folding_root() {
+    use crate::planner::view::memory::MemoryVault;
+
+    let (files, corpus) = carrying_corpus();
+    let index = crate::planner::links::testing::IndexedFiles::of(&files);
+    for operations in corpus {
+        let vault = MemoryVault::with(&files).folding_case().streaming();
+        assert_carried_alike(
+            &vault,
+            &index,
+            RootIdentity::from_device_and_inode(1, 2),
+            operations,
+        );
+    }
+}
+
+/// The vault and the plans the carrying corpus runs over.
+fn carrying_corpus() -> ([(&'static str, &'static str); 5], Vec<Vec<Operation>>) {
     let files = [
         ("a.md", "# A [[c]]\n"),
         ("b.md", "# B\n"),
@@ -965,82 +1000,123 @@ fn planning_and_the_applier_carry_the_same_documents() {
             moving("a.md", "A.md"),
         ],
     ];
-    for operations in corpus {
-        let fixture = Fixture::new(&files);
-        let tree =
-            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
-        let links = fixture.links();
-        let planning = Counted::over(&tree);
-        let resolution = crate::planner::resolve::resolve(
-            AuthoredPlan::new(crate::planner::links::testing::vault(), operations.clone()),
-            fixture.root_identity(),
-            &BTreeSet::new(),
-            &planning,
-            &links.index(),
-        )
-        .unwrap_or_else(|failure| panic!("{operations:?} is planned: {failure:?}"));
-        assert_eq!(resolution.unresolved, Vec::new(), "{operations:?}");
-        let plan = resolution.plan;
-        let recorded: Vec<usize> = (0..plan.operations.len()).collect();
-        let planned = crate::planner::compose::compose(
-            &plan.operations,
-            &recorded,
-            &crate::planner::view::Remembered::over(&tree),
-        )
-        .expect("a readable vault");
+    (files, corpus)
+}
 
-        let applying = Counted::over(&tree);
-        let units = units(&plan, tree.normalizer());
-        let (states, _) = observe(&plan, &units, &applying).expect("a readable vault");
-        let lineage = crate::applier::observe::recorded_lineage(&plan, tree.normalizer());
-        let crate::applier::recompose::Recomposed::Sound(recomposed) =
-            crate::applier::recompose::recompose(&plan, &states, &lineage, &applying)
-                .expect("a readable vault")
-        else {
-            panic!("{operations:?} recomposes");
-        };
-        assert_eq!(
-            carried_in(&planned),
-            carried_in(&recomposed),
-            "{operations:?}"
-        );
+/// Plan `operations` over `view`, judging links on `links`, and hold
+/// planning and the applier to one carried set and the applier to one read
+/// of each target, streamed exactly where planning held no byte of what it
+/// finds there.
+fn assert_carried_alike<V, I>(view: &V, links: &I, root: RootIdentity, operations: Vec<Operation>)
+where
+    V: VaultView,
+    V::Error: std::fmt::Debug,
+    I: crate::planner::links::LinkIndex,
+    I::Error: std::fmt::Debug,
+{
+    let planning = Counted::over(view);
+    let resolution = crate::planner::resolve::resolve(
+        AuthoredPlan::new(crate::planner::links::testing::vault(), operations.clone()),
+        root,
+        &BTreeSet::new(),
+        &planning,
+        links,
+    )
+    .unwrap_or_else(|failure| panic!("{operations:?} is planned: {failure:?}"));
+    assert_eq!(resolution.unresolved, Vec::new(), "{operations:?}");
+    let plan = resolution.plan;
+    let recorded: Vec<usize> = (0..plan.operations.len()).collect();
+    let planned = crate::planner::compose::compose(
+        &plan.operations,
+        &recorded,
+        &crate::planner::view::Remembered::over(view),
+    )
+    .expect("a readable vault");
 
-        let carried = carried_in(&planned);
-        let expected: Vec<(String, Reads)> = plan
-            .transitions
-            .iter()
-            .map(|transition| {
-                let at = transition.path.as_str();
-                let streamed = if transition.before == FileState::absent() {
-                    transition.after == FileState::absent()
-                        || carried.iter().any(|(path, _)| path == at)
-                } else {
-                    planning.reads(at).whole == 0
-                };
-                let reads = if streamed {
-                    Reads {
-                        whole: 0,
-                        streamed: 1,
-                    }
-                } else {
-                    Reads {
-                        whole: 1,
-                        streamed: 0,
-                    }
-                };
-                (at.to_string(), reads)
-            })
-            .collect();
-        let observed: Vec<(String, Reads)> = plan
-            .transitions
-            .iter()
-            .map(|transition| {
-                let at = transition.path.as_str();
-                (at.to_string(), applying.reads(at))
-            })
-            .collect();
-        assert_eq!(observed, expected, "{operations:?}");
+    let applying = Counted::over(view);
+    let units = units(&plan, view.normalizer());
+    let (states, _) = observe(&plan, &units, &applying).expect("a readable vault");
+    let lineage = crate::applier::observe::recorded_lineage(&plan, view.normalizer());
+    let crate::applier::recompose::Recomposed::Sound(recomposed) =
+        crate::applier::recompose::recompose(&plan, &states, &lineage, &applying)
+            .expect("a readable vault")
+    else {
+        panic!("{operations:?} recomposes");
+    };
+    assert_eq!(
+        carried_in(&planned),
+        carried_in(&recomposed),
+        "{operations:?}"
+    );
+
+    // A file is read once whatever spells it: on a root that folds case, a
+    // respell's two spellings name one file, read once under one of them.
+    // What a fresh apply finds there is the before-state of the spelling
+    // something stood at, which planning held a byte of where it read any of
+    // the file's spellings whole.
+    let mut files: std::collections::BTreeMap<
+        norn_fs::NormalizedPath,
+        Vec<&norn_wire::Transition>,
+    > = std::collections::BTreeMap::new();
+    for transition in &plan.transitions {
+        let file = view
+            .normalizer()
+            .normalize(std::path::Path::new(transition.path.as_str()))
+            .expect("a target is a vault path");
+        files.entry(file).or_default().push(transition);
     }
+    let carried = carried_in(&planned);
+    let spellings = |transitions: &[&norn_wire::Transition]| -> Vec<String> {
+        transitions
+            .iter()
+            .map(|transition| transition.path.as_str().to_string())
+            .collect()
+    };
+    let expected: Vec<(Vec<String>, Reads)> = files
+        .values()
+        .map(|transitions| {
+            let found = transitions
+                .iter()
+                .find(|transition| transition.before != FileState::absent())
+                .unwrap_or(&transitions[0]);
+            let at = found.path.as_str();
+            let streamed = if found.before == FileState::absent() {
+                found.after == FileState::absent() || carried.iter().any(|(path, _)| path == at)
+            } else {
+                transitions
+                    .iter()
+                    .all(|transition| planning.reads(transition.path.as_str()).whole == 0)
+            };
+            let reads = if streamed {
+                Reads {
+                    whole: 0,
+                    streamed: 1,
+                }
+            } else {
+                Reads {
+                    whole: 1,
+                    streamed: 0,
+                }
+            };
+            (spellings(transitions), reads)
+        })
+        .collect();
+    let observed: Vec<(Vec<String>, Reads)> = files
+        .values()
+        .map(|transitions| {
+            let reads = transitions
+                .iter()
+                .fold(Reads::default(), |sum, transition| {
+                    let at = applying.reads(transition.path.as_str());
+                    Reads {
+                        whole: sum.whole + at.whole,
+                        streamed: sum.streamed + at.streamed,
+                    }
+                });
+            (spellings(transitions), reads)
+        })
+        .collect();
+    assert_eq!(observed, expected, "{operations:?}");
 }
 
 /// Each target `composition` carries unread, and the file it carries.
