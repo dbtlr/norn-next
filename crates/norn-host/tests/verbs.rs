@@ -348,6 +348,54 @@ fn an_edit_applies_section_operations_and_a_str_replace() {
     );
 }
 
+/// Re-sending authored operations is a new change. Re-sending the resolved
+/// plan of the last append finds its completed target without appending again.
+#[test]
+fn re_sending_unconditioned_operations_appends_again_but_the_resolved_plan_does_not() {
+    let (_sandbox, vault) = a_vault(
+        "host-verbs-resend-operations",
+        &[("subject.md", "# Subject\n\n## Log\n\nseed\n")],
+    );
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let operations = EditParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("subject.md"),
+        vec![DocumentEdit::append_to_section("Log", "entry\n")],
+    )
+    .plan();
+    let applying = || {
+        host.apply(ApplyParams::new(
+            ApplyMode::Apply,
+            PlanDocument::operations(operations.clone()),
+        ))
+    };
+    applied(applying());
+    assert_eq!(
+        read(&vault, "subject.md"),
+        "# Subject\n\n## Log\n\nseed\nentry\n"
+    );
+    let (second, _, _) = applied(applying());
+    assert_eq!(
+        read(&vault, "subject.md"),
+        "# Subject\n\n## Log\n\nseed\nentry\nentry\n"
+    );
+    let (_, _, targets) = applied(host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        PlanDocument::resolved(second),
+    )));
+    assert!(
+        targets
+            .iter()
+            .all(|target| target.result == TargetResult::Found)
+    );
+    assert_eq!(
+        read(&vault, "subject.md"),
+        "# Subject\n\n## Log\n\nseed\nentry\nentry\n"
+    );
+}
+
 /// **A new document at a path is created with the folders above it**, its
 /// preview naming the plan its apply lands; **its resolved plan sent again is
 /// found landed**, writing nothing.
