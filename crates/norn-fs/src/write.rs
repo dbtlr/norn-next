@@ -2466,7 +2466,11 @@ fn folded_entries(
     for entry in entries {
         let entry = entry.map_err(|errno| errno_refusal("reading the folder of", full, errno))?;
         let spelled = entry.file_name().to_bytes();
-        if spelled != b"." && spelled != b".." && fold_together(spelled, name.as_bytes()) {
+        if spelled == b"." || spelled == b".." {
+            continue;
+        }
+        crate::reads::count_write_dirent();
+        if fold_together(spelled, name.as_bytes()) {
             listed.push(OsStr::from_bytes(spelled).to_owned());
         }
     }
@@ -2739,6 +2743,28 @@ mod tests {
     use crate::faults::Answer;
     use crate::scratch::Scratch;
     use norn_testkit::churn::{Folding, runs_where_the_volume_folds};
+
+    /// A spelling check pays for every sibling, even those whose names do
+    /// not fold together with the target. Dot entries are not siblings.
+    #[test]
+    fn a_write_spelling_listing_counts_every_sibling_it_reads() {
+        let scratch = Scratch::new("write-listing-count");
+        scratch.place("note.md", b"target");
+        scratch.place("other.md", b"unrelated");
+        scratch.place("third.md", b"unrelated");
+        let folder = open(scratch.at(""), anchor_flags(), Mode::empty()).unwrap();
+        let window = crate::reads::ReadWindow::open();
+        let listed = folded_entries(
+            folder.as_fd(),
+            OsStr::new("NOTE.md"),
+            &scratch.at("note.md"),
+        )
+        .expect("the spelling listing");
+        let tally = window.finish();
+        assert_eq!(listed, vec![OsString::from("note.md")]);
+        assert_eq!(tally.write_dirents, 3);
+        assert_eq!(tally.walk_dirents, 0);
+    }
 
     /// Stage `transition` at `relative` in `scratch`'s vault under `faults`.
     fn stage_in(

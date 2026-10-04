@@ -3184,7 +3184,15 @@ Four contracts inside that flow carry weight:
   of times by each protocol that reads it — planning, the recomposition and the read-back
   through the anchored read, staging and publication through the write kernel — for what the
   plan does to it, each staged shadow is read once, and no file the plan does not touch is
-  read.
+  read. **Spelling listings are a separate declared cost:** on a root that folds ASCII
+  case, staging and publication each read a fresh replacement's whole sibling listing.
+  N replacements in a folder holding S total entries therefore read `2 x N x S` directory
+  entries through the write kernel. A root that distinguishes case pays zero. The
+  `folding_cost` counter suite pins that cost on the per-PR macOS job and its distinct-root
+  control on Linux, crossing 32 and 128 targets with 256 and 2048 total siblings. The
+  tally separates the kernel's spelling listings from the walk's path confirmation and
+  excludes normalization probes and watcher-thread echoes. This is a limit for fresh
+  replacements, not a bound on every operation kind or interrupted-plan reapplication.
 - **Refuse-and-refresh.** Detected drift refuses and returns a fresh resolved plan and its
   forecast; the fresh plan's before-states are the compare-and-swap its apply rides. It
   drops operations whose targets all landed and re-resolves only operations none of whose

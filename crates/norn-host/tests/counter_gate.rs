@@ -440,6 +440,7 @@ fn thread_reads(tally: ReadTally) -> CounterSnapshot {
         ("document_opens", tally.document_opens),
         ("stats", tally.stats),
         ("walk_dirents", tally.walk_dirents),
+        ("write_dirents", tally.write_dirents),
     ]
     .into_iter()
     .collect()

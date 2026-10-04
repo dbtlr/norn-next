@@ -31,7 +31,8 @@
 //! except [`FD_BUDGET`] and [`READ_GATE_ROUNDS_AFTER_THE_FIRST_PER_ACQUISITION`],
 //! counts read on macos-arm64 that hold the same on both platforms, and the
 //! seven `APPLY_*` read budgets, counts of the acts an apply performs read on
-//! linux-x86_64, which no platform moves. A
+//! linux-x86_64, which no platform moves. The folding-root spelling-listing
+//! bar runs on macOS ARM64, with its distinct-root control on Linux. A
 //! band un-authored back to `None` for recalibration carries the readings it
 //! had, because what a recalibration window gathers is the next set. The soak
 //! bands' hosted readings come off the nightly lane's hour-long load at the
@@ -1571,6 +1572,22 @@ pub const APPLY_DOCUMENT_READS_PER_REPLACED_TARGET: u64 = 3;
 /// **publication** reads it again just before the rename and checks it still
 /// does. Budgeted with [`APPLY_DOCUMENT_READS_PER_REPLACED_TARGET`].
 pub const APPLY_TARGET_READS_PER_REPLACED_TARGET: u64 = 2;
+
+/// Complete sibling listings per freshly replaced target on a folding root.
+/// Staging checks the before-state's spelling once, and publication checks it
+/// again before the rename. Each pass reads every non-dot entry, so N targets
+/// in a folder holding S total entries cost exactly 2 x N x S write dirents.
+/// A root that distinguishes case pays zero. This is a declared listing
+/// limit, separate from the per-target content-read budgets above.
+///
+/// `folding_cost.rs` crosses 32 and 128 targets with 256 and 2048 siblings.
+/// Its expected folding readings are 16,384, 65,536, 131,072 and 524,288.
+/// Hosted folding readings are recorded after the macOS counter run.
+/// The Linux run holds the distinct-root control at zero for all four cases.
+/// The job-thread tally excludes the walk's path confirmation, normalization
+/// probes and watcher-thread echoes. This bar covers fresh replacements, not
+/// creates, removals, respells or interrupted-plan reapplication.
+pub const APPLY_SPELLING_LISTINGS_PER_REPLACED_TARGET: u64 = 2;
 
 /// A created document's document reads: one — **the changeset's read-back**
 /// of the landed file. Planning and the recomposition find the name holding

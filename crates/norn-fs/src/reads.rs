@@ -6,13 +6,14 @@
 //!
 //! # The counted set is narrow, and the fields say what is in it
 //!
-//! This is not every stat the crate takes. Five acts are counted — the reads
+//! This is not every stat the crate takes. Six acts are counted — the reads
 //! of a file's content through a descriptor `open_regular_at` handed back, the
 //! stats that open and the walk take along the way, the directory entries a
 //! walk pulls off a stream, and the write kernel's reads of a target (a
-//! copy's source among them) and of a staged shadow — and [`ReadTally`]'s fields name them one at a time, each
-//! with what it leaves out. An act outside those fields is outside the tally
-//! by construction: no call site elsewhere reaches the counters.
+//! copy's source among them), of a staged shadow, and of directory entries
+//! read to judge a target's spelling. [`ReadTally`]'s fields name them one at
+//! a time, each with what it leaves out. An act outside those fields is
+//! outside the tally by construction: no other site reaches the counters.
 //!
 //! **A read is counted by the act that reads the bytes**, not by the open
 //! that precedes it: the function that reads a file's content and hashes it
@@ -95,6 +96,13 @@ pub struct ReadTally {
     /// written. A reader that needs the two apart splits the field rather than
     /// inferring the split.
     pub walk_dirents: u64,
+    /// Directory entries the write kernel reads to judge a target's spelling,
+    /// excluding `.` and `..`. Every sibling counts, including names that do
+    /// not fold together with the target. This is separate from walk listings
+    /// so a write's spelling cost can be held independently of planning's
+    /// path reach. It includes staging, publication and landing confirmation
+    /// on this thread, and excludes the walk and normalization probes.
+    pub write_dirents: u64,
     /// Vault files the write kernel read through its own open: one per hash
     /// of a regular file opened at a target's name, taken by staging, by
     /// publication's verification again, and by a landing's confirmation, and
@@ -126,6 +134,7 @@ thread_local! {
         document_opens: 0,
         stats: 0,
         walk_dirents: 0,
+        write_dirents: 0,
         target_reads: 0,
         shadow_reads: 0,
     }) };
@@ -288,6 +297,10 @@ pub(crate) fn count_stat() {
     bump(|tally| tally.stats += 1);
 }
 
+pub(crate) fn count_write_dirent() {
+    bump(|tally| tally.write_dirents += 1);
+}
+
 pub(crate) fn count_dirents(entries: u64) {
     bump(|tally| tally.walk_dirents += entries);
 }
@@ -369,6 +382,7 @@ mod tests {
                 document_opens: 1,
                 stats: 1,
                 walk_dirents: 4,
+                write_dirents: 0,
                 target_reads: 1,
                 shadow_reads: 1,
             }
