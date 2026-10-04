@@ -180,10 +180,14 @@ fn explicit_requirements(
 /// a rename back — acts on the document at its new spelling, in plan order.
 ///
 /// **Whether a document stands is all this reads of a name**, so a name only
-/// moves name ([`moved_only`]) is read streamed, as composition will read a
-/// document the plan carries, and no body of a chain's moved documents is
-/// held for it; every other name is read whole, as composition will read it
-/// next.
+/// moves name ([`moved_only`]) is read streamed, and no body of a chain's
+/// moved documents is held for it; every other name is read whole, as
+/// composition will read it next, and read once. The plan's order is not yet
+/// settled here, so the streamed read follows the part of the carried rule
+/// that needs none: a name only moves name that the plan still does not
+/// carry — a moved document holding a link a cascade rewrites — is read
+/// whole again by composition, two opens of the file and one copy of it
+/// (see the planner's `Remembered` view).
 fn vacating_requirements<V: VaultView>(
     operations: &[Operation],
     view: &V,
