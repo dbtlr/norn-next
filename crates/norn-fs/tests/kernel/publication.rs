@@ -67,7 +67,7 @@ fn a_replacement_lands_and_reports_what_it_published() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new bytes",
+                content: norn_fs::Content::Held(b"new bytes"),
             },
         )
         .expect("a replacement");
@@ -124,7 +124,7 @@ fn a_replacement_publishes_a_new_file_rather_than_editing_the_old_one() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new bytes, and more of them",
+                content: norn_fs::Content::Held(b"new bytes, and more of them"),
             },
         )
         .expect("a replacement");
@@ -188,7 +188,7 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
                 "note.md",
                 Transition::Replace {
                     before: hash(&contents[round]),
-                    content: &contents[round + 1],
+                    content: norn_fs::Content::Held(&contents[round + 1]),
                 },
             )
             .unwrap_or_else(|e| panic!("round {round}: {e}"));
@@ -214,7 +214,7 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
         )
         .expect("a replacement");
@@ -230,7 +230,7 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
             "note.md",
             Transition::Replace {
                 before: hash(b"new"),
-                content: b"newer",
+                content: norn_fs::Content::Held(b"newer"),
             },
         )
         .expect("a second replacement");
@@ -274,7 +274,7 @@ fn a_replacement_carries_permission_bits_without_the_setuid_bits() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
         )
         .expect("a replacement");
@@ -296,7 +296,7 @@ fn a_read_only_target_is_still_replaced_with_its_mode_carried() {
             "note.md",
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
         )
         .expect("a replacement of a read-only document");
@@ -323,7 +323,7 @@ fn a_publication_into_an_unwritable_folder_is_an_environmental_refusal() {
                     "folder/note.md",
                     Transition::Replace {
                         before: hash(b"old"),
-                        content: b"new",
+                        content: norn_fs::Content::Held(b"new"),
                     },
                 )
                 .expect("a replacement stages"),
@@ -395,7 +395,7 @@ fn a_foreign_edit_after_staging_refuses_at_publication() {
     for transition in [
         Transition::Replace {
             before: hash(b"old"),
-            content: b"ours",
+            content: norn_fs::Content::Held(b"ours"),
         },
         Transition::Remove {
             before: hash(b"old"),
@@ -444,7 +444,7 @@ fn a_document_removed_after_staging_is_not_resurrected() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"ours",
+                    content: norn_fs::Content::Held(b"ours"),
                 },
             )
             .expect("staged"),
@@ -495,7 +495,7 @@ fn a_target_another_writer_landed_after_staging_is_found() {
                     "note.md",
                     Transition::Replace {
                         before: hash(b"old"),
-                        content: b"new",
+                        content: norn_fs::Content::Held(b"new"),
                     },
                 )
                 .expect("a replacement stages"),
@@ -585,7 +585,7 @@ fn a_replacement_whose_folder_is_gone_at_publication_is_drift() {
                 "folder/note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("a replacement stages"),
@@ -670,7 +670,7 @@ fn a_root_replaced_between_the_phases_refuses() {
                     "note.md",
                     Transition::Replace {
                         before: hash(b"old"),
-                        content: b"new",
+                        content: norn_fs::Content::Held(b"new"),
                     },
                 )
                 .expect("a replacement stages"),
@@ -729,7 +729,7 @@ fn a_missing_shadow_refuses_as_an_io_failure() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("staged"),
@@ -814,7 +814,7 @@ fn a_landed_target_is_confirmed_and_its_folder_synced() {
             "folder/note.md",
             Transition::Replace {
                 before: hash(b"the before-state"),
-                content: b"the after-state",
+                content: norn_fs::Content::Held(b"the after-state"),
             },
         )
         .expect("a target at its after-state")
@@ -855,7 +855,7 @@ fn a_shadow_replaced_by_a_copy_of_its_bytes_refuses() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("staged"),
@@ -907,7 +907,7 @@ fn the_shadow_is_confirmed_after_the_target_and_the_folders() {
                 "note.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("staged"),
@@ -1034,7 +1034,7 @@ fn the_kernels_reads_are_counted_per_hash_and_name_their_file() {
                 "replaced.md",
                 Transition::Replace {
                     before: hash(b"old"),
-                    content: b"new",
+                    content: norn_fs::Content::Held(b"new"),
                 },
             )
             .expect("staging a replacement"),

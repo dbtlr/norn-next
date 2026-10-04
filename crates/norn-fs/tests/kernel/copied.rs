@@ -1,13 +1,17 @@
-//! A create whose content is a streamed copy of another file below the same
-//! root: the source is reached as a target is, copied into the shadow a chunk
-//! at a time, and held to the hash the create names.
+//! A create or a replace whose content is a streamed copy of another file
+//! below the same root: the source is reached as a target is, copied into the
+//! shadow a chunk at a time, and held to the hash the transition names.
+//!
+//! A replace's copy is a create's copy at a name that stands: every case
+//! below a create's has its replace twin, the target held to its before-state
+//! as any replace's is and the source to the hash as a create's is.
 
 use std::path::Path;
 
 use norn_fs::reads::{FileRead, ReadAct, ReadWindow, record_files};
 use norn_fs::{AfterState, Content, Refusal, Staging, Transition};
 
-use crate::common::{Scratch, bytes_at, exists, hash, staged, symlink, wrote};
+use crate::common::{Scratch, bytes_at, exists, hash, mode_at, set_mode, staged, symlink, wrote};
 
 /// The copy's chunk, which the bodies here are longer than.
 const CHUNK: usize = 64 * 1024;
@@ -28,6 +32,21 @@ fn copy_of<'a>(source: &'a str, bytes: &[u8]) -> Transition<'a> {
         },
     }
 }
+
+/// A replace of a file standing at `before` with a copy of `source`, which
+/// must hash to `bytes`' hash.
+fn replace_copy_of<'a>(before: &[u8], source: &'a str, bytes: &[u8]) -> Transition<'a> {
+    Transition::Replace {
+        before: hash(before),
+        content: Content::CopyOf {
+            source: Path::new(source),
+            hash: hash(bytes),
+        },
+    }
+}
+
+/// What a replaced target holds before its copy lands.
+const OLD: &[u8] = b"what the target held before";
 
 /// Judge `transition` at `relative` as staging would.
 fn judge(scratch: &Scratch, relative: &str, transition: Transition<'_>) -> Result<(), Refusal> {
@@ -452,4 +471,424 @@ fn judge_leaves_a_sources_state_to_its_own_transition() {
         ),
         Err(Refusal::Drifted { .. })
     ));
+}
+
+/// **A replace's copy publishes its source's bytes over the target, keeping
+/// the target's mode, and leaves the source.** The replaced file holds the
+/// source's bytes byte for byte across the copy's chunk boundaries at the
+/// permission bits it had, reports the hash the replace named, and the source
+/// is left as it was.
+#[test]
+fn a_copied_replace_publishes_the_sources_bytes_and_leaves_the_source() {
+    let scratch = Scratch::new("copy-replace-publishes");
+    let body = long_body();
+    let source = scratch.place("notes/source.md", &body);
+    let target = scratch.place("moved/dest.md", OLD);
+    set_mode(&target, 0o640);
+
+    let published = scratch
+        .stage_and_publish(
+            "moved/dest.md",
+            replace_copy_of(OLD, "notes/source.md", &body),
+        )
+        .expect("a copy over the before-state");
+
+    let AfterState::Present(state) = published.after else {
+        panic!("a replace published absence");
+    };
+    assert_eq!(state.content_hash, hash(&body));
+    assert_eq!(state.len, body.len() as u64);
+    assert_eq!(bytes_at(&target), body);
+    assert_eq!(mode_at(&target) & 0o777, 0o640);
+    assert_eq!(bytes_at(&source), body);
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a shadow was left behind"
+    );
+}
+
+/// **A replace's copy is judged by its hash, as held bytes of that hash
+/// are.** Over a target at its before-state, a target holding other bytes and
+/// a target already at the hash, staging and [`norn_fs::judge`] answer for a
+/// copy exactly what they answer for the same bytes held.
+#[test]
+fn a_copied_replace_is_judged_as_held_bytes_of_its_hash() {
+    let scratch = Scratch::new("copy-replace-judged");
+    let body = long_body();
+    scratch.place("source.md", &body);
+    let held = Transition::Replace {
+        before: hash(OLD),
+        content: Content::Held(&body),
+    };
+    let copied = replace_copy_of(OLD, "source.md", &body);
+
+    // A target at its before-state stages for both, and is judged ready for
+    // both.
+    scratch.place("dest.md", OLD);
+    for transition in [held, copied] {
+        assert_eq!(judge(&scratch, "dest.md", transition), Ok(()));
+        let staging = staged(scratch.stage("dest.md", transition).expect("staged"));
+        scratch.discard(staging);
+    }
+
+    // A target holding other bytes refuses both alike, as drift.
+    scratch.place("drifted.md", b"somebody else's");
+    let answers = [held, copied].map(|transition| {
+        (
+            judge(&scratch, "drifted.md", transition),
+            scratch.stage("drifted.md", transition).map(drop),
+        )
+    });
+    assert_eq!(answers[0], answers[1]);
+    assert!(
+        matches!(answers[1].0, Err(Refusal::Drifted { .. })),
+        "{answers:?}"
+    );
+
+    // A target already at the hash has landed for both, as one landing.
+    scratch.place("landed.md", &body);
+    let landings = [held, copied].map(|transition| {
+        assert_eq!(judge(&scratch, "landed.md", transition), Ok(()));
+        match scratch.stage("landed.md", transition).expect("a landing") {
+            Staging::Landed(landed) => landed,
+            Staging::Staged(staged) => panic!("{:?} staged over its landing", staged.path()),
+        }
+    });
+    assert_eq!(landings[0], landings[1]);
+    assert!(scratch.shadow_names().is_empty());
+}
+
+/// **A replace's after-state is the hash it names, known without the
+/// source.** A target already at the hash lands and the source is never
+/// opened, and judging a replace's copy over a target at its before-state
+/// reads that target and no source — here there is none to read.
+#[test]
+fn a_copied_replaces_after_state_is_known_without_reading_its_source() {
+    let scratch = Scratch::new("copy-replace-unread");
+    let body = long_body();
+    scratch.place("landed.md", &body);
+    scratch.place("dest.md", OLD);
+
+    let _recording = record_files();
+    let window = ReadWindow::open();
+    let staging = scratch
+        .stage("landed.md", replace_copy_of(OLD, "gone.md", &body))
+        .expect("a landing");
+    assert!(matches!(staging, Staging::Landed(_)), "{staging:?}");
+    assert_eq!(
+        judge(&scratch, "dest.md", replace_copy_of(OLD, "gone.md", &body)),
+        Ok(())
+    );
+    let (tally, files) = window.finish_with_files();
+    assert_eq!(
+        files,
+        vec![
+            FileRead {
+                act: ReadAct::Target,
+                path: scratch.at("landed.md"),
+            },
+            FileRead {
+                act: ReadAct::Target,
+                path: scratch.at("dest.md"),
+            },
+        ],
+        "only the two targets are read: {tally:?}"
+    );
+}
+
+/// **The bar on a replace's source that is not the content it names.**
+/// Staging refuses as drift naming the source — onto the bytes it found, or
+/// onto absence where nothing is there — and as a non-file where the source
+/// is a folder. The target keeps its bytes and no shadow is left.
+#[test]
+fn a_copied_replace_of_a_source_not_at_its_hash_refuses_and_leaves_nothing() {
+    let scratch = Scratch::new("copy-replace-drifted");
+    let body = long_body();
+    let edited = [body.as_slice(), b"an edit"].concat();
+    let source = scratch.place("source.md", &edited);
+    let target = scratch.place("dest.md", OLD);
+    scratch.place("file", b"a file where a folder would be");
+    scratch.directory("folder.md");
+
+    let refusal = scratch
+        .stage("dest.md", replace_copy_of(OLD, "source.md", &body))
+        .expect_err("a source holding other bytes");
+    let Refusal::Drifted {
+        path,
+        expected,
+        observed: Some(observed),
+    } = &refusal
+    else {
+        panic!("not drift onto other bytes: {refusal}");
+    };
+    assert_eq!(
+        (path, *expected, observed.content_hash, observed.len),
+        (&source, hash(&body), hash(&edited), edited.len() as u64)
+    );
+
+    for absent in ["absent.md", "missing/source.md", "file/source.md"] {
+        assert_eq!(
+            scratch
+                .stage("dest.md", replace_copy_of(OLD, absent, &body))
+                .map(drop),
+            Err(Refusal::Drifted {
+                path: scratch.at(absent),
+                expected: hash(&body),
+                observed: None,
+            }),
+            "{absent}"
+        );
+    }
+    assert_eq!(
+        scratch
+            .stage("dest.md", replace_copy_of(OLD, "folder.md", &body))
+            .map(drop),
+        Err(Refusal::NotRegularFile {
+            path: scratch.at("folder.md"),
+        })
+    );
+
+    assert_eq!(bytes_at(&target), OLD);
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a shadow was left behind"
+    );
+    assert_eq!(bytes_at(&source), edited);
+}
+
+/// **The bar on a replace's containment.** Its source is reached from the
+/// root as a target is: a link at its name, a linked folder on its path, a
+/// parent name and an absolute name each refuse before a byte of the source
+/// is read — though the file outside holds exactly the bytes the replace
+/// names — and the target keeps its bytes. The one file read is the target,
+/// hashed to judge its before-state.
+#[test]
+fn a_copied_replace_never_reads_a_source_outside_the_root() {
+    let scratch = Scratch::new("copy-replace-contained");
+    let body = long_body();
+    let target = scratch.place("dest.md", OLD);
+    let outside = scratch.vault().with_extension("outside");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a folder outside the vault.
+    std::fs::create_dir_all(&outside).expect("a folder outside the vault");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a document outside the vault.
+    std::fs::write(outside.join("secret.md"), &body).expect("a document outside the vault");
+    symlink(&outside.join("secret.md"), &scratch.at("escape.md"));
+    symlink(&outside, &scratch.at("linked"));
+    let parent = format!(
+        "../{}/secret.md",
+        outside.file_name().unwrap().to_string_lossy()
+    );
+    let absolute = outside.join("secret.md").to_string_lossy().into_owned();
+
+    let _recording = record_files();
+    let window = ReadWindow::open();
+    assert_eq!(
+        scratch
+            .stage("dest.md", replace_copy_of(OLD, "escape.md", &body))
+            .map(drop),
+        Err(Refusal::SymlinkDestination {
+            path: scratch.at("escape.md"),
+        })
+    );
+    assert_eq!(
+        scratch
+            .stage("dest.md", replace_copy_of(OLD, "linked/secret.md", &body))
+            .map(drop),
+        Err(Refusal::LinkedAncestor {
+            path: scratch.at("linked/secret.md"),
+            ancestor: scratch.at("linked"),
+        })
+    );
+    for uncontained in [parent.as_str(), absolute.as_str()] {
+        let refusal = scratch
+            .stage("dest.md", replace_copy_of(OLD, uncontained, &body))
+            .expect_err("a source that leaves the root");
+        assert!(
+            matches!(refusal, Refusal::InvalidRequest { .. }),
+            "{uncontained}: {refusal}"
+        );
+    }
+    let (tally, files) = window.finish_with_files();
+    assert_eq!(tally.document_opens, 0, "a document was read: {tally:?}");
+    assert!(
+        files.iter().all(|read| read.path == target),
+        "a source was read: {files:?}"
+    );
+
+    assert_eq!(bytes_at(&target), OLD);
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a shadow was left behind"
+    );
+}
+
+/// **A replace's copy reads its source once, and counts it as the write
+/// kernel's read.** Staging a copy over a target at its before-state reads
+/// the target, then the source — each a target read, the kernel's own
+/// no-follow open, named at its full path — and no document. Publication
+/// then reads the target again and the shadow, as for any replace.
+#[test]
+fn a_copied_replace_reads_its_source_once_and_names_it() {
+    let scratch = Scratch::new("copy-replace-reads");
+    let body = long_body();
+    let source = scratch.place("source.md", &body);
+    let target = scratch.place("dest.md", OLD);
+    let _recording = record_files();
+
+    let window = ReadWindow::open();
+    let staging = staged(
+        scratch
+            .stage("dest.md", replace_copy_of(OLD, "source.md", &body))
+            .expect("a copy"),
+    );
+    let (tally, files) = window.finish_with_files();
+    assert_eq!(
+        (tally.document_opens, tally.target_reads, tally.shadow_reads),
+        (0, 2, 0),
+        "a replace's copy's staging reads: {tally:?}"
+    );
+    assert_eq!(
+        files,
+        vec![
+            FileRead {
+                act: ReadAct::Target,
+                path: target.clone(),
+            },
+            FileRead {
+                act: ReadAct::Target,
+                path: source.clone(),
+            },
+        ]
+    );
+
+    let window = ReadWindow::open();
+    let published = wrote(scratch.publish(staging).expect("publishing a copy"));
+    let tally = window.finish();
+    assert_eq!(
+        (tally.document_opens, tally.target_reads, tally.shadow_reads),
+        (0, 1, 1),
+        "a replace's copy's publication reads: {tally:?}"
+    );
+    assert!(matches!(published.after, AfterState::Present(_)));
+    assert_eq!(bytes_at(&target), body);
+}
+
+/// **The bar on a preview that answers a replace's source as staging
+/// does.** For every shape of source staging refuses before it reads a byte
+/// of the source, [`norn_fs::judge`] over a target at its before-state
+/// answers the refusal staging meets, reading the target and no source.
+/// Where the target has already landed, neither asks after the source.
+#[test]
+fn judge_refuses_a_replaces_source_shape_as_staging_does() {
+    let scratch = Scratch::new("copy-replace-judged-shape");
+    let body = long_body();
+    let target = scratch.place("dest.md", OLD);
+    let outside = scratch.vault().with_extension("outside");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a folder outside the vault.
+    std::fs::create_dir_all(&outside).expect("a folder outside the vault");
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a document outside the vault.
+    std::fs::write(outside.join("secret.md"), &body).expect("a document outside the vault");
+    symlink(&outside.join("secret.md"), &scratch.at("escape.md"));
+    symlink(&outside, &scratch.at("linked"));
+    scratch.directory("folder.md");
+    let made = std::process::Command::new("mkfifo")
+        .arg(scratch.at("pipe.md"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+    scratch.place("landed.md", &body);
+    let parent = format!(
+        "../{}/secret.md",
+        outside.file_name().unwrap().to_string_lossy()
+    );
+    let absolute = outside.join("secret.md").to_string_lossy().into_owned();
+
+    let shapes = [
+        parent.as_str(),
+        absolute.as_str(),
+        "",
+        ".",
+        "escape.md",
+        "linked/secret.md",
+        "folder.md",
+        "pipe.md",
+    ];
+    let _recording = record_files();
+    for source in shapes {
+        let window = ReadWindow::open();
+        let judged = judge(&scratch, "dest.md", replace_copy_of(OLD, source, &body));
+        let (tally, files) = window.finish_with_files();
+        assert_eq!(
+            (tally.document_opens, tally.shadow_reads),
+            (0, 0),
+            "judging a copy of {source:?} read a document: {tally:?}"
+        );
+        assert!(
+            files.iter().all(|read| read.path == target),
+            "judging a copy of {source:?} read its source: {files:?}"
+        );
+        let staged = scratch
+            .stage("dest.md", replace_copy_of(OLD, source, &body))
+            .map(drop);
+        assert!(
+            judged.is_err(),
+            "{source:?} judged ready, staged {staged:?}"
+        );
+        assert_eq!(judged, staged, "{source:?}");
+    }
+
+    for source in shapes {
+        assert_eq!(
+            judge(&scratch, "landed.md", replace_copy_of(OLD, source, &body)),
+            Ok(()),
+            "{source:?}"
+        );
+        assert!(
+            matches!(
+                scratch.stage("landed.md", replace_copy_of(OLD, source, &body)),
+                Ok(Staging::Landed(_))
+            ),
+            "{source:?}"
+        );
+    }
+
+    assert_eq!(bytes_at(&target), OLD);
+    assert!(
+        scratch.shadow_names().is_empty(),
+        "a shadow was left behind"
+    );
+}
+
+/// **A replace's source's state is its own transition's question.** Where
+/// the source is absent or holds bytes other than the replace's hash,
+/// staging refuses as drift when it reaches the source to copy it, but
+/// [`norn_fs::judge`] answers the replace ready, as it answers a create.
+#[test]
+fn judge_leaves_a_replaces_source_state_to_its_own_transition() {
+    let scratch = Scratch::new("copy-replace-judged-state");
+    let body = long_body();
+    let edited = [body.as_slice(), b"an edit"].concat();
+    scratch.place("source.md", &edited);
+    scratch.place("dest.md", OLD);
+    scratch.place("file", b"a file where a folder would be");
+
+    for source in [
+        "source.md",
+        "absent.md",
+        "missing/source.md",
+        "file/source.md",
+    ] {
+        assert_eq!(
+            judge(&scratch, "dest.md", replace_copy_of(OLD, source, &body)),
+            Ok(()),
+            "{source:?}"
+        );
+        assert!(
+            matches!(
+                scratch.stage("dest.md", replace_copy_of(OLD, source, &body)),
+                Err(Refusal::Drifted { .. })
+            ),
+            "{source:?}"
+        );
+    }
 }

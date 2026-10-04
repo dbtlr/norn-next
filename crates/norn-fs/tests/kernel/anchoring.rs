@@ -15,7 +15,7 @@ fn every_kind() -> [Transition<'static>; 3] {
         },
         Transition::Replace {
             before: hash(b"old"),
-            content: b"new",
+            content: norn_fs::Content::Held(b"new"),
         },
         Transition::Remove {
             before: hash(b"old"),
@@ -201,7 +201,7 @@ fn a_root_spelled_through_a_link_is_the_boundary() {
             Path::new("note.md"),
             Transition::Replace {
                 before: hash(b"old"),
-                content: b"new",
+                content: norn_fs::Content::Held(b"new"),
             },
             scratch.shadows(),
         )

@@ -326,7 +326,7 @@ fn a_target_under_another_spelling_is_not_this_target() {
     for transition in [
         Transition::Replace {
             before: hash(b"old"),
-            content: b"new",
+            content: norn_fs::Content::Held(b"new"),
         },
         Transition::Remove {
             before: hash(b"old"),

@@ -970,7 +970,7 @@ fn kernel_transition<'p>(
                     Some(Written::Bytes(content)),
                 ) => norn_fs::Transition::Replace {
                     before: kernel_hash(hash),
-                    content,
+                    content: norn_fs::Content::Held(content),
                 },
                 (FileState::Present { hash, .. }, FileState::Absent {}, _) => {
                     norn_fs::Transition::Remove {
