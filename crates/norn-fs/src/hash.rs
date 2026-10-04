@@ -11,8 +11,9 @@
 //! name: the write kernel's reads of a target and of a shadow through
 //! [`target_hashed_from`] and [`shadow_hashed_from`], which count themselves,
 //! the watcher's echo check through [`uncounted_echo_hashed_from`], which
-//! says in its name that it is not counted, and a streamed observation
-//! through [`hashed_and_checked_from`].
+//! says in its name that it is not counted, a streamed observation through
+//! [`hashed_and_checked_from`], and a create's copy of its source through
+//! [`copied_and_hashed`], which hashes the bytes it writes as it writes them.
 //! [`crate::read_and_hash`] is the configured-path form which returns both
 //! the bytes and their hash from one opening, and
 //! [`crate::stream_optional_and_hash`] the form that keeps no bytes: the hash
@@ -158,8 +159,8 @@ fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, 
 /// length of everything read.
 ///
 /// **The one streaming loop.** Every streamed reading in this crate — a
-/// target's and a shadow's hash, the echo check and a streamed observation —
-/// is this loop and differs only in what it does
+/// target's and a shadow's hash, the echo check, a streamed observation and a
+/// create's copy of its source — is this loop and differs only in what it does
 /// with a chunk, so peak memory is one chunk wherever a file is streamed. A
 /// read interrupted by a signal is retried, because `EINTR` is not a failure
 /// to read and half a hash is not a smaller hash.
@@ -187,7 +188,7 @@ fn streamed(
 }
 
 /// Which side of a streamed pass failed: the read of the file, or what was
-/// done with a chunk of it.
+/// done with a chunk of it — for a copy, the write into its destination.
 #[derive(Debug)]
 pub(crate) enum CopyFailed {
     Reading(std::io::Error),
@@ -235,6 +236,24 @@ pub(crate) fn hashed_and_checked_from(
         len,
         utf8: utf8.finish(),
     })
+}
+
+/// The write kernel's copy of a create's source at `path`, read through
+/// `source` and written into `sink` a chunk at a time: the hash and the length
+/// of exactly the bytes written, from one forward pass.
+///
+/// **The read counts itself** as one [`crate::reads::ReadTally::document_opens`]:
+/// the source is a vault file read for its content, once, through the same
+/// contained descent a document read takes. The hash is what makes the copy a
+/// copy of *the* content the caller named — the kernel compares it with the
+/// hash the create carries before the shadow is synced.
+pub(crate) fn copied_and_hashed(
+    source: &mut impl Read,
+    path: &std::path::Path,
+    sink: &mut impl std::io::Write,
+) -> Result<(ContentHash, u64), CopyFailed> {
+    crate::reads::count_document_read(path);
+    streamed(source, &mut |chunk| sink.write_all(chunk))
 }
 
 /// Whether a stream of bytes handed over in chunks is UTF-8, judged as the
@@ -506,6 +525,46 @@ mod tests {
             assert_eq!(streamed.utf8, utf8, "{} bytes", bytes.len());
             assert_eq!(streamed.utf8, std::str::from_utf8(&bytes).is_ok());
         }
+    }
+
+    /// A copy hands the sink exactly the bytes it hashed, a chunk at a time, and
+    /// a failure to read and a failure to write come back as which they were.
+    #[test]
+    fn a_streamed_copy_writes_what_it_hashes_and_names_which_side_failed() {
+        let bytes: Vec<u8> = (0..CHUNK * 2 + 7).map(|i| (i % 251) as u8).collect();
+        let mut sink = Vec::new();
+        let (hash, len) =
+            copied_and_hashed(&mut Cursor::new(bytes.clone()), Path::new("x"), &mut sink)
+                .unwrap_or_else(|_| panic!("copying a cursor into a buffer"));
+        assert_eq!((hash, len), (ContentHash::of(&bytes), bytes.len() as u64));
+        assert_eq!(sink, bytes);
+
+        /// A sink that refuses every write.
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(matches!(
+            copied_and_hashed(&mut Cursor::new(bytes), Path::new("x"), &mut Full),
+            Err(CopyFailed::Writing(error)) if error.raw_os_error() == Some(libc::ENOSPC)
+        ));
+
+        /// A source that refuses every read.
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            }
+        }
+        assert!(matches!(
+            copied_and_hashed(&mut Unreadable, Path::new("x"), &mut Vec::new()),
+            Err(CopyFailed::Reading(error)) if error.raw_os_error() == Some(libc::EIO)
+        ));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! the call began and with no shadow left behind: a staging refusal is found
 //! before publication, so it writes nothing.
 
-use norn_fs::{Refusal, Staging, Transition};
+use norn_fs::{Content, Refusal, Staging, Transition};
 
 use crate::common::{Scratch, bytes_at, exists, hash, identity_at, staged};
 
@@ -122,7 +122,7 @@ fn a_target_at_its_after_state_stages_as_landed_with_no_shadow() {
 
     for transition in [
         Transition::Create {
-            content: b"the after-state",
+            content: Content::Held(b"the after-state"),
         },
         Transition::Replace {
             before: hash(b"the before-state"),
@@ -163,7 +163,12 @@ fn a_create_refuses_every_taken_name_the_same_way() {
         ("folder.md", &directory),
     ] {
         let refusal = scratch
-            .stage(relative, Transition::Create { content: b"ours" })
+            .stage(
+                relative,
+                Transition::Create {
+                    content: Content::Held(b"ours"),
+                },
+            )
             .expect_err("a create onto a taken name");
         assert_eq!(
             refusal,
@@ -188,7 +193,7 @@ fn a_create_stages_its_content_and_publishes_nothing_yet() {
             .stage(
                 "fresh.md",
                 Transition::Create {
-                    content: b"fresh bytes",
+                    content: Content::Held(b"fresh bytes"),
                 },
             )
             .expect("a create onto nothing"),
@@ -215,7 +220,9 @@ fn a_symlinked_target_is_refused_whether_or_not_it_resolves() {
 
     for link in ["resolving.md", "dangling.md"] {
         for transition in [
-            Transition::Create { content: b"ours" },
+            Transition::Create {
+                content: Content::Held(b"ours"),
+            },
             Transition::Replace {
                 before: hash(b"the target's bytes"),
                 content: b"ours",

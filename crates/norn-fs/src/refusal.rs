@@ -94,6 +94,10 @@ pub enum Refusal {
     /// a link that dangles would have a rename replace the link itself. The two
     /// are opposite mistakes and neither is a document write, so the refusal
     /// asks only whether the destination is a link.
+    ///
+    /// A create's copied source is held to the same rule and refuses the same
+    /// way: a copy read through a link would publish bytes from wherever the
+    /// link points, outside the vault included.
     SymlinkDestination { path: PathBuf },
     /// A folder on the way from the vault root to the path is a symbolic link.
     ///

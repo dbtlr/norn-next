@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use norn_fs::{AfterState, Durability, Refusal, Staging, Transition, confirm_landed};
+use norn_fs::{AfterState, Content, Durability, Refusal, Staging, Transition, confirm_landed};
 
 use crate::common::{
     Scratch, bytes_at, demand_unwritable, exists, found, hash, identity_at, mode_at, mtime_at,
@@ -23,7 +23,7 @@ fn a_create_lands_and_reports_its_identity() {
         .stage_and_publish(
             "fresh.md",
             Transition::Create {
-                content: b"fresh bytes",
+                content: Content::Held(b"fresh bytes"),
             },
         )
         .expect("a create onto nothing");
@@ -239,7 +239,12 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
     // A create takes what an ordinary create takes: the control is a plain
     // write in the same directory under the same umask.
     let _ = scratch
-        .stage_and_publish("fresh.md", Transition::Create { content: b"fresh" })
+        .stage_and_publish(
+            "fresh.md",
+            Transition::Create {
+                content: Content::Held(b"fresh"),
+            },
+        )
         .expect("a create onto nothing");
     let control = scratch.place("control.md", b"control");
     assert_eq!(
@@ -325,7 +330,12 @@ fn a_publication_into_an_unwritable_folder_is_an_environmental_refusal() {
         ),
         staged(
             scratch
-                .stage("folder/fresh.md", Transition::Create { content: b"fresh" })
+                .stage(
+                    "folder/fresh.md",
+                    Transition::Create {
+                        content: Content::Held(b"fresh"),
+                    },
+                )
                 .expect("a create stages"),
         ),
         staged(
@@ -471,7 +481,12 @@ fn a_target_another_writer_landed_after_staging_is_found() {
     let staged = [
         staged(
             scratch
-                .stage("fresh.md", Transition::Create { content: b"fresh" })
+                .stage(
+                    "fresh.md",
+                    Transition::Create {
+                        content: Content::Held(b"fresh"),
+                    },
+                )
                 .expect("a create stages"),
         ),
         staged(
@@ -604,7 +619,12 @@ fn a_create_whose_name_is_taken_after_staging_refuses_and_leaves_it() {
     let scratch = Scratch::new("create-race");
     let staged = staged(
         scratch
-            .stage("note.md", Transition::Create { content: b"ours" })
+            .stage(
+                "note.md",
+                Transition::Create {
+                    content: Content::Held(b"ours"),
+                },
+            )
             .expect("staged"),
     );
     let path = scratch.place("note.md", b"the racer's bytes");
@@ -636,7 +656,12 @@ fn a_root_replaced_between_the_phases_refuses() {
     let staged = [
         staged(
             scratch
-                .stage("fresh.md", Transition::Create { content: b"fresh" })
+                .stage(
+                    "fresh.md",
+                    Transition::Create {
+                        content: Content::Held(b"fresh"),
+                    },
+                )
                 .expect("a create stages"),
         ),
         staged(
@@ -734,7 +759,12 @@ fn an_edited_shadow_refuses_as_an_io_failure() {
     let scratch = Scratch::new("shadow-edited");
     let staged = staged(
         scratch
-            .stage("fresh.md", Transition::Create { content: b"ours" })
+            .stage(
+                "fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"ours"),
+                },
+            )
             .expect("staged"),
     );
     {
@@ -892,7 +922,12 @@ fn the_shadow_is_confirmed_after_the_target_and_the_folders() {
 
     let create = staged(
         scratch
-            .stage("a/b/fresh.md", Transition::Create { content: b"fresh" })
+            .stage(
+                "a/b/fresh.md",
+                Transition::Create {
+                    content: Content::Held(b"fresh"),
+                },
+            )
             .expect("staged"),
     );
     std::fs::remove_file(scratch.only_shadow()).expect("a sweep taking the shadow");

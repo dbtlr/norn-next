@@ -780,7 +780,9 @@ fn kernel_transition<'p>(
             let transition = &plan.transitions[index];
             let kernel = match (&transition.before, &transition.after, content) {
                 (FileState::Absent {}, FileState::Present { .. }, Some(content)) => {
-                    norn_fs::Transition::Create { content }
+                    norn_fs::Transition::Create {
+                        content: norn_fs::Content::Held(content),
+                    }
                 }
                 (FileState::Present { hash, .. }, FileState::Present { .. }, Some(content)) => {
                     norn_fs::Transition::Replace {
