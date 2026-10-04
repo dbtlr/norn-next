@@ -418,11 +418,11 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// plans share one.
 ///
 /// Observed on x86_64-linux-glibc locally on 2026-10-04: **31.67–32.18 MiB**
-/// over nine readings of the planning child at `realistic` across three runs
-/// of the lane, three from this bar's own case and three from each heap
-/// pair's `realistic` child; the `ambiguous` children read 29.55–29.91 MiB.
+/// over eighteen readings of the planning child at `realistic` across six runs
+/// of the lane, six from this bar's own case and six from each heap pair's
+/// `realistic` child; the `ambiguous` children read 29.45–29.91 MiB.
 /// Five earlier runs of the same mix read 31.03–31.52 MiB over fifteen
-/// readings. The same runs read the attach ceiling's child at 29.00–30.07
+/// readings. The same runs read the attach ceiling's child at 29.00–30.36
 /// MiB, so the plans and the live host add about 2 MiB over the attach. On
 /// `ubuntu-latest` x86_64-glibc the `memory invariant` jobs 111331931343 and
 /// 111384985926 (runs 37166270607 and 37185003929) read the same mix at
@@ -441,8 +441,8 @@ pub const HUB_WRITE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// profiles with the same heap readings, so what set the peak was how many of
 /// their freed allocations glibc's dynamic threshold kept resident, and a
 /// ceiling sized over it was sized on the allocator. The size child carries
-/// no ceiling of its own, for the same reason: its readings span **57.36–82.69
-/// MiB** by default over twelve readings across those three runs, in modes
+/// no ceiling of its own, for the same reason: its readings span **56.98–82.69
+/// MiB** by default over twenty-four readings across those six runs, in modes
 /// about 57, 65 and 82 MiB that no heap reading shares, and 48.39–48.66 MiB
 /// over four with the threshold fixed. Every stretch it measures is barred in
 /// heap bytes instead, by
@@ -492,15 +492,14 @@ pub const PLAN_PEAK_RSS_CEILING_BYTES: u64 = 53 * 1024 * 1024;
 /// at `ambiguous` and fifteen at `realistic`; a reading moves by a few bytes
 /// with the sandbox's name, and the pair's two children carry names of one
 /// length. **Re-read after NORN-345's planning changes landed and with the
-/// mark set on a settled heap**, over three runs of the lane on 2026-10-04:
-/// 171,323 bytes at both profiles in all three, a difference of **0 bytes**,
-/// and every planning child read its previews at 171,293 to 171,323 bytes,
-/// six readings at `ambiguous` and nine at `realistic`. On `ubuntu-latest`
-/// x86_64-glibc the `memory invariant` job 111331931343, before those
-/// changes, read 164,752 bytes at both profiles, and job 111384985926, after
-/// them and before the settle, read 171,287 at both, a difference of **0
-/// bytes** in each: the rise of about 6.5 KB is those changes', on both
-/// platforms.
+/// mark set on a settled heap**, over six runs of the lane on 2026-10-04:
+/// 171,323 bytes at both profiles in all six, a difference of **0 bytes**, and
+/// every planning child read its previews at 171,293 to 171,323 bytes, twelve
+/// readings at `ambiguous` and eighteen at `realistic`. On `ubuntu-latest`
+/// x86_64-glibc the `memory invariant` job 111331931343, before those changes,
+/// read 164,752 bytes at both profiles, and job 111384985926, after them and
+/// before the settle, read 171,287 at both, a difference of **0 bytes** in
+/// each: the rise of about 6.5 KB is those changes', on both platforms.
 ///
 /// The allowance is **4 KiB**, the figure
 /// [`READ_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES`] is authored at, by the same rule:
@@ -556,9 +555,9 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// job beside a later preview or not by timing alone, and a mix that
 /// interleaved them read 164,110 to 232,512 bytes at one profile across runs.
 /// **Re-read after NORN-345's planning changes landed and with the mark set
-/// on a settled heap**, over three runs of the lane on 2026-10-04: 172,191
-/// bytes at both profiles in two runs, a difference of **0 bytes**, and
-/// 172,191 at `ambiguous` with 198,306 at `realistic` in the third, **26,115
+/// on a settled heap**, over six runs of the lane on 2026-10-04: 172,191
+/// bytes at both profiles in five runs, a difference of **0 bytes**, and
+/// 172,191 at `ambiguous` with 198,306 at `realistic` in the sixth, **26,115
 /// bytes**. On `ubuntu-latest` x86_64-glibc the `memory invariant` job
 /// 111331931343, before those changes, read 166,206 bytes at `ambiguous` and
 /// 166,210 at `realistic`, and job 111384985926, after them and before the
@@ -571,9 +570,9 @@ pub const PLAN_PREVIEW_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 1024;
 /// mix at 166,222 to 166,282 bytes in the lower state and 192,388 to 197,812
 /// in the upper, the same work on every thread each time, an excursion of at
 /// most **31,550 bytes** over the same child's lower reading. Either profile
-/// can land in either state, and nothing holds them together. The three runs
-/// of the re-reading read thirteen children at 172,147 to 172,207 bytes and
-/// two at 193,045 and 198,306, an excursion of at most 26,115 bytes over the
+/// can land in either state, and nothing holds them together. The six runs
+/// of the re-reading read twenty-six children at 172,147 to 172,207 bytes and
+/// four at 193,045 to 198,775, an excursion of at most 26,628 bytes over the
 /// same child's lower reading, inside the one the allowance is derived from.
 ///
 /// The allowance is **40 KiB**: the excursion with a quarter of headroom,
@@ -638,12 +637,12 @@ pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
 /// very bytes, so the 4,190,208 bytes between the two bodies are bytes the
 /// plan neither authored nor holds.
 ///
-/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twelve size
-/// children across three runs of the lane, three of them this bar's own: the
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
 /// small move's preview read 71,503 to 72,189 bytes and the large one's
 /// 72,127 to 72,155, the small one in states about 690 bytes apart that
-/// neither size sets, differences of **-34 to 630 bytes**, and -34, 630 and
-/// 630 in this bar's own three. On `ubuntu-latest` x86_64-glibc the `memory
+/// neither size sets, differences of **-34 to 636 bytes**, and -34, 630, 630,
+/// 630, -34 and 630 in this bar's own six. On `ubuntu-latest` x86_64-glibc the `memory
 /// invariant` run 37201706982 read differences of -34 to 597 bytes over eight
 /// children, while the size subjects still shared the planning child and ran
 /// ahead of its mix as they run here. Neither reading moves with the body:
@@ -716,13 +715,14 @@ pub const PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 64 * 1024;
 /// case refuses a control whose difference is under one body, which is a
 /// control that did not derive the document it stands for.
 ///
-/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twelve size
-/// children across three runs of the lane, three of them this bar's own: the
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
 /// applies read 85,553 to 85,651 bytes small and 16,797,889 to 16,798,107
 /// large, a difference of 16,712,246 to 16,712,464; the derivations read
-/// 122,062 to 122,182 small and 16,835,891 to 16,836,199 large, a difference
+/// 122,062 to 122,182 small and 16,835,891 to 16,836,203 large, a difference
 /// of 16,713,717 to 16,714,037. **The apply stood 1,463 to 1,775 bytes under
-/// the derivation**, and -1,775, -1,463 and -1,701 in this bar's own three.
+/// the derivation**, and -1,775, -1,463, -1,701, -1,767, -1,775 and -1,679
+/// in this bar's own six.
 /// On `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982
 /// read the apply 689 to 1,016 bytes over the derivation over eight
 /// children, while the size subjects still shared the planning child and
@@ -819,11 +819,12 @@ pub const PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES: u64 = 64 * 1024;
 /// a document packs Markdown nodes, so a document of shorter lines or of lists
 /// holds more than four bodies.
 ///
-/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twelve size
-/// children across three runs of the lane, three of them this bar's own: the
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
 /// small derivation read 122,062 to 122,182 bytes and the large 16,835,891 to
-/// 16,836,199, differences of **16,713,717 to 16,714,037 bytes**, about 3.98
-/// bodies, and 16,714,021 in each of this bar's own three. On
+/// 16,836,203, differences of **16,713,717 to 16,714,037 bytes**, about 3.98
+/// bodies, and 16,714,021 in four of this bar's own six, 16,713,717 and
+/// 16,713,925 in the other two. On
 /// `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982 read
 /// differences of 16,713,717 to 16,714,021 bytes over eight children, while
 /// the size subjects still shared the planning child. Each reading moves by
@@ -893,11 +894,12 @@ pub const DERIVATION_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 4 * 4 * 1024 * 1024
 /// for the whole input before it yields an event, so that scan holds the tree
 /// at once, beside the bytes it scans and the body they replace.
 ///
-/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twelve size
-/// children across three runs of the lane, three of them this bar's own: the
+/// Observed on x86_64-linux-glibc locally on 2026-10-04, over twenty-four
+/// size children across six runs of the lane, six of them this bar's own: the
 /// small preview read 106,981 to 106,989 bytes and the large 21,007,273 to
 /// 21,007,289, differences of **20,900,292 to 20,900,300 bytes**, about 4.98
-/// bodies, and 20,900,292, 20,900,292 and 20,900,300 in this bar's own three.
+/// bodies, and 20,900,292 in four of this bar's own six and 20,900,300 in
+/// two.
 /// On `ubuntu-latest` x86_64-glibc the `memory invariant` run 37201706982
 /// read differences of 20,900,292 to 20,900,300 bytes over eight children,
 /// while the size subjects still shared the planning child and ran ahead of
