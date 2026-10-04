@@ -39,7 +39,7 @@ impl Unit {
 ///
 /// **What the read kept of a document is its body**: its bytes, or — for a
 /// target whose content the plan carries byte for byte, read streamed
-/// ([`streamed`]) — only whether they decode.
+/// ([`reads`]) — only whether they decode.
 #[derive(Clone, Debug)]
 pub(super) enum TargetState {
     /// It holds its before-state: the body where it is a document.
@@ -151,31 +151,42 @@ pub(super) fn units(plan: &ResolvedPlan, normalizer: &PathNormalizer) -> Vec<Uni
 /// holding what it holds, and the moves that carry it are named. A chain is
 /// followed whole, through names the plan makes and takes away again.
 ///
-/// **A target whose content the plan carries is read streamed** ([`streamed`]):
+/// **A target whose content the plan carries is read streamed** ([`reads`]):
 /// its hash and whether its bytes decode are all its judgment and the
-/// recomposition read of it, so its body is never held.
+/// recomposition read of it, so its body is never held. A target found
+/// holding composed bytes of its change after a streamed read
+/// ([`Read::StreamedBefore`]) is read whole again for them.
 pub(super) fn observe<V: VaultView>(
     plan: &ResolvedPlan,
     units: &[Unit],
     view: &V,
 ) -> Result<(Vec<TargetState>, Vec<usize>), V::Error> {
     let lineage = recorded_lineage(plan, view.normalizer());
-    let streamed = streamed(plan, &lineage, view.normalizer());
+    let reads = reads(plan, &lineage, view.normalizer());
     let mut states: Vec<Option<TargetState>> = vec![None; plan.transitions.len()];
     for unit in units {
         match *unit {
             Unit::One(index) => {
-                states[index] = Some(one(&plan.transitions[index], streamed[index], view)?);
+                let transition = &plan.transitions[index];
+                let read = reads[index];
+                let mut state = one(transition, read != Read::Whole, view)?;
+                if read == Read::StreamedBefore && state.partly_landed() {
+                    state = one(transition, false, view)?;
+                }
+                states[index] = Some(state);
             }
             Unit::Respell { old, new } => {
-                let (old_state, new_state) = respell(
-                    &plan.transitions[old],
-                    &plan.transitions[new],
-                    streamed[old] && streamed[new],
-                    view,
-                )?;
-                states[old] = Some(old_state);
-                states[new] = Some(new_state);
+                let (old_transition, new_transition) =
+                    (&plan.transitions[old], &plan.transitions[new]);
+                let read = Read::respell(reads[old], reads[new]);
+                let mut held = respell(old_transition, new_transition, read != Read::Whole, view)?;
+                if read == Read::StreamedBefore
+                    && (held.0.partly_landed() || held.1.partly_landed())
+                {
+                    held = respell(old_transition, new_transition, false, view)?;
+                }
+                states[old] = Some(held.0);
+                states[new] = Some(held.1);
             }
         }
     }
@@ -187,30 +198,66 @@ pub(super) fn observe<V: VaultView>(
     Ok((states, sources))
 }
 
-/// Whether each target of `plan`, by transition index, holds no byte
-/// composition reads on either side, so it is read streamed and its body
-/// never held: the plan's one rule for what it carries byte for byte
-/// ([`Carried`]), built from the operations and `lineage` as planning builds
-/// it, so the applier observes streamed exactly the targets planning held no
-/// byte of.
-pub(super) fn streamed(
+/// How the applier reads one target, by what composition reads of the
+/// content leaving it and of the content arriving at it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Read {
+    /// Whole: composition reads the bytes leaving it, or nothing stood there
+    /// and what arrives is bytes composition writes.
+    Whole,
+    /// Streamed, whatever it holds: no byte of either side is one
+    /// composition reads or writes.
+    Streamed,
+    /// Streamed for its carried before-state, and whole again where it is
+    /// found holding its change — bytes composition writes, which the applier
+    /// publishes and checks a landed target from. A fresh apply finds the
+    /// before-state, so it holds no copy.
+    StreamedBefore,
+}
+
+impl Read {
+    /// How a case-only rename's one name is read: streamed where its old
+    /// spelling's before-state is carried, and whole again where it is found
+    /// holding the new spelling's change and that is not carried.
+    fn respell(old: Read, new: Read) -> Read {
+        match (old, new) {
+            (Read::Whole, _) => Read::Whole,
+            (_, Read::Streamed) => old,
+            _ => Read::StreamedBefore,
+        }
+    }
+}
+
+/// How each target of `plan` is read, by transition index: streamed where
+/// the content leaving it is carried, whatever refills it, and where nothing
+/// stood there and what arrives is absent or carried; held where what it is
+/// found holding is bytes composition writes. The plan's one rule for what
+/// it carries byte for byte ([`Carried`]), built from the operations and
+/// `lineage` as planning builds it, so the applier observes streamed exactly
+/// the names whose before-state planning held no byte of.
+pub(super) fn reads(
     plan: &ResolvedPlan,
     lineage: &Lineage,
     normalizer: &PathNormalizer,
-) -> Vec<bool> {
+) -> Vec<Read> {
     let carried = Carried::of(&plan.operations, lineage, normalizer);
     plan.transitions
         .iter()
         .map(|transition| {
-            identity(normalizer, transition.path.as_str()).is_some_and(|file| {
-                role_at(transition.path.as_str()).is_none()
-                    && carried.streams(
-                        &file,
-                        transition.before != FileState::absent(),
-                        transition.after != FileState::absent(),
-                        lineage,
-                    )
-            })
+            let Some(file) = identity(normalizer, transition.path.as_str())
+                .filter(|_| role_at(transition.path.as_str()).is_none())
+            else {
+                return Read::Whole;
+            };
+            let before = transition.before != FileState::absent();
+            let departs = carried.departs_unread(&file, before);
+            let arrives =
+                carried.arrives_unread(&file, transition.after != FileState::absent(), lineage);
+            match (departs, arrives) {
+                (true, true) => Read::Streamed,
+                (true, false) if before => Read::StreamedBefore,
+                _ => Read::Whole,
+            }
         })
         .collect()
 }
@@ -245,8 +292,7 @@ pub(crate) fn copied_sources(
 /// What one transition's target holds: a control file read as one
 /// ([`VaultView::control_entry`]) where the target is at the path a control
 /// file is named at — the schema read where the registration reads it — and
-/// a document otherwise, read streamed where its content is carried
-/// ([`streamed`]).
+/// a document otherwise, read streamed where `streamed` says ([`reads`]).
 fn one<V: VaultView>(
     transition: &Transition,
     streamed: bool,
@@ -310,8 +356,7 @@ fn judged(transition: &Transition, holds: FileState, bytes: Option<Body>) -> Tar
 /// What a case-only rename's two spellings hold: before (the old spelling at
 /// its before-state), halfway (the old spelling at the new one's
 /// after-state), landed (the new spelling at its after-state), or drift;
-/// read streamed where the rename carries its content unchanged
-/// ([`streamed`]).
+/// read streamed where `streamed` says ([`reads`]).
 fn respell<V: VaultView>(
     old: &Transition,
     new: &Transition,

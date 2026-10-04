@@ -2560,7 +2560,9 @@ carries byte for byte is one rule, read from its operations and their lineage by
 and the applier alike: a file some move names, which no other operation or expected value
 names, on whose before-state no edit, link rewrite or cascade composes, and which no
 case-only rename lands at another file's spelling. Planning and the applier read a carried
-document streamed, keeping its hash and whether its bytes decode, and the write kernel
+document streamed, keeping its hash and whether its bytes decode, whatever refills its name;
+the applier reads such a name whole only where it finds it already holding bytes composition
+wrote there, as a re-sent plan does. The write kernel
 stages every target holding it — a create, or a replace where a chain of moves refills a
 name — as a streamed copy of its source, held to the hash the plan carries. The links a
 carried document holds are the store index's, taken where the index derived them from those

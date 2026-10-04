@@ -426,9 +426,11 @@ impl Lineage {
 ///
 /// **Who reads it.** Composition reads a carried file streamed and carries
 /// its content unread ([`super::compose::After::Carried`]), wherever the
-/// plan's moves take it; the applier observes a target streamed where it
-/// holds no byte composition reads on either side ([`Carried::streams`]),
-/// and its recomposition answers a carried file only streamed. Both build
+/// plan's moves take it; the applier observes a name streamed where the
+/// content leaving it is carried ([`Carried::departs_unread`]), whatever
+/// refills it, and holds what it finds there only where that is content
+/// composition writes ([`Carried::arrives_unread`]); its recomposition
+/// answers a carried file only streamed. Both build
 /// it here, from the operations and their lineage, so the two never decide
 /// apart: what planning composes as carried is what the applier observes
 /// streamed and stages as a copy.
@@ -490,22 +492,34 @@ impl Carried {
         self.files.contains(file)
     }
 
-    /// Whether a target at `file` holds no byte composition reads on either
-    /// side, so the applier observes it streamed: its before-state absent
-    /// (`before` false) or carried, and its after-state absent (`after`
-    /// false) or the content of a carried file, as `lineage` follows it.
-    pub(crate) fn streams(
+    /// Whether the content leaving `file` holds no byte composition reads:
+    /// nothing stood there (`before` false), or what stood there is carried.
+    ///
+    /// **Whatever refills the name.** Composition never reads the bytes of a
+    /// carried before-state: the links it holds come from the index, its hash
+    /// from the stream, and a copy of it streams from the file. Content that
+    /// arrives at its name is composed from its own source, never from these
+    /// bytes, so the applier observes the name streamed for its before-state
+    /// whether or not the arriving content is carried.
+    pub(crate) fn departs_unread(&self, file: &NormalizedPath, before: bool) -> bool {
+        !before || self.carries(file)
+    }
+
+    /// Whether the content arriving at `file` is no bytes composition
+    /// writes: nothing arrives (`after` false), or a carried file's content
+    /// does, as `lineage` follows it, which the write kernel copies unread.
+    /// Where it is neither, the composed bytes are what the applier publishes
+    /// and checks a target already holding them from, so it holds them.
+    pub(crate) fn arrives_unread(
         &self,
         file: &NormalizedPath,
-        before: bool,
         after: bool,
         lineage: &Lineage,
     ) -> bool {
-        (!before || self.carries(file))
-            && (!after
-                || lineage
-                    .source(file)
-                    .is_some_and(|drawn| self.carries(&drawn.from)))
+        !after
+            || lineage
+                .source(file)
+                .is_some_and(|drawn| self.carries(&drawn.from))
     }
 }
 

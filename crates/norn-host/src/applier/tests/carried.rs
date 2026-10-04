@@ -584,25 +584,6 @@ impl<'a, V: VaultView> Counted<'a, V> {
         self.reads.borrow().get(at).copied().unwrap_or_default()
     }
 
-    /// Every name read whole.
-    fn whole(&self) -> BTreeSet<String> {
-        self.read_by(|reads| reads.whole > 0)
-    }
-
-    /// Every name read streamed.
-    fn streamed(&self) -> BTreeSet<String> {
-        self.read_by(|reads| reads.streamed > 0)
-    }
-
-    fn read_by(&self, read: impl Fn(&Reads) -> bool) -> BTreeSet<String> {
-        self.reads
-            .borrow()
-            .iter()
-            .filter(|(_, reads)| read(reads))
-            .map(|(at, _)| at.clone())
-            .collect()
-    }
-
     fn count(&self, path: &norn_fs::NormalizedPath, streamed: bool) {
         let mut reads = self.reads.borrow_mut();
         let reads = reads
@@ -700,14 +681,244 @@ fn a_document_moved_away_and_back_previews_and_applies_found() {
     }
 }
 
+/// **A carried name refilled by a document composition writes is read
+/// streamed.** `c.md` moves on to `n.md`, which the write kernel stages as a
+/// copy of it, and `h.md`, whose link to `c.md` the cascade respells, moves
+/// into the name it vacates. No composition reads the bytes leaving `c.md`:
+/// planning reads it streamed once, and the applier's check — observing,
+/// recomposing and judging links — reads it streamed once too, whatever
+/// refills it. The preview answers the plan and the apply writes every
+/// target. Observed again once the plan landed, `c.md` holds the bytes the
+/// composition wrote there, not carried ones, so it is read whole for them
+/// after the streamed read that found it landed; applied again, every target
+/// is found.
+#[test]
+fn a_carried_name_refilled_by_a_composed_document_is_read_streamed() {
+    let mut fixture = Fixture::new(&[("c.md", "# C\n"), ("h.md", "[x](c.md)\n")]);
+    let operations = vec![moving("c.md", "n.md"), moving("h.md", "c.md")];
+    let plan = {
+        let tree =
+            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+        let links = fixture.links();
+        let planning = Counted::over(&tree);
+        let resolution = crate::planner::resolve::resolve(
+            AuthoredPlan::new(crate::planner::links::testing::vault(), operations.clone()),
+            fixture.root_identity(),
+            &BTreeSet::new(),
+            &planning,
+            &links.index(),
+        )
+        .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"));
+        assert_eq!(resolution.unresolved, Vec::new());
+        assert_eq!(
+            planning.reads("c.md"),
+            Reads {
+                whole: 0,
+                streamed: 1
+            },
+            "planning holds no copy"
+        );
+        let applying = Counted::over(&tree);
+        let declared = crate::derivation::Declared::unpinned();
+        check(&resolution.plan, &applying, &declared, &links.index()).expect("the plan checks");
+        assert_eq!(
+            applying.reads("c.md"),
+            Reads {
+                whole: 0,
+                streamed: 1
+            },
+            "the applier holds no copy"
+        );
+        resolution.plan
+    };
+
+    let (previewed, _) = fixture.preview(plan.clone()).expect("the preview answers");
+    assert_eq!(previewed, plan);
+    let finished = applied(fixture.apply(plan.clone()));
+    assert!(
+        results(&finished)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Wrote),
+        "{:?}",
+        results(&finished)
+    );
+    assert_eq!(fixture.read("n.md").as_deref(), Some("# C\n"));
+    assert_eq!(fixture.read("c.md").as_deref(), Some("[x](n.md)\n"));
+    assert_eq!(fixture.tree(), vec!["c.md", "n.md"]);
+    fixture.assert_store_is_a_build_from_zero();
+
+    {
+        let tree =
+            TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+        let landed = Counted::over(&tree);
+        let units = units(&plan, tree.normalizer());
+        let (states, _) = observe(&plan, &units, &landed).expect("a readable vault");
+        let at = plan
+            .transitions
+            .iter()
+            .position(|transition| transition.path.as_str() == "c.md")
+            .expect("a transition at c.md");
+        assert!(
+            matches!(states[at], TargetState::Landed(Some(Body::Held(_)))),
+            "{:?}",
+            states[at]
+        );
+        assert_eq!(
+            landed.reads("c.md"),
+            Reads {
+                whole: 1,
+                streamed: 1
+            }
+        );
+    }
+    let again = applied(fixture.apply(plan));
+    assert!(
+        results(&again)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Found),
+        "{:?}",
+        results(&again)
+    );
+}
+
+/// **A carried name a case-only rename refills is read streamed.** On a
+/// root that folds case, `a.md` moves on to `t.md`, which the write kernel
+/// stages as a copy of it, `b.md` moves into the name it vacates, and the
+/// rename to `A.md` publishes `b.md`'s content as one respell, which holds
+/// it — so `b.md` is not carried, while `a.md` is. No composition reads the
+/// bytes leaving `a.md`, so the applier observes the respell's name
+/// streamed once and recomposes the plan as itself. Observed once the plan
+/// landed, the new spelling holds `b.md`'s bytes, which are not carried, so
+/// they are read whole after the streamed read that found them.
+#[test]
+fn a_carried_name_a_respell_refills_is_read_streamed() {
+    use crate::planner::view::memory::MemoryVault;
+
+    let operations = vec![
+        moving("a.md", "t.md"),
+        moving("b.md", "a.md"),
+        moving("a.md", "A.md"),
+    ];
+    let before = MemoryVault::with(&[("a.md", "# A\n"), ("b.md", "# B\n")])
+        .folding_case()
+        .streaming();
+    let plan = crate::planner::links::testing::resolve_over_files(
+        AuthoredPlan::new(crate::planner::links::testing::vault(), operations),
+        RootIdentity::from_device_and_inode(1, 2),
+        &BTreeSet::new(),
+        &before,
+    )
+    .unwrap_or_else(|failure| panic!("the plan is planned: {failure:?}"))
+    .plan;
+    let units = units(&plan, before.normalizer());
+    assert!(
+        units
+            .iter()
+            .any(|unit| matches!(unit, crate::applier::observe::Unit::Respell { .. })),
+        "{units:?}"
+    );
+
+    let applying = Counted::over(&before);
+    let (states, _) = observe(&plan, &units, &applying).expect("an infallible view");
+    assert_eq!(
+        applying.reads("a.md"),
+        Reads {
+            whole: 0,
+            streamed: 1
+        }
+    );
+    let lineage = crate::applier::observe::recorded_lineage(&plan, before.normalizer());
+    assert!(matches!(
+        crate::applier::recompose::recompose(&plan, &states, &lineage, &applying)
+            .expect("an infallible view"),
+        crate::applier::recompose::Recomposed::Sound(_)
+    ));
+    assert_eq!(
+        applying.reads("a.md"),
+        Reads {
+            whole: 0,
+            streamed: 1
+        },
+        "the recomposition holds no copy"
+    );
+
+    let landed = MemoryVault::with(&[("A.md", "# B\n"), ("t.md", "# A\n")])
+        .folding_case()
+        .streaming();
+    let applying = Counted::over(&landed);
+    let (states, _) = observe(&plan, &units, &applying).expect("an infallible view");
+    let at = plan
+        .transitions
+        .iter()
+        .position(|transition| transition.path.as_str() == "A.md")
+        .expect("a transition at A.md");
+    assert!(
+        matches!(states[at], TargetState::Landed(Some(Body::Held(_)))),
+        "{:?}",
+        states[at]
+    );
+    assert_eq!(
+        applying.reads("a.md"),
+        Reads {
+            whole: 1,
+            streamed: 1
+        }
+    );
+}
+
+/// **On a volume that folds case, a carried name a respell refills previews
+/// and applies as its plan.** The preview answers the plan, the apply writes
+/// every target, and applied again every target is found.
+#[test]
+fn a_carried_name_a_respell_refills_applies_on_a_folding_root() {
+    if !super::volume_folds("a_carried_name_a_respell_refills_applies_on_a_folding_root") {
+        return;
+    }
+    let mut fixture = Fixture::new(&[("a.md", "# A\n"), ("b.md", "# B\n")]);
+    let plan = fixture.plan(vec![
+        moving("a.md", "t.md"),
+        moving("b.md", "a.md"),
+        moving("a.md", "A.md"),
+    ]);
+    let (previewed, _) = fixture.preview(plan.clone()).expect("the preview answers");
+    assert_eq!(previewed, plan);
+    let finished = applied(fixture.apply(plan.clone()));
+    assert!(
+        results(&finished)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Wrote),
+        "{:?}",
+        results(&finished)
+    );
+    assert_eq!(fixture.tree(), vec!["A.md", "t.md"]);
+    assert_eq!(fixture.read("t.md").as_deref(), Some("# A\n"));
+    assert_eq!(fixture.read("A.md").as_deref(), Some("# B\n"));
+    fixture.assert_store_is_a_build_from_zero();
+    let again = applied(fixture.apply(plan));
+    assert!(
+        results(&again)
+            .iter()
+            .all(|(_, result)| *result == TargetResult::Found),
+        "{:?}",
+        results(&again)
+    );
+}
+
 /// **Planning and the applier carry the same documents.** Over a corpus of
 /// plans — chains, a rotation through a temporary name, a document moved
 /// away and back, a move beside an edit or a delete of what it moved, a move
-/// whose cascade rewrites holders, a moved document naming itself — the
-/// targets planning composes as carried are exactly those the applier's
-/// recomposition does, and the applier observes a target streamed exactly
-/// where planning held no byte of it: its before-state absent or read
-/// streamed, and its after-state absent or carried.
+/// whose cascade rewrites holders, a moved document naming itself, a carried
+/// name refilled by a document composition writes, by a move or by a
+/// case-only rename — the targets planning composes as carried are exactly
+/// those the applier's recomposition does, and the applier reads each
+/// target once, streamed exactly where planning held no byte of what it
+/// finds there: a name whose before-state planning read only streamed,
+/// whatever refills it, and a name nothing stood at whose after-state is
+/// absent or carried. Every other target is read whole once.
+///
+/// On a root that does not fold case, the case-only rename is a move to a
+/// name of its own; the plan on a folding root is held by
+/// `a_carried_name_a_respell_refills_is_read_streamed`.
 #[test]
 fn planning_and_the_applier_carry_the_same_documents() {
     let files = [
@@ -747,6 +958,12 @@ fn planning_and_the_applier_carry_the_same_documents() {
         vec![moving("c.md", "archive/c2.md")],
         vec![moving("me.md", "archive/me2.md")],
         vec![moving("me.md", "archive/me2.md"), moving("b.md", "me.md")],
+        vec![moving("c.md", "n.md"), moving("h.md", "c.md")],
+        vec![
+            moving("a.md", "t.md"),
+            moving("b.md", "a.md"),
+            moving("a.md", "A.md"),
+        ],
     ];
     for operations in corpus {
         let fixture = Fixture::new(&files);
@@ -788,35 +1005,41 @@ fn planning_and_the_applier_carry_the_same_documents() {
             "{operations:?}"
         );
 
-        let streamed_in_planning = planning.streamed();
-        let whole_in_planning = planning.whole();
         let carried = carried_in(&planned);
-        let held_nothing: BTreeSet<String> = plan
+        let expected: Vec<(String, Reads)> = plan
             .transitions
             .iter()
-            .filter(|transition| {
+            .map(|transition| {
                 let at = transition.path.as_str();
-                let before = transition.before == FileState::absent()
-                    || (streamed_in_planning.contains(at) && !whole_in_planning.contains(at));
-                let after = transition.after == FileState::absent()
-                    || carried.iter().any(|(path, _)| path == at);
-                before && after
+                let streamed = if transition.before == FileState::absent() {
+                    transition.after == FileState::absent()
+                        || carried.iter().any(|(path, _)| path == at)
+                } else {
+                    planning.reads(at).whole == 0
+                };
+                let reads = if streamed {
+                    Reads {
+                        whole: 0,
+                        streamed: 1,
+                    }
+                } else {
+                    Reads {
+                        whole: 1,
+                        streamed: 0,
+                    }
+                };
+                (at.to_string(), reads)
             })
-            .map(|transition| transition.path.as_str().to_string())
             .collect();
-        let observed_streamed: BTreeSet<String> = plan
+        let observed: Vec<(String, Reads)> = plan
             .transitions
             .iter()
-            .map(|transition| transition.path.as_str().to_string())
-            .filter(|at| applying.reads(at).streamed > 0)
+            .map(|transition| {
+                let at = transition.path.as_str();
+                (at.to_string(), applying.reads(at))
+            })
             .collect();
-        assert_eq!(observed_streamed, held_nothing, "{operations:?}");
-        assert!(
-            observed_streamed
-                .iter()
-                .all(|at| applying.reads(at).whole == 0),
-            "{operations:?}: a target observed streamed is read whole too"
-        );
+        assert_eq!(observed, expected, "{operations:?}");
     }
 }
 
