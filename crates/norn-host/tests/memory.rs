@@ -48,10 +48,11 @@
 //! retention a shape builds after the find's pages are gone shows only once it
 //! climbs past them.
 //!
-//! **A plan is held five ways, over one planning child.** The child previews
-//! a move of a small document and of a large one that change no bytes, then
-//! previews a `set --where`, a hub move with its cascade and a delete, applies
-//! each of those three as previewed, and then applies the two moves. A
+//! **A plan is held six ways, over one planning child.** The child previews
+//! a move of a small document and of a large one that change no bytes and the
+//! same pair of moves that rewrite their own links, then previews a `set
+//! --where`, a hub move with its cascade and a delete, applies each of those
+//! three as previewed, and then applies the four moves. A
 //! ceiling holds its whole-process peak at `realistic`, and two heap pairs
 //! hold, across the two profiles, what the mix's previews alone raised the
 //! heap by and what the whole mix with its applies did, because a plan's
@@ -77,8 +78,13 @@
 //! watcher echo of a large landed document costs about its body on the host's
 //! own threads and would otherwise land in whichever stretch it overlapped.
 //! What neither pair bars is a move the index does not vouch for, which reads
-//! the document whole once, or a move that rewrites the moved document's own
-//! links, which reads it whole and holds the bytes it authors.
+//! the document whole once.
+//!
+//! **A move that rewrites its own links is barred at a declared floor.** It
+//! authors the rewritten document and verifies it by re-scanning it whole
+//! beside the body it replaces, so its large preview may exceed the small one
+//! by about five bodies and one chunk, the three allocations that verification
+//! holds at once: a regression bar on today's floor, not a target.
 //!
 //! # What the measurement charges to whom
 //!
@@ -678,6 +684,20 @@ const PLAN_LARGE_TO: &str = "memory-plan-large-moved/memory-plan-large.md";
 const PLAN_SMALL_FROM: &str = "memory-plan-small/memory-plan-small.md";
 const PLAN_SMALL_TO: &str = "memory-plan-small-moved/memory-plan-small.md";
 
+/// Where the large and the small relinking document stand before their moves
+/// and where each is moved to. Each body opens with a relative link to
+/// [`PLAN_RELINKED_TARGET`] standing beside it, which a move into another
+/// folder breaks, so each move rewrites its own document. Each of the large
+/// document's paths is the length of the small one's.
+const PLAN_RELINK_LARGE_FROM: &str = "memory-plan-relink-large/memory-plan-relink.md";
+const PLAN_RELINK_LARGE_TO: &str = "memory-plan-relink-large-moved/memory-plan-relink.md";
+const PLAN_RELINK_SMALL_FROM: &str = "memory-plan-relink-small/memory-plan-relink.md";
+const PLAN_RELINK_SMALL_TO: &str = "memory-plan-relink-small-moved/memory-plan-relink.md";
+
+/// The file name of the document each relinking document links to, which
+/// stands in the relinking document's own folder.
+const PLAN_RELINKED_TARGET: &str = "memory-plan-relink-target.md";
+
 /// Where the derivation controls write the large and the small document, the
 /// same bytes as the moved pair's, from outside the vault while it is
 /// attached. The two paths are one length.
@@ -686,24 +706,27 @@ const PLAN_DERIVED_SMALL: &str = "memory-plan-derived-small/memory-plan-derived.
 
 /// What each planned write of the planning child writes, as the apply
 /// answers its targets: the set's matches, the hub with its in-links' rewrites
-/// and its new place, the deleted document, and each moved document's two
-/// places.
-const PLAN_WRITES: [(&str, usize); 5] = [
+/// and its new place, the deleted document, and each moved or relinked
+/// document's two places.
+const PLAN_WRITES: [(&str, usize); 7] = [
     ("set", PLAN_SET_MATCHES),
     ("move", PLAN_HUB_IN_LINKS + 2),
     ("delete", 1),
     ("move-small", 2),
     ("move-large", 2),
+    ("relink-small", 2),
+    ("relink-large", 2),
 ];
 
 /// How many documents [`plant_plan_subjects`] plants.
-const PLAN_PLANTED: usize = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1 + 2;
+const PLAN_PLANTED: usize = PLAN_SET_MATCHES + 1 + PLAN_HUB_IN_LINKS + 1 + 2 + 4;
 
 /// Plant the planning child's subjects into `vault`'s tree, before anything
 /// attaches it: [`PLAN_SET_MATCHES`] documents carrying [`PLAN_SET_FIELD`],
 /// the hub with [`PLAN_HUB_IN_LINKS`] documents linking it by its bare stem,
-/// the document the mix deletes, and the large and the small document the
-/// size pair moves, their bodies written without a link.
+/// the document the mix deletes, the large and the small document the size
+/// pair moves, their bodies written without a link, and the large and the
+/// small document the relinking pair moves, each beside the one it links to.
 fn plant_plan_subjects(vault: &attach::Vault) {
     let plant = |at: &str, content: &[u8]| {
         let path = vault.path().join(at);
@@ -727,6 +750,33 @@ fn plant_plan_subjects(vault: &attach::Vault) {
     plant(PLAN_DELETED, b"no link names me\n");
     plant(PLAN_LARGE_FROM, &unlinked_body(PLAN_LARGE_BODY_BYTES));
     plant(PLAN_SMALL_FROM, &unlinked_body(PLAN_SMALL_BODY_BYTES));
+    for (from, bytes) in [
+        (PLAN_RELINK_LARGE_FROM, PLAN_LARGE_BODY_BYTES),
+        (PLAN_RELINK_SMALL_FROM, PLAN_SMALL_BODY_BYTES),
+    ] {
+        plant(from, &relinking_body(bytes));
+        let (folder, _) = from
+            .rsplit_once('/')
+            .expect("a relinking document's folder");
+        plant(&format!("{folder}/{PLAN_RELINKED_TARGET}"), b"linked\n");
+    }
+}
+
+/// A document of exactly `bytes` bytes whose body opens with a relative
+/// Markdown link to [`PLAN_RELINKED_TARGET`] and goes on in plain lines that
+/// hold no other link.
+fn relinking_body(bytes: usize) -> Vec<u8> {
+    let mut content = format!(
+        "---\nmemory_plan_size: relinked\n---\nSee [the target]({PLAN_RELINKED_TARGET}).\n"
+    )
+    .into_bytes();
+    let line = b"a plain line of body text that names no other document\n";
+    while content.len() < bytes {
+        content.extend_from_slice(line);
+    }
+    content.truncate(bytes - 1);
+    content.push(b'\n');
+    content
 }
 
 /// A document of exactly `bytes` bytes: a frontmatter block and a body of
@@ -806,7 +856,7 @@ fn the_gate_profile_plans_inside_its_memory_bar() {
 /// **The reading is a high-water**, the blind spot
 /// [`the_read_mix_heap_grows_inside_its_allowance_from_the_ambiguity_profile_to_the_gate_profile`]
 /// declares: memory planning builds and frees under the previews' own peak,
-/// about 171 KB above its mark, never raises the reading. Work proportional to
+/// about 160 KB above its mark, never raises the reading. Work proportional to
 /// the vault while planning is the counter lane's to refuse, where
 /// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
 /// `set --where`'s steps flat across the same two scales. The high-water's
@@ -844,8 +894,8 @@ fn the_plan_previews_heap_grows_inside_its_allowance_from_the_ambiguity_profile_
 ///
 /// **The reading is a high-water, and the mix's peak is high.** Memory
 /// planning or applying builds and frees under it never raises the reading,
-/// which at these profiles leaves a working set of about 172 KB unseen, up to
-/// about 85 bytes for each of `realistic`'s documents. Work proportional to
+/// which at these profiles leaves a working set of about 161 KB unseen, up to
+/// about 79 bytes for each of `realistic`'s documents. Work proportional to
 /// the vault is the counter lane's to refuse, where
 /// `counter_gate::a_where_apply_costs_the_same_at_both_scales` holds a
 /// `set --where`'s steps flat across the same two scales. The high-water's
@@ -961,6 +1011,31 @@ fn applying_a_move_holds_no_more_heap_than_deriving_the_document_it_lands() {
          bytes deriving the same documents alone grew by and the {allowance} byte allowance: the \
          applies held {apply_large} and {apply_small} bytes and the derivations {derive_large} \
          and {derive_small}",
+    );
+}
+
+/// **Previewing a move that rewrites the moved document's own links holds no
+/// more than its declared floor of about five bodies**, as a difference in
+/// heap bytes between previewing the move of a large relinking document and of
+/// a small one.
+///
+/// The planning child at `realistic` previews both moves right after the
+/// byte-identical pair's, before any apply, each under its own mark set on a
+/// settled heap: one of a document of [`PLAN_SMALL_BODY_BYTES`] and one of
+/// [`PLAN_LARGE_BODY_BYTES`], each opening with a relative link that the move
+/// into another folder breaks. The plan authors the rewritten document and
+/// verifies it with a full re-scan beside the body it replaces:
+/// [`PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records the three allocations that floor is, and why it stands.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn previewing_a_move_that_rewrites_its_own_links_holds_no_more_than_its_declared_floor() {
+    let reading = plan_child("plan-relink-preview", "realistic");
+    hold_size_pair(
+        "previewing a move that rewrites its own links",
+        reading.heap("relink-preview-small"),
+        reading.heap("relink-preview-large"),
+        baselines::PLAN_RELINKING_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
     );
 }
 
@@ -1095,13 +1170,16 @@ fn plan_child(label: &str, profile: &str) -> PlanReading {
 /// this thread beside it, so a preview after an apply stacks on that echo or
 /// not by timing alone: the mix read up to 66 KB apart across runs that way,
 /// and the echo of a large landed document costs about its body. So the size
-/// pair's two moves are previewed first, right after the attach and each
-/// under its own mark, and the mix's three previews next under one mark read
+/// pair's two moves are previewed first, right after the attach, then the
+/// relinking pair's two, each under its own mark, and the mix's three
+/// previews next under one mark read
 /// before its first apply. The mix's applies are read under that same mark,
 /// where what is left to move the reading is the watcher's own threads taking
 /// an apply's publications in while it commits, between two states about
 /// 31 KB apart. The size pair's moves are applied after the mix, each under
-/// its own mark read as its apply answers.
+/// its own mark read as its apply answers, and the relinking pair's after
+/// them, unmeasured but each on a settled heap, so the plans each preview
+/// answered do land without stacking on another write's echo.
 ///
 /// **The derivation controls come last.** Each writes a document of one size
 /// outside the vault, settles, marks, renames it in, and reads the mark once
@@ -1135,10 +1213,23 @@ fn plan_and_report(root: &Path) {
     heaps.push(("move-preview-small", reading));
     let (move_large, reading) = previewed_move("move-large", PLAN_LARGE_FROM, PLAN_LARGE_TO);
     heaps.push(("move-preview-large", reading));
-    for (write, plan) in [("move-small", &move_small), ("move-large", &move_large)] {
-        assert!(
-            plan.operations[0].cascade.is_empty(),
-            "the {write} move planned rewrites of a document whose body names no link: {:?}",
+    let (relink_small, reading) =
+        previewed_move("relink-small", PLAN_RELINK_SMALL_FROM, PLAN_RELINK_SMALL_TO);
+    heaps.push(("relink-preview-small", reading));
+    let (relink_large, reading) =
+        previewed_move("relink-large", PLAN_RELINK_LARGE_FROM, PLAN_RELINK_LARGE_TO);
+    heaps.push(("relink-preview-large", reading));
+    for (write, plan, rewrites) in [
+        ("move-small", &move_small, 0),
+        ("move-large", &move_large, 0),
+        ("relink-small", &relink_small, 1),
+        ("relink-large", &relink_large, 1),
+    ] {
+        assert_eq!(
+            plan.operations[0].cascade.len(),
+            rewrites,
+            "the {write} move planned a cascade other than {rewrites} rewrites of its own links: \
+             {:?}",
             plan.operations[0].cascade
         );
     }
@@ -1201,6 +1292,16 @@ fn plan_and_report(root: &Path) {
     heaps.push(("move-apply-small", reading));
     let reading = measured_apply("move-large", move_large);
     heaps.push(("move-apply-large", reading));
+    // Unmeasured, but each on a settled heap, so no echo of the large move
+    // or of the other relink is handled beside it and stacks on the
+    // process's peak.
+    for (write, plan) in [
+        ("relink-small", relink_small),
+        ("relink-large", relink_large),
+    ] {
+        settle_heap();
+        landed(write, plan);
+    }
 
     for (stretch, at, bytes) in [
         ("derive-small", PLAN_DERIVED_SMALL, PLAN_SMALL_BODY_BYTES),
@@ -1372,11 +1473,13 @@ struct PlanReport {
 
 impl PlanReport {
     /// The heap stretches a planning child measures.
-    const STRETCHES: [&str; 8] = [
+    const STRETCHES: [&str; 10] = [
         "previews",
         "mix",
         "move-preview-small",
         "move-preview-large",
+        "relink-preview-small",
+        "relink-preview-large",
         "move-apply-small",
         "move-apply-large",
         "derive-small",
