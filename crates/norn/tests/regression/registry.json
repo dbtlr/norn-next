@@ -1202,7 +1202,7 @@
       "name": "preconditions-come-from-plan-time",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses. A resolved plan applies only while every before-state and condition it records still holds; operations carry no anchor beyond their own conditions, and re-sending them is a new change. The planner owns no comparison rule: a `where` selector is judged by the query layer's comparison rule, and an expected value is an exact compare of the field's value tree with no coercion.",
+      "property": "Preconditions are captured at plan or forecast time and never re-derived at apply, so a hash hydrated from apply-time state is tautological. What the operator confirmed is what applies, or the operation refuses. A resolved plan checks its recorded states and plan conditions. Targets at their after-states are complete. Reapplying the plan resumes interrupted publications. Operations carry no anchor beyond their own conditions, and re-sending them is a new change. The planner owns no comparison rule: a `where` selector is judged by the query layer's comparison rule, and an expected value is an exact compare of the field's value tree with no coercion.",
       "sources": ["NRN-151", "NRN-398", "NRN-443", "norn-legacy engineering learnings"],
       "binding": {
         "status": "bound",
