@@ -13,12 +13,16 @@ A Markdown file in a vault whose authored frontmatter and body are part of the s
 _Avoid_: Note, file (when the distinction matters)
 
 **Vault schema**:
-User-authored rules defining the valid structure and values of vault documents.
+A user-authored declaration of the valid structure and values of vault documents: field types and shapes, the tag facet, schema rules, path rules, creation rules and the inbox.
 _Avoid_: Doctrine, schema (unqualified)
 
 **Schema content model**:
-The typed reading of a vault schema's bytes — the declared fields with their types and rules, the declared tag facet, the declared folders, the path rules, the creation rules, and the inbox. It is a pure function of those bytes, so its identity is the schema fingerprint, and it is what derivation and the read surface act on rather than the bytes themselves.
+The typed reading of a vault schema's bytes — the declared fields with their types and shapes, the schema rules, the declared tag facet, the path rules, the creation rules, and the inbox. It is a pure function of those bytes, so its identity is the schema fingerprint, and it is what derivation and the read surface act on rather than the bytes themselves.
 _Avoid_: Parsed schema
+
+**Schema rule**:
+A named part of a vault schema stating what the vault documents it selects must hold. It selects by what a document's frontmatter says, and a path narrows that selection or, alone, adds an area's requirements; a document is held to every schema rule that selects it at once, and where it stands never decides what it is.
+_Avoid_: Rule (unqualified; a creation rule is a different concept), folder rule, validation rule
 
 **Creation rule**:
 A named rule in a vault schema for making a new vault document: where it is written, the values a caller must supply, and the frontmatter and body it starts with. Every value it varies on is fixed when the change that makes the document is planned.
@@ -54,6 +58,10 @@ A plan whose operations have been resolved into transitions, together with the c
 A fact a plan depends on, recorded with the plan and checked before any target is published. An author condition is one the operation's author observed, and on a file the plan writes it becomes that target's before-state; a plan condition is one the planning read: what a file the plan does not write holds, or what one link resolves to before the plan and after it.
 _Avoid_: Precondition, fingerprint
 
+**Confidence level**:
+How a change a repair proposes was reached: declared, when the vault schema's author wrote the fix; derived, when its answer is provably the only one; or suggested, when it is a deterministic heuristic's single best answer, without proof. A repair admits proposed changes down to a chosen level and skips the rest.
+_Avoid_: Certainty, score (a suggestion's score is its evidence, not its level), high or medium
+
 **Root identity**:
 The identity of the directory a vault is rooted at, independent of the address that names it. A resolved plan carries it, so the plan applies only to the vault it was planned over.
 _Avoid_: Vault root (for the identity rather than the path)
@@ -76,7 +84,11 @@ A resolved outcome in which Norn performs no requested mutation or answers no re
 _Avoid_: Error, failure (when the distinction matters)
 
 **Finding**:
-A structured statement that vault state violates a rule or cannot be resolved unambiguously. A **place-scoped** finding states that no document is derived at the place it names, so a readable document standing there withholds it; a **document-scoped** finding states something about the document derived at that place and stands beside it.
+A structured statement that vault state violates its vault schema or cannot be resolved unambiguously. A **place-scoped** finding states that no document is derived at the place it names, so a readable document standing there withholds it; a **document-scoped** finding states something about the document derived at that place and stands beside it.
+
+**Repair advisory**:
+A statement a repair makes about the vault schema rather than about one document — a field holding values of mixed types, a schema rule selecting no document — carrying its evidence and the schema text that would answer it, never a change. It is computed when a repair runs and never stored.
+_Avoid_: Advisory (unqualified, where a repair's is meant; an attach advisory, a forecast's link advisory and a count's mixed-offset advisory are other in-band notices), warning (a finding severity), hint
 
 **Quarantined document**:
 A vault document Norn cannot decode, which therefore contributes no derived state and is named by a finding carrying its path and the cause, except while a readable document occupies the same rendered place. Quarantine is scoped to the one document; the rest of the vault is derived and served.
