@@ -1,21 +1,34 @@
 ---
-status: superseded
-superseded-by: 0037-a-plan-refuses-exactly-the-violations-it-introduces.md
-date: 2026-10-01
+status: accepted
+date: 2026-10-05
 ---
 
-# 0032 — a plan resolves into per-file transitions whose states say whether their bytes are a document, every target is checked and staged before any is published, and re-applying a resolved plan finishes it
+# 0037 — a plan resolves into per-file transitions whose states say whether their bytes are a document, every target is checked and staged before any is published, a plan refuses exactly the violations it introduces under the schema it lands under, and re-applying a resolved plan finishes it
 
-Supersedes [ADR 0031](0031-a-plan-is-staged-whole-and-finished-by-reapplying.md), whose
-contract this decision restates whole. ADR 0031 ruled that each side of a transition is
-either absent or a content hash. A plan that moves, removes or replaces files also changes
-what other documents' links resolve to, and those resolutions are conditions the applier
-reads as the vault would stand at the plan's after-state. A file a hash names may be a
-document or a quarantined file whose bytes do not decode, and only a document can be a
-link's target. For a target an interrupted apply already landed, the applier no longer
-holds the before-bytes that would say which it was, so a hash alone cannot make the
-condition exact. **A present file state now records, beside its hash, whether its bytes
-decode as a vault document.** Everything else ADR 0031 ruled stands as it was.
+Supersedes [ADR 0032](0032-a-file-state-says-whether-its-bytes-are-a-document.md), whose
+contract this decision restates whole, as ADR 0032 restated [ADR
+0031](0031-a-plan-is-staged-whole-and-finished-by-reapplying.md) with one refinement: a
+present file state records, beside its hash, whether its bytes decode as a vault document,
+because a plan's link conditions count only documents as link targets and the applier no
+longer holds a landed target's before-bytes. ADR 0032 also counted the findings a repair
+acts on among a plan's conditions, and refused every violation on a field a plan writes.
+Repair compiles findings into resolved plans under schema rules that combine per field and
+judge a list element by element ([ADR
+0035](0035-a-schema-rule-selects-documents-by-their-frontmatter.md), [ADR
+0036](0036-a-repair-fix-is-declared-on-the-constraint-it-serves.md)), and neither clause
+holds up there. No change can move a finding a plan fixes without changing a target's bytes,
+a link resolution, a document a fix read, or the schema, and each of those has its own
+guard, so a findings condition adds nothing and was never carried on the wire. And a repair
+that rewrites one element of a list writes the field, so the field-level rule would refuse
+it over every element it leaves standing. **No finding is a condition: a repair plan cites
+the finding generation it read as provenance only. Evidence a repair fix read from another
+document is guarded by a content-hash condition on that document, and a fix that writes a
+link records a written-link condition on the address it writes and a replaced-address
+condition on any address it replaces, a condition kind of its own carried beside the link
+resolutions the plan's operations change. A plan refuses exactly the violation identities it
+introduces — a violation's identity being its kind, field, offending value and combined
+constraint — and a previewed plan applies where its results pass that check under the schema
+they land under.** Everything else ADR 0032 ruled stands as it was.
 
 A plan that touches many documents cannot be published atomically: the filesystem offers
 one atomic publication per name, and `norn-fs`'s write protocol makes each of those safe on
@@ -70,16 +83,29 @@ one planner and the one applier invariant 4 names.
   whose content dependencies form a cycle, such as two documents exchanging places, is
   refused at planning; the caller splits it into plans that each finish.
 - **Conditions the planning read travel with the plan.** A plan whose effect depends on
-  facts it does not write — the documents a link target resolves to, the backlinks a
-  removal would break, the findings a repair acts on — carries them as conditions; a repair
-  plan also cites the finding generation it read, as provenance rather than a condition.
-  An author's condition on a file the plan writes is checked at planning and becomes that
-  target's before-state. Planning records each condition as the vault would stand with every
-  target of the plan at its after-state, and the applier checks it the same way, landed or
-  not, after taking in the filesystem facts the watcher has delivered; so a plan's own
-  progress never changes a condition, and only a change to a file outside the plan's
-  targets refuses one. A foreign change the watcher has not yet reported is outside what a
-  condition can see; a link it breaks surfaces as a link-health finding.
+  facts it does not write — the documents a link target resolves to, the backlinks a removal
+  would break — carries them as conditions: content hashes, and the link resolutions its
+  operations change. **No finding is a condition**: a repair plan cites the finding
+  generation it read as provenance, which the applier never checks. Evidence a repair fix
+  read from a document the plan does not write — the heading a missing anchor is fixed to,
+  the content a followed move was matched by — travels as a content-hash condition on that
+  document. A repair fix that writes a link records a **written-link condition**, the
+  resolution its written address has at the plan's after-state, and one that rewrites a link
+  also records a **replaced-address condition**, the resolution the replaced address has at
+  the after-state, none for a broken link; so a written target that disappears or gains a
+  competitor, or a broken link's old target that reappears, refuses the plan. These are a
+  condition kind of their own, carried beside the link resolutions the plan's operations
+  change and never among them: the applier recomputes those resolutions from the operations
+  alone and takes every one the plan carries as a member of that set, which holds no entry
+  for an address the after-state drops. Only repair's planner records them, so an ordinary
+  write of a link value carries none. An author's condition on a file the plan writes is
+  checked at planning and becomes that target's before-state. Planning records each
+  condition as the vault would stand with every target of the plan at its after-state, and
+  the applier checks it the same way, landed or not, after taking in the filesystem facts
+  the watcher has delivered; so a plan's own progress never changes a condition, and only a
+  change to a file outside the plan's targets refuses one. A foreign change the watcher has
+  not yet reported is outside what a condition can see; a link it breaks surfaces as a
+  link-health finding.
 - **A request states its mode.** A request either previews, answering with the resolved
   plan and its forecast and writing nothing, or applies. There is no default mode at the
   wire.
@@ -132,10 +158,19 @@ one planner and the one applier invariant 4 names.
   before, and the host keeps no record of an earlier attempt, so the forecast marks every
   drifted target as possibly already carrying this plan's change. Applying the fresh plan
   is the caller's decision. Auto-rebase stays rejected.
-- **A plan refuses the schema violations it introduces.** A violation on a field the plan
-  writes, or one that did not stand before the plan, refuses; an unrelated violation
-  already present in a target does not. A plan that changes a vault control file changes
-  nothing else.
+- **A plan refuses exactly the schema violations it introduces.** A violation's identity is
+  its kind, the field it stands on, the offending value it names and the combined constraint
+  it breaches ([ADR 0035](0035-a-schema-rule-selects-documents-by-their-frontmatter.md)); a
+  violation about the whole document names no field and no value, and an undeclared tag's
+  identity is its kind and the tag, wherever the document writes it, in frontmatter or body.
+  A violation whose identity did not stand before the plan refuses. A standing violation
+  whose identity is unchanged does not, even on a field the plan writes or for a tag the
+  plan writes a different number of times, and an unrelated violation already present in a
+  target does not either. The check runs under the vault schema pinned when the plan
+  applies: a resolved plan applies where its composed results introduce no violation under
+  the schema they land under, a violation that schema finds already standing included, and
+  refuses where they introduce one. A plan that changes a vault control file changes nothing
+  else.
 - **A plan names its vault by address and carries the vault's root identity.** Applied to a
   vault whose root identity differs, it refuses.
 - **Applies serialize per registration; one uninterrupted apply is one changeset.** An
@@ -180,6 +215,21 @@ one planner and the one applier invariant 4 names.
   changes document-ness without changing presence, so the condition would be inexact in
   both directions.
 
+- **A findings condition** — a repair plan records the findings it acts on, and the applier
+  refuses where they changed. Rejected: every change that could move a finding a plan fixes
+  in a target changes that target's bytes, which its before-state refuses; what a fix rests
+  on elsewhere is a link resolution or another document's content, which conditions already
+  record; and re-judgment refuses a result the landing schema rejects. A condition on the
+  finding generation would refuse a plan over every unrelated derivation.
+- **A schema-fingerprint condition** — refuse a plan previewed under another schema.
+  Rejected: a reload that leaves the plan's results passing the write check would refuse it
+  for nothing, and the write check under the schema the plan lands under is the exact test.
+- **Keep the field-level written-field rule** — refuse every standing violation on a field
+  the plan writes, and every standing undeclared tag whose count the plan changes. Rejected:
+  a repair fixing one element of a list writes the field and would refuse over every
+  element it leaves standing, so a list could be repaired only whole; and a write that
+  repeats or drops one occurrence of a tag would refuse over a tag it did not introduce.
+
 ## Consequences
 
 - The `norn-fs` write protocol splits into a staging phase and a publishing phase. A create
@@ -198,3 +248,11 @@ one planner and the one applier invariant 4 names.
   targets are all documents serializes as it did under ADR 0031.
 - Layer 5's repair emits the same plans, carrying the findings it skipped and the finding
   generation it read, and the same applier executes them.
+- What the caller previewed is what applies, and whether it may is judged under the schema
+  it lands under: a reload between a preview and its apply refuses the plan only where its
+  results introduce a violation under the new schema.
+- Where a fix's uniqueness rests on another document's absence — a second document holding
+  the content a followed move was matched by, a closer match for a suggestion — that
+  absence is judged at planning and is not a condition: a second holder or a closer match
+  appearing after the preview does not refuse the plan. A written link target that gains a
+  competing resolution does refuse it, through its written-link condition.

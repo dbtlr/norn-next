@@ -2608,7 +2608,7 @@ very bytes. **A carried move holds no copy of its document once the vault has in
 where the index does not vouch for it, planning and the applier each read the file whole at
 the plan's hash, one copy, and take its links from its bytes** — a declared limit, kept
 because a plan and its re-send must finish over a vault whose index lags its files (ADR
-0032), as a move did before it carried anything. A move an edit, a link rewrite or its own
+0037), as a move did before it carried anything. A move an edit, a link rewrite or its own
 cascade lands on is not carried: it reads the moved document whole, once, and composes from
 that one held copy, and the rewrite it composes is new bytes the plan authors. Verifying a
 rewrite re-scans those bytes whole beside the held copy — the held copy, the rewritten bytes
@@ -2648,7 +2648,7 @@ waits for the outcome through `PendingApply::wait`, after admission, and a calle
 waiting does not abort the apply. Mutation
 preconditions are checked against the states and conditions the plan carries, not against
 the snapshot a planner read through
-([ADR 0032](decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md)).
+([ADR 0037](decisions/0037-a-plan-refuses-exactly-the-violations-it-introduces.md)).
 
 Beside the four kinds that place, edit, move and remove whole documents, a plan carries
 `create_by_rule`, which names a schema's creation rule (the vault's inbox where it names
@@ -2717,7 +2717,7 @@ A control file is no document: it is not judged under the schema, it is no link'
 and the changeset records no row for it. No document operation resolves at a control file's
 path or at a name beneath it, so none writes a control file or makes its path a folder. A
 plan writing a control file beside a document
-operation is `request/plan-invalid` (`control_file_beside_documents`), which is ADR 0032's
+operation is `request/plan-invalid` (`control_file_beside_documents`), which is ADR 0037's
 "a plan that changes a vault control file changes nothing else". Landing one takes nothing
 into service: the watcher's control-file facts are discarded, so the vault keeps serving the
 declaration it pinned and reports the authored file as a reload pending until a reload or a
