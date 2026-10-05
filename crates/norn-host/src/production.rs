@@ -371,8 +371,10 @@ fn apply_over(
     .apply(resolved, &store);
     drop(counted);
     drop(planned_on);
-    if let crate::applier::ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) =
-        outcome
+    if let crate::applier::ApplyOutcome::Unread {
+        refusal: crate::refusal::PageRefused::Damaged(detail),
+        ..
+    } = outcome
     {
         return ApplyEnd::damaged(detail);
     }
@@ -1608,9 +1610,9 @@ impl EntryOps for ProductionEntryOps {
             return Err(JobFailure::LostMaintainership);
         }
         let ended = apply_over(name, attachment, plan, progress, reporter, &self.evidence);
-        // Any answered apply may have committed lane-1 work: an applied one,
-        // and an interrupted one whose landed subset committed. A refusal
-        // committed nothing, and its drain finds nothing new.
+        // Any answered apply may have committed lane-1 work: publication,
+        // or confirmation of another writer's completed targets, even when
+        // this attempt published nothing and answered a refusal.
         if matches!(ended.answer, ApplyEnding::Answered(_)) {
             self.drain_semantic(name, attachment, reporter);
         }

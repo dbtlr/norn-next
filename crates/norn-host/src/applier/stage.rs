@@ -45,6 +45,8 @@ pub(super) struct StagedPlan {
     pub(super) forced: Vec<SchemaViolation>,
     /// Each transition's path as the store names it, by index.
     pub(super) stored: Vec<norn_store::DocumentPath>,
+    /// Each content destination and the source whose before-state it needs.
+    pub(super) content_dependencies: Vec<(usize, usize)>,
 }
 
 /// One publication waiting for its turn.
@@ -66,9 +68,6 @@ pub(super) enum Held {
     Staged(norn_fs::Staged),
     /// A target already at its after-state, which publication confirms.
     Landed(norn_fs::Landed),
-    /// A target whose two states are absence, standing absent: nothing to
-    /// publish or confirm.
-    Nothing,
 }
 
 /// When a publication runs: creates first, then replaces (a respell among
@@ -472,6 +471,7 @@ pub(super) fn stage(
         targets: staged,
         forced,
         stored,
+        content_dependencies: super::observe::content_dependencies(plan, &lineage, normalizer),
     })
 }
 
@@ -835,9 +835,8 @@ fn stage_one(
         },
     )?;
     Ok(match staged {
-        Some(Staging::Staged(staged)) => Held::Staged(staged),
-        Some(Staging::Landed(landed)) => Held::Landed(landed),
-        None => Held::Nothing,
+        Staging::Staged(staged) => Held::Staged(staged),
+        Staging::Landed(landed) => Held::Landed(landed),
     })
 }
 
@@ -878,8 +877,8 @@ pub(super) fn judge(
 
 /// Hand `unit`, with `content`, to the kernel through `kernel` — staging it,
 /// or judging it as staging would — at the place it lands, and answer why
-/// the plan stops where the kernel refuses. `None` for a target whose two
-/// states are absence, which the kernel is not asked about.
+/// the plan stops where the kernel refuses. Every state pair goes through
+/// the kernel, an absent-to-absent target included.
 ///
 /// **A copy's source answers for itself.** The kernel refuses a copy whose
 /// source is not at the hash it names — other bytes, nothing, a link, a
@@ -892,12 +891,16 @@ fn through_kernel<T, K>(
     unit: Unit,
     content: Option<&Written>,
     kernel: K,
-) -> Result<Option<T>, Stop>
+) -> Result<T, Stop>
 where
     K: FnOnce(&Path, norn_fs::Identity, &Path, norn_fs::Transition<'_>) -> Result<T, Refusal>,
 {
     let Some((path, transition)) = kernel_transition(plan, unit, content) else {
-        return Ok(None);
+        return Err(Stop::Invalid(PlanFault::transitions_disagree(
+            unit.transitions()
+                .map(|index| plan.transitions[index].path.clone())
+                .collect(),
+        )));
     };
     let landing = ground.landing(path).map_err(Stop::Failed)?;
     // A target outside the vault is held to its folder as it stands now:
@@ -906,7 +909,7 @@ where
         return Err(drifted_away(path, &landing, &transition));
     };
     match kernel(landing.anchor, root, landing.relative, transition) {
-        Ok(answer) => Ok(Some(answer)),
+        Ok(answer) => Ok(answer),
         Err(refusal) => Err(match classify(&refusal) {
             Classified::Drift(holds) => {
                 let source = match content {
@@ -942,7 +945,7 @@ fn refused_at(refusal: &Refusal) -> Option<&std::path::PathBuf> {
 }
 
 /// The plan path the kernel is asked about for `unit`, and the transition it
-/// is asked for there; `None` for a target whose two states are absence. A
+/// is asked for there; `None` if a write lacks its resolved content. A
 /// copy is asked for as a create or a replace whose content is its source's
 /// (`norn_fs::Content::CopyOf`), its source named below the vault root as the
 /// plan names it.
@@ -985,7 +988,7 @@ fn kernel_transition<'p>(
                         before: kernel_hash(hash),
                     }
                 }
-                _ => return None,
+                (FileState::Absent {}, FileState::Absent {}) => norn_fs::Transition::Absent,
             };
             (&transition.path, kernel)
         }
@@ -1088,7 +1091,6 @@ fn publication_order(
     for (ranked, &position) in by_phase.iter().enumerate() {
         rank[position] = ranked;
     }
-    let index_of = transition_index(plan, normalizer);
     let unit_of: BTreeMap<usize, usize> = units
         .iter()
         .enumerate()
@@ -1096,11 +1098,8 @@ fn publication_order(
         .collect();
     // Each source's unit waits for the units of the targets drawing on it.
     let mut waits: BTreeSet<(usize, usize)> = BTreeSet::new();
-    for (file, drawn) in lineage.drawing() {
-        let (Some(target), Some(source)) = (index_of.get(file), index_of.get(&drawn.from)) else {
-            continue;
-        };
-        let (target, source) = (unit_of[target], unit_of[source]);
+    for (target, source) in super::observe::content_dependencies(plan, lineage, normalizer) {
+        let (target, source) = (unit_of[&target], unit_of[&source]);
         if source != target {
             waits.insert((source, target));
         }

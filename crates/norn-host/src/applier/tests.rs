@@ -603,7 +603,9 @@ fn a_plan_for_another_root_is_refused_with_no_plan() {
     let mut plan = fixture.plan(vec![editing("a.md", "draft", "final")]);
     plan.root = RootIdentity::from_device_and_inode(0, 0);
     match fixture.apply(plan) {
-        ApplyOutcome::RootChanged { expected, found } => {
+        ApplyOutcome::RootChanged {
+            expected, found, ..
+        } => {
             assert_eq!(expected, RootIdentity::from_device_and_inode(0, 0));
             assert_eq!(found, fixture.root_identity());
         }
@@ -1009,6 +1011,109 @@ fn a_changeset_that_cannot_commit_after_every_target_landed_answers_applied_heal
     assert_eq!(fixture.read("a.md").as_deref(), Some("final\n"));
 }
 
+/// A foreign writer can complete a suffix after staging. Stopping an
+/// earlier publication must still report and derive that completed target.
+#[test]
+fn an_interruption_finds_a_suffix_another_writer_completed_after_staging() {
+    let mut fixture = Fixture::new(&[("e.md", "draft\n"), ("gone.md", "gone\n")]);
+    let plan = fixture.plan(vec![
+        creating("n.md", "n\n"),
+        editing("e.md", "draft", "final"),
+        deleting("gone.md"),
+    ]);
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::remove_file(anchor.join("gone.md")).expect("another writer completes the removal");
+        std::fs::write(anchor.join("e.md"), "foreign\n")
+            .expect("another writer changes the replacement");
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+    let envelope = outcome
+        .into_wire()
+        .unwrap()
+        .expect_err("the apply stops after its create");
+    let norn_wire::ErrorDetail::PlanInterrupted { landed, .. } = envelope.detail() else {
+        panic!("an interruption: {envelope:?}");
+    };
+    assert_eq!(*landed, vec![path("gone.md"), path("n.md")]);
+    assert_eq!(fixture.stored_paths(), vec!["e.md", "n.md"]);
+    assert!(fixture.shadows_left().is_empty());
+}
+
+/// A refused attempt still owes reconciliation when confirming another
+/// writer's progress cannot commit. The fresh plan has dropped that target.
+#[test]
+fn a_refusal_keeps_the_original_targets_to_heal_when_confirmed_progress_cannot_commit() {
+    let mut fixture = Fixture::new(&[("e.md", "draft\n"), ("gone.md", "gone\n")]);
+    let plan = fixture.plan(vec![editing("e.md", "draft", "final"), deleting("gone.md")]);
+    norn_store::induced_failure::execute_out_of_band(
+        &mut fixture.store,
+        "CREATE TRIGGER refuse_death BEFORE DELETE ON documents BEGIN SELECT RAISE(ABORT, 'induced'); END;",
+    ).expect("the changeset failure is arranged");
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::remove_file(anchor.join("gone.md")).expect("another writer completes the removal");
+        std::fs::write(anchor.join("e.md"), "foreign\n")
+            .expect("another writer removes the anchor");
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+    assert!(outcome.owes_a_heal());
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema)
+        .expect("the tree reads");
+    let heal = outcome.heal(view.normalizer());
+    let expected = ["e.md", "gone.md"]
+        .into_iter()
+        .map(|at| view.normalizer().normalize(Path::new(at)).unwrap())
+        .collect();
+    assert_eq!(heal.vault_roots(), &expected);
+    let envelope = outcome
+        .into_wire()
+        .unwrap()
+        .expect_err("no publication occurred");
+    let norn_wire::ErrorDetail::PlanRefused {
+        plan: fresh,
+        landed,
+        ..
+    } = envelope.detail()
+    else {
+        panic!("a refused attempt: {envelope:?}");
+    };
+    assert!(
+        fresh.transitions.is_empty(),
+        "recovery cannot come from the fresh plan"
+    );
+    assert_eq!(*landed, vec![path("gone.md")]);
+    assert_eq!(
+        fixture.stored_paths(),
+        vec!["e.md", "gone.md"],
+        "the failed changeset did not partially commit"
+    );
+}
+
 /// Whether the scratch volume folds case, standing the case down where it
 /// does not (and failing it on macOS, whose volume folds).
 pub(super) fn volume_folds(case: &str) -> bool {
@@ -1099,6 +1204,8 @@ fn each_outcome_crosses_under_its_wire_code() {
             forecast: Forecast::new(Vec::new(), Vec::new(), Vec::new()),
             checks: Vec::new(),
             unresolved: Vec::new(),
+            landed: Vec::new(),
+            healing: Vec::new(),
         }))),
         (ReasonCode::VaultPlanRefused, true)
     );
@@ -1106,6 +1213,7 @@ fn each_outcome_crosses_under_its_wire_code() {
         code(ApplyOutcome::RootChanged {
             expected: fixture.root_identity(),
             found: RootIdentity::from_device_and_inode(0, 0),
+            healing: Vec::new(),
         }),
         (ReasonCode::VaultRootChanged, false)
     );
@@ -1129,6 +1237,8 @@ fn each_outcome_crosses_under_its_wire_code() {
         code(ApplyOutcome::WriteFailed {
             plan,
             detail: "a disk filled".to_string(),
+            healing: Vec::new(),
+            landed: Vec::new(),
         }),
         (ReasonCode::VaultWriteFailed, true)
     );
@@ -3300,4 +3410,482 @@ fn a_set_of_the_collection_a_field_holds_lands_found() {
         fixture.recorded.calls.borrow().is_empty(),
         "nothing written"
     );
+}
+
+#[test]
+fn an_absent_no_op_target_refilled_after_staging_refuses_without_overwriting_it() {
+    let mut fixture = Fixture::new(&[]);
+    let plan = fixture.plan(vec![
+        creating("transient.md", "T\n"),
+        deleting("transient.md"),
+    ]);
+    assert_eq!(
+        plan.transitions.len(),
+        1,
+        "a no-op target survives composition"
+    );
+    assert_eq!(plan.transitions[0].before, norn_wire::FileState::absent());
+    assert_eq!(plan.transitions[0].after, norn_wire::FileState::absent());
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::write(anchor.join("transient.md"), "foreign\n").unwrap();
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+    assert!(
+        matches!(outcome, ApplyOutcome::Refused(_)),
+        "foreign content must refuse: {outcome:?}"
+    );
+}
+
+#[test]
+fn an_interruption_does_not_report_an_absent_no_op_suffix_another_writer_refilled() {
+    let mut fixture = Fixture::new(&[("e.md", "draft\n")]);
+    let plan = fixture.plan(vec![
+        creating("n.md", "N\n"),
+        editing("e.md", "draft", "final"),
+        creating("transient.md", "T\n"),
+        deleting("transient.md"),
+    ]);
+    assert!(
+        plan.transitions
+            .iter()
+            .any(|t| t.path == path("transient.md"))
+    );
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::write(anchor.join("transient.md"), "foreign\n").unwrap();
+        std::fs::write(anchor.join("e.md"), "foreign\n").unwrap();
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+    let error = outcome.into_wire().unwrap().unwrap_err();
+    let norn_wire::ErrorDetail::PlanInterrupted { landed, .. } = error.detail() else {
+        panic!("{error:?}")
+    };
+    assert_eq!(
+        *landed,
+        vec![path("n.md")],
+        "foreign no-op suffix holds neither state"
+    );
+}
+
+#[test]
+fn an_absent_no_op_target_occupied_before_staging_refuses_before_any_publication() {
+    let mut fixture = Fixture::new(&[]);
+    let plan = fixture.plan(vec![
+        creating("n.md", "N\n"),
+        creating("transient.md", "T\n"),
+        deleting("transient.md"),
+    ]);
+    std::fs::create_dir(fixture.vault.join("transient.md")).unwrap();
+    let outcome = fixture.apply(plan);
+    assert!(
+        matches!(outcome, ApplyOutcome::Refused(_)),
+        "preexisting occupied no-op target must refuse before writes: {outcome:?}"
+    );
+    assert!(
+        fixture.read("n.md").is_none(),
+        "a staging-time detectable refusal must publish nothing"
+    );
+}
+
+#[test]
+fn an_absent_no_op_target_confirmation_removes_its_stale_store_row() {
+    let mut fixture = Fixture::new(&[]);
+    let plan = fixture.plan(vec![
+        creating("transient.md", "T\n"),
+        deleting("transient.md"),
+    ]);
+    fixture.foreign("transient.md", "foreign\n");
+    assert_eq!(fixture.stored_paths(), vec!["transient.md"]);
+    std::fs::remove_file(fixture.vault.join("transient.md")).unwrap();
+    let outcome = fixture.apply(plan);
+    assert!(
+        matches!(outcome, ApplyOutcome::Applied(_)),
+        "no-op completion succeeds: {outcome:?}"
+    );
+    assert!(
+        fixture.stored_paths().is_empty(),
+        "confirmed absent target must remove stale store row"
+    );
+}
+
+#[test]
+fn completed_targets_changed_after_staging_are_not_reported_as_landed() {
+    for prefix in [true, false] {
+        let mut fixture = Fixture::new(&[("e.md", "draft\n"), ("gone.md", "G\n")]);
+        let plan = if prefix {
+            let plan = fixture.plan(vec![
+                creating("n.md", "N\n"),
+                editing("e.md", "draft", "final"),
+            ]);
+            fixture.write("n.md", "N\n");
+            plan
+        } else {
+            let plan = fixture.plan(vec![
+                creating("n.md", "N\n"),
+                editing("e.md", "draft", "final"),
+                deleting("gone.md"),
+            ]);
+            std::fs::remove_file(fixture.vault.join("gone.md")).unwrap();
+            plan
+        };
+        let links = fixture.links();
+        let anchor = fixture.vault.clone();
+        let publishing = || {
+            if prefix {
+                std::fs::write(anchor.join("n.md"), "foreign\n").unwrap();
+            } else {
+                std::fs::write(anchor.join("e.md"), "foreign\n").unwrap();
+                std::fs::write(anchor.join("gone.md"), "foreign\n").unwrap();
+            }
+            true
+        };
+        let applier = Applier {
+            anchor: &fixture.vault,
+            root: fixture.root,
+            exclusions: &fixture.exclusions,
+            schema: &fixture.schema,
+            shadows: &fixture.shadows,
+            own_writes: &fixture.recorded,
+            publishing: &publishing,
+            links: &links.index(),
+        };
+        let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+        let envelope = outcome.into_wire().unwrap().unwrap_err();
+        if prefix {
+            let norn_wire::ErrorDetail::PlanRefused { landed, .. } = envelope.detail() else {
+                panic!("{envelope:?}")
+            };
+            assert!(
+                landed.is_empty(),
+                "changed prelanded prefix is not confirmed"
+            );
+        } else {
+            let norn_wire::ErrorDetail::PlanInterrupted { landed, .. } = envelope.detail() else {
+                panic!("{envelope:?}")
+            };
+            assert_eq!(
+                *landed,
+                vec![path("n.md")],
+                "changed prelanded suffix is not confirmed"
+            );
+        }
+        assert!(fixture.shadows_left().is_empty());
+    }
+}
+
+struct RootMovedAfterRead<'a> {
+    inner: PlanSnapshot<'a>,
+    anchor: PathBuf,
+}
+
+/// A confirmed destination remains evidence for its source even when that
+/// same path lost the different before-state a later chain leg needs.
+#[test]
+fn a_chain_keeps_a_confirmed_destination_when_its_other_before_state_was_lost() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n"), ("b.md", "B\n")]);
+    let plan = fixture.plan(vec![
+        creating("0-new.md", "N\n"),
+        creating("1-blocked.md", "X\n"),
+        moving("b.md", "c.md"),
+        moving("a.md", "b.md"),
+    ]);
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::remove_file(anchor.join("a.md")).unwrap();
+        std::fs::write(anchor.join("b.md"), "A\n").unwrap();
+        std::fs::write(anchor.join("1-blocked.md"), "foreign\n").unwrap();
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let envelope = applier
+        .apply(plan, &RefCell::new(&mut fixture.store))
+        .into_wire()
+        .unwrap()
+        .unwrap_err();
+    let norn_wire::ErrorDetail::PlanInterrupted { landed, .. } = envelope.detail() else {
+        panic!("{envelope:?}")
+    };
+    assert_eq!(*landed, vec![path("0-new.md"), path("a.md")]);
+    assert_eq!(fixture.read("b.md").as_deref(), Some("A\n"));
+    assert!(fixture.read("c.md").is_none());
+}
+impl crate::planner::links::LinkIndex for RootMovedAfterRead<'_> {
+    type Error = crate::refusal::PageRefused;
+    fn changes(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        probed: &[norn_store::ProbedLink],
+        each: &mut dyn FnMut(norn_store::LinkChange),
+    ) -> Result<(), Self::Error> {
+        crate::planner::links::LinkIndex::changes(&self.inner, overlay, probed, each)
+    }
+    fn target(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        address: &str,
+        headed: norn_store::PlanSide,
+    ) -> Result<norn_store::TargetNaming, Self::Error> {
+        crate::planner::links::LinkIndex::target(&self.inner, overlay, address, headed)
+    }
+    fn held_links(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldLinks>, Self::Error> {
+        crate::planner::links::LinkIndex::held_links(&self.inner, holder)
+    }
+    fn release(&self) {
+        crate::planner::links::LinkIndex::release(&self.inner);
+        std::fs::rename(&self.anchor, self.anchor.with_file_name("retired-vault")).unwrap();
+    }
+}
+
+#[test]
+fn a_refresh_failure_keeps_targets_confirmed_before_the_root_moved() {
+    let mut fixture = Fixture::new(&[("e.md", "draft\n")]);
+    let plan = fixture.plan(vec![
+        creating("n.md", "N\n"),
+        editing("e.md", "draft", "final"),
+    ]);
+    fixture.write("n.md", "N\n");
+    let links = fixture.links();
+    let index = RootMovedAfterRead {
+        inner: links.index(),
+        anchor: fixture.vault.clone(),
+    };
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::write(anchor.join("e.md"), "foreign\n").unwrap();
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &index,
+    };
+    let outcome = applier.apply(plan, &RefCell::new(&mut fixture.store));
+    assert!(
+        outcome.owes_a_heal(),
+        "failed changeset owes original targets: {outcome:?}"
+    );
+    let envelope = outcome.into_wire().unwrap().unwrap_err();
+    let norn_wire::ErrorDetail::WriteFailed { landed, .. } = envelope.detail() else {
+        panic!("{envelope:?}")
+    };
+    assert_eq!(
+        *landed,
+        vec![path("n.md")],
+        "refresh I/O must not erase previously confirmed targets"
+    );
+}
+
+#[test]
+fn an_interruption_does_not_claim_a_missing_move_source_before_its_destination_lands() {
+    let mut fixture = Fixture::new(&[("a.md", "A\n")]);
+    let plan = fixture.plan(vec![
+        creating("0-new.md", "N\n"),
+        creating("1-blocked.md", "B\n"),
+        moving("a.md", "b.md"),
+    ]);
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::remove_file(anchor.join("a.md")).unwrap();
+        std::fs::write(anchor.join("1-blocked.md"), "foreign\n").unwrap();
+        true
+    };
+    let applier = Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let outcome = applier.apply(plan.clone(), &RefCell::new(&mut fixture.store));
+    assert!(fixture.read("a.md").is_none());
+    assert!(
+        fixture.read("0-new.md").is_some(),
+        "the first create must publish"
+    );
+    assert!(
+        fixture.read("b.md").is_none(),
+        "the move destination must remain unlanded"
+    );
+    let envelope = outcome.into_wire().unwrap().unwrap_err();
+    let norn_wire::ErrorDetail::PlanInterrupted { landed, .. } = envelope.detail() else {
+        panic!("{envelope:?}")
+    };
+    assert_eq!(
+        *landed,
+        vec![path("0-new.md")],
+        "absent source while destination is unlanded is drift"
+    );
+}
+
+// Keep index queries real and place an external root move at the read
+// whose missing indexed hash sends refresh back to the filesystem.
+
+struct RootMovedDuringUnvouchedRead<'a> {
+    inner: PlanSnapshot<'a>,
+    anchor: PathBuf,
+    fired: std::cell::Cell<bool>,
+}
+
+impl crate::planner::links::LinkIndex for RootMovedDuringUnvouchedRead<'_> {
+    type Error = crate::refusal::PageRefused;
+    fn changes(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        probed: &[norn_store::ProbedLink],
+        each: &mut dyn FnMut(norn_store::LinkChange),
+    ) -> Result<(), Self::Error> {
+        crate::planner::links::LinkIndex::changes(&self.inner, overlay, probed, each)
+    }
+    fn target(
+        &self,
+        overlay: &norn_store::PathOverlay,
+        address: &str,
+        headed: norn_store::PlanSide,
+    ) -> Result<norn_store::TargetNaming, Self::Error> {
+        crate::planner::links::LinkIndex::target(&self.inner, overlay, address, headed)
+    }
+    fn held_links(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldLinks>, Self::Error> {
+        let held = crate::planner::links::LinkIndex::held_links(&self.inner, holder)?;
+        assert!(
+            held.is_none(),
+            "the actual index has not derived the foreign source"
+        );
+        assert_eq!(holder, &path("source.md"));
+        assert!(!self.fired.replace(true), "one carried source read");
+        std::fs::rename(
+            &self.anchor,
+            self.anchor.with_file_name("retired-delta-vault"),
+        )
+        .unwrap();
+        Ok(held)
+    }
+}
+
+#[test]
+fn observed_and_confirmed_progress_survives_a_refresh_read_failure() {
+    let fixture = Fixture::new(&[]);
+    fixture.write("source.md", "Source\n");
+    let plan = fixture.plan(vec![
+        creating("z.md", "Z\n"),
+        creating("a.md", "A\n"),
+        moving("source.md", "destination.md"),
+    ]);
+    let targets: Vec<_> = plan.transitions.iter().map(|t| t.path.clone()).collect();
+    fixture.write("z.md", "Z\n");
+    fixture.write("a.md", "A\n");
+    let view = TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).unwrap();
+    let links = fixture.links();
+    let index = RootMovedDuringUnvouchedRead {
+        inner: links.index(),
+        anchor: fixture.vault.clone(),
+        fired: std::cell::Cell::new(false),
+    };
+    let outcome = super::refresh::refuse_and_refresh(
+        plan,
+        &view,
+        &crate::derivation::Declared::unpinned(),
+        Vec::new(),
+        &index,
+    );
+    assert!(
+        index.fired.get(),
+        "failure occurred after observation, during fresh resolve"
+    );
+    let ApplyOutcome::WriteFailed { landed, detail, .. } = &outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(
+        landed,
+        &vec![path("a.md"), path("z.md")],
+        "refresh retained both observed completions"
+    );
+    assert!(!detail.is_empty(), "real filesystem failure has detail");
+    let outcome = outcome.with_confirmed_progress(vec![path("z.md")], targets.clone());
+    assert!(outcome.owes_a_heal());
+    let expected = targets
+        .iter()
+        .map(|p| view.normalizer().normalize(Path::new(p.as_str())).unwrap())
+        .collect();
+    assert_eq!(outcome.heal(view.normalizer()).vault_roots(), &expected);
+    let envelope = outcome.into_wire().unwrap().unwrap_err();
+    let norn_wire::ErrorDetail::WriteFailed { landed, .. } = envelope.detail() else {
+        panic!("{envelope:?}")
+    };
+    assert_eq!(
+        landed,
+        &vec![path("a.md"), path("z.md")],
+        "confirmed subset merges without dropping observed paths or duplicating z"
+    );
+    let retired = fixture.vault.with_file_name("retired-delta-vault");
+    assert_eq!(
+        std::fs::read_to_string(retired.join("source.md")).unwrap(),
+        "Source\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(retired.join("a.md")).unwrap(),
+        "A\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(retired.join("z.md")).unwrap(),
+        "Z\n"
+    );
+    assert!(
+        !retired.join("destination.md").exists(),
+        "refresh published no target"
+    );
+    assert!(
+        fixture.recorded.calls.borrow().is_empty(),
+        "refresh recorded no own write"
+    );
+    assert!(fixture.shadows_left().is_empty());
 }

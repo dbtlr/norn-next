@@ -3581,14 +3581,17 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
     for (code, fields) in [
         (
             "vault/plan-refused",
-            vec!["code", "plan", "forecast", "checks", "unresolved"],
+            vec!["code", "plan", "forecast", "checks", "unresolved", "landed"],
         ),
         ("vault/root-changed", vec!["code", "expected", "found"]),
         (
             "vault/plan-interrupted",
             vec!["code", "plan", "landed", "cause", "forced"],
         ),
-        ("vault/write-failed", vec!["code", "plan", "detail"]),
+        (
+            "vault/write-failed",
+            vec!["code", "plan", "detail", "landed"],
+        ),
         ("host/apply-not-run", vec!["code", "cause", "plan"]),
         ("host/apply-outcome-unknown", vec!["code", "plan"]),
         ("request/plan-invalid", vec!["code", "fault"]),

@@ -518,6 +518,7 @@ pub(crate) fn fully_resolved(resolution: Resolution) -> Result<Resolution, Error
             resolution.forecast,
             Vec::new(),
             resolution.unresolved,
+            Vec::new(),
         ),
     ))
 }
@@ -566,7 +567,7 @@ fn preview_resolved(
             forecast.with_left_behind(left_behind),
         )),
         Err(outcome) => match *outcome {
-            applier::ApplyOutcome::Unread(refused) => Err(refused),
+            applier::ApplyOutcome::Unread { refusal, .. } => Err(refusal),
             outcome => Err(PageRefused::Answered(
                 outcome
                     .into_wire()

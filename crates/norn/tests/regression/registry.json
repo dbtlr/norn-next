@@ -1141,7 +1141,7 @@
       "name": "destructive-ordering-is-gated",
       "kind": "defect-class",
       "venue": 4,
-      "property": "No redirect is committed before the removal it redirects away from: a cascade that rewrites the links into a document orders every rewrite ahead of the destructive step, so no reader reaches a redirect whose target is already gone.",
+      "property": "A destructive step follows every link rewrite that redirects away from its target: cascades publish their rewrites before removing the document, so publication never removes it before its redirects land.",
       "sources": ["NRN-139", "NRN-162", "norn-legacy engineering learnings"],
       "binding": {
         "status": "bound",
@@ -1215,6 +1215,7 @@
           "crates/norn-host/tests/applies.rs::a_resolved_plan_whose_target_drifted_previews_as_its_apply_refuses",
           "crates/norn-host/tests/verbs.rs::a_previewed_creation_lands_as_previewed_after_the_clock_moves",
           "crates/norn-host/src/applier/tests.rs::re_sending_conditioned_operations_is_refused_rather_than_repeated",
+      "crates/norn-host/tests/verbs.rs::re_sending_unconditioned_operations_appends_again_but_the_resolved_plan_does_not",
           "crates/norn-host/tests/verbs.rs::a_set_where_writes_exactly_the_matched_documents_in_one_changeset",
           "crates/norn-host/tests/verbs.rs::a_set_where_naming_an_unknown_key_is_unresolved_naming_it",
           "crates/norn-host/tests/verbs.rs::a_set_where_with_a_typed_bound_matches_what_a_find_answers",

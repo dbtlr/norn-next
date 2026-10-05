@@ -14,6 +14,56 @@ use crate::common::{
     names_in, set_mode, staged,
 };
 
+/// Confirmation observes another writer's completed target without publishing
+/// the staged content, removing a file, or consuming its pending shadow.
+#[test]
+#[allow(clippy::disallowed_methods)] // The kernel's own public contract suite.
+fn a_staged_target_completed_by_another_writer_is_confirmed_without_publication() {
+    for kind in ["create", "replace", "remove"] {
+        let scratch = Scratch::new(&format!("confirm-staged-{kind}"));
+        if kind != "create" {
+            scratch.place("note.md", b"before");
+        }
+        let transition = match kind {
+            "create" => Transition::Create {
+                content: Content::Held(b"after"),
+            },
+            "replace" => Transition::Replace {
+                before: hash(b"before"),
+                content: Content::Held(b"after"),
+            },
+            _ => Transition::Remove {
+                before: hash(b"before"),
+            },
+        };
+        let staged = staged(
+            scratch
+                .stage("note.md", transition)
+                .expect("the target stages"),
+        );
+        let shadows = scratch.shadow_names();
+        norn_fs::confirm_staged(&scratch.vault(), &staged).expect_err("the target is not complete");
+        assert_eq!(exists(&scratch.at("note.md")), kind != "create");
+        if kind != "create" {
+            assert_eq!(bytes_at(&scratch.at("note.md")), b"before");
+        }
+        if kind == "remove" {
+            std::fs::remove_file(scratch.at("note.md")).expect("another writer removes the target");
+        } else {
+            scratch.place("note.md", b"after");
+        }
+        let confirmed =
+            norn_fs::confirm_staged(&scratch.vault(), &staged).expect("the target is complete");
+        assert!(matches!(confirmed.durability, Durability::Synced));
+        assert_eq!(exists(&scratch.at("note.md")), kind != "remove");
+        if kind != "remove" {
+            assert_eq!(bytes_at(&scratch.at("note.md")), b"after");
+        }
+        assert_eq!(scratch.shadow_names(), shadows);
+        norn_fs::discard(&scratch.vault(), staged, scratch.shadows());
+    }
+}
+
 /// A create publishes its content at a name that had nothing at it, reports
 /// the identity of what it published, and reports the folder synced.
 #[test]

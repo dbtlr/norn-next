@@ -1555,7 +1555,7 @@ cannot tell a signature crossing the seam from legitimate test and helper use. T
 - no SQLite connection opened outside `norn-db`
 - `std::fs` disallowed workspace-wide
 - no `norn-config` registry-surface use outside `norn-host`
-- no `norn-fs` write entry point — `stage`, `publish`, `confirm_landed`, `discard`,
+- no `norn-fs` write entry point — `stage`, `publish`, `confirm_landed`, `confirm_staged`, `discard`,
   `remove_empty_folders` — outside the one applier (invariant 4)
 - no direct stdout writes outside `norn-console`
 
@@ -3158,7 +3158,12 @@ Four contracts inside that flow carry weight:
   interrupted completes it with no journal and no rollback. A move's source found absent
   while its destination is not at its after-state was removed by another writer: that is
   drift, and the move is unresolved. An attempt that stops after
-  one of its targets landed is interrupted, not refused. An
+  it published a target is interrupted, not refused. Confirming another writer's
+  completed target does not make this attempt interrupted. A check that stops it
+  before any publication answers refused, or write-failed for an I/O failure;
+  both report the original plan's targets already at their after-states.
+  A stopped publication confirms the remaining targets without publishing them,
+  so a completed suffix belongs in both the report and the changeset. An
   uninterrupted apply commits one changeset to its registration's store, so a read there
   sees the whole state before or after it. Re-sending operations is a new change.
 - **Write-through.** The worker composed the post-state, so the increment writes it —
@@ -3175,7 +3180,11 @@ Four contracts inside that flow carry weight:
   store equals a build from zero the moment the apply lands. A path another
   writer changed between publication and the changeset is left out, and the watcher reports
   it, because the own-write ledger's entry names what was published rather than what the
-  path holds. The bar is **mark-invariance**: the same changeset reads the same derivation
+  path holds. Confirmed targets contribute write-through effects even when this attempt
+  publishes nothing and refuses.
+  If that changeset fails, the outcome retains the original target paths for healing,
+  independently of the fresh plan, which drops completed operations.
+  The bar is **mark-invariance**: the same changeset reads the same derivation
   counters whether it is marked derived or composed. The one counter that names a
   computation is the canonical-JSON projection of supplied frontmatter, which is storage
   encoding rather than recomputation and runs the identical code path under both marks — so

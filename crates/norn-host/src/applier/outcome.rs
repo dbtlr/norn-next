@@ -36,28 +36,36 @@ pub(crate) enum ApplyOutcome {
         expected: RootIdentity,
         /// The vault's root identity now.
         found: RootIdentity,
+        /// Original targets to reconcile if confirmed progress did not commit.
+        healing: Vec<DocumentPath>,
     },
-    /// Publication stopped after something landed.
+    /// Publication stopped after this attempt changed a target on disk.
     Interrupted(Box<Interrupted>),
     /// The apply's leg stopped standing before publication began — a
     /// teardown moved the entry past it — so every shadow was removed and no
     /// document was written. The apply job answers it with the teardown's
     /// cause and the plan the apply's progress recorded.
     StoodDown,
-    /// The filesystem refused before any target landed, so no document was
-    /// written.
+    /// The filesystem failed before this attempt published a target.
     WriteFailed {
         /// The resolved plan.
         plan: ResolvedPlan,
         /// The failure in words.
         detail: String,
+        /// Targets already confirmed at their after-states.
+        landed: Vec<DocumentPath>,
+        /// Original targets to reconcile if confirmed progress did not commit.
+        healing: Vec<DocumentPath>,
     },
     /// The snapshot the plan's resolution change set is judged on could not
     /// be read, so nothing was published. A caller answers it as a read
     /// meeting the same refusal is answered: a damaged store is published as
     /// damage, with the rebuild it owes, before anything turns this into an
     /// answer.
-    Unread(crate::refusal::PageRefused),
+    Unread {
+        refusal: crate::refusal::PageRefused,
+        healing: Vec<DocumentPath>,
+    },
 }
 
 /// An applied plan.
@@ -89,9 +97,13 @@ pub(crate) struct Refused {
     pub(crate) checks: Vec<RefusedCheck>,
     /// Each operation the fresh plan leaves for the caller.
     pub(crate) unresolved: Vec<UnresolvedOperation>,
+    /// Targets of the original plan observed at their after-states.
+    pub(crate) landed: Vec<DocumentPath>,
+    /// Original targets to reconcile if confirmed progress did not commit.
+    pub(crate) healing: Vec<DocumentPath>,
 }
 
-/// An apply whose publication stopped after something landed.
+/// An apply whose publication stopped after this attempt changed a target.
 #[derive(Debug)]
 pub(crate) struct Interrupted {
     /// The resolved plan. Sending it again finishes it.
@@ -109,6 +121,32 @@ pub(crate) struct Interrupted {
 }
 
 impl ApplyOutcome {
+    /// Keep confirmed progress and repair owed by a failed changeset even
+    /// when refresh fails or drops completed operations from its fresh plan.
+    pub(crate) fn with_confirmed_progress(
+        mut self,
+        known_landed: Vec<DocumentPath>,
+        targets: Vec<DocumentPath>,
+    ) -> Self {
+        match &mut self {
+            Self::Refused(refused) => refused.healing = targets,
+            Self::RootChanged { healing, .. } => {
+                *healing = targets;
+            }
+            Self::WriteFailed {
+                landed, healing, ..
+            } => {
+                landed.extend(known_landed);
+                landed.sort();
+                landed.dedup();
+                *healing = targets;
+            }
+            Self::Unread { healing, .. } => *healing = targets,
+            _ => unreachable!("only a publication refusal or failure needs this carrier"),
+        }
+        self
+    }
+
     /// What the entry derives because this outcome's changeset did not
     /// commit, and an empty batch where it owes none.
     ///
@@ -122,7 +160,15 @@ impl ApplyOutcome {
     /// `normalizer` spells each path as the entry's coverage does; a path it
     /// cannot spell widens the heal to the whole vault.
     pub(crate) fn heal(&self, normalizer: &norn_fs::PathNormalizer) -> Batch {
-        let mut heal = Batch::default();
+        let healing = match self {
+            Self::Refused(refused) => Some(&refused.healing),
+            Self::RootChanged { healing, .. } | Self::WriteFailed { healing, .. } => Some(healing),
+            Self::Unread { healing, .. } => Some(healing),
+            _ => None,
+        };
+        if let Some(targets) = healing {
+            return heal_targets(targets.iter().map(|path| (path, false)), normalizer);
+        }
         let (plan, landed): (&ResolvedPlan, &[DocumentPath]) = match self {
             ApplyOutcome::Applied(applied) if applied.changeset == ChangesetOutcome::Healing => {
                 (&applied.plan, &[])
@@ -132,32 +178,30 @@ impl ApplyOutcome {
             {
                 (&interrupted.plan, &interrupted.landed)
             }
-            _ => return heal,
+            _ => return Batch::default(),
         };
         let every_target_landed = matches!(self, ApplyOutcome::Applied(_));
-        for transition in &plan.transitions {
-            // A path no vault path normalizes to names nothing the heal can
-            // read again, so the vault is healed whole, as it is where the
-            // root cannot be walked. The document-path grammar refuses every
-            // spelling the normalizer refuses, so no transition reaches this;
-            // it is the conservative answer, never a panic.
-            let Ok(path) = normalizer.normalize(std::path::Path::new(transition.path.as_str()))
-            else {
-                return Batch::rescan(norn_fs::RescanScope::Vault);
-            };
-            let landed = every_target_landed || landed.contains(&transition.path);
-            heal.merge(match transition.after {
-                FileState::Absent {} if landed => Batch::vault_removal(path),
-                _ => Batch::vault_change(path),
-            });
-        }
-        heal
+        heal_targets(
+            plan.transitions.iter().map(|transition| {
+                let landed = every_target_landed || landed.contains(&transition.path);
+                (
+                    &transition.path,
+                    landed && matches!(transition.after, FileState::Absent {}),
+                )
+            }),
+            normalizer,
+        )
     }
 
-    /// Whether this outcome's changeset did not commit over something that
-    /// landed, so the entry owes the heal [`ApplyOutcome::heal`] names.
+    /// Whether confirmed or published progress failed to commit, so the
+    /// entry owes the heal [`ApplyOutcome::heal`] names.
     pub(crate) fn owes_a_heal(&self) -> bool {
         match self {
+            Self::Refused(refused) => !refused.healing.is_empty(),
+            Self::RootChanged { healing, .. } | Self::WriteFailed { healing, .. } => {
+                !healing.is_empty()
+            }
+            Self::Unread { healing, .. } => !healing.is_empty(),
             ApplyOutcome::Applied(applied) => applied.changeset == ChangesetOutcome::Healing,
             ApplyOutcome::Interrupted(interrupted) => {
                 interrupted.changeset == ChangesetOutcome::Healing
@@ -189,6 +233,7 @@ impl ApplyOutcome {
                     refused.forecast,
                     refused.checks,
                     refused.unresolved,
+                    refused.landed,
                 ),
             )),
             ApplyOutcome::Invalid(fault) => Err(ErrorEnvelope::new(
@@ -200,7 +245,9 @@ impl ApplyOutcome {
                 },
                 ErrorDetail::plan_invalid(fault),
             )),
-            ApplyOutcome::RootChanged { expected, found } => Err(ErrorEnvelope::new(
+            ApplyOutcome::RootChanged {
+                expected, found, ..
+            } => Err(ErrorEnvelope::new(
                 "the plan was resolved against another vault root",
                 ErrorDetail::root_changed(expected, found),
             )),
@@ -213,20 +260,49 @@ impl ApplyOutcome {
                     interrupted.forced,
                 ),
             )),
-            ApplyOutcome::WriteFailed { plan, detail } => Err(ErrorEnvelope::new(
-                format!("the filesystem refused the plan before anything landed: {detail}"),
-                ErrorDetail::write_failed(plan, detail),
+            ApplyOutcome::WriteFailed {
+                plan,
+                detail,
+                landed,
+                ..
+            } => Err(ErrorEnvelope::new(
+                format!("the filesystem failed before this attempt published anything: {detail}"),
+                ErrorDetail::write_failed(plan, detail, landed),
             )),
-            ApplyOutcome::Unread(crate::refusal::PageRefused::Answered(refused)) => Err(refused),
+            ApplyOutcome::Unread {
+                refusal: crate::refusal::PageRefused::Answered(refused),
+                ..
+            } => Err(refused),
             // A caller publishes damage before it answers; one that answers
             // it here answers as a read whose statement the store refused.
-            ApplyOutcome::Unread(crate::refusal::PageRefused::Damaged(detail)) => {
-                Err(ErrorEnvelope::new(
-                    "the store refused a statement this apply ran",
-                    ErrorDetail::read_failed(norn_wire::ReadFailure::statement(), detail),
-                ))
-            }
+            ApplyOutcome::Unread {
+                refusal: crate::refusal::PageRefused::Damaged(detail),
+                ..
+            } => Err(ErrorEnvelope::new(
+                "the store refused a statement this apply ran",
+                ErrorDetail::read_failed(norn_wire::ReadFailure::statement(), detail),
+            )),
             ApplyOutcome::StoodDown => return None,
         })
     }
+}
+
+/// Re-read failed write-through targets through the ordinary reconcile path.
+/// Missing paths become deaths there; no original bytes or plan are retained.
+fn heal_targets<'a>(
+    targets: impl IntoIterator<Item = (&'a DocumentPath, bool)>,
+    normalizer: &norn_fs::PathNormalizer,
+) -> Batch {
+    let mut heal = Batch::default();
+    for (target, absent) in targets {
+        let Ok(path) = normalizer.normalize(std::path::Path::new(target.as_str())) else {
+            return Batch::rescan(norn_fs::RescanScope::Vault);
+        };
+        heal.merge(if absent {
+            Batch::vault_removal(path)
+        } else {
+            Batch::vault_change(path)
+        });
+    }
+    heal
 }
