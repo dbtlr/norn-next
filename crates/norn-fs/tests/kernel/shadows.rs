@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 
-use norn_fs::{Content, Refusal, Transition, is_shadow_name};
+use norn_fs::{Refusal, Transition, is_shadow_name};
 
 use crate::common::{Scratch, bytes_at, exists, hard_link, hash, identity_at, staged};
 
@@ -236,7 +236,7 @@ fn no_descriptor_survives_staging() {
                 .stage(
                     "folder/fresh.md",
                     Transition::Create {
-                        content: Content::Held(b"fresh"),
+                        content: norn_fs::Content::Held(b"fresh"),
                     },
                 )
                 .expect("a create stages"),
