@@ -55,7 +55,9 @@ constraint per field.
   required where any requires it, forbidden where any forbids it, the smallest length
   limit, and a path allowed only where every contributing rule allows it. **There is
   one finding per path, field, constraint kind and offending value**: a list field is
-  judged element by element, each offending element its own finding naming that element.
+  judged element by element, each distinct offending value its own finding naming that
+  value, so a value repeated in one list is one finding and its fix covers every
+  occurrence.
   A finding cites every contributing rule and is reported at the highest of their
   severities.
 - **A conflict between rules is named, never silently resolved.** Where a combined
