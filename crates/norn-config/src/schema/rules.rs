@@ -761,9 +761,10 @@ impl VaultSchema {
     /// A value that does not read as its key's declared type or shape
     /// matches no selector. A list matches where any element does, as find's
     /// equality matches a list field, unless the key is declared
-    /// [`Shape::Single`]: a list there, like a map anywhere, is not a value
-    /// of the key's shape, so it has nothing to compare. Find's field
-    /// equality is owed the same shape reading (NORN-358).
+    /// [`Shape::Single`]; a scalar matches unless the key is declared
+    /// [`Shape::List`]. A value of the other shape, like a map anywhere, is
+    /// not a value of the key's shape, so it has nothing to compare. Find's
+    /// field equality is owed the same shape reading (NORN-358).
     fn matches_value(
         &self,
         key: &str,
@@ -776,13 +777,13 @@ impl VaultSchema {
                 .and_then(|raw| self.equality_key(key, &raw))
                 .is_some_and(|value| keys.contains(&value))
         };
+        let shape = self.field(key).and_then(|field| field.shape());
         match value {
             None => false,
             Some(AuthoredValue::List(items)) => {
-                self.field(key).and_then(|field| field.shape()) != Some(Shape::Single)
-                    && items.iter().any(equals)
+                shape != Some(Shape::Single) && items.iter().any(equals)
             }
-            Some(value) => equals(value),
+            Some(value) => shape != Some(Shape::List) && equals(value),
         }
     }
 }

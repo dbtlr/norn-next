@@ -1446,6 +1446,20 @@ fn a_list_or_map_under_a_single_shaped_key_selects_no_rule() {
     assert_eq!(selected(&schema, "a.md", &[("kind", text("a"))]), ["a"]);
 }
 
+/// **A scalar under a key declared list matches no selector on it**, the
+/// mirror of a list under a single-shaped key; a one-element list there
+/// matches.
+#[test]
+fn a_scalar_under_a_list_shaped_key_selects_no_rule() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  kind: { type: text, shape: list }\nrules:\n  a: { match: { frontmatter: { kind: a } } }\n  b: { match: { frontmatter: { kind: b } } }\n",
+    )
+    .expect("two rules on a list-shaped key");
+    assert!(selected(&schema, "a.md", &[("kind", text("a"))]).is_empty());
+    let one = AuthoredValue::list([text("a")]);
+    assert_eq!(selected(&schema, "a.md", &[("kind", one)]), ["a"]);
+}
+
 /// **A list under a key with no shape declared matches as find's equality
 /// does**: every rule whose value is one of its elements selects it.
 #[test]

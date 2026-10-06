@@ -3144,11 +3144,10 @@ Four contracts inside that flow carry weight:
   target's state and every condition holds, every composed result passes the vault schema,
   and every written target, a create included, is staged as a shadow. A refusal in that
   phase publishes nothing. A plan refuses a violation on a field it writes or one that did
-  not stand before it; a carried result introduces none by construction — its bytes are
-  the document's own, and no schema judgment a write makes reads where a document stands —
-  so it is not judged again. A schema rule's path selectors and allowed paths read exactly
-  that, so the write gate that judges schema rules judges a carried result at its
-  destination.
+  not stand before it. A carried result is not judged again: its bytes are the document's
+  own, and the schema judgment a write makes today reads no document's path. Schema rules'
+  path selectors and allowed paths do read it, and the write gate does not judge schema
+  rules yet; the gate that judges them must judge a carried result at its destination.
   Publication is still a window: a crash, an I/O failure, a create
   whose name another writer took after staging, or a foreign edit reaching a target after
   its staging can stop it part-way, and the apply report names every target that landed. A
