@@ -4,7 +4,7 @@
 use norn_db::rusqlite::types::Value;
 use norn_wire::Pattern;
 
-use super::FieldOrder;
+use super::{FieldMatch, FieldOrder, MatchedColumn};
 use crate::facts::StoredPathOrder;
 use crate::path::SuffixKey;
 use crate::resolve;
@@ -17,15 +17,18 @@ use crate::resolve;
 /// [`crate::FindStatement`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadFilter {
-    /// A value row under the key equals the value under the order: `(key,
-    /// raw)` on `document_fields_raw`, or `(key, typed)` on
-    /// `document_fields_typed` against the value's typed sort key.
-    Equal(FieldOrder),
-    /// No value row under the key equals the value under the order, a
+    /// A value row under the key equals the value under the reading: `(key,
+    /// raw)` on `document_fields_raw`, `(key, typed)` on
+    /// `document_fields_typed` against the value's typed sort key, or `(key,
+    /// folded)` on `document_fields_folded` against the tag the value names.
+    /// A shaped reading counts a row only where its key's presence row, one
+    /// primary-key seek, names the container the declared shape holds.
+    Equal(FieldMatch),
+    /// No value row under the key equals the value under the reading, a
     /// document without the key included.
-    NotEqual(FieldOrder),
-    /// A value row under the key equals one of the values under the order.
-    Member(FieldOrder),
+    NotEqual(FieldMatch),
+    /// A value row under the key equals one of the values under the reading.
+    Member(FieldMatch),
     /// The document carries the key: its presence row, on
     /// `document_fields_presence`.
     Present,
@@ -81,9 +84,9 @@ impl ReadFilter {
     /// slot.
     pub fn all() -> [Self; READ_FILTERS] {
         [
-            Self::Equal(FieldOrder::Raw),
-            Self::NotEqual(FieldOrder::Raw),
-            Self::Member(FieldOrder::Raw),
+            Self::Equal(FieldMatch::RAW),
+            Self::NotEqual(FieldMatch::RAW),
+            Self::Member(FieldMatch::RAW),
             Self::Present,
             Self::Absent,
             Self::Before(FieldOrder::Raw),
@@ -236,10 +239,31 @@ fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binde
                      WHERE fb.key = {key} AND fb.{column} {comparison} {bound})"
         )
     };
+    // The conditions a reading adds to a value row beside its comparison:
+    // under the tag fold, the bound flag saying whether the key's typed order
+    // must also read the value; under a declared shape, the container the
+    // key's presence row must name.
+    let reading = |reading: FieldMatch, next: &mut dyn FnMut() -> String| {
+        let mut conditions = String::new();
+        if reading.column == MatchedColumn::Folded {
+            let typed = next();
+            conditions.push_str(&format!(" AND ({typed} = 0 OR fv.typed IS NOT NULL)"));
+        }
+        if reading.shaped {
+            let container = next();
+            conditions.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM document_fields AS fs
+                         WHERE fs.document = fv.document AND fs.key = fv.key
+                           AND fs.ordinal = 0 AND fs.container = {container})"
+            ));
+        }
+        conditions
+    };
     match shape {
-        ReadFilter::Equal(order) | ReadFilter::NotEqual(order) => {
-            let column = order.column();
+        ReadFilter::Equal(matched) | ReadFilter::NotEqual(matched) => {
+            let column = matched.column();
             let (key, value) = (next(), next());
+            let conditions = reading(matched, &mut next);
             let membership = if matches!(shape, ReadFilter::Equal(_)) {
                 "IN"
             } else {
@@ -247,16 +271,17 @@ fn spell_bound(shape: ReadFilter, values: &[Value], id: &str, binder: &mut Binde
             };
             format!(
                 "{id} {membership} (SELECT fv.document FROM document_fields AS fv
-                     WHERE fv.key = {key} AND fv.{column} = {value})"
+                     WHERE fv.key = {key} AND fv.{column} = {value}{conditions})"
             )
         }
-        ReadFilter::Member(order) => {
-            let column = order.column();
+        ReadFilter::Member(matched) => {
+            let column = matched.column();
             let (key, values) = (next(), next());
+            let conditions = reading(matched, &mut next);
             format!(
                 "{id} IN (SELECT fv.document FROM document_fields AS fv
                      WHERE fv.key = {key}
-                       AND fv.{column} IN (SELECT value FROM json_each({values})))"
+                       AND fv.{column} IN (SELECT value FROM json_each({values})){conditions})"
             )
         }
         ReadFilter::Present | ReadFilter::Absent => {

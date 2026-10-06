@@ -10,7 +10,10 @@ use super::advisory::{Compared, DateComparison};
 use super::filter::{Filter, PathPart, ReadFilter};
 use super::naming::Naming;
 use super::run::StatementFailure;
-use super::{FieldOrder, IN_VALUES_CEILING, Lookups, PageRefusal, Ran, ReadBound, suggest};
+use super::{
+    FieldMatch, FieldOrder, IN_VALUES_CEILING, Lookups, MatchedColumn, PageRefusal, Ran, ReadBound,
+    suggest,
+};
 use crate::error::{self, StoreError};
 use crate::fields::ContentModel;
 use crate::find::{
@@ -250,25 +253,75 @@ impl Snapshot {
                     value: value.clone(),
                 }),
         };
+        // How an equality, an inequality and a membership read a key's values
+        // ([`FieldMatch`]): a tag key under the tag fold, a key with a typed
+        // order by its typed value, any other key as written; and only the
+        // values standing in the container a declared shape holds.
+        let matched = |key: &str| FieldMatch {
+            column: if declared.folds(key) {
+                MatchedColumn::Folded
+            } else if declared.typed_order(key).is_some() {
+                MatchedColumn::Typed
+            } else {
+                MatchedColumn::Raw
+            },
+            shaped: declared.container(key).is_some(),
+        };
+        // A request's value as the reading compares it: the tag it names
+        // under a tag key, refused where the key's typed order cannot read
+        // it, as a typed key's value is; otherwise the place it takes in the
+        // key's order.
+        let matched_value = |key: &String, value: &String| match matched(key).column {
+            MatchedColumn::Folded => {
+                compared(key, value)?;
+                Ok(fold_tag(value.strip_prefix('#').unwrap_or(value)))
+            }
+            MatchedColumn::Raw | MatchedColumn::Typed => compared(key, value),
+        };
+        // The values a reading binds after the key and the compared value:
+        // whether a tag key's typed order must also read the row, and the
+        // container a declared shape holds.
+        let reading_values = |key: &str| {
+            let reading = matched(key);
+            let mut values = Vec::new();
+            if reading.column == MatchedColumn::Folded {
+                values.push(Value::Integer(i64::from(
+                    declared.typed_order(key).is_some(),
+                )));
+            }
+            if let Some(container) = declared.container(key) {
+                values.push(text(container.as_str()));
+            }
+            values
+        };
         match predicate {
             Predicate::Eq { key, value, .. } => filter(
-                ReadFilter::Equal(order(key)),
-                vec![text(key), Value::Text(compared(key, value)?)],
+                ReadFilter::Equal(matched(key)),
+                [text(key), Value::Text(matched_value(key, value)?)]
+                    .into_iter()
+                    .chain(reading_values(key))
+                    .collect(),
             ),
             Predicate::NotEq { key, value, .. } => filter(
-                ReadFilter::NotEqual(order(key)),
-                vec![text(key), Value::Text(compared(key, value)?)],
+                ReadFilter::NotEqual(matched(key)),
+                [text(key), Value::Text(matched_value(key, value)?)]
+                    .into_iter()
+                    .chain(reading_values(key))
+                    .collect(),
             ),
             Predicate::In { key, values, .. } => {
                 let listed = canonical_json(&FrontmatterValue::Sequence(
                     values
                         .iter()
-                        .map(|value| compared(key, value).map(FrontmatterValue::String))
+                        .map(|value| matched_value(key, value).map(FrontmatterValue::String))
                         .collect::<Result<Vec<FrontmatterValue>, PageRefusal>>()?,
                 ))?;
                 filter(
-                    ReadFilter::Member(order(key)),
-                    vec![text(key), Value::Text(listed)],
+                    ReadFilter::Member(matched(key)),
+                    [text(key), Value::Text(listed)]
+                        .into_iter()
+                        .chain(reading_values(key))
+                        .collect(),
                 )
             }
             Predicate::Has { key, .. } => filter(ReadFilter::Present, vec![text(key)]),

@@ -200,8 +200,8 @@ impl WriteStatement {
             Self::InsertField => {
                 "INSERT INTO document_fields (
                      document, key, ordinal, path, container, raw, typed, least_raw,
-                     least_typed, offset_stated
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                     least_typed, offset_stated, folded
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             }
             // The hash the tombstone carries comes back from the row this
             // removes, so the delete and the record read one value between them.

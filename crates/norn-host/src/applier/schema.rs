@@ -49,10 +49,12 @@ use std::path::Path;
 
 use norn_fs::{NormalizedPath, PathNormalizer};
 use norn_store::{Change, TagSource};
-use norn_wire::{DocumentPath, FindingKind, OperationKind, ResolvedPlan, SchemaViolation};
+use norn_wire::{
+    CaseFold, DocumentPath, FindingKind, OperationKind, ResolvedPlan, SchemaViolation,
+};
 
 use super::observe::identity;
-use crate::derivation::{Declared, plan_document};
+use crate::derivation::{Cause, Declared, plan_document};
 
 /// What the derivation concludes about one document's bytes: each violation,
 /// by kind and subject, with its message, how many times it writes each tag,
@@ -63,8 +65,22 @@ pub(super) struct Judged {
     frontmatter_tags: BTreeSet<String>,
 }
 
-/// Judge `bytes` as the document at `path` under `declared`.
-pub(super) fn judge(path: &DocumentPath, bytes: &[u8], declared: &Declared) -> Judged {
+/// Judge `bytes` as the document at `path` under `declared`, its rules' path
+/// globs comparing letters as `case` says.
+///
+/// **The rule breaches are left out, a dormant carrier.** The derivation's
+/// judgment concludes them, and they gate a write under ADR 0037 by their
+/// identity — kind, field, offending value and combined constraint — which is
+/// the write gate NORN-359 builds. Read here by kind and subject alone they
+/// would refuse a repair of one element over every element it leaves
+/// standing, and pass a write that swaps one offending value for another, so
+/// until that gate lands they refuse nothing and are not listed.
+pub(super) fn judge(
+    path: &DocumentPath,
+    bytes: &[u8],
+    declared: &Declared,
+    case: CaseFold,
+) -> Judged {
     let hash = norn_fs::ContentHash::of(bytes).to_string();
     let plan = plan_document(
         Path::new(path.as_str()),
@@ -73,10 +89,12 @@ pub(super) fn judge(path: &DocumentPath, bytes: &[u8], declared: &Declared) -> J
         hash,
         None,
         declared,
+        case,
     );
     let violations = plan
         .findings
         .into_iter()
+        .filter(|finding| !matches!(finding.cause, Cause::RuleBreach(_)))
         .map(|finding| {
             (
                 (finding.cause.kind(), finding.target.clone()),
@@ -136,8 +154,8 @@ pub(super) fn written_fields(
 /// field where the result's frontmatter carries it, and on no field where
 /// only its body does. Every other kind names no field here: the path, bytes
 /// and frontmatter-block kinds are about the whole document, a link's health
-/// is not a schema violation, and the schema-rule kinds are minted by no
-/// judgment this check reads yet.
+/// is not a schema violation, and the schema-rule kinds are left out of the
+/// judgment this check reads until the write gate judges them ([`judge`]).
 fn on_written_field(
     kind: FindingKind,
     subject: Option<&str>,
@@ -163,10 +181,10 @@ fn on_written_field(
         | FindingKind::Ambiguous
         | FindingKind::MissingAnchor => false,
         // The schema kinds of ADR 0035 stand on the field their target names,
-        // or on the whole document, but no judgment here mints them: the
-        // write gate that judges a plan's documents by the rules is NORN-359,
-        // and under ADR 0037 it refuses a violation by its identity, never
-        // for standing on a field the plan writes.
+        // or on the whole document, but the judgment here leaves them out:
+        // the write gate that judges a plan's documents by the rules is
+        // NORN-359, and under ADR 0037 it refuses a violation by its
+        // identity, never for standing on a field the plan writes.
         FindingKind::Misplaced
         | FindingKind::DocumentRulesConflict
         | FindingKind::RequiredMissing

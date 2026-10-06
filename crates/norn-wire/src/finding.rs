@@ -21,12 +21,10 @@
 //! broken, ambiguous, or missing the heading or block its target names — per
 //! ADR 0027; the document it stands in still derives whole.
 //!
-//! **No producer files a schema-judged kind yet.** The nine kinds a schema
-//! judgment files — the seven `field/…` kinds, `document/misplaced` and
-//! `document/rules-conflict` — are dormant carriers: rule judgment in
-//! derivation files them (NORN-358), and until it lands the store's own suite
-//! is all that writes one, so every surface naming them answers from rows
-//! nothing derives yet.
+//! **Rule judgment in derivation files the schema-judged kinds.** The nine
+//! kinds — the seven `field/…` kinds, `document/misplaced` and
+//! `document/rules-conflict` — are concluded per document, in the document's
+//! own changeset, from its path and frontmatter and the vault schema.
 //!
 //! **A rule kind's severity is its rules'.** A finding judged against the
 //! schema rules cites every rule contributing to the constraint it breaches
@@ -187,34 +185,40 @@ pub enum FindingKind {
     /// value.
     #[serde(rename = "document/misplaced")]
     Misplaced,
-    /// `document/rules-conflict` — the rules selecting the document state
-    /// allowed paths with no path in common, so no place satisfies them all.
-    /// One finding per document whatever path it stands at, citing every
-    /// contributing rule. It names no field and no value.
+    /// `document/rules-conflict` — two or more rules selecting the document
+    /// state allowed paths admitting no document path in common, so no place
+    /// satisfies them all. (One rule's allowed paths admitting none is
+    /// refused at schema read.) One finding per document whatever path it
+    /// stands at, citing every rule stating allowed paths that selects it. It
+    /// names no field and no value.
     #[serde(rename = "document/rules-conflict")]
     DocumentRulesConflict,
     /// `field/required-missing` — a field some rule selecting the document
-    /// requires is absent. The field is the finding's `target`; it names no
-    /// value, and it cites every rule requiring the field.
+    /// requires is absent or null. The field is the finding's `target`; it
+    /// names no value, and it cites every rule requiring the field.
     #[serde(rename = "field/required-missing")]
     RequiredMissing,
     /// `field/forbidden` — the document holds a field some rule selecting it
-    /// forbids. The field is the finding's `target`, its value the finding's
-    /// value, and it cites every rule forbidding the field.
+    /// forbids, null included. The field is the finding's `target`, its value
+    /// the finding's value — none where it holds null, which is no value —
+    /// and it cites every rule forbidding the field.
     #[serde(rename = "field/forbidden")]
     Forbidden,
     /// `field/not-one-of` — a value the field holds, or an element of the list
     /// it holds, is outside the intersection of the closed sets the rules
     /// selecting the document state for it. One finding per distinct
-    /// offending value, which is the finding's value; the field is its
-    /// `target`, and it cites every rule closing the field.
+    /// offending value as the closed sets compare it — a tag key's tag under
+    /// the tag fold, a typed key's typed value — whose spelling written first
+    /// is the finding's value; the field is its `target`, and it cites every
+    /// rule closing the field.
     #[serde(rename = "field/not-one-of")]
     NotOneOf,
     /// `field/too-long` — a value the field holds, or an element of the list
     /// it holds, is longer than the smallest length limit the rules selecting
-    /// the document state for it. One finding per distinct offending value,
-    /// which is the finding's value; the field is its `target`, and it cites
-    /// every rule limiting the field.
+    /// the document state for it. One finding per distinct offending value as
+    /// a closed set would compare it, whose first spelling past the limit is
+    /// the finding's value; the field is its `target`, and it cites every rule
+    /// limiting the field.
     #[serde(rename = "field/too-long")]
     TooLong,
     /// `field/type-mismatch` — a value the field holds, or an element of the
@@ -234,13 +238,17 @@ pub enum FindingKind {
     /// `field/rules-conflict` — the rules selecting the document constrain the
     /// field in ways nothing satisfies: one requires it and another forbids
     /// it, or their closed sets share no member where the field is required or
-    /// holds a value. One finding per field whatever value it holds: the value
-    /// is the finding's payload, not part of what makes two conflicts one, so
-    /// the write gate judging a conflict (NORN-359) compares it by field. Where the field
-    /// holds a value, that whole value — its canonical JSON for a list or a
-    /// map — is the finding's value; where the field is absent the finding
-    /// names none. The field is its `target`, and it cites every contributing
-    /// rule.
+    /// holds a value they judge. One finding per field whatever value it
+    /// holds: the value is the finding's payload, not part of what makes two
+    /// conflicts one, so the write gate judging a conflict (NORN-359) compares
+    /// it by field. Where the field holds a value, that whole value — its
+    /// canonical JSON for a list or a map — is the finding's value; where the
+    /// field is absent or null the finding names none. The field is its
+    /// `target`, and it cites every rule contributing to the conflict. A
+    /// required field's conflict stands instead of its required, forbidden
+    /// and closed-set findings; closed sets sharing no member on a field no
+    /// rule requires stand instead of its closed-set findings alone, beside
+    /// any forbidden finding.
     #[serde(rename = "field/rules-conflict")]
     FieldRulesConflict,
 }

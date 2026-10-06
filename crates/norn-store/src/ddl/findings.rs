@@ -131,10 +131,10 @@
 //! its row reports. These rows grow with the rules a finding cites, which is
 //! what selecting by any one of them costs; the finding's own row does not.
 //!
-//! No finding cites a rule or carries a value until rule judgment in
-//! derivation files one (NORN-358): today only the store's own suite writes
-//! these tables and columns, through [`crate::FindingFacts::rules`] and
-//! [`crate::FindingFacts::value`].
+//! A finding cites a rule and carries a value where rule judgment in
+//! derivation files one, through [`crate::FindingFacts::rules`] and
+//! [`crate::FindingFacts::value`]; every other producer's findings cite no
+//! rule and carry no value.
 //!
 //! # The offending value is a head, at rest as on the wire
 //!

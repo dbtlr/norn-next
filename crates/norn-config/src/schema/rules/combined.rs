@@ -16,7 +16,7 @@ use std::fmt;
 use norn_wire::{CaseFold, Severity};
 
 use super::super::{TypedValue, VaultSchema};
-use super::{Rule, higher, named, placement};
+use super::{Rule, RuleWork, higher, named, placement};
 
 /// What a set of rules requires of a document they all select.
 #[derive(Clone, Debug)]
@@ -47,8 +47,9 @@ impl VaultSchema {
     /// What `rules` require together of a document they all select.
     ///
     /// Read at schema read by the statically unavoidable conflict check, and
-    /// by the rule findings (NORN-358) and the write gate (NORN-359), which
-    /// are not built.
+    /// by rule judgment ([`VaultSchema::judge`]) for the rules selecting each
+    /// document. The write gate (NORN-359) reads it through that judgment,
+    /// and is not built.
     pub fn combined<'s>(&'s self, rules: &[&'s Rule]) -> CombinedConstraint<'s> {
         let mut rules = rules.to_vec();
         rules.sort_by(|left, right| left.name.cmp(&right.name));
@@ -125,25 +126,49 @@ impl<'s> CombinedConstraint<'s> {
     }
 
     /// Whether every contributing rule's allowed paths admit `path`, under
-    /// `case` (see [`VaultSchema::selects`]).
-    pub fn admits_path(&self, path: &str, case: CaseFold) -> bool {
+    /// `case` (see [`VaultSchema::selects`]), tallying in `work` the
+    /// characters of each glob matched, up to the first rule admitting
+    /// nothing. Rule judgment places a document through it
+    /// ([`VaultSchema::judge`]).
+    pub fn admits_path(&self, path: &str, case: CaseFold, work: &mut RuleWork) -> bool {
         self.placement_rules().all(|rule| {
             rule.allowed_paths
                 .as_ref()
-                .is_some_and(|allowed| allowed.admits(path, case))
+                .is_some_and(|allowed| allowed.admits(path, case, work))
         })
     }
 
     /// Every way the combined constraint is empty — no document could meet
     /// it — whatever the document holds: a field required and forbidden, a
-    /// closed-set intersection with no member, and allowed paths sharing no
-    /// document path under `case`. Each names every contributing rule in name order.
+    /// closed-set intersection with no member, and the allowed paths of two
+    /// or more rules sharing no document path under `case`. Each names every
+    /// contributing rule in name order.
     ///
     /// An empty intersection is reported whether or not the field is
     /// required, carrying which: schema read refuses one on a required field
     /// alone, and a finding reports one on an unrequired field only where the
-    /// document holds a value.
+    /// document holds an element the closed sets judge. Schema read asks this
+    /// of groups of rules that always select together; rule judgment decides
+    /// placement itself ([`VaultSchema::judge`]). One rule's allowed paths
+    /// are no set to share: schema read refuses a rule whose allowed paths
+    /// admit no document path on its own, before any group is asked, so a
+    /// lone placement rule here always admits one.
     pub fn conflicts(&self, case: CaseFold) -> Vec<RulesConflict> {
+        let mut conflicts = self.field_conflicts();
+        let placed: Vec<&Rule> = self.placement_rules().collect();
+        if placed.len() > 1 && !placement::share_a_path(&placed, case) {
+            conflicts.push(RulesConflict::DisjointPlacement {
+                rules: names(placed.iter()),
+            });
+        }
+        conflicts
+    }
+
+    /// The conflicts [`CombinedConstraint::conflicts`] reports on fields, in
+    /// key order: a set operation over the contributing rules' constraints,
+    /// which walks no path. Rule judgment reads them per document, and walks
+    /// placement only where a document's path is not admitted.
+    pub(super) fn field_conflicts(&self) -> Vec<RulesConflict> {
         let mut conflicts = Vec::new();
         for (field, constraint) in &self.fields {
             if !constraint.required_by.is_empty() && !constraint.forbidden_by.is_empty() {
@@ -166,12 +191,6 @@ impl<'s> CombinedConstraint<'s> {
                     rules: names(intersection.rules.iter().chain(&constraint.required_by)),
                 });
             }
-        }
-        let placed: Vec<&Rule> = self.placement_rules().collect();
-        if placed.len() > 1 && !placement::share_a_path(&placed, case) {
-            conflicts.push(RulesConflict::DisjointPlacement {
-                rules: names(placed.iter()),
-            });
         }
         conflicts
     }
@@ -269,7 +288,8 @@ pub enum RulesConflict {
         /// Every rule closing or requiring it, in name order.
         rules: Vec<String>,
     },
-    /// Allowed paths that share no document path.
+    /// Allowed paths that share no document path: one rule's admitting none,
+    /// or several rules' sharing none.
     DisjointPlacement {
         /// Every rule stating allowed paths, in name order.
         rules: Vec<String>,
@@ -307,6 +327,11 @@ impl fmt::Display for RulesConflict {
                 } else {
                     ""
                 },
+                named(rules)
+            ),
+            RulesConflict::DisjointPlacement { rules } if rules.len() == 1 => write!(
+                formatter,
+                "the allowed paths of the rule {} admit no document path",
                 named(rules)
             ),
             RulesConflict::DisjointPlacement { rules } => write!(

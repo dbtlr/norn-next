@@ -62,12 +62,19 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use norn_wire::{
-    Facet, FacetKind, FieldShape, FieldType, PathRuleKind, Pattern, SchemaRule, TagStance, ValueMap,
+    Facet, FacetKind, FieldShape, FieldType, PathRuleKind, Pattern, SchemaRule, TagStance,
+    ValueMap, fold_tag,
 };
 
 use crate::json::{FrontmatterValue, float_text};
 use crate::path::DocumentPath;
 use crate::resolve::AmbiguityIgnore;
+
+/// The frontmatter field a document's tags are written in, the **tag
+/// carrier**: a tag key whatever the schema declares of it. `norn_text`'s
+/// `TAGS_FIELD` and the schema's rule grammar name the same field; this crate
+/// reaches neither, so it spells the name itself.
+pub const TAG_CARRIER: &str = "tags";
 
 /// The container a key's value sits in, as its presence row records it.
 ///
@@ -97,6 +104,17 @@ impl FieldContainer {
             FieldContainer::Scalar => "scalar",
             FieldContainer::Sequence => "sequence",
             FieldContainer::Map => "map",
+        }
+    }
+
+    /// The container a value of the declared shape `shape` stands in: one
+    /// value is a scalar, and a list a sequence. A shape this build does not
+    /// know holds nothing it can name.
+    pub(crate) const fn holding(shape: FieldShape) -> Option<Self> {
+        match shape {
+            FieldShape::Single => Some(FieldContainer::Scalar),
+            FieldShape::List => Some(FieldContainer::Sequence),
+            _ => None,
         }
     }
 
@@ -138,6 +156,12 @@ pub enum FieldRow {
         /// the key's order is a dated one and the text reads as a date, and
         /// `None` everywhere else.
         offset: Option<OffsetSpelling>,
+        /// The tag the raw text names under a **tag key** — the tag carrier
+        /// [`TAG_CARRIER`], declared or not, or a key declared `tags` — its
+        /// `#` marker dropped and the tag fold applied ([`norn_wire::fold_tag`]):
+        /// what an equality part compares the value by under such a key.
+        /// `None` under any other key, and for a null.
+        folded: Option<String>,
         /// Whether this is the key's least value under the raw order.
         least_raw: bool,
         /// Whether this is the key's least value under the typed order.
@@ -220,6 +244,7 @@ impl FieldRows {
                 path: path.as_str().to_string(),
             });
             let order = declared.typed_order(key);
+            let folds = declared.folds(key);
             let (typed, offsets): (Vec<Option<String>>, Vec<Option<OffsetSpelling>>) = scalars
                 .iter()
                 .map(|raw| {
@@ -233,12 +258,17 @@ impl FieldRows {
             for (index, ((raw, typed), offset)) in
                 scalars.into_iter().zip(typed).zip(offsets).enumerate()
             {
+                let folded = raw
+                    .as_deref()
+                    .filter(|_| folds)
+                    .map(|raw| fold_tag(raw.strip_prefix('#').unwrap_or(raw)));
                 rows.push(FieldRow::Value {
                     key: key.to_string(),
                     ordinal: index as u32 + 1,
                     raw,
                     typed,
                     offset,
+                    folded,
                     least_raw: least_raw == Some(index),
                     least_typed: least_typed == Some(index),
                     path: path.as_str().to_string(),
@@ -512,6 +542,32 @@ impl ContentModel {
         self.rules.contains_key(name)
     }
 
+    /// Whether `key` is a **tag key**, whose values are compared under the
+    /// tag fold with their `#` marker optional: the tag carrier
+    /// [`TAG_CARRIER`], declared or not and whatever type it is declared
+    /// with, or a key declared `tags`. Its value rows hold that fold as
+    /// [`FieldRow::Value`]'s `folded`.
+    pub fn folds(&self, key: &str) -> bool {
+        key == TAG_CARRIER
+            || self
+                .keys
+                .get(key)
+                .is_some_and(|declaration| declaration.field_type == FieldType::Tags)
+    }
+
+    /// The shape `key` is declared with, where it is declared with one. A
+    /// value of the other shape is no value of the key's to an equality
+    /// part, as a value failing its declared type has no typed value.
+    pub fn shape(&self, key: &str) -> Option<FieldShape> {
+        self.keys.get(key).and_then(|declaration| declaration.shape)
+    }
+
+    /// The container a value of `key` must stand in to be the key's, where
+    /// its declared shape names one.
+    pub(crate) fn container(&self, key: &str) -> Option<FieldContainer> {
+        self.shape(key).and_then(FieldContainer::holding)
+    }
+
     /// The typed order `key` carries, where it is declared with one.
     pub fn typed_order(&self, key: &str) -> Option<&TypedOrder> {
         self.keys
@@ -648,7 +704,8 @@ impl FieldDeclaration {
     }
 
     /// The same declaration, declaring `shape` where it is one and no shape
-    /// where it is `None`. Only `describe` reads it: no row the store derives
+    /// where it is `None`. `describe` reports it, and an equality part reads a
+    /// key's values in it ([`ContentModel::shape`]); no row the store derives
     /// depends on a field's shape.
     #[must_use]
     pub fn with_shape(mut self, shape: Option<FieldShape>) -> Self {

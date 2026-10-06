@@ -150,7 +150,8 @@ pub use facts::{
 pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use fields::{
-    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, OffsetSpelling, TypedOrder,
+    ContentModel, FieldContainer, FieldDeclaration, FieldRow, FieldRows, OffsetSpelling,
+    TAG_CARRIER, TypedOrder,
 };
 pub use find::{
     BODY_ROW_CEILING, FIND_STATEMENTS, FindPlan, FindStatement, FindWork, Found,
@@ -167,8 +168,8 @@ pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenanc
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
 pub use read::{
-    DEFAULT_PAGE, FieldOrder, IN_VALUES_CEILING, PageRefusal, READ_FILTERS, ReadBound, ReadFilter,
-    ReadStatement, TargetAmbiguity, page_limit,
+    DEFAULT_PAGE, FieldMatch, FieldOrder, IN_VALUES_CEILING, MatchedColumn, PageRefusal,
+    READ_FILTERS, ReadBound, ReadFilter, ReadStatement, TargetAmbiguity, page_limit,
 };
 // The open ceremony's own vocabulary, which is this crate's too: a store is
 // one client of that ceremony, and the rung a disagreement names is the same

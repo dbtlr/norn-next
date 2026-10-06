@@ -26,8 +26,8 @@ use norn_wire::{
     AnswerAdvisory, AttachMode, AuthoredValue, BodyText, CollectionPage, CollectionSelector,
     Column, ComparedBy, CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind,
     FieldShape, FieldType, FindParams, FindReport, FindingKind, GetParams, GetReport, GroupKey,
-    Hint, NotReady, Predicate, ReasonCode, ResolutionTarget, RuleClosedSet, RuleMatch, Rung,
-    RungSelection, RungSet, SchemaRule, SearchParams, Severity, Sort, SortKey, TrustState,
+    Hint, KindTally, NotReady, Predicate, ReasonCode, ResolutionTarget, RuleClosedSet, RuleMatch,
+    Rung, RungSelection, RungSet, SchemaRule, SearchParams, Severity, Sort, SortKey, TrustState,
     Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
     VaultRoot, WarmingPhase,
 };
@@ -1137,12 +1137,27 @@ fn a_describe_answers_every_value_a_selector_matches_any_of() {
 
 /// **A validate naming a rule the pinned schema does not declare is refused
 /// by name**, as `vault/unknown-rule`, on a page and on a summary; **one
-/// naming a declared rule answers the findings citing it**, which no
-/// derivation files until rule judgment does (NORN-358), so the page is empty
-/// and cites no rule set, and the tally holds nothing.
+/// naming a declared rule answers the findings citing it**, as rule judgment
+/// in derivation filed them: a task missing its `status` and a task holding
+/// one outside its closed set, each citing the rule's one set, which the page
+/// carries once, a kind's findings after another's, and tallied by kind at
+/// the rule's severity.
 #[test]
 fn a_validate_selects_by_a_declared_rule_and_refuses_an_unknown_one() {
-    let (_sandbox, vault, host) = a_verb_vault("host-reads-validate-rule", &[]);
+    let (_sandbox, vault, host) = a_verb_vault(
+        "host-reads-validate-rule",
+        &[
+            ("zz-tasks/unset.md", "---\ntype: task\n---\n# Unset\n"),
+            (
+                "zz-tasks/stalled.md",
+                "---\ntype: task\nstatus: stalled\n---\n# Stalled\n",
+            ),
+            (
+                "zz-tasks/done.md",
+                "---\ntype: task\nstatus: done\n---\n# Done\n",
+            ),
+        ],
+    );
     std::fs::write(vault.path().join(".norn/schema.yaml"), RULED_SCHEMA)
         .expect("write a schema declaring a rule");
     let _lease = attach::attach_and_wait(&host, vault.name());
@@ -1169,15 +1184,60 @@ fn a_validate_selects_by_a_declared_rule_and_refuses_an_unknown_one() {
     else {
         panic!("a validate answered {:?}", answered.answer.report);
     };
-    assert!(page.rows.is_empty(), "{:?}", page.rows);
-    assert!(rule_sets.is_empty());
+    let rows: Vec<_> = page
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.kind,
+                row.path.as_str(),
+                row.target.as_deref(),
+                row.value.as_ref().map(|value| value.text()),
+                row.severity,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                FindingKind::NotOneOf,
+                "zz-tasks/stalled.md",
+                Some("status"),
+                Some("stalled"),
+                Severity::Error
+            ),
+            (
+                FindingKind::RequiredMissing,
+                "zz-tasks/unset.md",
+                Some("status"),
+                None,
+                Severity::Error
+            ),
+        ]
+    );
+    let [set] = &rule_sets[..] else {
+        panic!("the page cites {rule_sets:?}");
+    };
+    assert_eq!(set.rules, ["tasks"]);
+    assert!(
+        page.rows.iter().all(|row| row.rule_set == Some(set.id)),
+        "{:?}",
+        page.rows
+    );
     let tallied = host
         .validate(&validating().with_rule("tasks").summarized())
         .expect("a declared rule's tally answers");
     let ValidateReport::Summary { by_kind, .. } = &tallied.answer.report else {
         panic!("a summary answered {:?}", tallied.answer.report);
     };
-    assert!(by_kind.is_empty());
+    assert_eq!(
+        by_kind,
+        &[
+            KindTally::new(FindingKind::NotOneOf, Severity::Error, 1),
+            KindTally::new(FindingKind::RequiredMissing, Severity::Error, 1),
+        ]
+    );
 }
 
 /// What a get of `target` answered, under the reading of its snapshot.

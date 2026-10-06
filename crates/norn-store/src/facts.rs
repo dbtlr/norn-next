@@ -785,10 +785,8 @@ pub struct FindingFacts {
     /// contributing to the constraint it breaches, and empty for a finding
     /// that cites none.
     ///
-    /// A dormant carrier, as [`FindingFacts::value`] is: rule judgment in
-    /// derivation fills both (NORN-358), and until it lands every producer
-    /// files them empty, so only the store's own suite reaches the write
-    /// they drive.
+    /// Rule judgment in derivation fills both this and
+    /// [`FindingFacts::value`]; every other producer files them empty.
     ///
     /// **Held as a set, once per schema fingerprint.** The write files the
     /// names under the one rule set of that fingerprint holding exactly them,
@@ -802,7 +800,8 @@ pub struct FindingFacts {
     /// for a list or a map, its canonical JSON. `None` for a finding about no
     /// value. A conflict between rules over a field the document holds carries
     /// that whole value; one over an absent field, or over where a document
-    /// may stand, carries none.
+    /// may stand, carries none. **A null is no value**: a forbidden or
+    /// conflicted field holding null carries none either.
     ///
     /// The write keeps its head, its length and its hash
     /// ([`norn_wire::ValueHead`]), never the whole, so a finding's bytes at
@@ -905,9 +904,9 @@ pub struct Invalidation {
     /// Parse-fact rows carry no schema key, no class and no path key, so none
     /// of them is ever counted here.
     pub findings_discarded: u64,
-    /// Field values whose typed sort key the act cleared, because it was derived
-    /// under a different vault schema. Only a schema pin clears one; the row
-    /// and its raw text stay.
+    /// Field values whose typed sort key, or whose fold under a key declared
+    /// `tags`, the act cleared, because it was derived under a different vault
+    /// schema. Only a schema pin clears one; the row and its raw text stay.
     pub typed_values_discarded: u64,
 }
 

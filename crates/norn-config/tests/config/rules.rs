@@ -6,7 +6,7 @@
 
 use norn_config::schema::{
     CaseFold, CreationProblem, ElementProblem, FieldType, ForbiddenFix, GlobProblem,
-    PLACEMENT_CEILING, RuleProblem, RulesConflict, Shape, TypedValue, VaultSchema,
+    PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, VaultSchema,
     VaultSchemaError,
 };
 use norn_wire::{AuthoredValue, PathProblem, Severity, ValueMap};
@@ -971,9 +971,10 @@ fn a_rename_onto_a_field_the_same_rule_forbids_or_renames_onto_is_refused() {
 
 // ---- the allowed-paths ceiling ----
 
-/// A glob of exactly `length` characters.
+/// A glob of exactly `length` characters admitting one document path under
+/// `prefix`, so the rule stating it alone admits a place to stand.
 fn glob_of(prefix: &str, length: usize) -> String {
-    format!("{prefix}/{}", "x".repeat(length - prefix.len() - 1))
+    format!("{prefix}/{}.md", "x".repeat(length - prefix.len() - 4))
 }
 
 #[test]
@@ -1168,15 +1169,48 @@ fn disjoint_allowed_paths_of_rules_selecting_together_are_refused() {
     .expect("allowed paths sharing a path");
 }
 
+/// **A rule whose allowed paths admit no document path is refused**, naming
+/// that rule alone: no document it selects could stand anywhere, whichever
+/// rules select beside it. A glob of another extension, a path no document's
+/// file name spells and a path holding a `..` segment each admit none; one
+/// admitting glob among them is enough to load.
+#[test]
+fn a_rule_whose_allowed_paths_admit_no_document_path_is_refused_naming_it() {
+    for allowed in ["'*.txt'", "shared", "'area/../*.md'"] {
+        let bytes = format!(
+            "version: 1\nrules:\n  q: {{ match: {{ frontmatter: {{ kind: x }} }}, allowed_paths: {{ paths: ['**'] }} }}\n  r: {{ match: {{ frontmatter: {{ kind: x }} }}, allowed_paths: {{ paths: [{allowed}] }} }}\n"
+        );
+        let error = refused(bytes.as_bytes());
+        assert_eq!(
+            error,
+            VaultSchemaError::RulesConflict {
+                conflict: RulesConflict::DisjointPlacement {
+                    rules: vec!["r".to_string()],
+                }
+            },
+            "allowed {allowed}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("the allowed paths of the rule `r` admit no document path"),
+            "{error}"
+        );
+    }
+    VaultSchema::parse(
+        b"version: 1\nrules:\n  r: { match: { frontmatter: { kind: x } }, allowed_paths: { paths: ['*.txt', 'shared', 'notes/*.md'] } }\n",
+    )
+    .expect("allowed paths admitting a document path");
+}
+
 /// **Allowed paths share a path only where a document could stand at it.**
-/// Two selectorless rules meeting only at `shared` — no document's file
-/// name — or only at a path holding a `..` segment leave every document
-/// unplaceable, and are refused as disjoint.
+/// Two selectorless rules, each admitting a document path, meeting only at
+/// `shared` — no document's file name — or only at a path holding a `..`
+/// segment leave every document unplaceable, and are refused as disjoint.
 #[test]
 fn allowed_paths_sharing_only_a_path_no_document_stands_at_are_refused() {
     for (left, right) in [
         ("['a/*.md', 'shared']", "['b/*.md', 'shared']"),
-        ("['area/../*.md']", "['area/**']"),
         ("['a/.?/x.md']", "['a/?./x.md']"),
     ] {
         let bytes = format!(
@@ -1261,7 +1295,12 @@ rules:
 
 fn selected(schema: &VaultSchema, path: &str, entries: &[(&str, AuthoredValue)]) -> Vec<String> {
     schema
-        .selecting_rules(path, &frontmatter(entries), CaseFold::Exact)
+        .selecting_rules(
+            path,
+            &frontmatter(entries),
+            CaseFold::Exact,
+            &mut RuleWork::default(),
+        )
         .iter()
         .map(|rule| rule.name().to_string())
         .collect()
@@ -1350,7 +1389,7 @@ rules:
     .expect("two rules");
     let at = "tasks/a.md";
     let document = frontmatter(&[("type", text("task"))]);
-    let rules = schema.selecting_rules(at, &document, CaseFold::Exact);
+    let rules = schema.selecting_rules(at, &document, CaseFold::Exact, &mut RuleWork::default());
     let combined = schema.combined(&rules);
     assert_eq!(
         combined
@@ -1372,8 +1411,9 @@ rules:
         combined.field("title").and_then(|title| title.max_length()),
         Some(40)
     );
-    assert!(combined.admits_path("tasks/a.md", CaseFold::Exact));
-    assert!(!combined.admits_path("notes/a.md", CaseFold::Exact));
+    let mut work = RuleWork::default();
+    assert!(combined.admits_path("tasks/a.md", CaseFold::Exact, &mut work));
+    assert!(!combined.admits_path("notes/a.md", CaseFold::Exact, &mut work));
     assert!(combined.conflicts(CaseFold::Exact).is_empty());
 
     let warning_only = schema.combined(&[schema.rule("wide").expect("wide")]);

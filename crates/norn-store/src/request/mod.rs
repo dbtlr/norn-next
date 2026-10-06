@@ -548,7 +548,11 @@ impl<'a> Request<'a> {
         let typed_discarded = transaction
             .execute(TYPED_VALUE_DISCARD_SQL, [])
             .map_err(|error| error::sql("clearing the typed field values", error))?
-            as u64;
+            as u64
+            + transaction
+                .execute(&folded_value_discard_sql(), [])
+                .map_err(|error| error::sql("clearing the declared tag keys' folds", error))?
+                as u64;
 
         transaction
             .commit()
@@ -1809,9 +1813,9 @@ pub(crate) fn check_finding_paths(
 /// names — the one standing, or one made here — and one `finding_rules` row
 /// per name copies the finding's key beside it. **The offending value is kept
 /// as its head**: its first [`norn_wire::VALUE_HEAD_BYTES`], its length and
-/// its hash, which is taken here over the whole value being written. Both are
-/// dormant carriers until rule judgment in derivation files a finding citing a
-/// rule or judging a value (NORN-358); no caller does yet.
+/// its hash, which is taken here over the whole value being written. Rule
+/// judgment in derivation files the findings that cite rules and judge
+/// values; every other producer's carry neither.
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -1910,10 +1914,6 @@ pub(crate) fn write_finding(
 /// A set is found by its canonical spelling ([`crate::rule_set::spelling`]),
 /// which tells every two sets apart however their names are spelled, and is
 /// held as that spelling alone: its names are read back off it.
-///
-/// A dormant carrier: no caller files a finding citing a rule until rule
-/// judgment in derivation does (NORN-358), so today only the store's own suite
-/// reaches past the empty set.
 fn cited_rule_set(
     transaction: &rusqlite::Transaction<'_>,
     fingerprint: &str,
@@ -2098,7 +2098,7 @@ const DOCUMENT_TAGS_SQL: &str =
 /// the document it names would be caught nowhere else.
 const DOCUMENT_FIELDS_SQL: &str =
     "SELECT key, ordinal, path, container, raw, typed, least_raw, least_typed,
-                        offset_stated
+                        offset_stated, folded
                  FROM document_fields WHERE document = ?1 ORDER BY key, ordinal";
 
 /// The statement [`Request::pin_vault_schema`] clears the typed field values
@@ -2110,6 +2110,21 @@ const DOCUMENT_FIELDS_SQL: &str =
 pub(crate) const TYPED_VALUE_DISCARD_SQL: &str =
     "UPDATE document_fields SET typed = NULL, least_typed = 0, offset_stated = NULL
      WHERE typed IS NOT NULL";
+
+/// The statement [`Request::pin_vault_schema`] clears the folds of the keys a
+/// schema declares `tags` with, in the pin's transaction.
+///
+/// The tag carrier's folds stand: the carrier, [`crate::TAG_CARRIER`], is a
+/// tag key under every schema, so its fold is a parse fact. Every other fold
+/// is there because the schema being replaced declared its key `tags`. Its
+/// predicate implies the fold index's own, so it reads that index — the tag
+/// keys' value rows — and never the rows that hold none.
+pub(crate) fn folded_value_discard_sql() -> String {
+    format!(
+        "UPDATE document_fields SET folded = NULL WHERE folded IS NOT NULL AND key <> '{}'",
+        crate::TAG_CARRIER
+    )
+}
 
 /// The statement [`Request::stored_tombstone`] emits.
 ///
@@ -3014,6 +3029,7 @@ fn stored_field(row: &Row<'_>) -> Reading<FieldRow> {
             .map(OffsetSpelling::of_stated),
         least_raw: row.get(6)?,
         least_typed: row.get(7)?,
+        folded: row.get(9)?,
         path,
     }))
 }

@@ -1612,15 +1612,15 @@ fn filtered() -> Vec<(Predicate, ReadFilter)> {
     vec![
         (
             Predicate::equal_to("status", "open"),
-            ReadFilter::Equal(norn_store::FieldOrder::Raw),
+            ReadFilter::Equal(norn_store::FieldMatch::RAW),
         ),
         (
             Predicate::not_equal_to("status", "open"),
-            ReadFilter::NotEqual(norn_store::FieldOrder::Raw),
+            ReadFilter::NotEqual(norn_store::FieldMatch::RAW),
         ),
         (
             Predicate::in_any("status", ["open".to_string(), "closed".to_string()]),
-            ReadFilter::Member(norn_store::FieldOrder::Raw),
+            ReadFilter::Member(norn_store::FieldMatch::RAW),
         ),
         (Predicate::has("status"), ReadFilter::Present),
         (Predicate::missing("status"), ReadFilter::Absent),

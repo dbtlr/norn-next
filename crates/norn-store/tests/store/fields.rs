@@ -34,8 +34,99 @@ fn raw(at: &str, key: &str, ordinal: u32, text: Option<&str>, least: bool) -> Fi
         offset: None,
         least_raw: least,
         least_typed: false,
+        folded: None,
         path: at.to_string(),
     }
+}
+
+/// `row` holding `fold` as the tag its value names under the tag fold.
+fn folded(row: FieldRow, fold: &str) -> FieldRow {
+    match row {
+        FieldRow::Value {
+            key,
+            ordinal,
+            raw,
+            typed,
+            offset,
+            least_raw,
+            least_typed,
+            path,
+            ..
+        } => FieldRow::Value {
+            key,
+            ordinal,
+            raw,
+            typed,
+            offset,
+            least_raw,
+            least_typed,
+            folded: Some(fold.to_string()),
+            path,
+        },
+        presence => presence,
+    }
+}
+
+/// **A tag key's value rows hold the tag each names under the tag fold**,
+/// its `#` marker dropped: the tag carrier `tags` under every declaration —
+/// none, or one declaring it text — and a key declared `tags`. Any other key's
+/// rows hold none, and neither does a null.
+#[test]
+fn a_tag_keys_value_rows_hold_the_tag_each_names_under_the_fold() {
+    let value = map(vec![
+        (
+            "tags",
+            FrontmatterValue::Sequence(vec![
+                string("#Work"),
+                string("Über"),
+                FrontmatterValue::Int(2024),
+                FrontmatterValue::Null,
+            ]),
+        ),
+        ("labels", string("#Play")),
+        ("title", string("Work")),
+    ]);
+    let at = "docs/tagged.md";
+    let folds = |declared: &ContentModel| -> Vec<(String, Option<String>)> {
+        FieldRows::derive(&path(at), Some(&value), declared)
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value { key, folded, .. } => Some((key.clone(), folded.clone())),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect()
+    };
+    let carrier = vec![
+        ("tags".to_string(), Some("work".to_string())),
+        ("tags".to_string(), Some("über".to_string())),
+        ("tags".to_string(), Some("2024".to_string())),
+        ("tags".to_string(), None),
+    ];
+    let undeclared: Vec<(String, Option<String>)> = [("labels".to_string(), None)]
+        .into_iter()
+        .chain(carrier.clone())
+        .chain([("title".to_string(), None)])
+        .collect();
+    assert_eq!(folds(&ContentModel::none()), undeclared);
+    assert_eq!(
+        folds(&ContentModel::under("schema").declare("tags")),
+        undeclared,
+        "the carrier declared text is still a tag key"
+    );
+    let declared: Vec<(String, Option<String>)> =
+        [("labels".to_string(), Some("play".to_string()))]
+            .into_iter()
+            .chain(carrier)
+            .chain([("title".to_string(), None)])
+            .collect();
+    assert_eq!(
+        folds(
+            &ContentModel::under("schema")
+                .declare_field("labels", norn_store::FieldDeclaration::tags())
+        ),
+        declared
+    );
 }
 
 fn string(text: &str) -> FrontmatterValue {
@@ -129,8 +220,8 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         presence(at, "ratio", FieldContainer::Scalar),
         raw(at, "ratio", 1, Some("1.0"), true),
         presence(at, "tags", FieldContainer::Sequence),
-        raw(at, "tags", 1, Some("b"), false),
-        raw(at, "tags", 2, Some("a"), true),
+        folded(raw(at, "tags", 1, Some("b"), false), "b"),
+        folded(raw(at, "tags", 2, Some("a"), true), "a"),
         raw(at, "tags", 3, None, false),
         presence(at, "title", FieldContainer::Scalar),
         raw(at, "title", 1, Some("second"), true),
@@ -427,6 +518,131 @@ fn typed_values_derived_under_a_schema_the_store_does_not_pin_are_refused() {
             &typed_under("schema-2")
         ),
     );
+}
+
+/// **A declared tag key's folds stand only under the schema the store
+/// pins**, as typed values do: a document whose folds under a key declared
+/// `tags` were derived under another schema than the pinned one is refused
+/// in its entry, naming both fingerprints. The tag carrier's folds need no
+/// agreement — the carrier is a tag key under every schema, so its fold is
+/// the document's alone.
+#[test]
+fn a_declared_tag_keys_folds_derived_under_a_schema_the_store_does_not_pin_are_refused() {
+    let scratch = Scratch::new("field-unpinned-folds");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-2")
+        .expect("pinning a schema");
+    let stale = ContentModel::under("schema-1").declare_field("labels", FieldDeclaration::tags());
+    let labelled = fielded(
+        "docs/labelled.md",
+        "hash-1",
+        map(vec![("labels", string("#Work"))]),
+        &stale,
+    );
+    let pinned = pinned_declaration(&request);
+    let refused = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(labelled)],
+            &[],
+            &pinned,
+        )
+        .expect_err("a declared tag key's folds derived under a schema the store does not pin");
+    let StoreError::Entry { problem, .. } = refused else {
+        panic!("a refusal outside the entry: {refused}");
+    };
+    assert_eq!(
+        *problem,
+        StoreError::UnpinnedDeclaration {
+            what: "typed field values were derived",
+            derived_under: Some("schema-1".to_string()),
+            pinned: Some("schema-2".to_string()),
+        }
+    );
+    assert!(
+        request
+            .stored_facts(&path("docs/labelled.md"))
+            .expect("reading a document")
+            .is_none(),
+        "a refused entry's document stands"
+    );
+
+    let tagged = fielded(
+        "docs/tagged.md",
+        "hash-1",
+        map(vec![("tags", string("#Play"))]),
+        &stale,
+    );
+    write_document(&mut request, &tagged);
+    assert_eq!(
+        stored_fields(&mut request, "docs/tagged.md"),
+        *tagged.fields(),
+        "the carrier's folds were refused as though a schema derived them"
+    );
+}
+
+/// **A pin that moves the schema clears a declared tag key's folds, and keeps
+/// the tag carrier's.** A key declared `tags` folds its values because the
+/// schema being replaced declared it so, and the walk under the new schema
+/// derives its folds again; the carrier folds under every schema, so its
+/// folds are a parse fact the pin leaves standing.
+#[test]
+fn a_moved_pin_clears_a_declared_tag_keys_folds_and_keeps_the_carriers() {
+    let scratch = Scratch::new("field-pin-folds");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    request
+        .pin_vault_schema(b"version: 1\n", "schema-1")
+        .expect("pinning a schema");
+    let declared =
+        ContentModel::under("schema-1").declare_field("labels", FieldDeclaration::tags());
+    let value = map(vec![("labels", string("#Work")), ("tags", string("#Play"))]);
+    let at = "docs/labelled.md";
+    write_document(
+        &mut request,
+        &fielded(at, "hash-1", value.clone(), &declared),
+    );
+    let folds = |request: &mut norn_store::Request<'_>| -> Vec<(String, Option<String>)> {
+        stored_fields(request, at)
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value { key, folded, .. } => Some((key.clone(), folded.clone())),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        folds(&mut request),
+        [
+            ("labels".to_string(), Some("work".to_string())),
+            ("tags".to_string(), Some("play".to_string())),
+        ]
+    );
+
+    let moved = request
+        .pin_vault_schema(b"version: 1\nfields: {}\n", "schema-2")
+        .expect("re-pinning a schema");
+    assert!(moved.repinned);
+    assert_eq!(
+        folds(&mut request),
+        [
+            ("labels".to_string(), None),
+            ("tags".to_string(), Some("play".to_string())),
+        ],
+        "the pin kept a declared tag key's fold, or took the carrier's"
+    );
+    assert_eq!(
+        stored_fields(&mut request, at),
+        FieldRows::derive(&path(at), Some(&value), &ContentModel::none()),
+        "the pin left rows other than those no declaration derives"
+    );
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose declared folds a pin cleared");
 }
 
 /// **A document's field rows die with it.** A death takes the rows through the

@@ -974,6 +974,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::TypedValueDiscard => {
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one"
         }
+        ExplainedStatement::FoldedValueDiscard => {
+            "a_pins_fold_clear_reads_only_the_declared_tag_keys_folds"
+        }
         ExplainedStatement::StoredDocumentPage(..) => {
             "a_heal_page_seeks_the_index_that_holds_its_order"
         }
@@ -1351,6 +1354,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         ExplainedStatement::PathDiscard(&path_key),
         ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
         ExplainedStatement::TypedValueDiscard,
+        ExplainedStatement::FoldedValueDiscard,
         ExplainedStatement::FindingSubjectsWithoutRows(
             norn_store::SubjectScope::Vault,
             &[FindingKind::PathNamesNoDocument],
@@ -1389,6 +1393,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
+            "a_pins_fold_clear_reads_only_the_declared_tag_keys_folds",
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
@@ -1686,6 +1691,7 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::FindingsInClass(_)
         | ExplainedStatement::SubjectDiscard(..)
         | ExplainedStatement::TypedValueDiscard
+        | ExplainedStatement::FoldedValueDiscard
         | ExplainedStatement::FindingSubjectsWithoutRows(..)
         | ExplainedStatement::StoredDocumentPage(..)
         | ExplainedStatement::StoredFindingPage
@@ -1820,6 +1826,54 @@ fn a_pins_typed_value_clear_reads_only_the_rows_that_hold_one() {
     assert!(
         !reads_the_typed_index(&unindexed),
         "the bar holds a clear with no typed index to read: {:?}",
+        unindexed.rows()
+    );
+}
+
+/// **A pin's fold clear reads the fold index, never the table.** A pin clears
+/// the folds of every key the replaced schema declared `tags`, and a clear
+/// that read the pillar end to end would make every pin cost every field row
+/// the vault holds.
+///
+/// The clear is stated over `folded IS NOT NULL AND key <> 'tags'`, which
+/// implies the fold index's own predicate, so the index holds every row it
+/// clears and the carrier's, which it leaves. The control is run in the same
+/// case: with the index dropped, the same statement reads the table, and the
+/// bar says so.
+#[test]
+fn a_pins_fold_clear_reads_only_the_declared_tag_keys_folds() {
+    let scratch = Scratch::new("fold-clear-plan");
+    let mut store = scratch.open();
+    let judge = |store: &mut norn_store::Store| {
+        plan(
+            store
+                .begin_request()
+                .emitted_plan(ExplainedStatement::FoldedValueDiscard)
+                .expect("a query plan for the fold clear"),
+        )
+    };
+    let reads_the_fold_index = |read: &QueryPlan| {
+        read.table_scans().is_empty()
+            && read.rows().iter().any(|row| {
+                row.scans() == Some("document_fields")
+                    && row.index() == Some("document_fields_folded")
+            })
+    };
+
+    let read = judge(&mut store);
+    assert!(
+        reads_the_fold_index(&read),
+        "the fold clear reads something other than the fold index: {:?}\nemitted SQL: {}",
+        read.rows(),
+        read.sql()
+    );
+
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX document_fields_folded")
+        .expect("dropping the fold index");
+    let unindexed = judge(&mut store);
+    assert!(
+        !reads_the_fold_index(&unindexed),
+        "the bar holds a clear with no fold index to read: {:?}",
         unindexed.rows()
     );
 }

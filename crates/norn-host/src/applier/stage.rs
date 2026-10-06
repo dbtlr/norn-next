@@ -769,6 +769,7 @@ impl Judging<'_> {
     fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
         let written_fields = schema::written_fields(self.plan, self.normalizer);
+        let case = crate::stored_path_order(self.normalizer.case_sensitivity()).glob_case();
         let no_field = BTreeSet::new();
         let mut checks = Vec::new();
         for (unit, content) in units.iter().zip(contents) {
@@ -806,12 +807,13 @@ impl Judging<'_> {
                         &self.plan.transitions[index].path,
                         bytes,
                         self.declared,
+                        case,
                     )),
                     _ => None,
                 })
                 .into_iter()
                 .collect();
-            let after = schema::judge(path, after, self.declared);
+            let after = schema::judge(path, after, self.declared, case);
             checks.extend(schema::introduced(path, &after, &before, &fields));
         }
         checks

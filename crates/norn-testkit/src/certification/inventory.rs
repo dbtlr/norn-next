@@ -490,6 +490,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-flush-commits-its-rule-findings-with-its-changeset",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a process that dies the instant a changeset is at rest has lost no rule \
+                 finding: the row an edit wrote and the finding a schema rule concludes about it \
+                 commit in one transaction, and the heal after it writes nothing",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_flush_commits_its_rule_findings_with_its_changeset",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-paging-window-vanished-entry-converges",
         suite: Suite::InducedFailure,
         lane: Lane::Any,

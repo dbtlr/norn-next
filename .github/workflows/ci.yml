@@ -212,9 +212,13 @@ jobs:
   # retake inside that hold; the reader-wait reading is eight; and each contended
   # read took exactly one round of the entry gate after its first, none past
   # a ceiling authored in norn-host's baselines. Its control runs the same
-  # reads one after another and must fail on contention alone. All four are
-  # counts: a counter says the same thing on a loaded runner, which a clock
-  # does not.
+  # reads one after another and must fail on contention alone. Rule judgment
+  # runs in the host and reads no database, so its work is the judge's own
+  # logical counts, folded into the host's account: one document judged under
+  # a live attachment costs the same at 300 documents as at 2000, and each
+  # parameter the schema declares, varied alone, moves its counts in
+  # proportion and no other. All of these are counts: a counter says the same
+  # thing on a loaded runner, which a clock does not.
   #
   # The plan bars live in the store's own suites, beside the read builders that
   # emit the SQL they judge. An `EXPLAIN` assertion is worth something only

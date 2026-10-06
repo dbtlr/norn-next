@@ -1,7 +1,7 @@
 //! What schema read judges of its rules once every rule is read: each rule
 //! against itself, the allowed-paths ceiling across rules that may select
-//! one document together, and the conflicts rules that always select
-//! together cannot avoid.
+//! one document together, and the conflicts rules cannot avoid — one rule's
+//! allowed paths alone, and rules that always select together.
 //!
 //! # A rule against itself
 //!
@@ -49,22 +49,25 @@
 //! once per rule, so it costs the square of the rule count times the
 //! selector keys compared, at schema read.
 //!
-//! **Statically unavoidable conflicts.** Rules select together on every
-//! document any of them selects where one is selectorless, or where their
-//! selectors are identical in normal form: any-of and `exclude.path` lists as
-//! sets, capture names erased, a `match.path` of `**` read as absent. So each
-//! class of identical selectors, with every selectorless rule beside it, is
-//! one group, and so is the selectorless set alone. Within a group the
-//! combined constraint's conflicts ([`CombinedConstraint::conflicts`]) are
-//! refused, except an empty closed-set intersection on a field none of the
-//! group requires, which a document holding no value meets.
+//! **Statically unavoidable conflicts.** A rule whose allowed paths admit no
+//! document path conflicts with itself on every document it selects, whatever
+//! selects beside it, so it is refused before any group is judged, naming
+//! that rule alone. Rules select together on every document any of them
+//! selects where one is selectorless, or where their selectors are identical
+//! in normal form: any-of and `exclude.path` lists as sets, capture names
+//! erased, a `match.path` of `**` read as absent. So each class of identical
+//! selectors, with every selectorless rule beside it, is one group, and so is
+//! the selectorless set alone. Within a group the combined constraint's
+//! conflicts ([`CombinedConstraint::conflicts`]) are refused, except an empty
+//! closed-set intersection on a field none of the group requires, which a
+//! document holding no value meets.
 //!
 //! **A conflict between rules holds on every root.** A refusal at read must
-//! hold whichever root the schema is pinned for, so a group's allowed paths
-//! are judged under [`CaseFold::Ascii`]: a document path the wider fold
-//! cannot admit no root admits. Two rules spelling one folder in two cases
-//! are two authors' spellings, which a folding root reads as one, so neither
-//! is refused for the other's.
+//! hold whichever root the schema is pinned for, so a rule's allowed paths
+//! alone and a group's are judged under [`CaseFold::Ascii`]: a document path
+//! the wider fold cannot admit no root admits. Two rules spelling one folder
+//! in two cases are two authors' spellings, which a folding root reads as
+//! one, so neither is refused for the other's.
 //!
 //! # What judging costs
 //!
@@ -73,20 +76,21 @@
 //! against itself, so no walk runs over a schema past it. A route's walk is
 //! the route's glob against its rule's allowed paths, so its weight is the
 //! route glob's weight times the rule's, and a route weighing past the
-//! ceiling is refused, naming the rule, before its walk. A group's walk is
+//! ceiling is refused, naming the rule, before its walk. A rule's own walk
+//! weighs its own weight, which its neighbourhood's holds. A group's walk is
 //! over rules that may each select beside every other, so it weighs no more
 //! than the neighbourhood of any of them, which the ceiling holds. Each walk
 //! visits at most a constant times its weight in states
 //! ([`norn_wire::sets_share_a_document_path`]), so a schema read costs at most
-//! one walk per route and one per group, each under that constant times
-//! `2^18`, beside the ceiling's own comparisons: the square of the rule count
-//! times the selector keys compared.
+//! one walk per route, one per rule with allowed paths and one per group, each
+//! under that constant times `2^18`, beside the ceiling's own comparisons: the
+//! square of the rule count times the selector keys compared.
 //!
 //! **A declared limit: the read's total grows with its walks.** No budget
-//! spans walks, so a schema of many routes or groups each near the ceiling
-//! reads slowly: globs built of hundreds of wildcards take about a second a
-//! walk in a release build, and sixteen such groups about eighteen seconds.
-//! Globs of ordinary length weigh far below the ceiling and read in
+//! spans walks, so a schema of many routes, rules or groups each near the
+//! ceiling reads slowly: globs built of hundreds of wildcards take about a
+//! second a walk in a release build, and sixteen such groups about eighteen
+//! seconds. Globs of ordinary length weigh far below the ceiling and read in
 //! microseconds. Only the vault's owner writes the schema, so the cost falls
 //! on that owner's own reloads; a budget across walks would let one rule's
 //! weight refuse an unrelated rule.
@@ -99,6 +103,7 @@ use super::super::creation::DefaultValue;
 use super::super::template::Part;
 use super::super::{Shape, VaultSchema, VaultSchemaError};
 use super::combined::{CombinedConstraint, RulesConflict};
+use super::judge::Element;
 use super::placement::{self, PLACEMENT_CEILING};
 use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem};
 
@@ -220,6 +225,10 @@ fn check_rule(schema: &VaultSchema, rule: &Rule) -> Result<(), VaultSchemaError>
 /// Why `rule` refuses `raw` as one element of `field`, or nothing: it must
 /// read as the field's declared type and fit the rule's `max_length`, and,
 /// where `in_closed_set`, be one of the rule's own `one_of` values.
+///
+/// The element is read as rule judgment reads a document's ([`Element`]), so
+/// a rule's own members and defaults answer to the one reading of a type, a
+/// length and a closed set its findings judge by.
 fn element_problem(
     schema: &VaultSchema,
     rule: &Rule,
@@ -227,20 +236,18 @@ fn element_problem(
     raw: &str,
     in_closed_set: bool,
 ) -> Option<ElementProblem> {
-    let declared = schema.declared_type(field);
-    if declared.read(raw).is_err() {
-        return Some(ElementProblem::NotType(declared));
+    let element = Element::read(schema, field, raw);
+    if !element.reads_as_type() {
+        return Some(ElementProblem::NotType(schema.declared_type(field)));
     }
     if let Some(limit) = rule.max_length.get(field)
-        && u64::try_from(raw.chars().count()).unwrap_or(u64::MAX) > *limit
+        && element.longer_than(*limit)
     {
         return Some(ElementProblem::TooLong(*limit));
     }
     if in_closed_set
         && let Some(set) = rule.one_of.get(field)
-        && !schema
-            .equality_key(field, raw)
-            .is_some_and(|key| set.members.contains_key(&key))
+        && !element.is_in(|key| set.members.contains_key(key))
     {
         return Some(ElementProblem::OutsideOneOf);
     }
@@ -331,8 +338,18 @@ fn check_ceiling(schema: &VaultSchema) -> Result<(), VaultSchemaError> {
     Ok(())
 }
 
-/// The statically unavoidable conflicts, group by group.
+/// The statically unavoidable conflicts: each rule's allowed paths alone,
+/// then group by group.
 fn check_unavoidable(schema: &VaultSchema) -> Result<(), VaultSchemaError> {
+    for rule in schema.rules.values() {
+        if rule.allowed_paths.is_some() && !placement::share_a_path(&[rule], CaseFold::Ascii) {
+            return Err(VaultSchemaError::RulesConflict {
+                conflict: RulesConflict::DisjointPlacement {
+                    rules: vec![rule.name.clone()],
+                },
+            });
+        }
+    }
     let mut selectorless: Vec<&Rule> = Vec::new();
     let mut classes: Vec<(NormalSelector<'_>, Vec<&Rule>)> = Vec::new();
     for rule in schema.rules.values() {
