@@ -127,35 +127,37 @@ fn reporting_over_an_empty_vocabulary_judges_no_document() {
     assert!(!schema.rederives_documents());
 }
 
-/// A field declared as text or tags orders as the text it is written as, so
-/// declaring one changes no stored order and a pin of it owes no document a
-/// re-derivation.
+/// **Every declared field judges every document**: a value of the wrong type
+/// or shape is a finding whatever the type — a map reads as no type, text
+/// included — so declaring any field owes each document its re-derivation,
+/// though a field declared as text or tags orders as the text it is written
+/// as and fills no typed column.
 #[test]
-fn a_schema_declaring_only_text_ordered_fields_judges_no_document() {
-    let schema = VaultSchema::parse(
-        b"version: 1\nfields:\n  title:\n    type: text\n  topics:\n    type: tags\n",
-    )
-    .expect("a text-only schema");
-
-    assert_eq!(schema.fields().count(), 2);
-    assert!(FieldType::Text.orders_as_text());
-    assert!(FieldType::Tags.orders_as_text());
-    assert!(!schema.rederives_documents());
-}
-
-/// A field declared with a type that orders otherwise is what the typed column
-/// holds a sort key for, and a pin clears that column: each such type obliges
-/// the re-derivation that refills it, the tag facet reporting nothing.
-#[test]
-fn a_schema_declaring_a_typed_field_rederives_every_document() {
-    for kind in [FieldType::Number, FieldType::Boolean, FieldType::Date] {
+fn a_schema_declaring_any_field_rederives_every_document() {
+    for kind in FieldType::ALL {
         let bytes = format!("version: 1\nfields:\n  rating:\n    type: {kind}\n");
-        let schema = VaultSchema::parse(bytes.as_bytes()).expect("a typed schema");
+        let schema = VaultSchema::parse(bytes.as_bytes()).expect("a declared field");
 
-        assert!(!kind.orders_as_text(), "{kind}");
         assert!(!schema.tags().reports_undeclared());
         assert!(schema.rederives_documents(), "a field declared {kind}");
     }
+    assert!(FieldType::Text.orders_as_text());
+    assert!(FieldType::Tags.orders_as_text());
+    for kind in [FieldType::Number, FieldType::Boolean, FieldType::Date] {
+        assert!(!kind.orders_as_text(), "{kind}");
+    }
+}
+
+/// **A schema rule judges the documents it selects**, so a schema stating one
+/// owes each document its re-derivation, whatever else it declares.
+#[test]
+fn a_schema_stating_a_rule_rederives_every_document() {
+    let schema = VaultSchema::parse(b"version: 1\nrules:\n  r: { required: { owner: } }\n")
+        .expect("a schema with a rule");
+
+    assert_eq!(schema.fields().count(), 0);
+    assert!(!schema.tags().reports_undeclared());
+    assert!(schema.rederives_documents());
 }
 
 #[test]

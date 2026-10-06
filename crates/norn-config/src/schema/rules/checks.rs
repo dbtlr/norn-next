@@ -99,6 +99,7 @@ use super::super::creation::DefaultValue;
 use super::super::template::Part;
 use super::super::{Shape, VaultSchema, VaultSchemaError};
 use super::combined::{CombinedConstraint, RulesConflict};
+use super::judge::Element;
 use super::placement::{self, PLACEMENT_CEILING};
 use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem};
 
@@ -220,6 +221,10 @@ fn check_rule(schema: &VaultSchema, rule: &Rule) -> Result<(), VaultSchemaError>
 /// Why `rule` refuses `raw` as one element of `field`, or nothing: it must
 /// read as the field's declared type and fit the rule's `max_length`, and,
 /// where `in_closed_set`, be one of the rule's own `one_of` values.
+///
+/// The element is read as rule judgment reads a document's ([`Element`]), so
+/// a rule's own members and defaults answer to the one reading of a type, a
+/// length and a closed set its findings judge by.
 fn element_problem(
     schema: &VaultSchema,
     rule: &Rule,
@@ -227,20 +232,18 @@ fn element_problem(
     raw: &str,
     in_closed_set: bool,
 ) -> Option<ElementProblem> {
-    let declared = schema.declared_type(field);
-    if declared.read(raw).is_err() {
-        return Some(ElementProblem::NotType(declared));
+    let element = Element::read(schema, field, raw);
+    if !element.reads_as_type() {
+        return Some(ElementProblem::NotType(schema.declared_type(field)));
     }
     if let Some(limit) = rule.max_length.get(field)
-        && u64::try_from(raw.chars().count()).unwrap_or(u64::MAX) > *limit
+        && element.longer_than(*limit)
     {
         return Some(ElementProblem::TooLong(*limit));
     }
     if in_closed_set
         && let Some(set) = rule.one_of.get(field)
-        && !schema
-            .equality_key(field, raw)
-            .is_some_and(|key| set.members.contains_key(&key))
+        && !element.is_in(|key| set.members.contains_key(key))
     {
         return Some(ElementProblem::OutsideOneOf);
     }

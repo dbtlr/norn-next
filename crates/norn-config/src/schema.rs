@@ -148,9 +148,10 @@ pub use creation::{CreationProblem, CreationRule, Inbox, SeqSlot, Target};
 use norn_wire::fold_tag;
 pub use norn_wire::{Binding, Captures, CaseFold, Pattern, PatternError};
 pub use rules::{
-    AllowedPaths, ClosedSet, CombinedConstraint, DefaultCandidate, DefaultsConflict,
-    ElementProblem, FieldConstraint, ForbiddenFix, OneOfIntersection, PLACEMENT_CEILING, Route,
-    Rule, RuleDefault, RuleDefaultsRefusal, RuleProblem, RulesConflict, Selector,
+    AllowedPaths, Breach, ClosedSet, CombinedConstraint, DefaultCandidate, DefaultsConflict,
+    ElementProblem, FieldConstraint, ForbiddenFix, Judgment, OneOfIntersection, PLACEMENT_CEILING,
+    Route, Rule, RuleDefault, RuleDefaultsRefusal, RuleFinding, RuleProblem, RuleWork,
+    RulesConflict, Selector,
 };
 pub use template::{
     FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateError, TemplateValues,
@@ -194,6 +195,9 @@ pub struct VaultSchema {
     rules: BTreeMap<String, Rule>,
     creation_rules: BTreeMap<String, CreationRule>,
     inbox: Option<Inbox>,
+    /// Rule judgment's memo of placement verdicts, which is no part of the
+    /// model: see [`rules::PlacementVerdicts`].
+    placement_verdicts: rules::PlacementVerdicts,
 }
 
 impl VaultSchema {
@@ -228,6 +232,7 @@ impl VaultSchema {
             rules,
             creation_rules: creation::read_creatable(&document)?,
             inbox: creation::read_inbox(&document)?,
+            placement_verdicts: rules::PlacementVerdicts::default(),
         };
         rules::check_rules(&schema)?;
         Ok(schema)
@@ -297,25 +302,28 @@ impl VaultSchema {
     /// The re-derivation a schema change implies costs the vault, so the
     /// question is asked before it is paid. The answer is the disjunction over
     /// the declarations some per-document derived state reads — state a
-    /// document's own re-derivation derives again — and that set holds two:
+    /// document's own re-derivation derives again — and that set holds three:
     ///
     /// - **A tag facet that reports**, whose findings are derived per document.
-    /// - **A field declared with a type that does not order as text**, whose
-    ///   values the field pillar's typed column holds. A pin clears that
-    ///   column, so a schema declaring one owes every document standing under
-    ///   it the re-derivation that refills it, whether or not its bytes moved.
-    ///   A field declared as text or tags orders as its raw text and fills
-    ///   nothing.
+    /// - **A declared field**, whatever its type and shape. Rule judgment
+    ///   files a type or shape mismatch against every declaration, a field
+    ///   declared text included — a map reads as no type — and a field whose
+    ///   type does not order as text also has its values held in the field
+    ///   pillar's typed column. A pin clears that column, so a schema
+    ///   declaring one owes every document standing under it the
+    ///   re-derivation that refills it, whether or not its bytes moved.
+    /// - **A schema rule**, whose findings are judged per document
+    ///   ([`VaultSchema::judge`]).
     ///
     /// Creation rules and the inbox are no term: they say how a document is
     /// made, and no row a document's derivation writes reads them.
     ///
-    /// A schema declaring neither leaves every row with the same per-document
-    /// derived state under the new pin as under the old. **A declaration
-    /// gaining a per-document consumer joins this disjunction in the same
-    /// change**: a schema answering `false` here while some per-document state
-    /// reads its declaration would leave that state derived under a schema the
-    /// vault no longer declares.
+    /// A schema declaring none of them leaves every row with the same
+    /// per-document derived state under the new pin as under the old. **A
+    /// declaration gaining a per-document consumer joins this disjunction in
+    /// the same change**: a schema answering `false` here while some
+    /// per-document state reads its declaration would leave that state derived
+    /// under a schema the vault no longer declares.
     ///
     /// State the store judges across documents is not in it. Link health reads
     /// [`VaultSchema::ambiguity_ignore`], and a link's finding is re-decided
@@ -332,11 +340,7 @@ impl VaultSchema {
     ///
     /// [ADR 0027]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0027-link-health-rides-the-changeset.md
     pub fn rederives_documents(&self) -> bool {
-        self.tags.reports_undeclared()
-            || self
-                .fields
-                .values()
-                .any(|field| !field.kind().orders_as_text())
+        self.tags.reports_undeclared() || !self.fields.is_empty() || !self.rules.is_empty()
     }
 
     /// The type a field's declaration gives it, or text where nothing declares
@@ -376,11 +380,12 @@ impl DeclaredField {
     /// declaring none admits either.
     ///
     /// Read at schema read, where a rule's default and selectors are judged
-    /// against it, and by selection: a selector on a key declared
-    /// [`Shape::Single`] reads a scalar value alone; and by `norn-host`, which
-    /// carries it into the declaration `describe` reports it with. Its other
-    /// consumer is not built: the finding a value of the wrong shape mints
-    /// (NORN-358).
+    /// against it; by selection and rule judgment, which read a value under
+    /// it — a selector on a key declared [`Shape::Single`] reads a scalar
+    /// value alone, and a value of the other shape is a shape mismatch
+    /// ([`VaultSchema::judge`]); and by `norn-host`, which carries it into
+    /// the declaration `describe` reports it with and the store's find reads
+    /// a field's equality under.
     pub fn shape(&self) -> Option<Shape> {
         self.shape
     }

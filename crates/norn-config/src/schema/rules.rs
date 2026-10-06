@@ -152,6 +152,7 @@
 mod checks;
 mod combined;
 mod defaults;
+mod judge;
 mod placement;
 mod read;
 
@@ -162,9 +163,11 @@ use norn_wire::{AuthoredValue, Captures, CaseFold, Severity, ValueMap, fold_tag}
 
 pub use combined::{CombinedConstraint, FieldConstraint, OneOfIntersection, RulesConflict};
 pub use defaults::{DefaultCandidate, DefaultsConflict, RuleDefaultsRefusal};
+pub use judge::{Breach, Judgment, RuleFinding, RuleWork};
 pub use placement::PLACEMENT_CEILING;
 
 pub(super) use checks::check_rules;
+pub(super) use placement::PlacementVerdicts;
 pub(super) use read::read_rules;
 
 use super::creation::DefaultValue;
@@ -461,9 +464,13 @@ impl AllowedPaths {
         self.route.as_ref()
     }
 
-    /// Whether some glob admits `path`.
-    fn admits(&self, path: &str, case: CaseFold) -> bool {
-        self.paths.iter().any(|glob| glob.matches(path, case))
+    /// Whether some glob admits `path`, tallying in `work` the characters of
+    /// each glob matched up to the first that admits it.
+    fn admits(&self, path: &str, case: CaseFold, work: &mut RuleWork) -> bool {
+        self.paths.iter().any(|glob| {
+            work.pattern_characters += glob.as_str().chars().count() as u64;
+            glob.matches(path, case)
+        })
     }
 }
 
@@ -735,10 +742,25 @@ impl VaultSchema {
         frontmatter: &ValueMap,
         case: CaseFold,
     ) -> Vec<&Rule> {
-        self.rules
+        self.select_counted(path, frontmatter.entries(), case, &mut RuleWork::default())
+    }
+
+    /// Every rule that selects a document at `path` whose frontmatter holds
+    /// `entries`, in name order, tallying the selectors evaluated in `work`.
+    fn select_counted(
+        &self,
+        path: &str,
+        entries: &[(String, AuthoredValue)],
+        case: CaseFold,
+        work: &mut RuleWork,
+    ) -> Vec<&Rule> {
+        let selected: Vec<&Rule> = self
+            .rules
             .values()
-            .filter(|rule| self.selects_in(rule, path, frontmatter.entries(), case))
-            .collect()
+            .filter(|rule| self.selects_counted(rule, path, entries, case, work))
+            .collect();
+        work.rules_selected += selected.len() as u64;
+        selected
     }
 
     /// Whether `rule` selects a document at `path` whose frontmatter holds
@@ -750,16 +772,36 @@ impl VaultSchema {
         entries: &[(String, AuthoredValue)],
         case: CaseFold,
     ) -> bool {
+        self.selects_counted(rule, path, entries, case, &mut RuleWork::default())
+    }
+
+    /// **The one matcher**: whether `rule` selects a document at `path` whose
+    /// frontmatter holds `entries`, tallying in `work` the rule evaluated,
+    /// each selector term evaluated up to the first that fails, and the
+    /// characters of each glob matched.
+    fn selects_counted(
+        &self,
+        rule: &Rule,
+        path: &str,
+        entries: &[(String, AuthoredValue)],
+        case: CaseFold,
+        work: &mut RuleWork,
+    ) -> bool {
         let selector = &rule.selector;
-        selector
-            .frontmatter
-            .iter()
-            .all(|(key, values)| self.matches_value(key, value_in(entries, key), &values.keys))
-            && selector
-                .path
-                .as_ref()
-                .is_none_or(|glob| glob.matches(path, case))
-            && !selector.exclude.iter().any(|glob| glob.matches(path, case))
+        work.rules_evaluated += 1;
+        let glob = |glob: &Pattern, work: &mut RuleWork| {
+            work.selector_terms += 1;
+            work.pattern_characters += glob.as_str().chars().count() as u64;
+            glob.matches(path, case)
+        };
+        selector.frontmatter.iter().all(|(key, values)| {
+            work.selector_terms += 1;
+            self.matches_value(key, value_in(entries, key), &values.keys)
+        }) && selector
+            .path
+            .as_ref()
+            .is_none_or(|path_glob| glob(path_glob, work))
+            && !selector.exclude.iter().any(|excluded| glob(excluded, work))
     }
 
     /// Whether `value`, held under `key`, equals one of `keys` by its
@@ -770,27 +812,24 @@ impl VaultSchema {
     /// equality matches a list field, unless the key is declared
     /// [`Shape::Single`]; a scalar matches unless the key is declared
     /// [`Shape::List`]. A value of the other shape, like a map anywhere, is
-    /// not a value of the key's shape, so it has nothing to compare. Find's
-    /// field equality is owed the same shape reading (NORN-358).
+    /// not a value of the key's shape, so it has nothing to compare. The shape
+    /// is read as rule judgment reads it ([`judge::read_shape`]), and find's
+    /// field equality reads it the same way.
     fn matches_value(
         &self,
         key: &str,
         value: Option<&AuthoredValue>,
         keys: &BTreeSet<TypedValue>,
     ) -> bool {
-        let equals = |value: &AuthoredValue| {
-            value
-                .scalar_text()
-                .and_then(|raw| self.equality_key(key, &raw))
-                .is_some_and(|value| keys.contains(&value))
-        };
         let shape = self.field(key).and_then(|field| field.shape());
-        match value {
-            None => false,
-            Some(AuthoredValue::List(items)) => {
-                shape != Some(Shape::Single) && items.iter().any(equals)
-            }
-            Some(value) => shape != Some(Shape::List) && equals(value),
+        match value.map(|value| judge::read_shape(shape, value)) {
+            Some(judge::ShapeReading::Elements(elements)) => elements.iter().any(|element| {
+                element
+                    .scalar_text()
+                    .and_then(|raw| self.equality_key(key, &raw))
+                    .is_some_and(|value| keys.contains(&value))
+            }),
+            Some(judge::ShapeReading::WrongShape) | None => false,
         }
     }
 }

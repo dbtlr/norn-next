@@ -16,7 +16,7 @@ use std::fmt;
 use norn_wire::{CaseFold, Severity};
 
 use super::super::{TypedValue, VaultSchema};
-use super::{Rule, higher, named, placement};
+use super::{Rule, RuleWork, higher, named, placement};
 
 /// What a set of rules requires of a document they all select.
 #[derive(Clone, Debug)]
@@ -127,10 +127,21 @@ impl<'s> CombinedConstraint<'s> {
     /// Whether every contributing rule's allowed paths admit `path`, under
     /// `case` (see [`VaultSchema::selects`]).
     pub fn admits_path(&self, path: &str, case: CaseFold) -> bool {
+        self.admits_path_counted(path, case, &mut RuleWork::default())
+    }
+
+    /// [`CombinedConstraint::admits_path`], tallying in `work` the characters
+    /// of each glob matched, up to the first rule admitting nothing.
+    pub(super) fn admits_path_counted(
+        &self,
+        path: &str,
+        case: CaseFold,
+        work: &mut RuleWork,
+    ) -> bool {
         self.placement_rules().all(|rule| {
             rule.allowed_paths
                 .as_ref()
-                .is_some_and(|allowed| allowed.admits(path, case))
+                .is_some_and(|allowed| allowed.admits(path, case, work))
         })
     }
 
@@ -144,6 +155,21 @@ impl<'s> CombinedConstraint<'s> {
     /// alone, and a finding reports one on an unrequired field only where the
     /// document holds a value.
     pub fn conflicts(&self, case: CaseFold) -> Vec<RulesConflict> {
+        let mut conflicts = self.field_conflicts();
+        let placed: Vec<&Rule> = self.placement_rules().collect();
+        if placed.len() > 1 && !placement::share_a_path(&placed, case) {
+            conflicts.push(RulesConflict::DisjointPlacement {
+                rules: names(placed.iter()),
+            });
+        }
+        conflicts
+    }
+
+    /// The conflicts [`CombinedConstraint::conflicts`] reports on fields, in
+    /// key order: a set operation over the contributing rules' constraints,
+    /// which walks no path. Rule judgment reads them per document, and walks
+    /// placement only where a document's path is not admitted.
+    pub(super) fn field_conflicts(&self) -> Vec<RulesConflict> {
         let mut conflicts = Vec::new();
         for (field, constraint) in &self.fields {
             if !constraint.required_by.is_empty() && !constraint.forbidden_by.is_empty() {
@@ -166,12 +192,6 @@ impl<'s> CombinedConstraint<'s> {
                     rules: names(intersection.rules.iter().chain(&constraint.required_by)),
                 });
             }
-        }
-        let placed: Vec<&Rule> = self.placement_rules().collect();
-        if placed.len() > 1 && !placement::share_a_path(&placed, case) {
-            conflicts.push(RulesConflict::DisjointPlacement {
-                rules: names(placed.iter()),
-            });
         }
         conflicts
     }
