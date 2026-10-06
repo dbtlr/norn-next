@@ -882,10 +882,10 @@ impl Declared {
 }
 
 /// What `schema` declares, pinned under `fingerprint`, as the store reads it:
-/// every declared field with its type, whether it is required and its closed
-/// set, and for each whose type does not order as text, the typed order that
-/// type reads a raw value into; the declared tags, the tag patterns and the
-/// stance on an undeclared tag; the declared folders; and the ambiguity-ignore
+/// every declared field with its type, and for each whose type does not order
+/// as text, the typed order that type reads a raw value into; the declared
+/// tags, the tag patterns and the stance on an undeclared tag; the
+/// ambiguity-ignore
 /// patterns, the places the schema keeps out of ambiguity classes, which
 /// the resolver applies and `describe` reports as path rules; and each
 /// creation rule and the inbox, every template as its source text, which
@@ -897,16 +897,7 @@ impl Declared {
 fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.fields().fold(
         ContentModel::under(fingerprint),
-        |declared, (key, field)| {
-            let mut declaration = field_declaration(field.kind());
-            if field.required() {
-                declaration = declaration.required();
-            }
-            if let Some(values) = field.one_of() {
-                declaration = declaration.one_of(values);
-            }
-            declared.declare_field(key, declaration)
-        },
+        |declared, (key, field)| declared.declare_field(key, field_declaration(field.kind())),
     );
     let tags = schema.tags();
     let declared = tags.declared().fold(declared, ContentModel::declare_tag);
@@ -920,9 +911,6 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
             UndeclaredTags::Allow => TagStance::Allow,
             UndeclaredTags::Report => TagStance::Report,
         });
-    let declared = schema.folders().iter().fold(declared, |declared, folder| {
-        declared.declare_folder(folder.path(), folder.description().map(str::to_string))
-    });
     let declared = schema
         .ambiguity_ignore()
         .iter()
@@ -1434,17 +1422,13 @@ mod tests {
             VaultSchema::parse(
                 b"version: 1
 fields:
-  title: {type: text, required: true}
+  title: {type: text}
   due: {type: date}
-  status: {type: text, one_of: [live, draft]}
+  status: {type: text}
 tags:
   declared: [project, area]
   patterns: [\"person/**\", \"area/**\"]
   undeclared: report
-folders:
-  - path: journal
-    description: One document per day
-  - path: archive
 paths:
   ambiguity_ignore: [\"archive/**\"]
 creatable:
@@ -1473,14 +1457,9 @@ inbox:
         assert_eq!(
             facets(FacetKind::DeclaredField),
             vec![
-                Facet::declared_field("due", Wire::Date, false, None),
-                Facet::declared_field(
-                    "status",
-                    Wire::Text,
-                    false,
-                    Some(vec!["draft".to_string(), "live".to_string()])
-                ),
-                Facet::declared_field("title", Wire::Text, true, None),
+                Facet::declared_field("due", Wire::Date),
+                Facet::declared_field("status", Wire::Text),
+                Facet::declared_field("title", Wire::Text),
             ]
         );
         assert!(declared.content_model().typed_order("due").is_some());
@@ -1499,13 +1478,6 @@ inbox:
         assert_eq!(
             facets(FacetKind::UndeclaredTags),
             vec![Facet::undeclared_tags(TagStance::Report)]
-        );
-        assert_eq!(
-            facets(FacetKind::Folder),
-            vec![
-                Facet::folder("archive", None),
-                Facet::folder("journal", Some("One document per day".to_string())),
-            ]
         );
         assert_eq!(
             facets(FacetKind::PathRule),

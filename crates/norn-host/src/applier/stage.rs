@@ -759,11 +759,13 @@ impl Judging<'_> {
     /// document from its path only through the path grammar
     /// (`crate::derivation::map_document`'s `document_path`), which the
     /// destination already passes as a document path; its tags rules are
-    /// vault-wide, and a declared folder carries no rules. So what the moved
+    /// vault-wide, and no write judges a schema rule yet. So what the moved
     /// document violates at its destination is what it violated where it
-    /// stood, and the violations it introduces are none by construction. A
-    /// schema rule scoped to a folder would make this judgment necessary
-    /// again: the same bytes could violate it in one folder and not another.
+    /// stood, and the violations it introduces are none by construction. The
+    /// schema rules' path selectors and allowed paths make this judgment
+    /// necessary again — the same bytes can violate a rule at one path and not
+    /// another — and the write gate that judges rules (NORN-358) judges a
+    /// carried move at its destination.
     fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
         let written_fields = schema::written_fields(self.plan, self.normalizer);

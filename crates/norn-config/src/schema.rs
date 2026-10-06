@@ -3,9 +3,9 @@
 //! A vault schema is a YAML file the author writes and norn never edits. Until
 //! this module existed it was bytes: read, hashed, pinned, and opaque to every
 //! consumer. [`VaultSchema`] is the typed reading of those bytes — the declared
-//! fields with their types and rules, the declared tag facet, the declared
-//! folders, the path rules, and the creation rules and inbox that say how a
-//! new document is made — and it is what makes a declaration something
+//! fields with their types, the declared tag facet, the path rules, and the
+//! creation rules and inbox that say how a new document is made — and it is
+//! what makes a declaration something
 //! derivation and the read surface can act on.
 //!
 //! **The model is a pure function of the bytes, and its identity is the schema
@@ -22,19 +22,14 @@
 //! fields:
 //!   title:
 //!     type: text
-//!     required: true
 //!   created:
 //!     type: date
 //!   status:
 //!     type: text
-//!     one_of: [draft, live, retired]
 //! tags:
 //!   declared: [project, area]
 //!   patterns: ["person/**"]
 //!   undeclared: report
-//! folders:
-//!   - path: journal
-//!     description: One document per day
 //! paths:
 //!   ambiguity_ignore: ["archive/**"]
 //! creatable:
@@ -141,24 +136,13 @@ pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, Type
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// The sections a schema declares, which is every key its root holds.
-const ROOT_KEYS: &[&str] = &[
-    "version",
-    "fields",
-    "tags",
-    "folders",
-    "paths",
-    "creatable",
-    "inbox",
-];
+const ROOT_KEYS: &[&str] = &["version", "fields", "tags", "paths", "creatable", "inbox"];
 
 /// The keys one field's declaration holds.
-const FIELD_KEYS: &[&str] = &["type", "required", "one_of"];
+const FIELD_KEYS: &[&str] = &["type"];
 
 /// The keys the tag facet holds.
 const TAG_KEYS: &[&str] = &["declared", "patterns", "undeclared"];
-
-/// The keys one folder's declaration holds.
-const FOLDER_KEYS: &[&str] = &["path", "description"];
 
 /// The keys the path rules hold.
 const PATH_KEYS: &[&str] = &["ambiguity_ignore"];
@@ -168,7 +152,6 @@ const PATH_KEYS: &[&str] = &["ambiguity_ignore"];
 pub struct VaultSchema {
     fields: BTreeMap<String, DeclaredField>,
     tags: TagFacet,
-    folders: Vec<DeclaredFolder>,
     ambiguity_ignore: Vec<Pattern>,
     creation_rules: BTreeMap<String, CreationRule>,
     inbox: Option<Inbox>,
@@ -200,7 +183,6 @@ impl VaultSchema {
         Ok(VaultSchema {
             fields: read_fields(&document)?,
             tags: read_tags(&document)?,
-            folders: read_folders(&document)?,
             ambiguity_ignore: read_ambiguity_ignore(&document)?,
             creation_rules: creation::read_creatable(&document)?,
             inbox: creation::read_inbox(&document)?,
@@ -226,16 +208,6 @@ impl VaultSchema {
     /// The declared tag facet.
     pub fn tags(&self) -> &TagFacet {
         &self.tags
-    }
-
-    /// The declared folders, in the order they were written, each path once
-    /// and without its trailing `/`.
-    ///
-    /// Read by derivation, which hands them to the store with the rest of the
-    /// declaration, and `describe` reports each as a facet. No derivation
-    /// judges a document by the folder it stands in.
-    pub fn folders(&self) -> &[DeclaredFolder] {
-        &self.folders
     }
 
     /// The paths the resolution ladder does not count as candidates.
@@ -347,66 +319,12 @@ impl VaultSchema {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredField {
     kind: FieldType,
-    required: bool,
-    one_of: Option<BTreeSet<String>>,
 }
 
 impl DeclaredField {
     /// The field's declared type.
     pub fn kind(&self) -> FieldType {
         self.kind
-    }
-
-    /// Whether every document is declared to carry this field.
-    ///
-    /// Read by `describe`, which reports it with the field's declaration, and
-    /// by the field-rule finding kinds, which are not built: a missing required
-    /// field is a finding a derivation mints under the schema fingerprint the
-    /// way the tag facet's is. The current call graph does not reach that
-    /// consumer, because the only finding kind a schema keys today is the tag
-    /// facet's.
-    pub fn required(&self) -> bool {
-        self.required
-    }
-
-    /// The closed set of values the field is declared to hold, where it is
-    /// declared closed.
-    ///
-    /// Read by the same two consumers as [`DeclaredField::required`]:
-    /// `describe`, which reports the closed set as part of the declaration,
-    /// and the finding a value outside it mints, which is not built.
-    pub fn one_of(&self) -> Option<impl Iterator<Item = &str>> {
-        self.one_of
-            .as_ref()
-            .map(|values| values.iter().map(String::as_str))
-    }
-}
-
-/// One declared folder.
-///
-/// A name and what it is for. What a folder *requires* of the documents inside
-/// it is a rule family with its own invalidation key — a document's path — and
-/// the declaration arrives with the derivation that reads it.
-///
-/// **A folder-scoped rule reopens a carried move's schema check.** The host's
-/// applier does not judge a document a move carries byte for byte again,
-/// because no rule yet concludes about a document from its folder; one that
-/// did would make that skip unsound (`norn-host`'s `applier::stage`).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeclaredFolder {
-    path: String,
-    description: Option<String>,
-}
-
-impl DeclaredFolder {
-    /// The vault-root-relative path the folder is at.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    /// What the schema says the folder is for.
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
     }
 }
 
@@ -531,12 +449,6 @@ pub enum VaultSchemaError {
         /// The keys the section does hold, in grammar order.
         known: &'static [&'static str],
     },
-    /// `folders` declares one folder path twice. A trailing `/` does not make
-    /// a second folder, so `journal` and `journal/` are one path.
-    RepeatedFolder {
-        /// The path declared twice, without its trailing `/`.
-        path: String,
-    },
     /// A creation rule or the inbox breaks the template grammar or a rule
     /// placed on where a token stands.
     Creation {
@@ -581,9 +493,6 @@ impl fmt::Display for VaultSchemaError {
                 },
                 known.join(", ")
             ),
-            VaultSchemaError::RepeatedFolder { path } => {
-                write!(formatter, "`folders` declares the folder `{path}` twice")
-            }
             VaultSchemaError::Creation { at, problem } => write!(formatter, "`{at}` {problem}"),
         }
     }
@@ -741,21 +650,7 @@ fn read_field(key: &str, declaration: &Value) -> Result<DeclaredField, VaultSche
             section_error(&format!("fields.{key}.type"), "a declared type", value)
         })?,
     };
-    let required = match at(declaration, "required") {
-        None => false,
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| section_error(&format!("fields.{key}.required"), "a boolean", value))?,
-    };
-    let one_of = match at(declaration, "one_of") {
-        None => None,
-        Some(value) => Some(read_strings(&format!("fields.{key}.one_of"), value)?),
-    };
-    Ok(DeclaredField {
-        kind,
-        required,
-        one_of,
-    })
+    Ok(DeclaredField { kind })
 }
 
 fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaError> {
@@ -796,63 +691,6 @@ fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaErro
     })
 }
 
-fn read_folders(document: &serde_yaml::Mapping) -> Result<Vec<DeclaredFolder>, VaultSchemaError> {
-    let Some(value) = at(document, "folders") else {
-        return Ok(Vec::new());
-    };
-    let Value::Sequence(folders) = value else {
-        return Err(section_error("folders", "a sequence", value));
-    };
-    let mut declared = BTreeSet::new();
-    folders
-        .iter()
-        .map(|folder| {
-            let Value::Mapping(folder) = folder else {
-                return Err(section_error("folders", "a sequence of mappings", folder));
-            };
-            known_keys_only("folders", folder, FOLDER_KEYS)?;
-            // Absent and present-but-wrong-shape are two refusals. A folder
-            // that never wrote `path` is missing a declaration; a folder that
-            // wrote `path: 2026` holds one the grammar cannot read, and the
-            // author is told which of the two they wrote.
-            let Some(path) = at(folder, "path") else {
-                return Err(VaultSchemaError::Section {
-                    at: "folders.path".to_string(),
-                    wanted: "a path",
-                    found: "absent".to_string(),
-                });
-            };
-            // A folder path is read without its trailing `/`: `journal/` is
-            // the folder `journal`.
-            let path = path
-                .as_str()
-                .ok_or_else(|| section_error("folders.path", "a path", path))?
-                .trim_end_matches('/');
-            // A path declared twice is refused as a repeated key is, rather
-            // than leaving which declaration stands to the order they were
-            // written in.
-            if !declared.insert(path) {
-                return Err(VaultSchemaError::RepeatedFolder {
-                    path: path.to_string(),
-                });
-            }
-            let description = match at(folder, "description") {
-                None => None,
-                Some(value) => Some(
-                    value
-                        .as_str()
-                        .ok_or_else(|| section_error("folders.description", "a string", value))?
-                        .to_string(),
-                ),
-            };
-            Ok(DeclaredFolder {
-                path: path.to_string(),
-                description,
-            })
-        })
-        .collect()
-}
-
 fn read_ambiguity_ignore(document: &serde_yaml::Mapping) -> Result<Vec<Pattern>, VaultSchemaError> {
     let Some(value) = at(document, "paths") else {
         return Ok(Vec::new());
@@ -865,20 +703,6 @@ fn read_ambiguity_ignore(document: &serde_yaml::Mapping) -> Result<Vec<Pattern>,
         None => Ok(Vec::new()),
         Some(value) => read_patterns("paths.ambiguity_ignore", value),
     }
-}
-
-fn read_strings(at_path: &str, value: &Value) -> Result<BTreeSet<String>, VaultSchemaError> {
-    let Value::Sequence(items) = value else {
-        return Err(section_error(at_path, "a sequence of strings", value));
-    };
-    items
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| section_error(at_path, "a sequence of strings", item))
-        })
-        .collect()
 }
 
 /// A sequence of tag names, each held at its first spelling under its fold.

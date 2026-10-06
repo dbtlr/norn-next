@@ -296,9 +296,8 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// pinned and hands it over. [`FieldRows::derive`] reads the typed orders to
 /// fill the typed column, a read compiles its keys under them, and `describe`
 /// reports every declaration here as a facet — the declared fields with their
-/// type, whether they are required and their closed set of values, the
-/// declared tags, the tag patterns, the stance on an undeclared tag, the
-/// declared folders, the path rules, the creation rules and the inbox. No
+/// type, the declared tags, the tag patterns, the stance on an undeclared tag,
+/// the path rules, the creation rules and the inbox. No
 /// read and no derivation consults a creation rule or the inbox: they are held
 /// here for `describe` alone, as the source text of their templates. A key
 /// declared without a typed order is ordered by its raw text, which is what a
@@ -325,10 +324,9 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 ///
 /// **Every declaration is held once, by the text that names it**: a field by
 /// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
-/// folder by its path, a creation rule by its name. A schema names each field,
-/// each folder and each creation rule once — its
-/// grammar refuses a repeated field key and a folder path written twice — so
-/// the host hands neither twice. A schema reading holds a declared tag once
+/// creation rule by its name. A schema names each field and each creation
+/// rule once — its grammar refuses a repeated key — so the host hands neither
+/// twice. A schema reading holds a declared tag once
 /// under the tag fold, at its first spelling, so the host hands each tag
 /// once. A tag, a tag pattern or a path rule written twice is the same text
 /// twice and carries nothing beyond it, so the two collapse to one and
@@ -340,7 +338,6 @@ pub struct ContentModel {
     tags: BTreeSet<String>,
     tag_patterns: BTreeSet<String>,
     undeclared_tags: Option<TagStance>,
-    folders: BTreeMap<String, Option<String>>,
     ambiguity_ignore: AmbiguityIgnore,
     creation_rules: BTreeMap<String, CreationRuleDeclaration>,
     inbox: Option<String>,
@@ -372,8 +369,8 @@ impl ContentModel {
         }
     }
 
-    /// The same declaration with `key` declared as text: not required, not
-    /// closed, and ordered by its raw text.
+    /// The same declaration with `key` declared as text, ordered by its raw
+    /// text.
     ///
     /// # Panics
     ///
@@ -422,16 +419,6 @@ impl ContentModel {
     pub fn declare_undeclared_tags(mut self, stance: TagStance) -> Self {
         self.schema_declares(stance.as_str());
         self.undeclared_tags = Some(stance);
-        self
-    }
-
-    /// The same declaration with the folder at `path` declared, for what
-    /// `description` says. A schema's grammar refuses a folder path written
-    /// twice, so the host declares each path once.
-    pub fn declare_folder(mut self, path: impl Into<String>, description: Option<String>) -> Self {
-        let path = path.into();
-        self.schema_declares(&path);
-        self.folders.insert(path, description);
         self
     }
 
@@ -524,9 +511,8 @@ impl ContentModel {
 
     /// Every facet of `kind` this declaration reports keyed after `after` —
     /// from the first where it is `None` — in the order of the text that keys
-    /// it: the byte order of a field's key, a tag's name, a pattern, a
-    /// folder's path, the stance's spelling, a creation rule's name or the
-    /// inbox's target. Each is reported once.
+    /// it: the byte order of a field's key, a tag's name, a pattern, the
+    /// stance's spelling, a creation rule's name or the inbox's target. Each is reported once.
     ///
     /// A pure read of the declaration: it runs no statement, and it builds a
     /// facet only as the iterator is drawn, so a page drawing the facets it
@@ -541,12 +527,7 @@ impl ContentModel {
         match kind {
             FacetKind::DeclaredField => {
                 Box::new(keyed_after(&self.keys, after).map(|(key, declaration)| {
-                    Facet::declared_field(
-                        key.clone(),
-                        declaration.field_type,
-                        declaration.required,
-                        declaration.one_of.clone(),
-                    )
+                    Facet::declared_field(key.clone(), declaration.field_type)
                 }))
             }
             FacetKind::DeclaredTag => {
@@ -555,10 +536,6 @@ impl ContentModel {
             FacetKind::TagPattern => {
                 Box::new(named_after(&self.tag_patterns, after).map(Facet::tag_pattern))
             }
-            FacetKind::Folder => Box::new(
-                keyed_after(&self.folders, after)
-                    .map(|(path, description)| Facet::folder(path.clone(), description.clone())),
-            ),
             FacetKind::PathRule => {
                 Box::new(self.ambiguity_ignore.after(after).map(|pattern| {
                     Facet::path_rule(PathRuleKind::AmbiguityIgnore, pattern.as_str())
@@ -618,10 +595,8 @@ fn named_after<'a>(
     ))
 }
 
-/// What a schema declares one field as: its type, the typed order that type
-/// reads a raw value into where it does not order as text, whether every
-/// document is declared to carry it, and the closed set of values it is
-/// declared to hold.
+/// What a schema declares one field as: its type, and the typed order that
+/// type reads a raw value into where it does not order as text.
 ///
 /// **A type and its order are made together.** There is one constructor per
 /// type: `text` and `tags` order by their raw text and take no order, and
@@ -633,20 +608,12 @@ fn named_after<'a>(
 pub struct FieldDeclaration {
     field_type: FieldType,
     order: Option<TypedOrder>,
-    required: bool,
-    one_of: Option<Vec<String>>,
 }
 
 impl FieldDeclaration {
-    /// A field declared as `field_type` and ordered by `order`: not required,
-    /// and not closed.
+    /// A field declared as `field_type` and ordered by `order`.
     const fn of(field_type: FieldType, order: Option<TypedOrder>) -> Self {
-        FieldDeclaration {
-            field_type,
-            order,
-            required: false,
-            one_of: None,
-        }
+        FieldDeclaration { field_type, order }
     }
 
     /// A field declared as text, ordered by its raw text.
@@ -672,20 +639,6 @@ impl FieldDeclaration {
     /// A field declared as a date, ordered by `order`.
     pub const fn date(order: TypedOrder) -> Self {
         Self::of(FieldType::Date, Some(order))
-    }
-
-    /// The same declaration, with every document declared to carry the field.
-    #[must_use]
-    pub fn required(mut self) -> Self {
-        self.required = true;
-        self
-    }
-
-    /// The same declaration, closed over `values`.
-    #[must_use]
-    pub fn one_of(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.one_of = Some(values.into_iter().map(Into::into).collect());
-        self
     }
 }
 

@@ -95,7 +95,7 @@ use crate::read::search::RungSet;
 /// What a facet row is a facet of.
 ///
 /// On the wire a kind is the flat string itself: `"declared_field"`,
-/// `"folder"`.
+/// `"path_rule"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -106,8 +106,6 @@ pub enum FacetKind {
     ObservedField,
     /// A tag the vault's schema declares.
     DeclaredTag,
-    /// A folder the vault's schema declares.
-    Folder,
     /// A path rule the vault's schema states.
     PathRule,
     /// A pattern the vault's tag facet admits beyond its literal names.
@@ -125,11 +123,10 @@ impl FacetKind {
     /// is its name, not its place here, and the order a page reads kinds in
     /// is the byte order of those codes, so adding a kind changes no other
     /// kind's code.
-    pub const ALL: [FacetKind; 9] = [
+    pub const ALL: [FacetKind; 8] = [
         FacetKind::DeclaredField,
         FacetKind::ObservedField,
         FacetKind::DeclaredTag,
-        FacetKind::Folder,
         FacetKind::PathRule,
         FacetKind::TagPattern,
         FacetKind::UndeclaredTags,
@@ -141,7 +138,7 @@ impl FacetKind {
     /// of facets reads the kinds in: every facet of one kind before any of the
     /// next. It is the order a finding cursor reads its kinds in too, so every
     /// cursor that names a kind orders kinds one way.
-    pub fn in_code_order() -> [FacetKind; 9] {
+    pub fn in_code_order() -> [FacetKind; 8] {
         let mut kinds = Self::ALL;
         kinds.sort_unstable_by_key(|kind| kind.as_str());
         kinds
@@ -153,7 +150,6 @@ impl FacetKind {
             FacetKind::DeclaredField => "declared_field",
             FacetKind::ObservedField => "observed_field",
             FacetKind::DeclaredTag => "declared_tag",
-            FacetKind::Folder => "folder",
             FacetKind::PathRule => "path_rule",
             FacetKind::TagPattern => "tag_pattern",
             FacetKind::UndeclaredTags => "undeclared_tags",
