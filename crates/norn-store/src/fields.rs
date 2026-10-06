@@ -527,7 +527,7 @@ impl ContentModel {
         match kind {
             FacetKind::DeclaredField => {
                 Box::new(keyed_after(&self.keys, after).map(|(key, declaration)| {
-                    Facet::declared_field(key.clone(), declaration.field_type)
+                    Facet::declared_field(key.clone(), declaration.field_type, None)
                 }))
             }
             FacetKind::DeclaredTag => {

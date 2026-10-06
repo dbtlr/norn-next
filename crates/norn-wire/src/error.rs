@@ -390,6 +390,12 @@ pub enum ReasonCode {
     /// document in this vault. The detail is the target.
     #[serde(rename = "vault/unknown-target")]
     VaultUnknownTarget,
+    /// `vault/unknown-rule` — the schema rule the request named is not one
+    /// the vault's pinned schema declares, so there are no findings citing it
+    /// to answer with: an empty answer would say the rule holds everywhere.
+    /// The detail is the rule.
+    #[serde(rename = "vault/unknown-rule")]
+    VaultUnknownRule,
     /// `vault/reload-busy` — the vault is serving and something is already
     /// working over it, so the reload was not started. The detail carries
     /// nothing: the ask is repeated rather than resolved.
@@ -766,6 +772,13 @@ pub enum ErrorDetail {
         /// same parsed value back.
         target: ResolutionTarget,
     },
+    /// The detail of `vault/unknown-rule`: the rule the request named.
+    #[serde(rename = "vault/unknown-rule")]
+    #[non_exhaustive]
+    UnknownRule {
+        /// The rule's name, as the request wrote it.
+        rule: String,
+    },
     /// The detail of `vault/reload-busy`, which carries nothing.
     #[serde(rename = "vault/reload-busy")]
     ReloadBusy {},
@@ -1053,6 +1066,12 @@ impl ErrorDetail {
         ErrorDetail::UnknownTarget { target }
     }
 
+    /// The detail of `vault/unknown-rule`, for the `rule` the pinned schema
+    /// does not declare.
+    pub fn unknown_rule(rule: impl Into<String>) -> Self {
+        ErrorDetail::UnknownRule { rule: rule.into() }
+    }
+
     /// The detail of `vault/reload-busy`.
     pub const fn reload_busy() -> Self {
         ErrorDetail::ReloadBusy {}
@@ -1207,6 +1226,7 @@ impl ErrorDetail {
             ErrorDetail::AmbiguousRoot { .. } => ReasonCode::VaultAmbiguousRoot,
             ErrorDetail::AmbiguousTarget { .. } => ReasonCode::VaultAmbiguousTarget,
             ErrorDetail::UnknownTarget { .. } => ReasonCode::VaultUnknownTarget,
+            ErrorDetail::UnknownRule { .. } => ReasonCode::VaultUnknownRule,
             ErrorDetail::ReloadBusy { .. } => ReasonCode::VaultReloadBusy,
             ErrorDetail::ReloadFailed { .. } => ReasonCode::VaultReloadFailed,
             ErrorDetail::CursorOrderChanged { .. } => ReasonCode::VaultCursorOrderChanged,
@@ -1387,6 +1407,7 @@ mod tests {
             ReasonCode::VaultAmbiguousRoot => "vault/ambiguous-root",
             ReasonCode::VaultAmbiguousTarget => "vault/ambiguous-target",
             ReasonCode::VaultUnknownTarget => "vault/unknown-target",
+            ReasonCode::VaultUnknownRule => "vault/unknown-rule",
             ReasonCode::VaultReloadBusy => "vault/reload-busy",
             ReasonCode::VaultReloadFailed => "vault/reload-failed",
             ReasonCode::VaultCursorOrderChanged => "vault/cursor-order-changed",
@@ -1460,6 +1481,7 @@ mod tests {
                 Hint::resolves(a_target()),
             ),
             ReasonCode::VaultUnknownTarget => ErrorDetail::unknown_target(a_target()),
+            ReasonCode::VaultUnknownRule => ErrorDetail::unknown_rule("tasks"),
             ReasonCode::VaultReloadBusy => ErrorDetail::reload_busy(),
             ReasonCode::VaultReloadFailed => {
                 ErrorDetail::reload_failed(ReloadFailure::unsupported())

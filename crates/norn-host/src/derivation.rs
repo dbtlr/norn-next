@@ -366,14 +366,31 @@ const CAUSES: [Cause; 7] = [
 /// rules the store to judge link health in SQL and file those findings itself,
 /// inside the changeset, over per-document facts this crate's derivation
 /// already writes, so no per-document act here ever concludes one. A kind
-/// minted for another producer — a field a schema refuses — is named here too,
-/// which is the one line that keeps the classification below a reading of the
-/// registry rather than a claim that every kind the registry holds is this
-/// crate's.
-const KINDS_NO_CAUSE_CARRIES: [FindingKind; 3] = [
+/// minted for another producer is named here too, which is the one line that
+/// keeps the classification below a reading of the registry rather than a
+/// claim that every kind the registry holds is this crate's.
+///
+/// **The nine schema kinds are a dormant carrier.** ADR 0035's rule judgment
+/// — a document's fields against their declared type and shape, and the
+/// document against the combined constraint of the rules selecting it — is
+/// what files them, and its consuming step is NORN-358, which derives them in
+/// the document's own changeset. No cause reaches them yet because no act in
+/// this crate judges a rule: the store holds their rows, their rule sets and
+/// their values, and `validate` reads them back, but nothing here records
+/// one. NORN-358 gives each a cause, which moves it out of this list.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 12] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,
     FindingKind::MissingAnchor,
+    FindingKind::Misplaced,
+    FindingKind::DocumentRulesConflict,
+    FindingKind::RequiredMissing,
+    FindingKind::Forbidden,
+    FindingKind::NotOneOf,
+    FindingKind::TooLong,
+    FindingKind::TypeMismatch,
+    FindingKind::ShapeMismatch,
+    FindingKind::FieldRulesConflict,
 ];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
@@ -1457,9 +1474,9 @@ inbox:
         assert_eq!(
             facets(FacetKind::DeclaredField),
             vec![
-                Facet::declared_field("due", Wire::Date),
-                Facet::declared_field("status", Wire::Text),
-                Facet::declared_field("title", Wire::Text),
+                Facet::declared_field("due", Wire::Date, None),
+                Facet::declared_field("status", Wire::Text, None),
+                Facet::declared_field("title", Wire::Text, None),
             ]
         );
         assert!(declared.content_model().typed_order("due").is_some());

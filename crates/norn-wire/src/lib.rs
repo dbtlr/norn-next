@@ -597,7 +597,10 @@ pub use error::{
     RequestBound, RequestPart, TooFewNames,
 };
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
-pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
+pub use finding_row::{
+    CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint, IllegalValueHead, VALUE_HEAD_BYTES,
+    ValueHead,
+};
 pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::backlinks::Backlinks;
@@ -624,7 +627,9 @@ pub use predicate::Predicate;
 pub use product::{AnswerAdvisory, ComparedBy, RungSkipReason, Unsatisfied, VaultAnswer};
 pub use read::count::{CountParams, CountReport, GroupKey, Tally};
 pub use read::describe::{
-    ContainerKind, DescribeParams, DescribeReport, Facet, FieldType, PathRuleKind, TagStance,
+    ContainerKind, DescribeParams, DescribeReport, Facet, FieldShape, FieldType, PathRuleKind,
+    RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, SchemaRule,
+    TagStance,
 };
 pub use read::find::{Direction, FindParams, FindReport, Sort, SortKey};
 pub use read::get::{CollectionPage, CollectionSelector, GetParams, GetReport};
@@ -632,7 +637,7 @@ pub use read::search::{
     Hit, NoRetrievalRung, RUNG_DEPTH, RungSelection, RungSet, RungSubtraction, SearchParams,
     SearchReport,
 };
-pub use read::validate::{KindTally, ValidateParams, ValidateReport};
+pub use read::validate::{KindTally, RuleSet, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, MalformedLadder, ModelIdentity,
     Rung, RungReport,

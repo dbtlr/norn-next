@@ -19,24 +19,24 @@ use norn_wire::{
     DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
     DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
     EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind,
-    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
-    GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId,
-    OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
-    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart, RequestScope,
-    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams,
-    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
-    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
-    WriteTarget,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady,
+    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport, RungSelection,
+    RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport,
+    SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
+    TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
+    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress,
+    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
+    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -546,6 +546,7 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
+            "vault/unknown-rule",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -732,6 +733,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
+            "vault/unknown-rule",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -776,7 +778,16 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "document/undeclared-tag",
             "link/broken",
             "link/ambiguous",
-            "link/missing-anchor"
+            "link/missing-anchor",
+            "document/misplaced",
+            "document/rules-conflict",
+            "field/required-missing",
+            "field/forbidden",
+            "field/not-one-of",
+            "field/too-long",
+            "field/type-mismatch",
+            "field/shape-mismatch",
+            "field/rules-conflict"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to
@@ -1289,6 +1300,7 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "undeclared_tags",
             "creation_rule",
             "inbox",
+            "rule",
         ])
     );
     assert_eq!(
@@ -1309,6 +1321,7 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "inbox",
             "observed_field",
             "path_rule",
+            "rule",
             "tag_pattern",
             "undeclared_tags",
         ],
@@ -1704,11 +1717,12 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
             .unwrap_or_else(|| panic!("the {code} branch"))
             .clone()
     };
-    let cases: [(&str, &[&str]); 4] = [
+    let cases: [(&str, &[&str]); 5] = [
         ("request/out-of-bound", &["code", "bound"]),
         ("request/part-not-taken", &["code", "part", "answer"]),
         ("request/cursor-not-taken", &["code", "cursor", "paged"]),
         ("host/read-failed", &["code", "failure", "detail"]),
+        ("vault/unknown-rule", &["code", "rule"]),
     ];
     for (code, properties) in cases {
         assert_eq!(
@@ -2108,9 +2122,20 @@ fn a_finding_row_advertises_its_bounded_head_and_its_hint() {
             "hint",
             "message",
             "generation",
+            "rule_set",
+            "value",
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(
+        schema["properties"]["value"]["anyOf"][0]["$ref"].as_str(),
+        Some("#/$defs/ValueHead"),
+        "a finding row restates the value head rather than referring to it: {schema}"
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["ValueHead"]),
+        ["text", "byte_length", "hash"].into_iter().collect()
     );
     assert_eq!(
         schema["properties"]["head"]["$ref"].as_str(),
@@ -2225,6 +2250,7 @@ fn every_read_params_advertises_the_whole_of_what_a_request_carries() {
             "predicates",
             "kinds",
             "severity",
+            "rule",
             "summary",
             "limit",
             "after",
@@ -2457,6 +2483,7 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             "undeclared_tags",
             "creation_rule",
             "inbox",
+            "rule",
         ])
     );
     let declared = branches(&schema)
@@ -2465,7 +2492,43 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
         .expect("the declared_field branch");
     assert_eq!(
         property_names(declared),
-        ["facet", "key", "field_type"].into_iter().collect()
+        ["facet", "key", "field_type", "shape"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<FieldShape>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a shape branch is not a pinned string: {branch}"))
+        })),
+        sorted(["single", "list"])
+    );
+    let rule = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("rule"))
+        .expect("the rule branch");
+    assert_eq!(
+        rule["$ref"].as_str(),
+        Some("#/$defs/SchemaRule"),
+        "a rule facet restates the rule rather than referring to it: {rule}"
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["SchemaRule"]),
+        [
+            "name",
+            "description",
+            "severity",
+            "match",
+            "exclude",
+            "required",
+            "forbidden",
+            "one_of",
+            "max_length",
+            "allowed_paths",
+        ]
+        .into_iter()
+        .collect(),
+        "a rule facet advertises every part a rule can declare: {rule}"
     );
     assert_eq!(
         declared["properties"]["field_type"]["$ref"].as_str(),

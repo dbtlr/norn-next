@@ -130,7 +130,7 @@ impl Validated {
     pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, ValidateReport) {
         let report = match self.answer {
             Validation::Findings { rows, next, moved } => {
-                ValidateReport::findings(Page::new(rows, next, moved))
+                ValidateReport::findings(Page::new(rows, next, moved), [])
             }
             Validation::Summary { by_kind } => ValidateReport::summary(by_kind),
         };

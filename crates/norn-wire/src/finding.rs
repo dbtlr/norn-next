@@ -7,14 +7,27 @@
 //! one spelling. Derivation records kinds; it does not name them, and a kind
 //! nobody can enumerate here is a kind no surface can advertise.
 //!
-//! The set holds two namespaces. `document/…` is a fact about one document: a
-//! vault holding a document norn cannot fully read stays serviceable, and the
+//! The set holds three namespaces. `document/…` is a fact about one document:
+//! a vault holding a document norn cannot fully read stays serviceable, and the
 //! finding is where what is missing from derived state is stated. A kind may
 //! also state that a document derived *whole* and disagrees with what the vault
 //! declares about itself, which is what the vault schema's content model
-//! judges. `link/…` is a fact about one link a document holds — broken,
-//! ambiguous, or missing the heading or block its target names — per ADR 0027;
-//! the document it stands in still derives whole.
+//! judges — an undeclared tag, or a document standing where the rules
+//! selecting it do not allow. `field/…` is a fact about one frontmatter field a
+//! document derived whole holds or lacks, judged against the type and shape
+//! the schema declares the field with or against the combined constraint of
+//! the schema rules selecting the document, per ADR 0035; the field is the
+//! finding's `target`. `link/…` is a fact about one link a document holds —
+//! broken, ambiguous, or missing the heading or block its target names — per
+//! ADR 0027; the document it stands in still derives whole.
+//!
+//! **A rule kind's severity is its rules'.** A finding judged against the
+//! schema rules cites every rule contributing to the constraint it breaches
+//! and is reported at the highest of their severities, so the severity a
+//! producer files it at is read off those rules; a rule that states none is a
+//! warning, which is what [`FindingKind::default_severity`] says of each rule
+//! kind. A type or shape mismatch is judged against the field declarations,
+//! which state no severity and no rule, and is always a warning.
 //!
 //! **A kind also says where its findings may stand**, as [`FindingScope`]. A
 //! kind whose cause leaves nothing derivable is about the *place* and stands
@@ -160,6 +173,65 @@ pub enum FindingKind {
     /// derives whole; the link is the finding's `target`.
     #[serde(rename = "link/missing-anchor")]
     MissingAnchor,
+    /// `document/misplaced` — the document stands at a path the rules
+    /// selecting it do not allow: a document stands only where every rule
+    /// stating allowed paths allows it. The finding cites every rule stating
+    /// allowed paths that selects the document. It names no field and no
+    /// value.
+    #[serde(rename = "document/misplaced")]
+    Misplaced,
+    /// `document/rules-conflict` — the rules selecting the document state
+    /// allowed paths with no path in common, so no place satisfies them all.
+    /// One finding per document whatever path it stands at, citing every
+    /// contributing rule. It names no field and no value.
+    #[serde(rename = "document/rules-conflict")]
+    DocumentRulesConflict,
+    /// `field/required-missing` — a field some rule selecting the document
+    /// requires is absent. The field is the finding's `target`; it names no
+    /// value, and it cites every rule requiring the field.
+    #[serde(rename = "field/required-missing")]
+    RequiredMissing,
+    /// `field/forbidden` — the document holds a field some rule selecting it
+    /// forbids. The field is the finding's `target`, its value the finding's
+    /// value, and it cites every rule forbidding the field.
+    #[serde(rename = "field/forbidden")]
+    Forbidden,
+    /// `field/not-one-of` — a value the field holds, or an element of the list
+    /// it holds, is outside the intersection of the closed sets the rules
+    /// selecting the document state for it. One finding per distinct
+    /// offending value, which is the finding's value; the field is its
+    /// `target`, and it cites every rule closing the field.
+    #[serde(rename = "field/not-one-of")]
+    NotOneOf,
+    /// `field/too-long` — a value the field holds, or an element of the list
+    /// it holds, is longer than the smallest length limit the rules selecting
+    /// the document state for it. One finding per distinct offending value,
+    /// which is the finding's value; the field is its `target`, and it cites
+    /// every rule limiting the field.
+    #[serde(rename = "field/too-long")]
+    TooLong,
+    /// `field/type-mismatch` — a value the field holds, or an element of the
+    /// list it holds, does not read as the type the schema declares the field
+    /// with. One finding per distinct offending value, which is the finding's
+    /// value; the field is its `target`. It is judged against the field
+    /// declarations, so it cites no rule, and it is always a warning.
+    #[serde(rename = "field/type-mismatch")]
+    TypeMismatch,
+    /// `field/shape-mismatch` — the field holds a list where the schema
+    /// declares it single, or one value where it declares it a list. The value
+    /// held is the finding's value and the field its `target`. It is judged
+    /// against the field declarations, so it cites no rule, and it is always a
+    /// warning.
+    #[serde(rename = "field/shape-mismatch")]
+    ShapeMismatch,
+    /// `field/rules-conflict` — the rules selecting the document constrain the
+    /// field in ways nothing satisfies: one requires it and another forbids
+    /// it, or their closed sets share no member where the field is required or
+    /// holds a value. One finding per field whatever value it holds, so it
+    /// names no value; the field is its `target`, and it cites every
+    /// contributing rule.
+    #[serde(rename = "field/rules-conflict")]
+    FieldRulesConflict,
 }
 
 /// Where the findings of a kind may stand.
@@ -186,7 +258,7 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 10] = [
+    pub const ALL: [FindingKind; 19] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
@@ -197,6 +269,15 @@ impl FindingKind {
         FindingKind::Broken,
         FindingKind::Ambiguous,
         FindingKind::MissingAnchor,
+        FindingKind::Misplaced,
+        FindingKind::DocumentRulesConflict,
+        FindingKind::RequiredMissing,
+        FindingKind::Forbidden,
+        FindingKind::NotOneOf,
+        FindingKind::TooLong,
+        FindingKind::TypeMismatch,
+        FindingKind::ShapeMismatch,
+        FindingKind::FieldRulesConflict,
     ];
 
     /// The kind as the string it is on the wire.
@@ -212,12 +293,26 @@ impl FindingKind {
             FindingKind::Broken => "link/broken",
             FindingKind::Ambiguous => "link/ambiguous",
             FindingKind::MissingAnchor => "link/missing-anchor",
+            FindingKind::Misplaced => "document/misplaced",
+            FindingKind::DocumentRulesConflict => "document/rules-conflict",
+            FindingKind::RequiredMissing => "field/required-missing",
+            FindingKind::Forbidden => "field/forbidden",
+            FindingKind::NotOneOf => "field/not-one-of",
+            FindingKind::TooLong => "field/too-long",
+            FindingKind::TypeMismatch => "field/type-mismatch",
+            FindingKind::ShapeMismatch => "field/shape-mismatch",
+            FindingKind::FieldRulesConflict => "field/rules-conflict",
         }
     }
 
     /// The severity a producer files this kind at when it holds no severity of
-    /// its own to state: warning for every link-health kind, per ADR 0027, and
-    /// otherwise the one severity every current producer of that kind uses.
+    /// its own to state: warning for every link-health kind, per ADR 0027;
+    /// warning for every kind judged against the schema rules, which is the
+    /// severity a rule stating none is reported at — a finding citing rules
+    /// that state one is reported at the highest of theirs instead, per ADR
+    /// 0035; warning for a type or shape mismatch, which no rule states a
+    /// severity for; and otherwise the one severity every current producer of
+    /// that kind uses.
     pub const fn default_severity(&self) -> Severity {
         match self {
             // Nothing is derivable, or the document's frontmatter block was
@@ -235,6 +330,17 @@ impl FindingKind {
             | FindingKind::Broken
             | FindingKind::Ambiguous
             | FindingKind::MissingAnchor => Severity::Warning,
+            // Judged against the rules selecting the document: the floor a
+            // rule stating no severity is reported at.
+            FindingKind::Misplaced
+            | FindingKind::DocumentRulesConflict
+            | FindingKind::RequiredMissing
+            | FindingKind::Forbidden
+            | FindingKind::NotOneOf
+            | FindingKind::TooLong
+            | FindingKind::FieldRulesConflict => Severity::Warning,
+            // Judged against the field declarations, which state no severity.
+            FindingKind::TypeMismatch | FindingKind::ShapeMismatch => Severity::Warning,
         }
     }
 
@@ -264,7 +370,19 @@ impl FindingKind {
             // links resolve to.
             | FindingKind::Broken
             | FindingKind::Ambiguous
-            | FindingKind::MissingAnchor => FindingScope::Document,
+            | FindingKind::MissingAnchor
+            // A schema judgment reads a document that derived whole — its path
+            // and its frontmatter — so the finding stands beside the row it
+            // judged.
+            | FindingKind::Misplaced
+            | FindingKind::DocumentRulesConflict
+            | FindingKind::RequiredMissing
+            | FindingKind::Forbidden
+            | FindingKind::NotOneOf
+            | FindingKind::TooLong
+            | FindingKind::TypeMismatch
+            | FindingKind::ShapeMismatch
+            | FindingKind::FieldRulesConflict => FindingScope::Document,
         }
     }
 }
