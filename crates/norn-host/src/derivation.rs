@@ -42,14 +42,19 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use norn_config::schema::{FieldType, Offset, TypedValue, UndeclaredTags, VaultSchema};
+use norn_config::schema::{
+    FieldType, ForbiddenFix, Offset, Rule, Shape, TypedValue, UndeclaredTags, VaultSchema,
+};
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
     DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkAnchor,
     LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, Severity, TagStance, fold_tag};
+use norn_wire::{
+    FieldShape, FindingKind, FindingScope, RuleAllowedPaths, RuleClosedSet, RuleExclude,
+    RuleForbiddenFix, RuleMatch, SchemaRule, Severity, TagStance, fold_tag,
+};
 
 /// The derivation this build writes a store's rows by, recorded in every store
 /// it creates and judged at every open: a store another version wrote is
@@ -366,14 +371,31 @@ const CAUSES: [Cause; 7] = [
 /// rules the store to judge link health in SQL and file those findings itself,
 /// inside the changeset, over per-document facts this crate's derivation
 /// already writes, so no per-document act here ever concludes one. A kind
-/// minted for another producer — a field a schema refuses — is named here too,
-/// which is the one line that keeps the classification below a reading of the
-/// registry rather than a claim that every kind the registry holds is this
-/// crate's.
-const KINDS_NO_CAUSE_CARRIES: [FindingKind; 3] = [
+/// minted for another producer is named here too, which is the one line that
+/// keeps the classification below a reading of the registry rather than a
+/// claim that every kind the registry holds is this crate's.
+///
+/// **The nine schema kinds are a dormant carrier.** ADR 0035's rule judgment
+/// — a document's fields against their declared type and shape, and the
+/// document against the combined constraint of the rules selecting it — is
+/// what files them, and its consuming step is NORN-358, which derives them in
+/// the document's own changeset. No cause reaches them yet because no act in
+/// this crate judges a rule: the store holds their rows, their rule sets and
+/// their values, and `validate` reads them back, but nothing here records
+/// one. NORN-358 gives each a cause, which moves it out of this list.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 12] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,
     FindingKind::MissingAnchor,
+    FindingKind::Misplaced,
+    FindingKind::DocumentRulesConflict,
+    FindingKind::RequiredMissing,
+    FindingKind::Forbidden,
+    FindingKind::NotOneOf,
+    FindingKind::TooLong,
+    FindingKind::TypeMismatch,
+    FindingKind::ShapeMismatch,
+    FindingKind::FieldRulesConflict,
 ];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
@@ -882,14 +904,15 @@ impl Declared {
 }
 
 /// What `schema` declares, pinned under `fingerprint`, as the store reads it:
-/// every declared field with its type, and for each whose type does not order
-/// as text, the typed order that type reads a raw value into; the declared
-/// tags, the tag patterns and the stance on an undeclared tag; the
-/// ambiguity-ignore
-/// patterns, the places the schema keeps out of ambiguity classes, which
-/// the resolver applies and `describe` reports as path rules; and each
-/// creation rule and the inbox, every template as its source text, which
-/// `describe` alone reports.
+/// every declared field with its type and the shape it declares, and for each
+/// whose type does not order as text, the typed order that type reads a raw
+/// value into; the declared tags, the tag patterns and the stance on an
+/// undeclared tag; the ambiguity-ignore patterns, the places the schema keeps
+/// out of ambiguity classes, which the resolver applies and `describe` reports
+/// as path rules; each creation rule and the inbox, every template as its
+/// source text, which `describe` alone reports; and each schema rule as the
+/// schema writes it, which `describe` reports and a `validate` naming a rule
+/// is checked against.
 ///
 /// A raw value that does not read as its declared type has no sort key, which
 /// is the store's `NULL`: the document still carries the value, and a typed
@@ -897,7 +920,12 @@ impl Declared {
 fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
     let declared = schema.fields().fold(
         ContentModel::under(fingerprint),
-        |declared, (key, field)| declared.declare_field(key, field_declaration(field.kind())),
+        |declared, (key, field)| {
+            declared.declare_field(
+                key,
+                field_declaration(field.kind()).with_shape(field.shape().map(field_shape)),
+            )
+        },
     );
     let tags = schema.tags();
     let declared = tags.declared().fold(declared, ContentModel::declare_tag);
@@ -926,8 +954,82 @@ fn content_model(schema: &VaultSchema, fingerprint: String) -> ContentModel {
             rule.body().map(|body| body.as_str().to_string()),
         )
     });
-    match schema.inbox() {
+    let declared = match schema.inbox() {
         Some(inbox) => declared.declare_inbox(inbox.target().as_str()),
+        None => declared,
+    };
+    schema.rules().fold(declared, |declared, rule| {
+        declared.declare_rule(schema_rule(rule))
+    })
+}
+
+/// A declared shape as the wire spells it: the same two members, held equal
+/// by spelling in `norn-config`'s suite.
+const fn field_shape(shape: Shape) -> FieldShape {
+    match shape {
+        Shape::Single => FieldShape::Single,
+        Shape::List => FieldShape::List,
+    }
+}
+
+/// `rule` as `describe` reports it: every part as the schema writes it — a
+/// selector's every value in the order written and in the spelling it is
+/// compared by, each glob and route as its source text, a default as its
+/// source — and every part the rule does not declare left out.
+fn schema_rule(rule: &Rule) -> SchemaRule {
+    let selector = rule.selector();
+    let declared = SchemaRule::new(rule.name(), rule.severity())
+        .with_match(RuleMatch::new(
+            selector
+                .frontmatter()
+                .map(|(key, values)| (key.to_string(), values.to_vec())),
+            selector.path().map(|glob| glob.as_str().to_string()),
+        ))
+        .with_exclude(RuleExclude::new(
+            selector
+                .exclude()
+                .iter()
+                .map(|glob| glob.as_str().to_string()),
+        ));
+    let declared = match rule.description() {
+        Some(description) => declared.with_description(description),
+        None => declared,
+    };
+    let declared = rule
+        .required()
+        .fold(declared, |declared, (field, default)| {
+            declared.with_required(field, default.map(|default| default.source()))
+        });
+    let declared = rule.forbidden().fold(declared, |declared, (field, fix)| {
+        declared.with_forbidden(
+            field,
+            match fix {
+                ForbiddenFix::Unfixed => None,
+                ForbiddenFix::Remove => Some(RuleForbiddenFix::Remove),
+                ForbiddenFix::RenameTo(target) => Some(RuleForbiddenFix::RenameTo(target.clone())),
+            },
+        )
+    });
+    let declared = rule.one_of().fold(declared, |declared, (field, set)| {
+        declared.with_one_of(
+            field,
+            RuleClosedSet::new(
+                set.values().iter().cloned(),
+                set.synonyms()
+                    .map(|(written, member)| (written.to_string(), member.to_string())),
+            ),
+        )
+    });
+    let declared = rule
+        .max_length()
+        .fold(declared, |declared, (field, limit)| {
+            declared.with_max_length(field, limit)
+        });
+    match rule.allowed_paths() {
+        Some(allowed) => declared.with_allowed_paths(RuleAllowedPaths::new(
+            allowed.paths().iter().map(|glob| glob.as_str().to_string()),
+            allowed.route().map(|route| route.as_str().to_string()),
+        )),
         None => declared,
     }
 }
@@ -1406,12 +1508,11 @@ mod tests {
 
     /// **A pinned schema's declaration reports every declaration the schema
     /// makes**, each as the facet `describe` answers with, in the order of the
-    /// text that keys it: each field with its type, whether it is required and
-    /// its closed set, the tags, the patterns, the stance, the folders and the
-    /// ambiguity-ignore patterns, and each creation rule and the inbox with
-    /// every template as its source text. A vault with no schema pinned
-    /// declares nothing, and a schema silent on tags states the default
-    /// stance.
+    /// text that keys it: each field with its type, the tags, the patterns,
+    /// the stance and the ambiguity-ignore patterns, and each creation rule and
+    /// the inbox with every template as its source text. A vault with no
+    /// schema pinned declares nothing, and a schema silent on tags states the
+    /// default stance.
     #[test]
     fn a_pinned_declaration_reports_every_declaration_its_schema_makes() {
         use norn_wire::{
@@ -1457,9 +1558,9 @@ inbox:
         assert_eq!(
             facets(FacetKind::DeclaredField),
             vec![
-                Facet::declared_field("due", Wire::Date),
-                Facet::declared_field("status", Wire::Text),
-                Facet::declared_field("title", Wire::Text),
+                Facet::declared_field("due", Wire::Date, None),
+                Facet::declared_field("status", Wire::Text, None),
+                Facet::declared_field("title", Wire::Text, None),
             ]
         );
         assert!(declared.content_model().typed_order("due").is_some());
@@ -1540,6 +1641,115 @@ inbox:
                 "{kind:?}"
             );
         }
+    }
+
+    /// **A pinned schema's rules and field shapes reach the declaration as
+    /// the schema writes them.** Each rule is one facet, in name order, every
+    /// part it declares spelled as written — a selector's values as a list
+    /// however many were written, a default and a route as their source text,
+    /// a forbidden field's fix — and every part it does not left out, its
+    /// severity always stated. Each field carries the shape it declares, and
+    /// none where it declares none.
+    #[test]
+    fn a_pinned_declaration_reports_its_rules_and_shapes_as_written() {
+        use norn_wire::{
+            AuthoredValue, Facet, FacetKind, FieldShape, FieldType as Wire, RuleAllowedPaths,
+            RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, SchemaRule,
+        };
+
+        let declared = Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1
+fields:
+  status: {type: text, shape: single}
+  aliases: {type: text, shape: list}
+  due: {type: date}
+rules:
+  tasks:
+    description: what a task holds
+    severity: error
+    match:
+      frontmatter: {type: task}
+      path: \"projects/<project>/**\"
+    exclude:
+      path: [\"projects/archive/**\"]
+    required:
+      status: {default: todo}
+      project: {default: \"{{path.project}}\"}
+      due:
+    forbidden:
+      assignee: {rename_to: owner}
+      legacy: remove
+      draft:
+    one_of:
+      status: {values: [todo, done], synonyms: {complete: done}}
+    max_length:
+      title: 80
+    allowed_paths:
+      paths: [\"projects/**\"]
+      route: \"projects/{{path.project}}/\"
+  areas:
+    match: {path: \"areas/**\"}
+",
+            )
+            .expect("a schema declaring rules and shapes"),
+            "rules-and-shapes",
+        );
+        let facets = |kind| {
+            declared
+                .content_model()
+                .facets_of(kind, None)
+                .collect::<Vec<Facet>>()
+        };
+        assert_eq!(
+            facets(FacetKind::DeclaredField),
+            vec![
+                Facet::declared_field("aliases", Wire::Text, Some(FieldShape::List)),
+                Facet::declared_field("due", Wire::Date, None),
+                Facet::declared_field("status", Wire::Text, Some(FieldShape::Single)),
+            ]
+        );
+        assert_eq!(
+            facets(FacetKind::Rule),
+            vec![
+                Facet::rule(
+                    SchemaRule::new("areas", Severity::Warning)
+                        .with_match(RuleMatch::new([], Some("areas/**".to_string())))
+                ),
+                Facet::rule(
+                    SchemaRule::new("tasks", Severity::Error)
+                        .with_description("what a task holds")
+                        .with_match(RuleMatch::new(
+                            [("type".to_string(), vec!["task".to_string()])],
+                            Some("projects/<project>/**".to_string()),
+                        ))
+                        .with_exclude(RuleExclude::new(["projects/archive/**".to_string()]))
+                        .with_required("status", Some(AuthoredValue::string("todo")))
+                        .with_required("project", Some(AuthoredValue::string("{{path.project}}")))
+                        .with_required("due", None)
+                        .with_forbidden(
+                            "assignee",
+                            Some(RuleForbiddenFix::RenameTo("owner".to_string()))
+                        )
+                        .with_forbidden("legacy", Some(RuleForbiddenFix::Remove))
+                        .with_forbidden("draft", None)
+                        .with_one_of(
+                            "status",
+                            RuleClosedSet::new(
+                                ["todo".to_string(), "done".to_string()],
+                                [("complete".to_string(), "done".to_string())],
+                            )
+                        )
+                        .with_max_length("title", 80)
+                        .with_allowed_paths(RuleAllowedPaths::new(
+                            ["projects/**".to_string()],
+                            Some("projects/{{path.project}}/".to_string()),
+                        ))
+                ),
+            ]
+        );
+        assert!(declared.content_model().declares_rule("tasks"));
+        assert!(!declared.content_model().declares_rule("task"));
     }
 
     /// **Every field type is declared as the wire type spelled as it is, and

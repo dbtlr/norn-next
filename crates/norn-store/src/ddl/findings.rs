@@ -86,12 +86,69 @@
 //!   subject read and discard's seek, and a walked-scope prune's bytewise page
 //!   of subjects.
 //!
+//! - `finding_rules_fingerprint_rule_kind_nocase` and
+//!   `finding_rules_fingerprint_rule_kind_severity_nocase` are the first two
+//!   with the rule a finding cites one column further in, over
+//!   `finding_rules` — see below — so a request selecting one rule pages and
+//!   tallies the findings citing it in the same order by the same seeks.
+//!
 //! A statement a document part drives joins each matched document to its
 //! findings on the path compared folded and bytewise. The folded equality is
 //! implied by the bytewise one, and it is what lets the seek at a matched
 //! document's path run down the `NOCASE` column of the two indexes above. The
 //! bytewise equality is what matches a finding to the one document at its
 //! exact path, where the root tells `a.md` and `A.md` apart.
+//!
+//! # A finding cites its rules by one set, held once per fingerprint
+//!
+//! A finding judged against the schema rules cites every rule contributing to
+//! the constraint it breaches (ADR 0035). `findings.rule_set` names the set by
+//! one integer, so a finding row's bytes do not grow with the rules it cites.
+//! `rule_sets` holds each set once per vault-schema fingerprint as its
+//! canonical spelling — the names in byte order, each once, as a JSON list —
+//! which is both what a write finds the set by again, under
+//! `rule_sets_fingerprint_rules`, and what a reader reads the set's names back
+//! from ([`crate::rule_set`]); the names are held nowhere else as a set. A set
+//! is held under the fingerprint the findings citing it were derived under,
+//! and it stands exactly as long as a finding cites it:
+//! `findings_collect_rule_set` deletes it as the last finding citing it is
+//! deleted, by whichever discard — a changeset's, a caller's or a schema
+//! pin's — so a store maintained through any history holds the sets a store
+//! derived from zero holds. The citation is a foreign key, and
+//! `findings_rule_set` is the index the collection's check for another citer
+//! and the foreign key's own check both seek, so collecting a set costs the
+//! findings citing it.
+//!
+//! **Selecting by rule reads a row per finding and rule.** A finding citing
+//! several rules is found by any of them, so `finding_rules` holds one row
+//! per `(finding, rule)` pair, beside a copy of the finding's fingerprint,
+//! kind, severity, path and position: the key its two indexes order by, in
+//! the findings' own order, ending in the finding's id. The copy is taken from
+//! the finding's own row as the rule row is written, and the rows cascade with
+//! the finding, so a discard takes them whole. The store's verification holds
+//! the copy equal to the finding and the rows' names equal to the set the
+//! finding cites, so the rules a validate selects a finding by are the rules
+//! its row reports. These rows grow with the rules a finding cites, which is
+//! what selecting by any one of them costs; the finding's own row does not.
+//!
+//! No finding cites a rule or carries a value until rule judgment in
+//! derivation files one (NORN-358): today only the store's own suite writes
+//! these tables and columns, through [`crate::FindingFacts::rules`] and
+//! [`crate::FindingFacts::value`].
+//!
+//! # The offending value is a head, at rest as on the wire
+//!
+//! A finding about a value carries it as `value_head`, `value_bytes` and
+//! `value_hash`: the value's first [`norn_wire::VALUE_HEAD_BYTES`] cut at a
+//! character boundary, its whole length, and the SHA-256 of the whole of it,
+//! taken where the finding is written. `CHECK`s built from the wire's
+//! constant hold the head to the bound and to the value, a value within the
+//! bound whole, a longer one cut within three bytes of the bound, the hash to
+//! the SHA-256 spelling, and the three present together or absent together,
+//! so a value of any length costs a finding the same bytes and every head at
+//! rest is one the wire reads. The combined expectation a value breached — a closed set, a
+//! limit, the allowed paths — is never stored with it: it is a function of
+//! the rules the finding cites.
 //!
 //! # `generation` is what a repair plan cites
 //!
@@ -270,9 +327,13 @@
 //! and this column stays `TEXT`; `detail` is projected into the store by
 //! whatever composed it and is never forwarded back out as a typed shape.
 
+use crate::write_path::WriteStatement;
+
 pub(crate) fn statements() -> Vec<String> {
-    let mut all = vec![findings()];
+    let mut all = super::fixed(RULE_SET_STATEMENTS);
+    all.push(findings());
     all.extend(super::fixed(STATEMENTS));
+    all.push(collect_rule_set());
     all.push(finding_candidates());
     all
 }
@@ -284,9 +345,50 @@ pub(crate) fn statements() -> Vec<String> {
 /// at.
 pub(crate) const DOCUMENT_POSITION: i64 = -1;
 
+/// The hexadecimal digits a SHA-256 is spelled in, after its `sha256:` prefix.
+const SHA256_HEX_DIGITS: usize = 64;
+
+/// The rule sets a finding cites, ahead of the findings that reference them.
+const RULE_SET_STATEMENTS: &[&str] = &[
+    "CREATE TABLE rule_sets (
+    id                       INTEGER PRIMARY KEY,
+    vault_schema_fingerprint TEXT    NOT NULL,
+    rules                    TEXT    NOT NULL
+)",
+    "CREATE UNIQUE INDEX rule_sets_fingerprint_rules ON rule_sets(vault_schema_fingerprint, rules)",
+];
+
+/// The trigger that collects a rule set when the last finding citing it goes,
+/// its body [`WriteStatement::CollectRuleSet`] with the deleted finding's
+/// citation in place of the parameter, so the plan bar over that statement is
+/// a plan of what the trigger runs.
+fn collect_rule_set() -> String {
+    format!(
+        "CREATE TRIGGER findings_collect_rule_set AFTER DELETE ON findings
+    WHEN old.rule_set IS NOT NULL
+BEGIN
+    {};
+END",
+        WriteStatement::CollectRuleSet
+            .sql()
+            .replace("?1", "old.rule_set")
+    )
+}
+
 /// The findings table, with the position of a finding about the document
-/// taken from [`DOCUMENT_POSITION`] rather than spelled a second time.
+/// taken from [`DOCUMENT_POSITION`] and the value head's bound from
+/// [`norn_wire::VALUE_HEAD_BYTES`] rather than spelled a second time.
+///
+/// The value checks are the wire's [`norn_wire::ValueHead`] grammar as far
+/// as a byte length can state it: a head within the bound and the value; a
+/// value within the bound carried whole; a longer one cut no shorter than a
+/// character boundary forces, which is within the longest UTF-8 character's
+/// bytes ([`char::MAX_LEN_UTF8`]) less one of the bound; and the hash spelled
+/// as a SHA-256.
 fn findings() -> String {
+    let value_head_bytes = norn_wire::VALUE_HEAD_BYTES;
+    let shortest_cut = value_head_bytes - (char::MAX_LEN_UTF8 - 1);
+    let hash_spelling = format!("sha256:{}", "[0-9a-f]".repeat(SHA256_HEX_DIGITS));
     format!(
         "CREATE TABLE findings (
     id                       INTEGER PRIMARY KEY,
@@ -304,8 +406,18 @@ fn findings() -> String {
     detail                   TEXT,
     ordinal                  INTEGER CHECK (ordinal >= 0),
     position                 INTEGER GENERATED ALWAYS AS (coalesce(ordinal, {DOCUMENT_POSITION})) VIRTUAL,
+    rule_set                 INTEGER REFERENCES rule_sets(id),
+    value_head               TEXT    CHECK (length(CAST(value_head AS BLOB)) <= {value_head_bytes}),
+    value_bytes              INTEGER CHECK (value_bytes >= length(CAST(value_head AS BLOB))),
+    value_hash               TEXT    CHECK (value_hash GLOB '{hash_spelling}'),
     CHECK ((span_line IS NULL) = (span_column IS NULL)
-       AND (span_line IS NULL) = (span_offset IS NULL))
+       AND (span_line IS NULL) = (span_offset IS NULL)),
+    CHECK ((value_head IS NULL) = (value_bytes IS NULL)
+       AND (value_head IS NULL) = (value_hash IS NULL)),
+    CHECK (value_bytes > {value_head_bytes}
+        OR length(CAST(value_head AS BLOB)) = value_bytes),
+    CHECK (value_bytes <= {value_head_bytes}
+        OR length(CAST(value_head AS BLOB)) >= {shortest_cut})
 )"
     )
 }
@@ -321,6 +433,7 @@ const STATEMENTS: &[&str] = &[
     "CREATE UNIQUE INDEX findings_one_per_link ON findings(
     vault_schema_fingerprint, path, ordinal
 ) WHERE ordinal IS NOT NULL",
+    "CREATE INDEX findings_rule_set ON findings(rule_set) WHERE rule_set IS NOT NULL",
     "CREATE TABLE finding_classes (
     finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     class_key TEXT    NOT NULL,
@@ -333,6 +446,22 @@ const STATEMENTS: &[&str] = &[
     PRIMARY KEY (finding, path_key)
 ) WITHOUT ROWID",
     "CREATE INDEX finding_paths_path_key ON finding_paths(path_key)",
+    "CREATE TABLE finding_rules (
+    finding                  INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    rule                     TEXT    NOT NULL,
+    vault_schema_fingerprint TEXT    NOT NULL,
+    kind                     TEXT    NOT NULL,
+    severity                 TEXT    NOT NULL,
+    path                     TEXT    NOT NULL,
+    position                 INTEGER NOT NULL,
+    PRIMARY KEY (finding, rule)
+) WITHOUT ROWID",
+    "CREATE INDEX finding_rules_fingerprint_rule_kind_severity_nocase ON finding_rules(
+    vault_schema_fingerprint, rule, kind, severity, path COLLATE NOCASE, path, position, finding
+)",
+    "CREATE INDEX finding_rules_fingerprint_rule_kind_nocase ON finding_rules(
+    vault_schema_fingerprint, rule, kind, path COLLATE NOCASE, path, position, finding
+)",
 ];
 
 /// The bounded head, with its rank bound taken from the constant the API states

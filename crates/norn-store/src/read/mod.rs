@@ -55,7 +55,9 @@ pub(crate) use answer_order::{AnswerSeek, Term, answer_ordering, answer_place, a
 pub(crate) use conjunction::{Conjunction, KeyPlace, Report, ResolvesPart};
 pub(crate) use filter::{Binder, Filter, PathPart};
 pub use filter::{READ_FILTERS, ReadFilter};
-pub(crate) use finding::{FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base};
+pub(crate) use finding::{
+    FINDING_ROW_COLUMNS, FindingBase, cursor_position, finding_base, projected_findings,
+};
 pub(crate) use glob::register_functions;
 pub(crate) use keys::key_walk;
 pub(crate) use naming::{Naming, SuffixSpellings, wire_path};
@@ -263,6 +265,10 @@ pub enum PageRefusal {
     AmbiguousTarget(Box<TargetAmbiguity>),
     /// The target names no document.
     UnknownTarget { target: ResolutionTarget },
+    /// The request selects the findings citing `rule`, and the declaration it
+    /// was compiled under declares no rule of that name: no finding can cite
+    /// it, and an empty answer would say it holds everywhere.
+    UnknownRule { rule: String },
     /// The request carries `part`, which the answer it asks for — `answer` —
     /// does not take: an anchor or a column on a collection page, a column on
     /// a section or a block, or a cursor or a limit on anything but a
@@ -336,6 +342,9 @@ impl std::fmt::Display for PageRefusal {
             ),
             PageRefusal::UnknownTarget { target } => {
                 write!(formatter, "`{target}` names no document")
+            }
+            PageRefusal::UnknownRule { rule } => {
+                write!(formatter, "the vault's schema declares no rule `{rule}`")
             }
             PageRefusal::PartNotTaken { part, answer } => write!(
                 formatter,

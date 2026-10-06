@@ -539,6 +539,8 @@ pub fn path_names_no_document_for_target(
         candidates_total: total,
         message: format!("`{target}` addresses {total} documents"),
         detail: None,
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 
@@ -558,6 +560,8 @@ pub fn unread_block(at: &str) -> FindingFacts {
         candidates_total: 0,
         message: format!("`{at}` derives without its frontmatter"),
         detail: Some("the block is not well-formed".to_string()),
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 
@@ -584,6 +588,8 @@ pub fn keyed_by_paths(at: &str, keys: &[&str]) -> FindingFacts {
         candidates_total: 0,
         message: format!("a path `{at}` names holds no document"),
         detail: None,
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 
@@ -602,6 +608,8 @@ pub fn violation(at: &str) -> FindingFacts {
         candidates_total: 0,
         message: "the `status` field is required".to_string(),
         detail: Some(r#"{"field":"status"}"#.to_string()),
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 

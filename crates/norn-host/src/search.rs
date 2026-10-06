@@ -858,7 +858,11 @@ fn ranked_answer(
     Ok(Built {
         unsatisfied,
         advisories,
-        report: SearchReport::new(declaration, Page::new(hydrated.hits, next, moved)),
+        report: SearchReport::new(
+            declaration,
+            Page::new(hydrated.hits, next, moved),
+            hydrated.rule_sets,
+        ),
         work: cost,
     })
 }

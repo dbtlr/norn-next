@@ -99,6 +99,7 @@ mod statement;
 
 use std::ops::Range;
 
+use crate::read::projected_findings;
 use norn_db::EmittedPlan;
 use norn_db::rusqlite::Row;
 use norn_wire::{
@@ -477,7 +478,10 @@ impl Snapshot {
                 )?;
                 work.link_candidates_read += hydration.link_candidates_read;
                 let unsatisfied = self.resolve(unknown, declared, lookups)?;
-                (GetReport::record(rows.remove(0)), unsatisfied)
+                let document = rows.remove(0);
+                let rule_sets =
+                    self.rule_sets(&mut lookups.ran, projected_findings([&document]))?;
+                (GetReport::record(document, rule_sets), unsatisfied)
             }
             Shape::Section(anchor) => self.section(named, anchor, text, lookups, &mut work)?,
             Shape::Block(id) => self.block(named, id, text, lookups)?,
@@ -578,7 +582,7 @@ impl Snapshot {
         }
         let Some(at) = text.section(&headings, &body, anchor) else {
             return Ok((
-                GetReport::record(DocumentRow::new(named.wire)),
+                GetReport::record(DocumentRow::new(named.wire), []),
                 vec![Unsatisfied::missing_section(anchor)],
             ));
         };
@@ -619,7 +623,7 @@ impl Snapshot {
             .transpose()?;
         let Some(definition) = definition else {
             return Ok((
-                GetReport::record(DocumentRow::new(named.wire)),
+                GetReport::record(DocumentRow::new(named.wire), []),
                 vec![Unsatisfied::missing_block(id)],
             ));
         };
@@ -675,9 +679,9 @@ impl Snapshot {
     ) -> Result<CollectionPage, PageRefusal> {
         let collection = match selector {
             CollectionSelector::Findings => {
-                return Ok(CollectionPage::findings(
-                    self.finding_page(&named, limit, after, snapshot, lookups)?,
-                ));
+                let page = self.finding_page(&named, limit, after, snapshot, lookups)?;
+                let rule_sets = self.rule_sets(&mut lookups.ran, &page.rows)?;
+                return Ok(CollectionPage::findings(page, rule_sets));
             }
             CollectionSelector::Links => Nested::Links,
             CollectionSelector::Headings => Nested::Headings,

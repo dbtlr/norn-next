@@ -22,30 +22,32 @@ use norn_wire::{
     CursorKey, CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory,
     DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
     EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldType, FieldValue, FilePath,
-    FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath,
-    Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash,
-    IllegalOperationId, InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration,
-    LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams,
-    ListReport, MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport,
-    MigrationRefusal, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams,
-    NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId,
-    OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition,
-    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
-    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
-    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage,
-    RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport,
-    ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung,
-    RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score,
+    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
+    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
+    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
+    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
+    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths,
+    RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport,
+    RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource, SchemaViolation, Score,
     SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
     Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
     TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
     UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
     UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    ValidateParams, ValidateReport, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
-    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character, is_refused_segment,
-    leaf_stem,
+    VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap, Variables, VaultAddress,
+    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
+    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
+    is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -148,6 +150,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::VaultAmbiguousRoot,
         ReasonCode::VaultAmbiguousTarget,
         ReasonCode::VaultUnknownTarget,
+        ReasonCode::VaultUnknownRule,
         ReasonCode::VaultReloadBusy,
         ReasonCode::VaultReloadFailed,
         ReasonCode::VaultCursorOrderChanged,
@@ -268,6 +271,7 @@ fn error_details() -> Vec<ErrorDetail> {
             Sort::new(SortKey::field("due"), Direction::Descending),
         )),
         ErrorDetail::unreadable_bound("due", "not-a-date"),
+        ErrorDetail::unknown_rule("tasks"),
         ErrorDetail::out_of_bound(RequestBound::page_rows(5_000, 1_024)),
         ErrorDetail::out_of_bound(RequestBound::page_rows(0, 1_024)),
         ErrorDetail::out_of_bound(RequestBound::membership_values("status", 257, 256)),
@@ -854,6 +858,30 @@ fn finding_row() -> FindingRow {
     )
 }
 
+/// The hash a fixture's value head carries.
+fn value_hash() -> ContentHash {
+    ContentHash::from_sha256([7; 32])
+}
+
+/// A finding judged against the schema rules: it cites a rule set and carries
+/// the head of the value it judged.
+fn rule_finding_row() -> FindingRow {
+    FindingRow::new(
+        8,
+        FindingKind::NotOneOf,
+        Severity::Error,
+        path("tasks/a.md"),
+        Some("status".to_string()),
+        None,
+        no_head(),
+        None,
+        "`status` holds a value outside its closed set",
+        13,
+    )
+    .citing(3)
+    .with_value(ValueHead::of("someday", value_hash()))
+}
+
 /// Every nested collection a request pages.
 fn collection_selectors() -> Vec<CollectionSelector> {
     vec![
@@ -897,7 +925,10 @@ fn collection_pages() -> Vec<CollectionPage> {
             None,
             vec![],
         )),
-        CollectionPage::findings(Page::new(vec![finding_row()], None, vec![])),
+        CollectionPage::findings(
+            Page::new(vec![finding_row(), rule_finding_row()], None, vec![]),
+            [rule_set_three()],
+        ),
     ]
 }
 
@@ -919,10 +950,15 @@ fn whole_document_row() -> DocumentRow {
         .with_findings(collection(vec![finding_row()], 1))
 }
 
+/// The rule set [`rule_finding_row`] cites.
+fn rule_set_three() -> RuleSet {
+    RuleSet::new(3, ["tasks".to_string(), "open-tasks".to_string()]).expect("a rule set")
+}
+
 /// Every shape a `get` answers with.
 fn get_reports() -> Vec<GetReport> {
     let mut reports = vec![
-        GetReport::record(whole_document_row()),
+        GetReport::record(whole_document_row(), []),
         GetReport::section(
             path("notes/a.md"),
             heading_row(),
@@ -945,7 +981,14 @@ fn get_reports() -> Vec<GetReport> {
 /// Every shape a `validate` answers with.
 fn validate_reports() -> Vec<ValidateReport> {
     vec![
-        ValidateReport::findings(Page::new(vec![finding_row()], None, vec![])),
+        ValidateReport::findings(Page::new(vec![finding_row()], None, vec![]), []),
+        ValidateReport::findings(
+            Page::new(vec![rule_finding_row()], None, vec![]),
+            [
+                RuleSet::new(3, ["tasks".to_string(), "open-tasks".to_string()])
+                    .expect("a rule set"),
+            ],
+        ),
         ValidateReport::summary([KindTally::new(
             FindingKind::UndeclaredTag,
             Severity::Warning,
@@ -988,8 +1031,13 @@ fn path_rule_kinds() -> Vec<PathRuleKind> {
 fn facets() -> Vec<Facet> {
     let mut facets: Vec<Facet> = field_types()
         .into_iter()
-        .map(|field_type| Facet::declared_field("due", field_type))
+        .map(|field_type| Facet::declared_field("due", field_type, None))
         .collect();
+    facets.extend(
+        field_shapes()
+            .into_iter()
+            .map(|shape| Facet::declared_field("tags", FieldType::Tags, Some(shape))),
+    );
     facets.extend(
         container_kinds()
             .into_iter()
@@ -1023,7 +1071,53 @@ fn facets() -> Vec<Facet> {
         None,
     ));
     facets.push(Facet::inbox("inbox/{{date}}-{{seq}}.md"));
+    facets.push(Facet::rule(SchemaRule::new("bare", Severity::Warning)));
+    facets.push(Facet::rule(every_part_rule()));
     facets
+}
+
+/// Every shape a vault's schema declares a field under.
+fn field_shapes() -> Vec<FieldShape> {
+    FieldShape::ALL.to_vec()
+}
+
+/// A schema rule declaring every part a rule can, each fix among them.
+fn every_part_rule() -> SchemaRule {
+    SchemaRule::new("tasks", Severity::Error)
+        .with_description("what a task holds")
+        .with_match(RuleMatch::new(
+            [(
+                "type".to_string(),
+                vec!["task".to_string(), "todo".to_string()],
+            )],
+            Some("projects/<project>/**".to_string()),
+        ))
+        .with_exclude(RuleExclude::new(["projects/archive/**".to_string()]))
+        .with_required("status", Some(AuthoredValue::string("todo")))
+        .with_required("project", Some(AuthoredValue::string("{{path.project}}")))
+        .with_required("due", None)
+        .with_forbidden(
+            "assignee",
+            Some(RuleForbiddenFix::RenameTo("owner".to_string())),
+        )
+        .with_forbidden("legacy", Some(RuleForbiddenFix::Remove))
+        .with_forbidden("draft", None)
+        .with_one_of(
+            "status",
+            RuleClosedSet::new(
+                ["todo".to_string(), "done".to_string()],
+                [("complete".to_string(), "done".to_string())],
+            ),
+        )
+        .with_one_of(
+            "priority",
+            RuleClosedSet::new(["1".to_string(), "2".to_string()], []),
+        )
+        .with_max_length("title", 80)
+        .with_allowed_paths(RuleAllowedPaths::new(
+            ["projects/**".to_string()],
+            Some("projects/{{path.project}}/".to_string()),
+        ))
 }
 
 /// Every stance a vault takes on a tag its facet does not admit.
@@ -1964,6 +2058,15 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "link/broken",
         "link/ambiguous",
         "link/missing-anchor",
+        "document/misplaced",
+        "document/rules-conflict",
+        "field/required-missing",
+        "field/forbidden",
+        "field/not-one-of",
+        "field/too-long",
+        "field/type-mismatch",
+        "field/shape-mismatch",
+        "field/rules-conflict",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -2009,13 +2112,46 @@ fn the_two_scopes_partition_the_finding_kinds() {
             "document/frontmatter-too-large",
             "document/frontmatter-unclosed",
             "document/frontmatter-unreadable",
+            "document/misplaced",
+            "document/rules-conflict",
             "document/undeclared-tag",
+            "field/forbidden",
+            "field/not-one-of",
+            "field/required-missing",
+            "field/rules-conflict",
+            "field/shape-mismatch",
+            "field/too-long",
+            "field/type-mismatch",
             "link/ambiguous",
             "link/broken",
             "link/missing-anchor",
         ]
     );
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
+}
+
+/// ADR 0035's schema kinds each judge a document that derived whole — its
+/// path and its frontmatter — so each stands beside that document's row. A
+/// rule kind is filed at the highest severity of the rules it cites, and a
+/// rule stating none is a warning, so a warning is what each defaults to; a
+/// type or shape mismatch is judged against the field declarations, which
+/// state no severity, so it is a warning always.
+#[test]
+fn schema_kinds_are_document_scoped_warnings() {
+    for kind in [
+        FindingKind::Misplaced,
+        FindingKind::DocumentRulesConflict,
+        FindingKind::RequiredMissing,
+        FindingKind::Forbidden,
+        FindingKind::NotOneOf,
+        FindingKind::TooLong,
+        FindingKind::TypeMismatch,
+        FindingKind::ShapeMismatch,
+        FindingKind::FieldRulesConflict,
+    ] {
+        assert_eq!(kind.scope(), FindingScope::Document, "{kind}");
+        assert_eq!(kind.default_severity(), Severity::Warning, "{kind}");
+    }
 }
 
 /// ADR 0027's three link-health kinds are each about one link in a document
@@ -3400,16 +3536,22 @@ fn a_search_report_declares_its_ladder_beside_its_page() {
     let report = SearchReport::new(
         LadderDeclaration::lexical(),
         Page::new(vec![Hit::new(path("notes/a.md"), score(0.5))], None, vec![]),
+        [],
     );
     assert_eq!(
         wire(&report),
         concat!(
             r#"{"ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true},"#,
-            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]}}"#
+            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]},"#,
+            r#""rule_sets":[]}"#
         )
     );
     for ladder in ladder_declarations() {
-        round_trip(&SearchReport::new(ladder, Page::new(vec![], None, vec![])));
+        round_trip(&SearchReport::new(
+            ladder,
+            Page::new(vec![], None, vec![]),
+            [],
+        ));
     }
     assert!(
         serde_json::from_str::<SearchReport>(r#"{"page":{"rows":[],"next":null,"moved":[]}}"#)
@@ -4713,9 +4855,322 @@ fn a_finding_row_carries_its_typed_halves() {
             r#""path":"notes/a.md","target":"draft","span":null,"#,
             r#""head":{"candidates":[],"total":0},"#,
             r#""hint":{"hint":"resolves","target":"glossary"},"#,
-            r#""message":"the tag is not declared","generation":12}"#
+            r#""message":"the tag is not declared","generation":12,"#,
+            r#""rule_set":null,"value":null}"#
+        ),
+        "a finding citing no rule and about no value says so"
+    );
+}
+
+/// A finding judged against the schema rules cites the set of rules it
+/// breaches by one number and carries the value it judged as a bounded head:
+/// the text, the whole length and the hash of the whole value.
+#[test]
+fn a_rule_finding_cites_its_rule_set_and_carries_its_value_head() {
+    assert_eq!(
+        wire(&rule_finding_row()),
+        concat!(
+            r#"{"id":8,"kind":"field/not-one-of","severity":"error","#,
+            r#""path":"tasks/a.md","target":"status","span":null,"#,
+            r#""head":{"candidates":[],"total":0},"hint":null,"#,
+            r#""message":"`status` holds a value outside its closed set","generation":13,"#,
+            r#""rule_set":3,"value":{"text":"someday","byte_length":7,"#,
+            r#""hash":"sha256:0707070707070707070707070707070707070707070707070707070707070707"}}"#
         )
     );
+    round_trip(&rule_finding_row());
+}
+
+/// **A value head is the value's first [`VALUE_HEAD_BYTES`], cut at a
+/// character boundary**, with the whole value's length beside it: a short
+/// value is carried whole, and a long one is cut at the last boundary at or
+/// below the bound, never inside a character, however long the value.
+#[test]
+fn a_value_head_is_cut_at_the_last_character_boundary_within_the_bound() {
+    let short = ValueHead::of("done", value_hash());
+    assert_eq!(
+        (short.text(), short.byte_length(), short.is_truncated()),
+        ("done", 4, false)
+    );
+    for prefix in 0..4 {
+        // `é` is two bytes and `€` three, so the value crosses the bound
+        // inside a character at every offset but one.
+        let value = format!(
+            "{}{}",
+            "a".repeat(VALUE_HEAD_BYTES - 2 + prefix),
+            "é€".repeat(64)
+        );
+        let head = ValueHead::of(&value, value_hash());
+        assert!(head.text().len() <= VALUE_HEAD_BYTES, "{prefix}");
+        assert!(head.text().len() > VALUE_HEAD_BYTES - 4, "{prefix}");
+        assert!(value.starts_with(head.text()), "{prefix}");
+        assert_eq!(head.byte_length(), value.len() as u64);
+        assert!(head.is_truncated());
+    }
+    let exact = "x".repeat(VALUE_HEAD_BYTES);
+    let head = ValueHead::of(&exact, value_hash());
+    assert_eq!((head.text(), head.is_truncated()), (exact.as_str(), false));
+    for length in [
+        VALUE_HEAD_BYTES + 1,
+        10 * VALUE_HEAD_BYTES,
+        1_000 * VALUE_HEAD_BYTES,
+    ] {
+        let head = ValueHead::of(&"x".repeat(length), value_hash());
+        assert_eq!(head.text().len(), VALUE_HEAD_BYTES, "{length}");
+        assert_eq!(head.byte_length(), length as u64);
+    }
+}
+
+/// **A head no value could have been cut to is refused where it is built and
+/// where it is read alike**: text past the bound, text longer than the value
+/// it heads, and a cut that stops short of the bound by more than one
+/// character.
+#[test]
+fn a_value_head_no_value_was_cut_to_is_refused() {
+    let past = "x".repeat(VALUE_HEAD_BYTES + 1);
+    let short = "x".repeat(VALUE_HEAD_BYTES - 4);
+    for (text, byte_length, refusal) in [
+        (
+            past.as_str(),
+            1_000,
+            IllegalValueHead::PastTheBound {
+                text: VALUE_HEAD_BYTES + 1,
+            },
+        ),
+        (
+            "done",
+            3,
+            IllegalValueHead::LongerThanTheValue {
+                text: 4,
+                byte_length: 3,
+            },
+        ),
+        (
+            short.as_str(),
+            1_000,
+            IllegalValueHead::CutShort {
+                text: VALUE_HEAD_BYTES - 4,
+                byte_length: 1_000,
+            },
+        ),
+    ] {
+        assert_eq!(
+            ValueHead::new(text, byte_length, value_hash()),
+            Err(refusal)
+        );
+        let json = format!(
+            r#"{{"text":"{text}","byte_length":{byte_length},"hash":"{}"}}"#,
+            value_hash()
+        );
+        assert!(
+            serde_json::from_str::<ValueHead>(&json).is_err(),
+            "{json} was read as a head"
+        );
+    }
+    let cut = "x".repeat(VALUE_HEAD_BYTES - 3);
+    assert!(ValueHead::new(cut, 1_000, value_hash()).is_ok());
+    assert!(ValueHead::new("done", 4, value_hash()).is_ok());
+}
+
+/// **A value within the bound is carried whole.** Only a value longer than
+/// [`VALUE_HEAD_BYTES`] is cut, so a head shorter than a value of at most
+/// that many bytes is no value's head, however close to the bound it stops:
+/// it is refused where it is built and where it is read alike.
+#[test]
+fn a_value_within_the_bound_is_carried_whole() {
+    let near = "x".repeat(VALUE_HEAD_BYTES - 3);
+    for byte_length in [
+        VALUE_HEAD_BYTES as u64 - 2,
+        VALUE_HEAD_BYTES as u64 - 1,
+        VALUE_HEAD_BYTES as u64,
+    ] {
+        assert_eq!(
+            ValueHead::new(near.as_str(), byte_length, value_hash()),
+            Err(IllegalValueHead::NotWhole {
+                text: VALUE_HEAD_BYTES - 3,
+                byte_length,
+            })
+        );
+        let json = format!(
+            r#"{{"text":"{near}","byte_length":{byte_length},"hash":"{}"}}"#,
+            value_hash()
+        );
+        assert!(
+            serde_json::from_str::<ValueHead>(&json).is_err(),
+            "{json} was read as a head"
+        );
+    }
+    assert_eq!(
+        ValueHead::new("done", 5, value_hash()),
+        Err(IllegalValueHead::NotWhole {
+            text: 4,
+            byte_length: 5
+        })
+    );
+    let whole = "x".repeat(VALUE_HEAD_BYTES);
+    assert!(ValueHead::new(whole, VALUE_HEAD_BYTES as u64, value_hash()).is_ok());
+}
+
+/// **The cut is the longest a character boundary allows.** A value of 128
+/// two-byte characters is exactly the bound and is kept whole; a value whose
+/// bound falls inside a character keeps every character that ends at or
+/// below the bound, which stops one, two or three bytes short of it as the
+/// straddling character is two, three or four bytes wide.
+#[test]
+fn a_value_head_keeps_the_longest_prefix_a_character_boundary_allows() {
+    let accented = "é".repeat(128);
+    let head = ValueHead::of(&accented, value_hash());
+    assert_eq!(head.text(), accented);
+    assert_eq!(head.text().len(), VALUE_HEAD_BYTES);
+    assert!(!head.is_truncated());
+
+    for (straddling, kept) in [("é", 255), ("€", 254), ("𝄞", 253)] {
+        let value = format!("{}{straddling}tail", "a".repeat(kept));
+        let head = ValueHead::of(&value, value_hash());
+        assert_eq!(head.text().len(), kept, "{straddling}");
+        assert_eq!(head.text(), &value[..kept], "{straddling}");
+        assert!(head.is_truncated(), "{straddling}");
+    }
+}
+
+/// **A finding's bytes do not grow with the value it judged or the rules it
+/// cites.** A row carries its rule set as one number and its value as a head
+/// bounded at [`VALUE_HEAD_BYTES`], so rows about values of any length past
+/// the bound, citing any set, serialize to the same length wherever their
+/// numbers spell the same width.
+#[test]
+fn a_rule_findings_bytes_do_not_grow_with_its_value_or_its_rules() {
+    let row = |value_length: usize, rule_set: u64| {
+        wire(
+            &rule_finding_row()
+                .citing(rule_set)
+                .with_value(ValueHead::of(&"x".repeat(value_length), value_hash())),
+        )
+        .len()
+    };
+    let at_rest = row(10_000, 10);
+    for (value_length, rule_set) in [(10_001, 10), (99_999, 99), (50_000, 42)] {
+        assert_eq!(row(value_length, rule_set), at_rest, "{value_length}");
+    }
+}
+
+/// A validate page carries each rule set its rows cite once, as the names of
+/// its rules in byte order, beside the page.
+#[test]
+fn a_validate_page_carries_the_rule_sets_its_rows_cite() {
+    let report = ValidateReport::findings(
+        Page::new(vec![rule_finding_row()], None, vec![]),
+        [RuleSet::new(
+            3,
+            [
+                "tasks".to_string(),
+                "open-tasks".to_string(),
+                "tasks".to_string(),
+            ],
+        )
+        .expect("a rule set")],
+    );
+    let json = serde_json::to_value(&report).expect("a report as JSON");
+    assert_eq!(json["shape"], "findings");
+    assert_eq!(
+        json["rule_sets"],
+        serde_json::json!([{"id": 3, "rules": ["open-tasks", "tasks"]}])
+    );
+    assert_eq!(json["page"]["rows"][0]["rule_set"], 3);
+    let none = serde_json::to_value(ValidateReport::findings(
+        Page::new(vec![finding_row()], None, vec![]),
+        [],
+    ))
+    .expect("a report as JSON");
+    assert_eq!(none["rule_sets"], serde_json::json!([]));
+}
+
+/// **A rule set names at least one rule, in byte order, each once**, and a set
+/// that does not is refused where it is read: an empty list, names out of
+/// byte order, and a name given twice are no set a response carries. The
+/// constructor puts what it is handed in that order and refuses an empty set.
+#[test]
+fn a_rule_set_names_its_rules_in_byte_order_each_once() {
+    assert_eq!(
+        RuleSet::new(1, Vec::<String>::new()),
+        Err(IllegalRuleSet::Empty)
+    );
+    let set = RuleSet::new(1, ["b".to_string(), "a".to_string(), "b".to_string()])
+        .expect("a set of two rules");
+    assert_eq!(set.rules, ["a", "b"]);
+    for (rules, refusal) in [
+        ("[]", "no rule"),
+        (r#"["b","a"]"#, "byte order"),
+        (r#"["a","a"]"#, "twice"),
+    ] {
+        let json = format!(r#"{{"id":1,"rules":{rules}}}"#);
+        let error = serde_json::from_str::<RuleSet>(&json)
+            .expect_err(&format!("{json} was read as a rule set"));
+        assert!(error.to_string().contains(refusal), "{json}: {error}");
+    }
+    round_trip(&set);
+}
+
+/// **Every response carrying finding rows carries the rule sets they cite**,
+/// beside its page or its record, as the names of each set's rules: a find
+/// page and a search page beside their pages, a get record beside its
+/// document, and a get page of findings beside its page — each `[]` where no
+/// row cites a set.
+#[test]
+fn every_response_carrying_finding_rows_carries_the_rule_sets_they_cite() {
+    let row =
+        DocumentRow::new(path("tasks/a.md")).with_findings(collection(vec![rule_finding_row()], 1));
+    let sets = serde_json::json!([{"id": 3, "rules": ["open-tasks", "tasks"]}]);
+
+    let find = serde_json::to_value(FindReport::new(
+        Page::new(vec![row.clone()], None, vec![]),
+        [rule_set_three()],
+    ))
+    .expect("a find report as JSON");
+    assert_eq!(find["rule_sets"], sets);
+    assert_eq!(
+        find["page"]["rows"][0]["findings"]["items"][0]["rule_set"],
+        3
+    );
+
+    let search = serde_json::to_value(SearchReport::new(
+        LadderDeclaration::lexical(),
+        Page::new(
+            vec![Hit::new(path("tasks/a.md"), score(0.5)).with_document(row.clone())],
+            None,
+            vec![],
+        ),
+        [rule_set_three()],
+    ))
+    .expect("a search report as JSON");
+    assert_eq!(search["rule_sets"], sets);
+
+    let record = serde_json::to_value(GetReport::record(row.clone(), [rule_set_three()]))
+        .expect("a get record as JSON");
+    assert_eq!(record["shape"], "record");
+    assert_eq!(record["rule_sets"], sets);
+
+    let page = serde_json::to_value(GetReport::collection(
+        path("tasks/a.md"),
+        CollectionPage::findings(
+            Page::new(vec![rule_finding_row()], None, vec![]),
+            [rule_set_three()],
+        ),
+    ))
+    .expect("a get page as JSON");
+    assert_eq!(page["page"]["of"], "findings");
+    assert_eq!(page["page"]["rule_sets"], sets);
+
+    let none = serde_json::to_value(FindReport::new(
+        Page::new(vec![DocumentRow::new(path("tasks/a.md"))], None, vec![]),
+        [],
+    ))
+    .expect("a find report as JSON");
+    assert_eq!(none["rule_sets"], serde_json::json!([]));
+    round_trip(&FindReport::new(
+        Page::new(vec![row], None, vec![]),
+        [rule_set_three()],
+    ));
 }
 
 /// The refusal a target that names more than one document earns carries the
@@ -5200,8 +5655,17 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
             .collect::<BTreeSet<_>>()
     );
     assert_eq!(
-        wire(&Facet::declared_field("due", FieldType::Date)),
-        r#"{"facet":"declared_field","key":"due","field_type":"date"}"#
+        wire(&Facet::declared_field("due", FieldType::Date, None)),
+        r#"{"facet":"declared_field","key":"due","field_type":"date"}"#,
+        "a field declaring no shape admits either, and its facet carries none"
+    );
+    assert_eq!(
+        wire(&Facet::declared_field(
+            "tags",
+            FieldType::Tags,
+            Some(FieldShape::List)
+        )),
+        r#"{"facet":"declared_field","key":"tags","field_type":"tags","shape":"list"}"#
     );
     assert_eq!(
         wire(&Facet::undeclared_tags(TagStance::Report)),
@@ -5246,6 +5710,54 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
     }
 }
 
+/// **A rule facet mirrors the rule as the schema writes it.** Every part the
+/// rule declares is spelled as the schema spells it — a selector's values as
+/// a list, a required field's default as its source text or `null`, a
+/// forbidden field's fix as `remove`, a rename or `null` — and every part it
+/// does not declare is left out. The severity is always stated.
+#[test]
+fn a_rule_facet_mirrors_the_rule_as_the_schema_writes_it() {
+    assert_eq!(
+        wire(&Facet::rule(SchemaRule::new("bare", Severity::Warning))),
+        r#"{"facet":"rule","name":"bare","severity":"warning"}"#,
+        "a rule declaring nothing states its severity alone"
+    );
+    assert_eq!(
+        wire(&Facet::rule(every_part_rule())),
+        concat!(
+            r#"{"facet":"rule","name":"tasks","description":"what a task holds","#,
+            r#""severity":"error","#,
+            r#""match":{"frontmatter":{"type":["task","todo"]},"path":"projects/<project>/**"},"#,
+            r#""exclude":{"path":["projects/archive/**"]},"#,
+            r#""required":{"due":null,"project":"{{path.project}}","status":"todo"},"#,
+            r#""forbidden":{"assignee":{"rename_to":"owner"},"draft":null,"legacy":"remove"},"#,
+            r#""one_of":{"priority":{"values":["1","2"]},"#,
+            r#""status":{"values":["todo","done"],"synonyms":{"complete":"done"}}},"#,
+            r#""max_length":{"title":80},"#,
+            r#""allowed_paths":{"paths":["projects/**"],"route":"projects/{{path.project}}/"}}"#
+        )
+    );
+    let path_only = SchemaRule::new("area", Severity::Warning)
+        .with_match(RuleMatch::new([], Some("areas/**".to_string())))
+        .with_allowed_paths(RuleAllowedPaths::new(["areas/**".to_string()], None));
+    assert_eq!(
+        wire(&Facet::rule(path_only.clone())),
+        concat!(
+            r#"{"facet":"rule","name":"area","severity":"warning","match":{"path":"areas/**"},"#,
+            r#""allowed_paths":{"paths":["areas/**"]}}"#
+        ),
+        "a part the rule leaves undeclared inside a part it declares is left out too"
+    );
+    round_trip(&Facet::rule(path_only));
+    assert_eq!(
+        SchemaRule::new("bare", Severity::Warning)
+            .with_match(RuleMatch::new([], None))
+            .with_exclude(RuleExclude::new([])),
+        SchemaRule::new("bare", Severity::Warning),
+        "a selection and an exclusion stating nothing are no parts of the rule"
+    );
+}
+
 /// The map from a facet to its kind is injective: one kind per shape, so
 /// `--facets` naming a kind names one shape and a page ordered by kind holds
 /// one. Two shapes sharing a kind would make the selection ambiguous.
@@ -5283,10 +5795,11 @@ fn every_facet_shape_maps_to_a_kind_of_its_own() {
 fn every_facet_says_where_a_page_of_facets_stops_at_it() {
     for (facet, kind, key) in [
         (
-            Facet::declared_field("due", FieldType::Date),
+            Facet::declared_field("due", FieldType::Date, Some(FieldShape::Single)),
             FacetKind::DeclaredField,
             "due",
         ),
+        (Facet::rule(every_part_rule()), FacetKind::Rule, "tasks"),
         (
             Facet::observed_field("author", [ContainerKind::Sequence]),
             FacetKind::ObservedField,
@@ -5496,6 +6009,7 @@ fn every_validate_setter_lands_in_the_bytes() {
         .with_predicates(predicates())
         .with_kinds(finding_kinds())
         .with_severity(Severity::Error)
+        .with_rule("tasks")
         .summarized()
         .with_limit(20)
         .with_after(cursors().remove(0));
@@ -5506,7 +6020,7 @@ fn every_validate_setter_lands_in_the_bytes() {
             PINNED_VAULT,
             r##","predicates":"##,
             PINNED_PREDICATES,
-            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor"],"severity":"error","summary":true,"limit":20,"after":""##,
+            r##","kinds":["document/path-bytes-not-utf8","document/path-names-no-document","document/body-bytes-not-utf8","document/frontmatter-too-large","document/frontmatter-unclosed","document/frontmatter-unreadable","document/undeclared-tag","link/broken","link/ambiguous","link/missing-anchor","document/misplaced","document/rules-conflict","field/required-missing","field/forbidden","field/not-one-of","field/too-long","field/type-mismatch","field/shape-mismatch","field/rules-conflict"],"severity":"error","rule":"tasks","summary":true,"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]
@@ -5525,7 +6039,7 @@ fn every_describe_setter_lands_in_the_bytes() {
         [
             r##"{"vault":"##,
             PINNED_VAULT,
-            r##","facets":["declared_field","observed_field","declared_tag","path_rule","tag_pattern","undeclared_tags","creation_rule","inbox"],"limit":20,"after":""##,
+            r##","facets":["declared_field","observed_field","declared_tag","path_rule","tag_pattern","undeclared_tags","creation_rule","inbox","rule"],"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]
@@ -5539,7 +6053,7 @@ fn every_document_row_setter_lands_in_the_bytes() {
     assert_eq!(
         wire(&request),
         [
-            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12}],"total":1}}"##,
+            r##"{"path":"notes/a.md","fields":{"type":{"kind":"scalar","raw":"note"}},"body":{"text":"Design\n","byte_length":4096},"links":{"items":[{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"broken"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"}],"total":1},"health":"healthy"},{"family":"wikilink","embed":false,"protocol":null,"target":"a","title":"A","anchor":{"kind":"heading","text":"Design"},"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[{"path":"notes/a.md","suffix":"notes/a"},{"path":"archive/a.md","suffix":"archive/a"}],"total":2},"health":"ambiguous"},{"family":"markdown","embed":false,"protocol":"https","target":"example.com/page","title":"","anchor":null,"span":{"line":3,"column":1,"byte_offset":42},"targets":{"candidates":[],"total":0},"health":"not_judged"}],"total":9},"headings":{"items":[{"level":2,"text":"Design","slug":"design","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"blocks":{"items":[{"id":"a1","span":null}],"total":1},"tags":{"items":[{"name":"draft","source":"frontmatter","span":{"line":3,"column":1,"byte_offset":42}}],"total":1},"findings":{"items":[{"id":7,"kind":"document/undeclared-tag","severity":"warning","path":"notes/a.md","target":"draft","span":{"line":3,"column":1,"byte_offset":42},"head":{"candidates":[{"path":"notes/glossary.md","suffix":"notes/glossary"},{"path":"archive/glossary.md","suffix":"archive/glossary"}],"total":9},"hint":{"hint":"resolves","target":"glossary"},"message":"the tag is not declared","generation":12,"rule_set":null,"value":null}],"total":1}}"##,
         ]
         .concat()
     );

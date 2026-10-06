@@ -61,7 +61,9 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use norn_wire::{Facet, FacetKind, FieldType, PathRuleKind, Pattern, TagStance, ValueMap};
+use norn_wire::{
+    Facet, FacetKind, FieldShape, FieldType, PathRuleKind, Pattern, SchemaRule, TagStance, ValueMap,
+};
 
 use crate::json::{FrontmatterValue, float_text};
 use crate::path::DocumentPath;
@@ -296,12 +298,15 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 /// pinned and hands it over. [`FieldRows::derive`] reads the typed orders to
 /// fill the typed column, a read compiles its keys under them, and `describe`
 /// reports every declaration here as a facet — the declared fields with their
-/// type, the declared tags, the tag patterns, the stance on an undeclared tag,
-/// the path rules, the creation rules and the inbox. No
-/// read and no derivation consults a creation rule or the inbox: they are held
-/// here for `describe` alone, as the source text of their templates. A key
-/// declared without a typed order is ordered by its raw text, which is what a
-/// field declared as text is.
+/// type and shape, the declared tags, the tag patterns, the stance on an
+/// undeclared tag, the path rules, the creation rules, the inbox and the
+/// schema rules. No read and no derivation consults a creation rule or the
+/// inbox: they are held here for `describe` alone, as the source text of their
+/// templates. The schema rules are held as `describe` reports them, as the
+/// schema writes them, and a validate selecting the findings citing one reads
+/// here whether the schema declares it; no derivation in the store judges a
+/// rule. A key declared without a typed order is ordered by its raw text,
+/// which is what a field declared as text is.
 ///
 /// **The ambiguity-ignore set is held once.** The one path rule a schema
 /// states is ambiguity-ignore, and its globs are held as the
@@ -324,9 +329,9 @@ fn least(values: &[Option<String>]) -> Option<usize> {
 ///
 /// **Every declaration is held once, by the text that names it**: a field by
 /// its key, a tag by its name, a tag pattern and a path rule by the pattern, a
-/// creation rule by its name. A schema names each field and each creation
-/// rule once — its grammar refuses a repeated key — so the host hands neither
-/// twice. A schema reading holds a declared tag once
+/// creation rule and a schema rule by its name. A schema names each field,
+/// each creation rule and each schema rule once — its grammar refuses a
+/// repeated key — so the host hands none of them twice. A schema reading holds a declared tag once
 /// under the tag fold, at its first spelling, so the host hands each tag
 /// once. A tag, a tag pattern or a path rule written twice is the same text
 /// twice and carries nothing beyond it, so the two collapse to one and
@@ -341,6 +346,7 @@ pub struct ContentModel {
     ambiguity_ignore: AmbiguityIgnore,
     creation_rules: BTreeMap<String, CreationRuleDeclaration>,
     inbox: Option<String>,
+    rules: BTreeMap<String, SchemaRule>,
 }
 
 /// One creation rule as `describe` reports it: every template as its source
@@ -468,6 +474,15 @@ impl ContentModel {
         self
     }
 
+    /// The same declaration with the schema rule `rule` declared, as the
+    /// schema writes it, under its name. A schema keys its rules by name, so
+    /// the host declares each name once.
+    pub fn declare_rule(mut self, rule: SchemaRule) -> Self {
+        self.schema_declares(&rule.name);
+        self.rules.insert(rule.name.clone(), rule);
+        self
+    }
+
     /// The invariant every declare method holds to: a declaration built over
     /// [`ContentModel::under`] before anything is declared on it, so `schema`
     /// is `Some` here. Debug-checked rather than refused, because every
@@ -492,6 +507,11 @@ impl ContentModel {
         self.keys.contains_key(key)
     }
 
+    /// Whether the schema declares a rule named `name`.
+    pub fn declares_rule(&self, name: &str) -> bool {
+        self.rules.contains_key(name)
+    }
+
     /// The typed order `key` carries, where it is declared with one.
     pub fn typed_order(&self, key: &str) -> Option<&TypedOrder> {
         self.keys
@@ -512,7 +532,8 @@ impl ContentModel {
     /// Every facet of `kind` this declaration reports keyed after `after` —
     /// from the first where it is `None` — in the order of the text that keys
     /// it: the byte order of a field's key, a tag's name, a pattern, the
-    /// stance's spelling, a creation rule's name or the inbox's target. Each is reported once.
+    /// stance's spelling, a creation rule's or a schema rule's name, or the
+    /// inbox's target. Each is reported once.
     ///
     /// A pure read of the declaration: it runs no statement, and it builds a
     /// facet only as the iterator is drawn, so a page drawing the facets it
@@ -527,7 +548,7 @@ impl ContentModel {
         match kind {
             FacetKind::DeclaredField => {
                 Box::new(keyed_after(&self.keys, after).map(|(key, declaration)| {
-                    Facet::declared_field(key.clone(), declaration.field_type)
+                    Facet::declared_field(key.clone(), declaration.field_type, declaration.shape)
                 }))
             }
             FacetKind::DeclaredTag => {
@@ -564,6 +585,9 @@ impl ContentModel {
                     .filter(move |target| after.is_none_or(|after| target.as_str() > after))
                     .map(Facet::inbox),
             ),
+            FacetKind::Rule => {
+                Box::new(keyed_after(&self.rules, after).map(|(_, rule)| Facet::rule(rule.clone())))
+            }
             // Observed fields, and a kind this build does not know, are
             // declared nowhere.
             _ => Box::new(std::iter::empty()),
@@ -595,8 +619,9 @@ fn named_after<'a>(
     ))
 }
 
-/// What a schema declares one field as: its type, and the typed order that
-/// type reads a raw value into where it does not order as text.
+/// What a schema declares one field as: its type, the typed order that type
+/// reads a raw value into where it does not order as text, and the shape it
+/// declares where it declares one.
 ///
 /// **A type and its order are made together.** There is one constructor per
 /// type: `text` and `tags` order by their raw text and take no order, and
@@ -608,12 +633,27 @@ fn named_after<'a>(
 pub struct FieldDeclaration {
     field_type: FieldType,
     order: Option<TypedOrder>,
+    shape: Option<FieldShape>,
 }
 
 impl FieldDeclaration {
-    /// A field declared as `field_type` and ordered by `order`.
+    /// A field declared as `field_type` and ordered by `order`, declaring no
+    /// shape.
     const fn of(field_type: FieldType, order: Option<TypedOrder>) -> Self {
-        FieldDeclaration { field_type, order }
+        FieldDeclaration {
+            field_type,
+            order,
+            shape: None,
+        }
+    }
+
+    /// The same declaration, declaring `shape` where it is one and no shape
+    /// where it is `None`. Only `describe` reads it: no row the store derives
+    /// depends on a field's shape.
+    #[must_use]
+    pub fn with_shape(mut self, shape: Option<FieldShape>) -> Self {
+        self.shape = shape;
+        self
     }
 
     /// A field declared as text, ordered by its raw text.

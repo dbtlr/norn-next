@@ -186,7 +186,9 @@ mod statement;
 
 use std::collections::BTreeSet;
 
+use crate::read::projected_findings;
 use norn_db::EmittedPlan;
+use norn_wire::RuleSet;
 use norn_wire::{
     AnswerAdvisory, Column, Cursor, CursorKey, Direction, DocumentRow, FindParams, FindReport,
     Moved, Page, PagedRows, RequestPart, Sort, SortKey, Unsatisfied,
@@ -286,6 +288,9 @@ pub(crate) struct FoundPage {
 pub struct Found {
     /// The documents, at most the page bound of them, in the request's order.
     pub rows: Vec<DocumentRow>,
+    /// Every rule set the rows' findings column cites, each once, in the
+    /// order of its identity.
+    pub rule_sets: Vec<RuleSet>,
     /// Where the next page begins, and `None` where this page is the last.
     pub next: Option<Cursor>,
     /// What moved between the cursor this page continued and the snapshot it
@@ -320,7 +325,7 @@ impl Found {
         (
             self.unsatisfied,
             self.advisories,
-            Page::new(self.rows, self.next, self.moved),
+            FindReport::new(Page::new(self.rows, self.next, self.moved), self.rule_sets),
         )
     }
 }
@@ -329,7 +334,9 @@ impl Found {
 /// values it ran with.
 #[derive(Clone, Debug)]
 pub struct FindPlan {
-    pub statement: FindStatement,
+    /// The statement, named by the builder that names it: a find statement,
+    /// or the rule-sets read the findings column's rows cite.
+    pub statement: ReadStatement,
     /// The filters the statement narrows by, in the request's order.
     pub filters: Vec<ReadFilter>,
     pub plan: EmittedPlan,
@@ -533,17 +540,14 @@ impl Snapshot {
             .map(|ran| ran.stepped.vm_steps)
             .collect::<Vec<_>>()
             .into_iter();
-        Ok(self.explained(lookups.ran, |statement, filters, plan| {
-            let ReadStatement::Find(statement) = statement else {
-                unreachable!("a find runs only the statements find names")
-            };
-            FindPlan {
+        Ok(
+            self.explained(lookups.ran, |statement, filters, plan| FindPlan {
                 statement,
                 filters,
                 plan,
                 vm_steps: stepped.next().unwrap_or_default(),
-            }
-        })?)
+            })?,
+        )
     }
 
     /// The find [`Snapshot::find`] answers and [`Snapshot::find_plans`]
@@ -586,10 +590,12 @@ impl Snapshot {
         let advisories = self.offset_advisories(&compiled.comparisons, lookups)?;
         let unsatisfied = self.resolve(compiled.reports, declared, lookups)?;
         let rows = self.hydrate_rows(&keys, &projection, &fields, declared, lookups, &mut work)?;
+        let rule_sets = self.rule_sets(&mut lookups.ran, projected_findings(&rows))?;
         work.statements = self.counters().statements_executed() - started;
         Ok(FoundPage {
             found: Found {
                 rows,
+                rule_sets,
                 next,
                 moved,
                 unsatisfied,

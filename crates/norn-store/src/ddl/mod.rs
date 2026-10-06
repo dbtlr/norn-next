@@ -33,9 +33,10 @@
 //!
 //! **Schema-dependent tables carry the vault-schema fingerprint they were
 //! derived under**, so a schema edit re-derives exactly the tables it keys.
-//! `findings` is that set today: whether vault state violates a rule is a
-//! question the vault schema asks, so a finding derived under one schema says
-//! nothing under another.
+//! `findings` is that set today, with the rule sets its findings cite and the
+//! rows a validate selecting by rule seeks: whether vault state violates a rule
+//! is a question the vault schema asks, so a finding derived under one schema
+//! says nothing under another.
 //!
 //! **The field pillar is a parse fact with one schema-dependent column.** Its
 //! rows record what a document's frontmatter says, and its `typed` column

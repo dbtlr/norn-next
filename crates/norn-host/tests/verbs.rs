@@ -122,6 +122,7 @@ fn found(
     .expect("a find answers")
     .answer
     .report
+    .page
     .rows
     .into_iter()
     .map(|row| row.path.as_str().to_string())

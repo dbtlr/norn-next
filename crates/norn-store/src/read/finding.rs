@@ -9,6 +9,12 @@
 //! of those findings and nothing else. So the head and the hint a finding
 //! carries are the same on every verb that carries it.
 //!
+//! **A rule finding's citation and value are read off the row too.** The row
+//! carries the identity of the rule set it cites and the head of the value it
+//! judged, both as the pillar stores them. Resolving a set to its rules is
+//! the response's, once per set it holds rather than once per row, and every
+//! verb answering finding rows resolves through [`Snapshot::rule_sets`].
+//!
 //! **The head and the hint are read off what the pillar stores.** The head is
 //! the finding's candidate rows, which were bounded at
 //! [`crate::CANDIDATE_HEAD`] when they were written, and the total beside them
@@ -27,7 +33,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Candidate, CandidateHead, CursorKey, FindingKind, FindingRow, Hint, ResolutionTarget, Severity,
+    Candidate, CandidateHead, CursorKey, DocumentRow, FindingKind, FindingRow, Hint,
+    ResolutionTarget, RuleSet, Severity,
 };
 
 use super::Ran;
@@ -36,14 +43,15 @@ use crate::error::{self, StoreError};
 use crate::facts::Span;
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
 use crate::path::ClassKey;
-use crate::request::{Reading, optional_span, unreadable};
+use crate::request::{Reading, optional_span, optional_value_head, unreadable};
 use crate::store::Snapshot;
+use crate::validate::{ValidateStatement, compose_rule_sets};
 
 /// A finding's own columns, in the order [`finding_base`] reads them, under
 /// the alias `f`.
 pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, f.target, \
      f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation, \
-     f.ordinal, f.position";
+     f.ordinal, f.position, f.rule_set, f.value_head, f.value_bytes, f.value_hash";
 
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
@@ -67,6 +75,9 @@ pub(crate) struct FindingBase {
     /// Where the finding stands among its path's findings, as the column
     /// `findings.position` holds it.
     position: i64,
+    /// The rule set the finding cites, and `None` for one citing none.
+    pub(crate) rule_set: Option<i64>,
+    value: Option<norn_wire::ValueHead>,
 }
 
 impl FindingBase {
@@ -132,6 +143,10 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         Ok(span) => span,
         Err(damaged) => return Ok(Err(damaged)),
     };
+    let value = match optional_value_head(row, 14)? {
+        Ok(value) => value,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     Ok(Ok(FindingBase {
         id: row.get(0)?,
         kind: row.get(1)?,
@@ -144,10 +159,77 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         generation: row.get(10)?,
         ordinal: row.get(11)?,
         position: row.get(12)?,
+        rule_set: row.get(13)?,
+        value,
     }))
 }
 
+/// The finding rows the findings column of `documents` carries, in their
+/// order: what a page of document rows hands [`Snapshot::rule_sets`].
+pub(crate) fn projected_findings<'r>(
+    documents: impl IntoIterator<Item = &'r DocumentRow>,
+) -> impl Iterator<Item = &'r FindingRow> {
+    documents
+        .into_iter()
+        .filter_map(|document| document.findings.as_ref())
+        .flat_map(|findings| findings.items.iter())
+}
+
 impl Snapshot {
+    /// The rule sets `rows` cite, each once, in the order of its identity,
+    /// each with its names in byte order: one
+    /// [`ValidateStatement::RuleSets`] over all of them, recorded in
+    /// `record`. No set cited, no statement.
+    ///
+    /// **Every verb answering finding rows resolves the sets they cite
+    /// here** — a validate page, a get's record and page of findings, and the
+    /// findings column a find's and a search's rows carry — so a response
+    /// carrying a row carries the names of the set it cites, read one way. A
+    /// set that is no set this crate wrote is [`StoreError::Damaged`].
+    pub(crate) fn rule_sets<'r>(
+        &self,
+        record: &mut Vec<Ran>,
+        rows: impl IntoIterator<Item = &'r FindingRow>,
+    ) -> Result<Vec<RuleSet>, StoreError> {
+        let mut ids: Vec<i64> = rows
+            .into_iter()
+            .filter_map(|row| row.rule_set)
+            .map(|id| {
+                i64::try_from(id).map_err(|_| unreadable("findings.rule_set", &id.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let walked = self
+            .run_statement(
+                record,
+                Ran::new(ValidateStatement::RuleSets, compose_rule_sets(&ids)),
+                |row| crate::rule_set::walked(row, 0, 1),
+            )
+            .map_err(|problem| error::sql("reading the rule sets a page cites", problem))?;
+        let sets = crate::rule_set::owned_sets(walked)?;
+        if let Some(missing) = ids
+            .iter()
+            .find(|id| !sets.iter().any(|(set, _, _)| set == *id))
+        {
+            return Err(StoreError::Damaged {
+                what: format!("a finding cites the rule set {missing}, which is not there"),
+            });
+        }
+        sets.into_iter()
+            .map(|(id, _, rules)| {
+                let id = u64::try_from(id)
+                    .map_err(|_| unreadable("findings.rule_set", &id.to_string()))?;
+                RuleSet::new(id, rules).map_err(|problem| StoreError::Damaged {
+                    what: format!("the rule set {id} is no rule set: {problem}"),
+                })
+            })
+            .collect()
+    }
+
     /// The rows of the findings `bases` holds, in its order, each with its
     /// candidate head and its hint, read by two statements over all of them:
     /// [`FindStatement::FindingCandidates`] and
@@ -279,7 +361,14 @@ fn finding_row(
     let id = u64::try_from(base.id).map_err(|_| unreadable("findings.id", &base.id.to_string()))?;
     let generation = u64::try_from(base.generation)
         .map_err(|_| unreadable("findings.generation", &base.generation.to_string()))?;
-    Ok(FindingRow::new(
+    let rule_set = base
+        .rule_set
+        .map(|rule_set| {
+            u64::try_from(rule_set)
+                .map_err(|_| unreadable("findings.rule_set", &rule_set.to_string()))
+        })
+        .transpose()?;
+    let row = FindingRow::new(
         id,
         kind,
         severity,
@@ -291,7 +380,15 @@ fn finding_row(
         hint,
         base.message,
         generation,
-    ))
+    );
+    let row = match rule_set {
+        Some(rule_set) => row.citing(rule_set),
+        None => row,
+    };
+    Ok(match base.value {
+        Some(value) => row.with_value(value),
+        None => row,
+    })
 }
 
 #[cfg(test)]

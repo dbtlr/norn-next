@@ -83,7 +83,9 @@ pub(crate) mod words;
 
 pub use candidates::{Candidate, Candidates, FeedRows, Held, HitRows};
 
+use crate::read::projected_findings;
 use norn_db::EmittedPlan;
+use norn_wire::RuleSet;
 use norn_wire::{
     AnswerAdvisory, Column, Cursor, CursorKey, Hit, LadderDeclaration, Moved, Page, Predicate,
     RungSet, Score, SearchReport, Unsatisfied,
@@ -185,6 +187,9 @@ impl LexicalQuery {
 pub struct Searched {
     /// The hits, at most the page bound of them, most relevant first.
     pub hits: Vec<Hit>,
+    /// Every rule set the findings column of the hits' rows cites, each once,
+    /// in the order of its identity.
+    pub rule_sets: Vec<RuleSet>,
     /// Where the next page begins, and `None` where this page is the last.
     pub next: Option<Cursor>,
     /// What moved between the cursor this page continued and the snapshot it
@@ -214,7 +219,11 @@ impl Searched {
         (
             self.unsatisfied,
             self.advisories,
-            SearchReport::new(self.ladder, Page::new(self.hits, self.next, self.moved)),
+            SearchReport::new(
+                self.ladder,
+                Page::new(self.hits, self.next, self.moved),
+                self.rule_sets,
+            ),
         )
     }
 }
@@ -425,7 +434,7 @@ impl Snapshot {
             unsatisfied.push(Unsatisfied::query_names_no_word(&request.query));
         }
         unsatisfied.extend(self.resolve(conjunction.reports, declared, lookups)?);
-        let hits = self.hits(
+        let (hits, rule_sets) = self.hits(
             &ranked,
             &request.columns,
             &projection,
@@ -437,6 +446,7 @@ impl Snapshot {
         work.statements = self.counters().statements_executed() - started;
         Ok(Searched {
             hits,
+            rule_sets,
             next,
             moved,
             unsatisfied,
@@ -501,7 +511,8 @@ impl Snapshot {
     }
 
     /// The hits `ranked` names, in its order, each carrying its document row
-    /// where the request names a column.
+    /// where the request names a column, and the rule sets those rows'
+    /// findings cite.
     #[allow(clippy::too_many_arguments)] // What a hit's row is hydrated under is named by each of these, and none of them groups with another.
     fn hits(
         &self,
@@ -512,8 +523,8 @@ impl Snapshot {
         declared: &ContentModel,
         lookups: &mut Lookups,
         work: &mut SearchWork,
-    ) -> Result<Vec<Hit>, StoreError> {
-        let mut rows = if columns.is_empty() {
+    ) -> Result<(Vec<Hit>, Vec<RuleSet>), StoreError> {
+        let rows = if columns.is_empty() {
             Vec::new()
         } else {
             let keys: Vec<FoundKey> = ranked
@@ -528,9 +539,10 @@ impl Snapshot {
             work.link_candidates_read = hydration.link_candidates_read;
             work.finding_rows = hydration.finding_rows;
             rows
-        }
-        .into_iter();
-        ranked
+        };
+        let rule_sets = self.rule_sets(&mut lookups.ran, projected_findings(&rows))?;
+        let mut rows = rows.into_iter();
+        let hits = ranked
             .iter()
             .map(|key| {
                 let path = norn_wire::DocumentPath::new(&key.path).map_err(|problem| {
@@ -544,7 +556,8 @@ impl Snapshot {
                     None => hit,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<Hit>, StoreError>>()?;
+        Ok((hits, rule_sets))
     }
 }
 

@@ -19,24 +19,24 @@ use norn_wire::{
     DeleteParams, DescribeParams, DescribeReport, Direction, Directory, DoctorRegistryParams,
     DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift, EditParams, EngineHealth,
     EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
-    FieldChange, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport, FindingKind,
-    FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport,
-    GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally, LadderDeclaration, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady, Operation, OperationId,
-    OperationKind, Page, PagedRows, PathRuleKind, PlanCondition, PlanDocument, PlanFault,
-    PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck,
-    RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure,
-    ReloadOutcome, ReloadParams, ReloadReport, RequestBound, RequestPart, RequestScope,
-    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, Resolves, RewriteWikilinkParams,
-    RollUp, RootIdentity, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaSource,
-    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
-    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
-    TagStance, Tally, TargetResult, Transition, TrustState, UnregisterParams, UnregisterReport,
-    UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason, ValidateParams,
-    ValidateReport, ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace,
-    VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause,
-    WriteTarget,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow,
+    ListParams, ListReport, MaintainerIdentity, MoveParams, Moved, NameSet, NewParams, NotReady,
+    Operation, OperationId, OperationKind, Page, PagedRows, PathRuleKind, PlanCondition,
+    PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure,
+    ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem,
+    RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    Resolves, RewriteWikilinkParams, RollUp, RootIdentity, Rung, RungReport, RungSelection,
+    RungSet, RungSkipReason, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport,
+    SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
+    StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
+    TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
+    Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead,
+    ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
+    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -546,6 +546,7 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
+            "vault/unknown-rule",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -732,6 +733,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "vault/ambiguous-root",
             "vault/ambiguous-target",
             "vault/unknown-target",
+            "vault/unknown-rule",
             "vault/reload-busy",
             "vault/reload-failed",
             "vault/cursor-order-changed",
@@ -776,7 +778,16 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
             "document/undeclared-tag",
             "link/broken",
             "link/ambiguous",
-            "link/missing-anchor"
+            "link/missing-anchor",
+            "document/misplaced",
+            "document/rules-conflict",
+            "field/required-missing",
+            "field/forbidden",
+            "field/not-one-of",
+            "field/too-long",
+            "field/type-mismatch",
+            "field/shape-mismatch",
+            "field/rules-conflict"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to
@@ -1289,6 +1300,7 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "undeclared_tags",
             "creation_rule",
             "inbox",
+            "rule",
         ])
     );
     assert_eq!(
@@ -1309,6 +1321,7 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "inbox",
             "observed_field",
             "path_rule",
+            "rule",
             "tag_pattern",
             "undeclared_tags",
         ],
@@ -1400,15 +1413,15 @@ fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
     );
 }
 
-/// A search report advertises the ladder that ranked it and the page of hits,
-/// both required, so a surface validating a search answer refuses one that
-/// declares no ladder.
+/// A search report advertises the ladder that ranked it, the page of hits and
+/// the rule sets their rows' findings cite, all required, so a surface
+/// validating a search answer refuses one that declares no ladder.
 #[test]
 fn a_search_report_advertises_its_ladder_and_its_page() {
     let schema = schema_of::<SearchReport>();
     assert_eq!(
         property_names(&schema),
-        ["ladder", "page"].into_iter().collect()
+        ["ladder", "page", "rule_sets"].into_iter().collect()
     );
     let required: BTreeSet<&str> = schema["required"]
         .as_array()
@@ -1416,7 +1429,10 @@ fn a_search_report_advertises_its_ladder_and_its_page() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    assert_eq!(required, ["ladder", "page"].into_iter().collect());
+    assert_eq!(
+        required,
+        ["ladder", "page", "rule_sets"].into_iter().collect()
+    );
     assert_eq!(
         schema["properties"]["ladder"]["$ref"].as_str(),
         Some("#/$defs/LadderDeclaration")
@@ -1704,11 +1720,12 @@ fn a_read_refusal_advertises_the_typed_facts_it_carries() {
             .unwrap_or_else(|| panic!("the {code} branch"))
             .clone()
     };
-    let cases: [(&str, &[&str]); 4] = [
+    let cases: [(&str, &[&str]); 5] = [
         ("request/out-of-bound", &["code", "bound"]),
         ("request/part-not-taken", &["code", "part", "answer"]),
         ("request/cursor-not-taken", &["code", "cursor", "paged"]),
         ("host/read-failed", &["code", "failure", "detail"]),
+        ("vault/unknown-rule", &["code", "rule"]),
     ];
     for (code, properties) in cases {
         assert_eq!(
@@ -2090,6 +2107,37 @@ fn a_candidate_head_advertises_the_ceiling_it_is_read_through() {
     );
 }
 
+/// **A value head advertises the bound it is read through**, as the text's
+/// `maxLength`. A schema counts characters where the bound counts bytes, and a
+/// character is at least a byte, so the advertised bound is the sound looser
+/// one: a surface validating against it passes no text longer than this
+/// crate reads. The bound is read off the constant rather than written down a
+/// second time.
+#[test]
+fn a_value_head_advertises_the_bound_it_is_read_through() {
+    let schema = schema_of::<ValueHead>();
+    assert_eq!(
+        property_names(&schema),
+        ["text", "byte_length", "hash"].into_iter().collect()
+    );
+    let text = &schema["properties"]["text"];
+    assert_eq!(text["type"].as_str(), Some("string"));
+    assert_eq!(
+        text["maxLength"].as_u64(),
+        Some(VALUE_HEAD_BYTES as u64),
+        "the head does not advertise the bound it is read through: {schema}"
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["text", "byte_length", "hash"])
+    );
+    assert_eq!(
+        schema["properties"]["hash"]["$ref"].as_str(),
+        Some("#/$defs/ContentHash"),
+        "the head restates a hash rather than referring to it: {schema}"
+    );
+}
+
 /// A finding row advertises the bounded head, the total that makes it a head,
 /// and the hint that names what enumerates the rest.
 #[test]
@@ -2108,9 +2156,20 @@ fn a_finding_row_advertises_its_bounded_head_and_its_hint() {
             "hint",
             "message",
             "generation",
+            "rule_set",
+            "value",
         ]
         .into_iter()
         .collect()
+    );
+    assert_eq!(
+        schema["properties"]["value"]["anyOf"][0]["$ref"].as_str(),
+        Some("#/$defs/ValueHead"),
+        "a finding row restates the value head rather than referring to it: {schema}"
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["ValueHead"]),
+        ["text", "byte_length", "hash"].into_iter().collect()
     );
     assert_eq!(
         schema["properties"]["head"]["$ref"].as_str(),
@@ -2225,6 +2284,7 @@ fn every_read_params_advertises_the_whole_of_what_a_request_carries() {
             "predicates",
             "kinds",
             "severity",
+            "rule",
             "summary",
             "limit",
             "after",
@@ -2457,6 +2517,7 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             "undeclared_tags",
             "creation_rule",
             "inbox",
+            "rule",
         ])
     );
     let declared = branches(&schema)
@@ -2465,7 +2526,43 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
         .expect("the declared_field branch");
     assert_eq!(
         property_names(declared),
-        ["facet", "key", "field_type"].into_iter().collect()
+        ["facet", "key", "field_type", "shape"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<FieldShape>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a shape branch is not a pinned string: {branch}"))
+        })),
+        sorted(["single", "list"])
+    );
+    let rule = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "facet") == Some("rule"))
+        .expect("the rule branch");
+    assert_eq!(
+        rule["$ref"].as_str(),
+        Some("#/$defs/SchemaRule"),
+        "a rule facet restates the rule rather than referring to it: {rule}"
+    );
+    assert_eq!(
+        property_names(&schema["$defs"]["SchemaRule"]),
+        [
+            "name",
+            "description",
+            "severity",
+            "match",
+            "exclude",
+            "required",
+            "forbidden",
+            "one_of",
+            "max_length",
+            "allowed_paths",
+        ]
+        .into_iter()
+        .collect(),
+        "a rule facet advertises every part a rule can declare: {rule}"
     );
     assert_eq!(
         declared["properties"]["field_type"]["$ref"].as_str(),
@@ -2525,13 +2622,28 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
     );
 }
 
-/// Every paged read report but search's is a page of its own row type, so a
-/// surface publishing a verb publishes the continuation with the rows. A
-/// search report holds its page beside the ladder that ranked it.
+/// Every paged read report but find's and search's is a page of its own row
+/// type, so a surface publishing a verb publishes the continuation with the
+/// rows. A search report holds its page beside the ladder that ranked it, and
+/// a find report and a search report each hold theirs beside the rule sets
+/// their rows' findings cite.
 #[test]
 fn every_paged_read_report_is_a_page_of_its_row() {
+    let find = schema_of::<FindReport>();
+    assert_eq!(
+        property_names(&find),
+        ["page", "rule_sets"].into_iter().collect()
+    );
+    assert_eq!(
+        find["properties"]["rule_sets"]["items"]["$ref"].as_str(),
+        Some("#/$defs/RuleSet"),
+        "a find report restates a rule set rather than referring to it: {find}"
+    );
+    assert!(
+        find["$defs"]["DocumentRow"].is_object(),
+        "the page carries no definition of a document row: {find}"
+    );
     for (report, row) in [
-        (schema_of::<FindReport>(), "DocumentRow"),
         (schema_of::<CountReport>(), "Tally"),
         (schema_of::<DescribeReport>(), "Facet"),
     ] {

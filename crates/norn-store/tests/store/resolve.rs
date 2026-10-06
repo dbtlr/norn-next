@@ -461,6 +461,8 @@ fn finding_about_foo(resolution: &TargetClass, class: &[String]) -> FindingFacts
         candidates_total: class.len() as u64,
         message: "`Foo` names more than one document".to_string(),
         detail: None,
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 
@@ -569,6 +571,8 @@ fn finding_filed_under(class_keys: &[&str]) -> FindingFacts {
         candidates_total: 0,
         message: "`Foo` names more than one document".to_string(),
         detail: None,
+        rules: BTreeSet::new(),
+        value: None,
     }
 }
 

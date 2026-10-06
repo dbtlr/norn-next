@@ -3328,7 +3328,7 @@ fn backlinks(reader: &Reader<'_>, stem: &str, backlinks: Option<usize>) -> Count
     );
     if let Some(backlinks) = backlinks {
         assert_eq!(
-            answered.answer.report.rows.len(),
+            answered.answer.report.page.rows.len(),
             backlinks,
             "`{stem}` has other backlinks"
         );

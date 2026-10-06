@@ -690,9 +690,10 @@ fn a_heading_anchor_answers_the_section_it_names() {
         let missing = vault.get(&getting("guide#Nope"));
         assert_eq!(
             missing.report,
-            GetReport::record(DocumentRow::new(
-                norn_wire::DocumentPath::new("notes/guide.md").expect("a path")
-            ))
+            GetReport::record(
+                DocumentRow::new(norn_wire::DocumentPath::new("notes/guide.md").expect("a path")),
+                []
+            )
         );
         assert_eq!(missing.unsatisfied, [Unsatisfied::missing_section("Nope")]);
     }
@@ -911,9 +912,10 @@ fn a_block_anchor_answers_its_block_or_reports_it_missing() {
     let missing = vault.get(&getting("b#^zz"));
     assert_eq!(
         missing.report,
-        GetReport::record(DocumentRow::new(
-            norn_wire::DocumentPath::new("notes/b.md").expect("a path")
-        ))
+        GetReport::record(
+            DocumentRow::new(norn_wire::DocumentPath::new("notes/b.md").expect("a path")),
+            []
+        )
     );
     assert_eq!(missing.unsatisfied, [Unsatisfied::missing_block("zz")]);
 }

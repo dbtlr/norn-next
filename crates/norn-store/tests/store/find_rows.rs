@@ -8,7 +8,7 @@
 use norn_store::{
     BODY_ROW_CEILING, BlockFact, ContentModel, FieldDeclaration, FindStatement, FindWork, Found,
     HeadingFact, LinkFact, LinkFamily, NESTED_ROW_CEILING, Nested, NestedRows, PageRefusal,
-    SnapshotReader, Span, Store, TagFact, TagSource, Validation, induced_failure,
+    ReadStatement, SnapshotReader, Span, Store, TagFact, TagSource, Validation, induced_failure,
 };
 use norn_wire::{
     BlockRow, CollectionSelector, Column, Cursor, CursorKey, CursorOrderChanged, Direction,
@@ -860,14 +860,20 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
     // The plans name the same statements: a named collection's head, no
     // total where no head filled the ceiling, and nothing of a table no column
     // named.
-    let statements: Vec<FindStatement> = seeded
+    let statements: Vec<ReadStatement> = seeded
         .plans(&request().with_columns([Column::tags()]))
         .into_iter()
         .map(|plan| plan.statement)
         .collect();
-    assert!(statements.contains(&FindStatement::NestedHead(Nested::Tags)));
     assert!(
-        !statements.contains(&FindStatement::NestedTotal(Nested::Tags)),
+        statements.contains(&ReadStatement::Find(FindStatement::NestedHead(
+            Nested::Tags
+        )))
+    );
+    assert!(
+        !statements.contains(&ReadStatement::Find(FindStatement::NestedTotal(
+            Nested::Tags
+        ))),
         "a total ran where no head filled the ceiling: {statements:?}"
     );
     for unnamed in [
@@ -878,7 +884,7 @@ fn a_page_of_limit_rows_hydrates_limit_rows_and_reads_no_unnamed_table() {
         FindStatement::NestedTotal(Nested::Blocks),
     ] {
         assert!(
-            !statements.contains(&unnamed),
+            !statements.contains(&ReadStatement::Find(unnamed)),
             "{unnamed:?} in {statements:?}"
         );
     }
@@ -1379,7 +1385,7 @@ fn every_unknown_key_is_reported_with_the_keys_near_it() {
         ]
     );
     let probes = |params: &FindParams| {
-        let statements: Vec<FindStatement> = seeded
+        let statements: Vec<ReadStatement> = seeded
             .snapshot()
             .find_plans(params, &declaring_due())
             .expect("plans")
@@ -1389,11 +1395,13 @@ fn every_unknown_key_is_reported_with_the_keys_near_it() {
         (
             statements
                 .iter()
-                .filter(|statement| **statement == FindStatement::KnownKey)
+                .filter(|statement| **statement == ReadStatement::Find(FindStatement::KnownKey))
                 .count(),
             statements
                 .iter()
-                .filter(|statement| **statement == FindStatement::FieldUniverse)
+                .filter(|statement| {
+                    **statement == ReadStatement::Find(FindStatement::FieldUniverse)
+                })
                 .count(),
         )
     };
@@ -1463,7 +1471,7 @@ fn a_find_is_the_report_a_handler_wraps() {
         [Unsatisfied::unknown_sort_key("nope", Vec::new())]
     );
     assert!(advisories.is_empty(), "{advisories:?}");
-    assert_eq!(report.rows, rows);
-    assert_eq!(report.next, next);
-    assert!(report.moved.is_empty());
+    assert_eq!(report.page.rows, rows);
+    assert_eq!(report.page.next, next);
+    assert!(report.page.moved.is_empty());
 }

@@ -134,9 +134,10 @@ pub(super) fn written_fields(
 ///
 /// **The field a kind stands on**: an undeclared tag stands on the `tags`
 /// field where the result's frontmatter carries it, and on no field where
-/// only its body does. Every other kind names no field: the path, bytes and
-/// frontmatter-block kinds are about the whole document, and a link's health
-/// is not a schema violation.
+/// only its body does. Every other kind names no field here: the path, bytes
+/// and frontmatter-block kinds are about the whole document, a link's health
+/// is not a schema violation, and the schema-rule kinds are minted by no
+/// judgment this check reads yet.
 fn on_written_field(
     kind: FindingKind,
     subject: Option<&str>,
@@ -161,6 +162,20 @@ fn on_written_field(
         | FindingKind::Broken
         | FindingKind::Ambiguous
         | FindingKind::MissingAnchor => false,
+        // The schema kinds of ADR 0035 stand on the field their target names,
+        // or on the whole document, but no judgment here mints them: the
+        // write gate that judges a plan's documents by the rules is NORN-359,
+        // and under ADR 0037 it refuses a violation by its identity, never
+        // for standing on a field the plan writes.
+        FindingKind::Misplaced
+        | FindingKind::DocumentRulesConflict
+        | FindingKind::RequiredMissing
+        | FindingKind::Forbidden
+        | FindingKind::NotOneOf
+        | FindingKind::TooLong
+        | FindingKind::TypeMismatch
+        | FindingKind::ShapeMismatch
+        | FindingKind::FieldRulesConflict => false,
         // A kind minted after these is about the whole document until it is
         // given a field here.
         _ => false,

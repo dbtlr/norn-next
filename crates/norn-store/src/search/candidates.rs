@@ -11,6 +11,8 @@
 //! lexical page's cursor is judged by, and the rows are hydrated by the one
 //! hydration a find's rows are read through.
 
+use crate::read::projected_findings;
+use norn_wire::RuleSet;
 use norn_wire::{
     AnswerAdvisory, Column, Cursor, FindParams, Hit, HitResume, RungSet, Score, SidecarRevision,
     Unsatisfied,
@@ -89,6 +91,9 @@ pub struct FeedRows {
 pub struct HitRows {
     /// The hits, in the order they were handed in.
     pub hits: Vec<Hit>,
+    /// Every rule set the findings column of the hits' rows cites, each once,
+    /// in the order of its identity.
+    pub rule_sets: Vec<RuleSet>,
     /// The projected keys the vault's field universe does not hold, in the
     /// order the columns name them.
     pub unsatisfied: Vec<Unsatisfied>,
@@ -279,7 +284,7 @@ impl Snapshot {
         let fields = self.projected_keys(&projection, declared, &mut lookups, &mut reports)?;
         let unsatisfied = self.resolve(reports, declared, &mut lookups)?;
         let mut work = FindWork::default();
-        let mut rows = if columns.is_empty() {
+        let rows = if columns.is_empty() {
             Vec::new()
         } else {
             let keys: Vec<FoundKey> = ranked
@@ -294,8 +299,9 @@ impl Snapshot {
                 &mut lookups,
                 &mut work,
             )?
-        }
-        .into_iter();
+        };
+        let rule_sets = self.rule_sets(&mut lookups.ran, projected_findings(&rows))?;
+        let mut rows = rows.into_iter();
         let hits = ranked
             .iter()
             .map(|(candidate, score)| {
@@ -309,6 +315,7 @@ impl Snapshot {
             .collect::<Result<Vec<_>, crate::error::StoreError>>()?;
         Ok(HitRows {
             hits,
+            rule_sets,
             unsatisfied,
             work,
         })

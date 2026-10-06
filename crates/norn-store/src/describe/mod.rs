@@ -10,8 +10,9 @@
 //! # Where each facet comes from
 //!
 //! **The declared facets are the pinned declaration's**: the declared fields
-//! with their type, the declared tags, the tag patterns, the path rules, the
-//! stance on an undeclared tag, the creation rules and the inbox are read off
+//! with their type and shape, the declared tags, the tag patterns, the path
+//! rules, the stance on an undeclared tag, the creation rules, the inbox and
+//! the schema rules are read off
 //! the [`ContentModel`] the host hands over, which is refused unless it was
 //! read from the schema the snapshot pins. They are a read of memory and run
 //! no statement, drawn from the page's position on, so a page builds no

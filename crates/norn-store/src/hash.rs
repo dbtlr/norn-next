@@ -17,10 +17,26 @@
 //! equal where the body is the whole document — one carrying no frontmatter
 //! block — and that costs nothing, because the two values answer
 //! different questions and neither is read as the other.
+//!
+//! **A finding's offending value is hashed at its write too**, for the same
+//! reason: the head a finding keeps of its value names the whole value by its
+//! hash, and that hash is taken here over the text the write is handed, never
+//! carried in beside it.
 
 use std::fmt::Write as _;
 
+use norn_wire::{ContentHash, ValueHead};
 use sha2::{Digest, Sha256};
+
+/// The head a finding keeps of the offending value `full`: its first
+/// [`norn_wire::VALUE_HEAD_BYTES`] cut at a character boundary, its length,
+/// and the SHA-256 of the whole of it.
+pub(crate) fn value_head(full: &str) -> ValueHead {
+    ValueHead::of(
+        full,
+        ContentHash::from_sha256(Sha256::digest(full.as_bytes()).into()),
+    )
+}
 
 /// The hash of one stored text value.
 pub(crate) fn sub_fingerprint(value: &str) -> String {

@@ -92,7 +92,8 @@ use norn_fixtures::digest::{Sha256, hex};
 use norn_store::{
     BlockFact, DocumentPath, FieldRow, FieldRows, FindingCursor, HeadingFact, IndexedTerm,
     LinkAnchor, LinkFact, OffsetSpelling, PillarReport, Span, Store, StoreError, StoredFinding,
-    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone, ddl,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredRuleSet, StoredSuffixKeys, StoredTag,
+    StoredTombstone, ddl,
 };
 use norn_wire::{FindingKind, FindingScope};
 
@@ -118,6 +119,9 @@ pub struct StoreProjection {
     findings: Vec<ProjectedFinding>,
     terms: Vec<IndexedTerm>,
     vault_schema: Option<ProjectedSchema>,
+    /// Every rule set the store holds, by the fingerprint it is held under and
+    /// its names, in that order.
+    rule_sets: Vec<StoredRuleSet>,
 }
 
 /// One document row and everything derived from it.
@@ -176,6 +180,12 @@ pub struct ProjectedFinding {
     pub candidates_total: u64,
     pub class_keys: BTreeSet<String>,
     pub path_keys: BTreeSet<String>,
+    /// The names of the rules the finding cites: the names of the rule set
+    /// its row cites, which are the rules the wire reports it citing.
+    pub rules: BTreeSet<String>,
+    /// The head of the offending value — its text, its whole length and its
+    /// hash — and `None` for a finding about no value.
+    pub value: Option<(String, u64, String)>,
     pub vault_schema_fingerprint: String,
 }
 
@@ -322,6 +332,7 @@ impl StoreProjection {
             findings: Vec::new(),
             terms: Vec::new(),
             vault_schema: None,
+            rule_sets: Vec::new(),
         };
         let mut request = store.begin_request();
 
@@ -429,6 +440,17 @@ impl StoreProjection {
             projection.terms.extend(page);
         }
 
+        let mut after = None;
+        loop {
+            let page = request.stored_rule_sets_after(after, PAGE)?;
+            let Some((last, _)) = page.last() else { break };
+            after = Some(*last);
+            projection
+                .rule_sets
+                .extend(page.into_iter().map(|(_, set)| set));
+        }
+        projection.rule_sets.sort();
+
         projection.vault_schema = request.vault_schema_pin()?.map(|pin| ProjectedSchema {
             bytes: pin.bytes,
             fingerprint: pin.fingerprint,
@@ -455,6 +477,11 @@ impl StoreProjection {
 
     pub fn vault_schema(&self) -> Option<&ProjectedSchema> {
         self.vault_schema.as_ref()
+    }
+
+    /// Every rule set the store holds, by fingerprint and then by names.
+    pub fn rule_sets(&self) -> &[StoredRuleSet] {
+        &self.rule_sets
     }
 
     /// The document stored at `path`, and nothing where no row stands there.
@@ -636,6 +663,13 @@ impl StoreProjection {
             for (index, key) in finding.path_keys.iter().enumerate() {
                 entries.push((format!("{at}.path_key[{index}]"), quoted(key)));
             }
+            // The rules a finding cites by their names, in byte order: the
+            // rule set's identity is where it landed, and two stores agree
+            // about a finding's rules by naming the same ones.
+            entries.push((format!("{at}.rule count"), finding.rules.len().to_string()));
+            for (index, rule) in finding.rules.iter().enumerate() {
+                entries.push((format!("{at}.rule[{index}]"), quoted(rule)));
+            }
             *ordinal += 1;
         }
         for term in &self.terms {
@@ -665,6 +699,23 @@ impl StoreProjection {
         );
         entries.push(("vault schema.bytes".to_string(), bytes));
         entries.push(("vault schema.fingerprint".to_string(), fingerprint));
+        // A rule set is its fingerprint and its names, and a set one store
+        // holds and the other does not is a field opposite nothing. A set
+        // stands only while a finding cites it, so a set left behind by
+        // findings no longer standing diverges here even though no finding
+        // names it. A store holding no set renders nothing, as it holds
+        // nothing a set could disagree with.
+        for set in &self.rule_sets {
+            let names: Vec<String> = set.rules.iter().map(|rule| quoted(rule)).collect();
+            entries.push((
+                format!(
+                    "rule set[{}][{}]",
+                    set.vault_schema_fingerprint,
+                    names.join(", ")
+                ),
+                "held".to_string(),
+            ));
+        }
         let rendered: BTreeMap<String, String> = entries.iter().cloned().collect();
         assert_eq!(
             rendered.len(),
@@ -1058,6 +1109,14 @@ fn project_finding(finding: StoredFinding) -> ProjectedFinding {
             .iter()
             .map(|key| key.as_str().to_string())
             .collect(),
+        rules: finding.rules,
+        value: finding.value.map(|value| {
+            (
+                value.text().to_string(),
+                value.byte_length(),
+                value.hash().as_str().to_string(),
+            )
+        }),
         vault_schema_fingerprint: finding.vault_schema_fingerprint,
     }
 }
@@ -1116,6 +1175,15 @@ const NULL: &str = "(none)";
 ///   pin — write generations, dropped for [`ProjectedFinding`]'s own reason.
 /// - **`position`** on `findings` — a generated column the database computes
 ///   from `ordinal`, which is rendered.
+/// - **`rule_set`** on `findings` and **`id`** on `rule_sets` — the set's row
+///   identifier, where it landed. Each set is rendered by the fingerprint it
+///   is held under and its names, and the names of the set a finding cites
+///   are rendered under that finding.
+/// - **`finding_rules`** — the copy a validate selecting by rule seeks: one
+///   row per rule a finding cites, beside a copy of the finding's own
+///   fingerprint, kind, severity, path and position. The store's own
+///   verification holds the names equal to the set the finding cites, which
+///   is rendered, and the copy equal to the finding, which is rendered too.
 /// - **`derived_at`** on `documents` and every other timestamp — when a row was
 ///   written, never a fact about the vault.
 ///
@@ -1286,6 +1354,20 @@ impl StoredColumns for ProjectedFinding {
             ("message", quoted(&self.message)),
             ("detail", optional_text(self.detail.as_deref())),
             (
+                "value_head",
+                optional_text(self.value.as_ref().map(|(text, _, _)| text.as_str())),
+            ),
+            (
+                "value_bytes",
+                self.value
+                    .as_ref()
+                    .map_or_else(|| NULL.to_string(), |(_, bytes, _)| bytes.to_string()),
+            ),
+            (
+                "value_hash",
+                optional_text(self.value.as_ref().map(|(_, _, hash)| hash.as_str())),
+            ),
+            (
                 "vault_schema_fingerprint",
                 quoted(&self.vault_schema_fingerprint),
             ),
@@ -1379,6 +1461,7 @@ mod tests {
                 occurrences: 1,
             }],
             vault_schema: None,
+            rule_sets: Vec::new(),
         }
     }
 

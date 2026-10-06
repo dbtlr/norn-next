@@ -17,7 +17,7 @@ use crate::common::{Scratch, dated_order, document, write_documents};
 use crate::find::{failure_of, map, plan_of, request, string};
 use norn_store::{
     ContentModel, Counted, FieldDeclaration, FindPlan, FindStatement, Found, FrontmatterValue,
-    LexicalQuery, Searched, Snapshot, SnapshotReader, Store, TypedOrder, Validated,
+    LexicalQuery, ReadStatement, Searched, Snapshot, SnapshotReader, Store, TypedOrder, Validated,
     induced_failure,
 };
 use norn_testkit::explain::Access;
@@ -393,7 +393,7 @@ fn the_advisory_costs_one_probe_per_dated_key() {
         vault
             .plans(params)
             .iter()
-            .filter(|plan| plan.statement == FindStatement::OffsetSpellings)
+            .filter(|plan| plan.statement == ReadStatement::Find(FindStatement::OffsetSpellings))
             .count()
     };
     assert_eq!(

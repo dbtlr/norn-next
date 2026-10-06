@@ -6,6 +6,12 @@
 //! second field beside the page would be a second spelling of one fact, free
 //! to disagree with the tag under it.
 //!
+//! **A response carrying finding rows carries the rule sets they cite.** A
+//! record's findings column and a page of findings each cite rule sets by
+//! identity, and the report carries each set its rows cite once, beside them,
+//! as `validate` does: an identity resolves only against the sets of the
+//! response carrying it.
+//!
 //! **A target that names no one document is a refusal, not a report.** The
 //! verb answers about one document, so a target that resolves to more than one
 //! is `vault/ambiguous-target` and a target that resolves to none is
@@ -22,6 +28,7 @@ use crate::document::{
     BlockRow, BodyText, Column, DocumentPath, DocumentRow, HeadingRow, LinkRow, TagRow,
 };
 use crate::finding_row::FindingRow;
+use crate::read::validate::RuleSet;
 use crate::target::ResolutionTarget;
 
 /// Which nested collection of one document a request pages.
@@ -90,6 +97,9 @@ pub enum CollectionPage {
     Findings {
         /// The page.
         page: Page<FindingRow>,
+        /// Every rule set the page's rows cite, each once, in the order of its
+        /// identity; empty where no row cites one.
+        rule_sets: Vec<RuleSet>,
     },
 }
 
@@ -114,9 +124,12 @@ impl CollectionPage {
         CollectionPage::Tags { page }
     }
 
-    /// A page of findings.
-    pub const fn findings(page: Page<FindingRow>) -> Self {
-        CollectionPage::Findings { page }
+    /// A page of findings, with the rule sets its rows cite.
+    pub fn findings(page: Page<FindingRow>, rule_sets: impl IntoIterator<Item = RuleSet>) -> Self {
+        CollectionPage::Findings {
+            page,
+            rule_sets: rule_sets.into_iter().collect(),
+        }
     }
 
     /// Which collection this is a page of.
@@ -152,6 +165,10 @@ pub enum GetReport {
     Record {
         /// The document's row.
         document: DocumentRow,
+        /// Every rule set the row's findings column cites, each once, in the
+        /// order of its identity; empty where it projects no findings or none
+        /// cites a set.
+        rule_sets: Vec<RuleSet>,
     },
     /// The section the target's heading anchor named.
     #[non_exhaustive]
@@ -185,9 +202,12 @@ pub enum GetReport {
 }
 
 impl GetReport {
-    /// The whole record `document`.
-    pub const fn record(document: DocumentRow) -> Self {
-        GetReport::Record { document }
+    /// The whole record `document`, with the rule sets its findings cite.
+    pub fn record(document: DocumentRow, rule_sets: impl IntoIterator<Item = RuleSet>) -> Self {
+        GetReport::Record {
+            document,
+            rule_sets: rule_sets.into_iter().collect(),
+        }
     }
 
     /// The section `heading` opens in the document at `path`, holding `body`.

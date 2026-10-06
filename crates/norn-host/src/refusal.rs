@@ -585,6 +585,7 @@ pub(crate) fn page_refusal(refusal: PageRefusal) -> PageRefused {
             ErrorDetail::ambiguous_target(ambiguity.target, ambiguity.head, ambiguity.hint)
         }
         PageRefusal::UnknownTarget { target } => ErrorDetail::unknown_target(target),
+        PageRefusal::UnknownRule { rule } => ErrorDetail::unknown_rule(rule),
         PageRefusal::PartNotTaken { part, answer } => {
             ErrorDetail::part_not_taken(part, Some(answer))
         }
@@ -1633,6 +1634,7 @@ mod page_refusal_tests {
         UnknownPart,
         AmbiguousTarget,
         UnknownTarget,
+        UnknownRule,
         PartNotTaken,
         StoreDamaged,
         Store,
@@ -1653,7 +1655,8 @@ mod page_refusal_tests {
                 Shape::OutOfBound => Some(Shape::UnknownPart),
                 Shape::UnknownPart => Some(Shape::AmbiguousTarget),
                 Shape::AmbiguousTarget => Some(Shape::UnknownTarget),
-                Shape::UnknownTarget => Some(Shape::PartNotTaken),
+                Shape::UnknownTarget => Some(Shape::UnknownRule),
+                Shape::UnknownRule => Some(Shape::PartNotTaken),
                 Shape::PartNotTaken => Some(Shape::StoreDamaged),
                 Shape::StoreDamaged => Some(Shape::Store),
                 Shape::Store => None,
@@ -1685,6 +1688,7 @@ mod page_refusal_tests {
             PageRefusal::UnknownPart { .. } => Shape::UnknownPart,
             PageRefusal::AmbiguousTarget(_) => Shape::AmbiguousTarget,
             PageRefusal::UnknownTarget { .. } => Shape::UnknownTarget,
+            PageRefusal::UnknownRule { .. } => Shape::UnknownRule,
             PageRefusal::PartNotTaken { .. } => Shape::PartNotTaken,
             PageRefusal::Store(StoreError::Damaged { .. }) => Shape::StoreDamaged,
             PageRefusal::Store(
@@ -1812,6 +1816,13 @@ mod page_refusal_tests {
                 },
                 ReasonCode::VaultUnknownTarget,
                 ErrorDetail::unknown_target(target("nowhere")),
+            ),
+            (
+                PageRefusal::UnknownRule {
+                    rule: "chores".to_string(),
+                },
+                ReasonCode::VaultUnknownRule,
+                ErrorDetail::unknown_rule("chores"),
             ),
             (
                 PageRefusal::PartNotTaken {

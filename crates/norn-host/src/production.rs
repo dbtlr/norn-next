@@ -3834,6 +3834,10 @@ impl<'s> Pending<'s> {
                 candidates: Vec::new(),
                 candidates_total: 0,
                 detail: Some(detail),
+                // No cause here is judged against a schema rule or names an
+                // offending value: rule judgment files those (NORN-358).
+                rules: BTreeSet::new(),
+                value: None,
             },
             cause,
         });
@@ -17154,6 +17158,7 @@ mod tests {
             let paths = answered
                 .answer
                 .report
+                .page
                 .rows
                 .iter()
                 .map(|row| row.path.as_str().to_string())

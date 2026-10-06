@@ -1938,9 +1938,9 @@ fn read_and_report(root: &Path) {
         };
         let page = complete(Find::NAME, host.find(&request));
         read.answered::<Find>(&page);
-        linked = linked.or_else(|| a_linked_stem(&page.rows));
-        directory = directory.or_else(|| a_directory(&page.rows));
-        after = page.next;
+        linked = linked.or_else(|| a_linked_stem(&page.page.rows));
+        directory = directory.or_else(|| a_directory(&page.page.rows));
+        after = page.page.next;
         if after.is_none() {
             break;
         }
@@ -1990,15 +1990,15 @@ fn read_and_report(root: &Path) {
         ),
     );
     assert!(
-        backlinks.rows.iter().any(|row| row.path == linking),
+        backlinks.page.rows.iter().any(|row| row.path == linking),
         "the backlinks of `{stem}` leave out `{linking}`, whose link to it named the target"
     );
     // Both shapes narrow by the one links-to part, so where the backlinks fit
     // one page the count tallies exactly the documents the page lists.
-    if backlinks.next.is_none() {
+    if backlinks.page.next.is_none() {
         assert_eq!(
             LinksTo::rows(&linking_to),
-            backlinks.rows.len(),
+            backlinks.page.rows.len(),
             "the links-to count of `{stem}` and its backlinks page disagree on who links to it"
         );
     }
@@ -2119,7 +2119,7 @@ impl Shape for Find {
     const NAME: &'static str = "find";
     type Report = FindReport;
     fn rows(report: &FindReport) -> usize {
-        report.rows.len()
+        report.page.rows.len()
     }
 }
 
@@ -2152,7 +2152,7 @@ impl Shape for Backlinks {
     const NAME: &'static str = "backlinks";
     type Report = FindReport;
     fn rows(report: &FindReport) -> usize {
-        report.rows.len()
+        report.page.rows.len()
     }
 }
 

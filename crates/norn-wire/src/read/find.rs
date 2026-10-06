@@ -16,6 +16,7 @@ use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page};
 use crate::document::{Column, DocumentRow};
 use crate::predicate::Predicate;
+use crate::read::validate::RuleSet;
 
 /// Which way an order runs.
 ///
@@ -81,8 +82,36 @@ impl Sort {
     }
 }
 
-/// What `find` answers with: one page of document rows.
-pub type FindReport = Page<DocumentRow>;
+/// What `find` answers with: one page of document rows, and the rule sets the
+/// finding rows they carry cite.
+///
+/// On the wire a report is a plain object:
+/// `{"page":{"rows":[…],"next":null,"moved":[]},"rule_sets":[…]}`. The page
+/// is a field of its own, as every report holding a page beside something
+/// else holds it, so the page's shape is the one every paged verb answers
+/// with. A row's findings column cites rule sets by identity, and the report
+/// carries each set any row on the page cites once, as the names of its
+/// rules — exactly those, and none where the page projects no findings or
+/// none cites a set.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct FindReport {
+    /// The page of document rows.
+    pub page: Page<DocumentRow>,
+    /// Every rule set the page's finding rows cite, each once, in the order
+    /// of its identity; empty where none cites one.
+    pub rule_sets: Vec<RuleSet>,
+}
+
+impl FindReport {
+    /// The `page`, with the rule sets its finding rows cite.
+    pub fn new(page: Page<DocumentRow>, rule_sets: impl IntoIterator<Item = RuleSet>) -> Self {
+        FindReport {
+            page,
+            rule_sets: rule_sets.into_iter().collect(),
+        }
+    }
+}
 
 /// What a `find` request carries.
 ///

@@ -804,6 +804,31 @@ fn the_declared_field_types_are_the_ones_the_wire_carries() {
     }
 }
 
+/// The field shapes this crate reads and the ones the wire carries are two
+/// lists, and they name one vocabulary.
+///
+/// The same seam as the field types above: a `describe` facet reports the
+/// shape a field is declared with, and `norn-wire` spells that vocabulary
+/// again rather than reaching for this one. Both lists are walked by the
+/// spelling a schema writes, so a shape added on one side alone fails here
+/// rather than crossing the seam as a spelling the other side has no reader
+/// for.
+#[test]
+fn the_declared_field_shapes_are_the_ones_the_wire_carries() {
+    let here: Vec<&str> = Shape::ALL.iter().map(|shape| shape.as_str()).collect();
+    let wire: Vec<&str> = norn_wire::FieldShape::ALL
+        .iter()
+        .map(norn_wire::FieldShape::as_str)
+        .collect();
+    assert_eq!(
+        here, wire,
+        "the field shapes this crate reads are not the ones the wire carries"
+    );
+    for shape in Shape::ALL {
+        assert_eq!(Shape::named(shape.as_str()), Some(shape));
+    }
+}
+
 /// The stances on an undeclared tag this crate reads and the ones the wire
 /// carries are two lists, and they name one vocabulary.
 ///

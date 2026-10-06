@@ -23,10 +23,11 @@ use norn_host::{Demand, ReadRefusal, ReloadRefusal};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{
-    AnswerAdvisory, AttachMode, BodyText, CollectionPage, CollectionSelector, Column, ComparedBy,
-    CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind, FieldType, FindParams,
-    FindReport, FindingKind, GetParams, GetReport, GroupKey, Hint, NotReady, Predicate, ReasonCode,
-    ResolutionTarget, Rung, RungSelection, RungSet, SearchParams, Sort, SortKey, TrustState,
+    AnswerAdvisory, AttachMode, AuthoredValue, BodyText, CollectionPage, CollectionSelector,
+    Column, ComparedBy, CountParams, DescribeParams, Direction, ErrorDetail, Facet, FacetKind,
+    FieldShape, FieldType, FindParams, FindReport, FindingKind, GetParams, GetReport, GroupKey,
+    Hint, NotReady, Predicate, ReasonCode, ResolutionTarget, RuleClosedSet, RuleMatch, Rung,
+    RungSelection, RungSet, SchemaRule, SearchParams, Severity, Sort, SortKey, TrustState,
     Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, VaultAddress, VaultName,
     VaultRoot, WarmingPhase,
 };
@@ -813,7 +814,8 @@ fn a_target(text: &str) -> ResolutionTarget {
 
 /// The paths a find page answered.
 fn paths_of(page: &FindReport) -> Vec<String> {
-    page.rows
+    page.page
+        .rows
         .iter()
         .map(|row| row.path.as_str().to_string())
         .collect()
@@ -835,7 +837,7 @@ fn a_find_pages_exactly_and_refuses_a_cursor_under_another_order() {
     assert_read_from_its_snapshot(&whole.answer.reading, &vault);
     assert!(whole.answer.is_complete());
     assert!(
-        whole.answer.report.next.is_none(),
+        whole.answer.report.page.next.is_none(),
         "the whole listing paged"
     );
     assert_eq!(
@@ -857,12 +859,12 @@ fn a_find_pages_exactly_and_refuses_a_cursor_under_another_order() {
         assert_read_from_its_snapshot(&answered.answer.reading, &vault);
         let page = answered.answer.report;
         assert!(
-            page.moved.is_empty(),
+            page.page.moved.is_empty(),
             "a continuation moved: {:?}",
-            page.moved
+            page.page.moved
         );
         listed.extend(paths_of(&page));
-        match page.next {
+        match page.page.next {
             Some(next) => {
                 first_cursor.get_or_insert_with(|| next.clone());
                 after = Some(next);
@@ -1058,6 +1060,124 @@ fn a_describe_answers_the_creation_rules_and_inbox_its_schema_declares() {
             Facet::inbox("inbox/{{date}}-{{seq}}.md"),
         ]
     );
+}
+
+/// The schema the rule cases pin: a field declared with a shape, and one
+/// rule declaring a selector, a requirement and a closed set.
+const RULED_SCHEMA: &str = "version: 1\nfields:\n  created: {type: date, shape: single}\nrules:\n  tasks:\n    severity: error\n    match: {frontmatter: {type: task}}\n    required:\n      status: {default: todo}\n    one_of:\n      status: {values: [todo, done]}\n";
+
+/// **A describe answers the rules and the field shapes the pinned schema
+/// declares**, read from the schema bytes the attachment pinned, through the
+/// host's declaration of the store's content model: each rule as the schema
+/// writes it, and each field with the shape it declares.
+#[test]
+fn a_describe_answers_the_rules_and_shapes_its_schema_declares() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-describe-rules", &[]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), RULED_SCHEMA)
+        .expect("write a schema declaring a rule");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .describe(
+            &DescribeParams::new(address(vault.name()))
+                .with_facets([FacetKind::Rule, FacetKind::DeclaredField]),
+        )
+        .expect("an attached vault answers a describe");
+    assert_eq!(
+        answered.answer.report.rows,
+        vec![
+            Facet::declared_field("created", FieldType::Date, Some(FieldShape::Single)),
+            Facet::rule(
+                SchemaRule::new("tasks", Severity::Error)
+                    .with_match(RuleMatch::new(
+                        [("type".to_string(), vec!["task".to_string()])],
+                        None,
+                    ))
+                    .with_required("status", Some(AuthoredValue::string("todo")))
+                    .with_one_of(
+                        "status",
+                        RuleClosedSet::new(["todo".to_string(), "done".to_string()], []),
+                    ),
+            ),
+        ]
+    );
+}
+
+/// **A rule's selector is described with every value it matches any of**, in
+/// the order the schema writes them, repeats included, each in the spelling
+/// the selector compares by — the field-row spelling, so `1.50` reads `1.5`
+/// and `1` and `"1"` both read `1`.
+#[test]
+fn a_describe_answers_every_value_a_selector_matches_any_of() {
+    const ANY_OF_SCHEMA: &str = "version: 1\nrules:\n  chores:\n    match: {frontmatter: {type: [task, chore, task], rank: [1.50, 1, \"1\"]}}\n    required:\n      status:\n";
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-describe-any-of", &[]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), ANY_OF_SCHEMA)
+        .expect("write a schema declaring an any-of selector");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .describe(&DescribeParams::new(address(vault.name())).with_facets([FacetKind::Rule]))
+        .expect("an attached vault answers a describe");
+    let strings = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect();
+    assert_eq!(
+        answered.answer.report.rows,
+        vec![Facet::rule(
+            SchemaRule::new("chores", Severity::Warning)
+                .with_match(RuleMatch::new(
+                    [
+                        ("rank".to_string(), strings(&["1.5", "1", "1"])),
+                        ("type".to_string(), strings(&["task", "chore", "task"])),
+                    ],
+                    None,
+                ))
+                .with_required("status", None),
+        )]
+    );
+}
+
+/// **A validate naming a rule the pinned schema does not declare is refused
+/// by name**, as `vault/unknown-rule`, on a page and on a summary; **one
+/// naming a declared rule answers the findings citing it**, which no
+/// derivation files until rule judgment does (NORN-358), so the page is empty
+/// and cites no rule set, and the tally holds nothing.
+#[test]
+fn a_validate_selects_by_a_declared_rule_and_refuses_an_unknown_one() {
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-validate-rule", &[]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), RULED_SCHEMA)
+        .expect("write a schema declaring a rule");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let validating = || ValidateParams::new(address(vault.name()));
+
+    for params in [
+        validating().with_rule("chores"),
+        validating().with_rule("chores").summarized(),
+    ] {
+        let refused = host
+            .validate(&params)
+            .expect_err("a rule the schema does not declare answered");
+        assert_eq!(refused.code(), &ReasonCode::VaultUnknownRule);
+        assert_eq!(refused.detail(), &ErrorDetail::unknown_rule("chores"));
+    }
+
+    let answered = host
+        .validate(&validating().with_rule("tasks"))
+        .expect("a declared rule answers");
+    assert!(answered.answer.is_complete());
+    let ValidateReport::Findings {
+        page, rule_sets, ..
+    } = &answered.answer.report
+    else {
+        panic!("a validate answered {:?}", answered.answer.report);
+    };
+    assert!(page.rows.is_empty(), "{:?}", page.rows);
+    assert!(rule_sets.is_empty());
+    let tallied = host
+        .validate(&validating().with_rule("tasks").summarized())
+        .expect("a declared rule's tally answers");
+    let ValidateReport::Summary { by_kind, .. } = &tallied.answer.report else {
+        panic!("a summary answered {:?}", tallied.answer.report);
+    };
+    assert!(by_kind.is_empty());
 }
 
 /// What a get of `target` answered, under the reading of its snapshot.
@@ -1329,9 +1449,9 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         .expect("a find over an unknown key answers");
     assert_read_from_its_snapshot(&found.answer.reading, &vault);
     assert!(
-        found.answer.report.rows.is_empty(),
+        found.answer.report.page.rows.is_empty(),
         "a find over an unknown key answered {} rows",
-        found.answer.report.rows.len()
+        found.answer.report.page.rows.len()
     );
     assert!(
         matches!(
@@ -1404,6 +1524,7 @@ fn a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why() {
             let row = found
                 .answer
                 .report
+                .page
                 .rows
                 .iter()
                 .find(|row| row.path.as_str() == path)
@@ -1554,7 +1675,7 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
     }
     let read = window.finish();
 
-    assert!(found.answer.report.next.is_none(), "the find paged");
+    assert!(found.answer.report.page.next.is_none(), "the find paged");
     let mut listed = paths_of(&found.answer.report);
     listed.sort();
     assert_eq!(
@@ -1562,7 +1683,7 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
         bodies.keys().cloned().collect::<Vec<_>>(),
         "the find answered other documents than the attachment derived"
     );
-    for row in &found.answer.report.rows {
+    for row in &found.answer.report.page.rows {
         let path = row.path.as_str();
         let body = row.body.as_ref().expect("the find projected the body");
         assert_body(body, &bodies[path], path);
@@ -1612,7 +1733,7 @@ fn every_read_verb_answers_with_no_file_read_on_its_thread() {
                 let found = host
                     .find(&FindParams::new(at()).with_columns([Column::body()]))
                     .expect("an attached vault answers a find");
-                found.answer.report.rows.len()
+                found.answer.report.page.rows.len()
             }),
         ),
         (

@@ -33,6 +33,17 @@
 //! anchor, which names another address, so a class spelled with one carries
 //! no hint.
 //!
+//! **What a finding judged against the schema rules carries is bounded too.**
+//! A rule finding cites the set of rules contributing to the constraint it
+//! breaches by one number, [`FindingRow::rule_set`], which the response
+//! carrying the row resolves once per set rather than once per row, so a
+//! row's bytes do not grow with the rules it cites. The value it judged travels as a
+//! [`ValueHead`]: the first [`VALUE_HEAD_BYTES`] of its text, its whole length
+//! and its hash, so a row's bytes do not grow with the value either. The
+//! combined expectation — the closed set, the limit, the paths — never rides
+//! a finding; it is a pure function of the cited rules, which `describe`
+//! reports.
+//!
 //! **The row's identity and its subject are two fields.** `id` is the
 //! finding's identity in the findings pillar, minted vault-wide, and it is
 //! what a `validate` page continues by after the kind and the path. `target`
@@ -45,8 +56,11 @@ use std::borrow::Cow;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use std::fmt;
+
 use crate::document::{DocumentPath, Span, TotalBelowHead};
 use crate::finding::{FindingKind, Severity};
+use crate::plan::hash::ContentHash;
 use crate::target::ResolutionTarget;
 
 /// How many resolution candidates a row or a refusal carries.
@@ -204,6 +218,267 @@ impl<'de> Deserialize<'de> for CandidateHead {
     }
 }
 
+/// How many bytes of an offending value a finding carries.
+///
+/// The head is the value's text cut at the last character boundary at or
+/// below this many bytes. The bound is wire shape: the store holds a value
+/// head to the same number at rest, and a surface renders the head it was
+/// handed rather than choosing a bound of its own.
+pub const VALUE_HEAD_BYTES: usize = 256;
+
+/// The offending value a finding judged, as its bounded head, its whole
+/// length and its hash.
+///
+/// On the wire a head is a plain object:
+/// `{"text":"someday","byte_length":7,"hash":"sha256:…"}`. The value is a
+/// scalar or one list element as the document writes it — the same text a
+/// field row holds for it — or, for a list or a map, its canonical JSON.
+/// `text` is the value's first 256 bytes at most, cut at a character
+/// boundary; `byte_length` is the whole value's length in bytes, so
+/// a head whose text is shorter was cut; and `hash` is the SHA-256 of the
+/// whole value's text, which tells two values apart that share their head.
+/// A head that could not have been cut from a value of its length is refused
+/// where it is built and where it is read alike: text past the bound, text
+/// longer than the length it heads, a value within the bound carried other
+/// than whole, or a longer value cut short of the bound by more than one
+/// character.
+///
+/// **What the head alone decides, and what it does not.** Which character
+/// follows a cut is not in the head, so a head of a value past the bound that
+/// stops one to three bytes short of it is accepted: a character that wide
+/// may follow it, and whether one does cannot be told from the head. The wire
+/// hashes nothing, so `hash` is not verified here either; it is the writer's
+/// declaration of the whole value's SHA-256, which the store takes over the
+/// value it writes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ValueHead {
+    /// The value's text, at most 256 bytes of it, cut at a character
+    /// boundary.
+    text: String,
+    /// How many bytes the whole value has, which is what makes the text a
+    /// head.
+    byte_length: u64,
+    /// The SHA-256 of the whole value's text.
+    hash: ContentHash,
+}
+
+impl ValueHead {
+    /// The head of the value `full`, whose SHA-256 is `hash`: its first
+    /// [`VALUE_HEAD_BYTES`] cut at the last character boundary at or below
+    /// them, and its whole length.
+    ///
+    /// The wire hashes nothing ([`ContentHash`]), so the caller hands the hash
+    /// of the very text it hands here; the store's finding write is that
+    /// caller, and it hashes the value it is writing. A dormant carrier: that
+    /// write takes a value only from a finding judging one, which rule
+    /// judgment in derivation files (NORN-358) and nothing files yet.
+    pub fn of(full: &str, hash: ContentHash) -> Self {
+        let mut cut = full.len().min(VALUE_HEAD_BYTES);
+        while !full.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        ValueHead {
+            text: full[..cut].to_string(),
+            byte_length: full.len() as u64,
+            hash,
+        }
+    }
+
+    /// The head `text` of a value of `byte_length` bytes hashing to `hash`,
+    /// or the reason no value's head is that text.
+    pub fn new(
+        text: impl Into<String>,
+        byte_length: u64,
+        hash: ContentHash,
+    ) -> Result<Self, IllegalValueHead> {
+        let text = text.into();
+        IllegalValueHead::check(&text, byte_length)?;
+        Ok(ValueHead {
+            text,
+            byte_length,
+            hash,
+        })
+    }
+
+    /// The value's text, as far as the head goes.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How many bytes the whole value has.
+    pub const fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+
+    /// The SHA-256 of the whole value's text.
+    pub fn hash(&self) -> &ContentHash {
+        &self.hash
+    }
+
+    /// Whether the value has bytes this head does not carry.
+    pub fn is_truncated(&self) -> bool {
+        (self.text.len() as u64) < self.byte_length
+    }
+}
+
+/// A text that is no value's head at the length it claims.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IllegalValueHead {
+    /// The text is longer than [`VALUE_HEAD_BYTES`].
+    PastTheBound {
+        /// The text's length in bytes.
+        text: usize,
+    },
+    /// The text is longer than the value it heads.
+    LongerThanTheValue {
+        /// The text's length in bytes.
+        text: usize,
+        /// The length claimed for the whole value.
+        byte_length: u64,
+    },
+    /// The value is within the bound and the text is shorter than it: a
+    /// value of at most [`VALUE_HEAD_BYTES`] bytes is carried whole.
+    NotWhole {
+        /// The text's length in bytes.
+        text: usize,
+        /// The length claimed for the whole value.
+        byte_length: u64,
+    },
+    /// The text was cut short of the bound by more than one character, which
+    /// no cut at the last boundary at or below the bound leaves.
+    CutShort {
+        /// The text's length in bytes.
+        text: usize,
+        /// The length claimed for the whole value.
+        byte_length: u64,
+    },
+}
+
+impl IllegalValueHead {
+    /// Whether `text` can be the head of a value of `byte_length` bytes.
+    fn check(text: &str, byte_length: u64) -> Result<(), Self> {
+        let length = text.len();
+        if length > VALUE_HEAD_BYTES {
+            return Err(IllegalValueHead::PastTheBound { text: length });
+        }
+        if length as u64 > byte_length {
+            return Err(IllegalValueHead::LongerThanTheValue {
+                text: length,
+                byte_length,
+            });
+        }
+        if (length as u64) == byte_length {
+            return Ok(());
+        }
+        if byte_length <= VALUE_HEAD_BYTES as u64 {
+            return Err(IllegalValueHead::NotWhole {
+                text: length,
+                byte_length,
+            });
+        }
+        // A cut at the last character boundary below the bound stops short
+        // of it by less than the widest UTF-8 character.
+        if length + char::MAX_LEN_UTF8 <= VALUE_HEAD_BYTES {
+            return Err(IllegalValueHead::CutShort {
+                text: length,
+                byte_length,
+            });
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for IllegalValueHead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IllegalValueHead::PastTheBound { text } => write!(
+                formatter,
+                "a value head holds at most {VALUE_HEAD_BYTES} bytes, and this one holds {text}"
+            ),
+            IllegalValueHead::LongerThanTheValue { text, byte_length } => write!(
+                formatter,
+                "a head of {text} bytes cannot head a value of {byte_length}"
+            ),
+            IllegalValueHead::NotWhole { text, byte_length } => write!(
+                formatter,
+                "a value of {byte_length} bytes is within {VALUE_HEAD_BYTES} bytes and \
+                 carried whole, and this head holds {text}"
+            ),
+            IllegalValueHead::CutShort { text, byte_length } => write!(
+                formatter,
+                "a value of {byte_length} bytes is cut within one character of \
+                 {VALUE_HEAD_BYTES} bytes, and this head stops at {text}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IllegalValueHead {}
+
+impl JsonSchema for ValueHead {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ValueHead")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::ValueHead")
+    }
+
+    /// The object a derive would describe, with the bound the reader keeps
+    /// advertised as the text's `maxLength`. A schema counts characters and
+    /// the bound counts bytes; a character is at least one byte, so a text
+    /// within the byte bound is within the same number of characters, and the
+    /// advertised bound is the sound looser one. Whether the text is cut where
+    /// its length says is the read's to refuse, as the description states.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let hash = generator.subschema_for::<ContentHash>();
+        json_schema!({
+            "type": "object",
+            "description": "The offending value a finding judged, as its bounded head, its whole length and its hash. A value within the bound is carried whole and a longer one is cut at the last character boundary at or below it; a head that could not have been cut from a value of its length is refused by the read.",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The value's text, at most the bound in bytes, cut at a character boundary.",
+                    "maxLength": VALUE_HEAD_BYTES,
+                },
+                "byte_length": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "description": "How many bytes the whole value has, which is what makes the text a head.",
+                },
+                "hash": hash,
+            },
+            "required": ["text", "byte_length", "hash"],
+        })
+    }
+}
+
+/// The value head as it arrives, before its text is checked against the
+/// length it heads. The field names and order are the head's, so the bytes a
+/// reader accepts are the bytes a writer produces.
+#[derive(Deserialize)]
+struct ValueHeadFields {
+    text: String,
+    byte_length: u64,
+    hash: ContentHash,
+}
+
+impl<'de> Deserialize<'de> for ValueHead {
+    /// A head arrives as its text, its length and its hash and is read back
+    /// through the check the constructor holds, so a head no value could have
+    /// been cut to refuses the read rather than landing as a payload no bound
+    /// covers.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = ValueHeadFields::deserialize(deserializer)?;
+        ValueHead::new(fields.text, fields.byte_length, fields.hash).map_err(D::Error::custom)
+    }
+}
+
 /// What a client can ask next to see the whole of what a bounded head heads.
 ///
 /// On the wire a hint is an object tagged `hint`:
@@ -259,10 +534,28 @@ pub struct FindingRow {
     pub message: String,
     /// The write generation the finding was derived at.
     pub generation: u64,
+    /// The set of schema rules the finding cites, by identity, and `null` for
+    /// a finding that cites no rule. A finding judged against the rules
+    /// selecting its document cites every rule contributing to the constraint
+    /// it breaches. Every response carrying finding rows — a validate page, a
+    /// get's record or page of findings, a find's or a search's page — carries
+    /// the sets its rows cite beside them, as the names of each set's rules,
+    /// and the identity resolves only against those: it is where the store
+    /// filed the set, so it is not stable across responses, and a schema pin
+    /// files the sets again under new ones.
+    pub rule_set: Option<u64>,
+    /// The offending value the finding judged, as its bounded head, and `null`
+    /// for a finding about no value — a missing field, a misplaced document, a
+    /// conflict between rules over where a document may stand, and a
+    /// conflict over a field the document does not hold. A conflict over a
+    /// field the document holds carries that whole value, its canonical JSON
+    /// for a list or a map.
+    pub value: Option<ValueHead>,
 }
 
 impl FindingRow {
-    /// The finding `id` of `kind` at `path`, over `head`.
+    /// The finding `id` of `kind` at `path`, over `head`, citing no rule and
+    /// about no value.
     #[allow(clippy::too_many_arguments)] // A finding row is the finding's own facts; grouping them would mint a shape nothing else holds.
     pub fn new(
         id: u64,
@@ -287,6 +580,30 @@ impl FindingRow {
             hint,
             message: message.into(),
             generation,
+            rule_set: None,
+            value: None,
         }
+    }
+
+    /// The same row, citing the rule set `rule_set`.
+    ///
+    /// A dormant carrier: no finding cites a rule until rule judgment in
+    /// derivation files one (NORN-358), so today only the store's own suite
+    /// and this crate's reach it.
+    #[must_use]
+    pub const fn citing(mut self, rule_set: u64) -> Self {
+        self.rule_set = Some(rule_set);
+        self
+    }
+
+    /// The same row, about the offending value `value`.
+    ///
+    /// A dormant carrier for the same reason as [`FindingRow::citing`]: no
+    /// finding judges a value until rule judgment in derivation files one
+    /// (NORN-358).
+    #[must_use]
+    pub fn with_value(mut self, value: ValueHead) -> Self {
+        self.value = Some(value);
+        self
     }
 }

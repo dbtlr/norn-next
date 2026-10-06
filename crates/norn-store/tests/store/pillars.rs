@@ -11,7 +11,8 @@
 use crate::common::{
     Scratch, class, class_named, classes, document, document_with_every_fact, drained,
     full_text_matches, path, path_names_no_document_for_target, path_names_no_document_in_class,
-    record_death, violation, write_document, write_documents, written_links, written_tags,
+    record_death, unread_block, violation, write_document, write_documents, written_links,
+    written_tags,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
@@ -23,7 +24,7 @@ use norn_testkit::equivalence::assert_operationally_valid;
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::readings;
 use norn_testkit::work::WorkBar;
-use norn_wire::FindingKind;
+use norn_wire::{FindingKind, Severity};
 
 /// The plan the store reported for one of its named statements, in the shape the
 /// harness asserts over. The pairing is the store's: a plan bar over SQL nobody
@@ -209,6 +210,206 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             panic!("`{column}` outside its vocabulary was reported as {error:?}");
         };
         assert!(what.contains(column), "{what}");
+    }
+}
+
+/// **A rule row's copy of its finding's key is checked rather than trusted.**
+/// Each rule a finding cites stands in `finding_rules` beside a copy of the
+/// finding's fingerprint, kind, severity, path and position, which is the
+/// order a validate by rule pages it in; nothing structural keeps the copy
+/// equal to the finding after the write, so a copy that strayed — to another
+/// kind the vocabulary holds, another severity, another place — is damage the
+/// verification has to see, as a value outside a closed vocabulary is.
+#[test]
+fn a_rule_row_that_disagrees_with_its_finding_is_damage() {
+    for (arrange, strayed) in [
+        ("UPDATE finding_rules SET kind = 'field/forbidden'", "kind"),
+        ("UPDATE finding_rules SET severity = 'error'", "severity"),
+        ("UPDATE finding_rules SET path = 'b.md'", "path"),
+        ("UPDATE finding_rules SET position = 3", "position"),
+        (
+            "UPDATE finding_rules SET vault_schema_fingerprint = 'elsewhere'",
+            "fingerprint",
+        ),
+    ] {
+        let scratch = Scratch::new("rule-row");
+        let mut store = scratch.open();
+        let mut finding = unread_block("a.md");
+        finding.kind = FindingKind::NotOneOf;
+        finding.severity = Severity::Warning;
+        finding.rules = ["tasks".to_string()].into_iter().collect();
+        finding.value = Some("someday".to_string());
+        store
+            .begin_request()
+            .record_finding(&finding)
+            .expect("recording a rule finding");
+        store.verify_integrity().expect("a store just written to");
+
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("writing a copy nothing writes");
+        let error = store.verify_integrity().unwrap_err();
+        let StoreError::Damaged { what } = &error else {
+            panic!("a rule row's {strayed} that strayed was reported as {error:?}");
+        };
+        assert!(what.contains("rule rows disagree"), "{strayed}: {what}");
+    }
+}
+
+/// A finding filed under a rule set at `at`, citing `rules`.
+fn citing(at: &str, rules: &[&str]) -> norn_store::FindingFacts {
+    let mut finding = unread_block(at);
+    finding.kind = FindingKind::NotOneOf;
+    finding.severity = Severity::Warning;
+    finding.target = Some("status".to_string());
+    finding.rules = rules.iter().map(|rule| (*rule).to_string()).collect();
+    finding.value = Some("someday".to_string());
+    finding
+}
+
+/// **A finding's rules are held equal to the set it cites, and a set to a set
+/// this crate writes.** The rules a validate selects a finding by stand in
+/// `finding_rules`; the rules every verb reports it citing are the names of
+/// the set its row cites, read off the set's spelling. Each way the two can
+/// come apart out of band — a rule row renamed, added or taken away, the
+/// citation moved to another set, a set held under another fingerprint than
+/// its finding, emptied, or spelled as no set this crate writes — is damage
+/// the verification sees, so a store whose selection and report disagree
+/// does not verify healthy. So is a set no finding cites, which the
+/// collection takes with its last citer and only a write out of band leaves.
+#[test]
+fn a_findings_rules_that_disagree_with_its_rule_set_are_damage() {
+    const DISAGREE: &str = "rule rows name a rule";
+    const RULE_SET: &str = "the rule set";
+    const UNCITED: &str = "no finding cites";
+    for (arrange, reported) in [
+        (
+            "UPDATE finding_rules SET rule = 'closed' WHERE rule = 'tasks'",
+            DISAGREE,
+        ),
+        (
+            "UPDATE findings SET rule_set = (SELECT rule_set FROM findings WHERE path = 'b.md')
+             WHERE path = 'a.md'",
+            DISAGREE,
+        ),
+        ("DELETE FROM finding_rules WHERE rule = 'open'", DISAGREE),
+        ("DELETE FROM finding_rules WHERE rule = 'other'", DISAGREE),
+        (
+            "INSERT INTO finding_rules
+                 (finding, rule, vault_schema_fingerprint, kind, severity, path, position)
+             SELECT id, 'extra', vault_schema_fingerprint, kind, severity, path, position
+             FROM findings WHERE path = 'a.md'",
+            DISAGREE,
+        ),
+        (
+            "INSERT INTO finding_rules
+                 (finding, rule, vault_schema_fingerprint, kind, severity, path, position)
+             SELECT id, 'tasks', vault_schema_fingerprint, kind, severity, path, position
+             FROM findings WHERE path = 'c.md'",
+            DISAGREE,
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[\"other\",\"tasks\"]' WHERE rules = '[\"other\"]'",
+            DISAGREE,
+        ),
+        (
+            "UPDATE rule_sets SET vault_schema_fingerprint = 'elsewhere'
+             WHERE rules = '[\"other\"]'",
+            "another fingerprint",
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[]' WHERE rules = '[\"other\"]'",
+            RULE_SET,
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[\"tasks\",\"open\"]'
+             WHERE rules = '[\"open\",\"tasks\"]'",
+            RULE_SET,
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[\"other\",\"other\"]' WHERE rules = '[\"other\"]'",
+            RULE_SET,
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[ \"other\" ]' WHERE rules = '[\"other\"]'",
+            RULE_SET,
+        ),
+        (
+            "UPDATE rule_sets SET rules = '[1]' WHERE rules = '[\"other\"]'",
+            RULE_SET,
+        ),
+        (
+            "UPDATE rule_sets SET rules = 'other' WHERE rules = '[\"other\"]'",
+            "other than JSON",
+        ),
+        (
+            "UPDATE findings SET rule_set = NULL WHERE path = 'b.md';
+             DELETE FROM finding_rules WHERE rule = 'other'",
+            UNCITED,
+        ),
+        (
+            "INSERT INTO rule_sets (vault_schema_fingerprint, rules)
+             SELECT vault_schema_fingerprint, '[\"idle\"]' FROM findings WHERE path = 'a.md'",
+            UNCITED,
+        ),
+    ] {
+        let scratch = Scratch::new("rule-set");
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        for finding in [
+            citing("a.md", &["tasks", "open"]),
+            citing("b.md", &["other"]),
+            unread_block("c.md"),
+        ] {
+            request
+                .record_finding(&finding)
+                .expect("recording a finding");
+        }
+        store.verify_integrity().expect("a store just written to");
+
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("writing a citation nothing writes");
+        let error = store.verify_integrity().unwrap_err();
+        let StoreError::Damaged { what } = &error else {
+            panic!("`{arrange}` was reported as {error:?}");
+        };
+        assert!(what.contains(reported), "`{arrange}`: {what}");
+    }
+}
+
+/// **A value head no value has cannot stand at rest.** A head whose hash is
+/// not a SHA-256, one shorter than the value it claims to carry whole, one
+/// cut far short of the bound for a long value, and one within the bound in
+/// characters but past it in bytes would each verify healthy and
+/// then fail every read of the finding as damage; the table refuses each where
+/// it is written, so the store stays one whose heads every reader reads.
+#[test]
+fn a_value_head_no_value_has_is_refused_at_rest() {
+    for arrange in [
+        "UPDATE findings SET value_hash = 'not-a-hash'",
+        "UPDATE findings SET value_head = 's', value_bytes = 400",
+        "UPDATE findings SET value_bytes = 100000",
+        "UPDATE findings SET value_bytes = 8",
+        // Bytes, not characters: 129 two-byte characters are within the
+        // bound as characters and past it as bytes; 253 are as many
+        // characters as the shortest cut and twice its bytes.
+        "UPDATE findings SET value_head = replace(printf('%129s', ''), ' ', 'é'),
+             value_bytes = 1000",
+        "UPDATE findings SET value_head = replace(printf('%253s', ''), ' ', 'é'),
+             value_bytes = 1000",
+    ] {
+        let scratch = Scratch::new("value-head");
+        let mut store = scratch.open();
+        store
+            .begin_request()
+            .record_finding(&citing("a.md", &["tasks"]))
+            .expect("recording a rule finding");
+        assert!(
+            induced_failure::execute_out_of_band(&mut store, arrange).is_err(),
+            "`{arrange}` was written"
+        );
+        store
+            .verify_integrity()
+            .expect("a store whose value heads were refused");
     }
 }
 
@@ -779,7 +980,8 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
         | ExplainedStatement::StoredSuffixKeyPage
-        | ExplainedStatement::IndexedTermPage => {
+        | ExplainedStatement::IndexedTermPage
+        | ExplainedStatement::StoredRuleSetPage => {
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it"
         }
         ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
@@ -805,6 +1007,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::FindingPaths(_) => {
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead"
         }
+        ExplainedStatement::FindingRules(_) => {
+            "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id"
+        }
         ExplainedStatement::LinkHealthLinks
         | ExplainedStatement::LinkHealthClassLinks
         | ExplainedStatement::LinkHealthPathLinks
@@ -825,14 +1030,15 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
     }
 }
 
-/// The four statements a caller drains end to end to account for everything one
-/// pillar holds, named once so the bar and the cursor-spelling bar judge the
-/// same set.
+/// The five statements a caller drains end to end to account for everything
+/// one pillar holds, named once so the bar and the cursor-spelling bar judge
+/// the same set.
 const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::StoredFindingPage,
     ExplainedStatement::StoredTombstonePage,
     ExplainedStatement::StoredSuffixKeyPage,
     ExplainedStatement::IndexedTermPage,
+    ExplainedStatement::StoredRuleSetPage,
 ];
 
 /// The two statements a lane-2 consumer drains change through, named once so
@@ -1161,6 +1367,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .chain(FEEDS.iter().copied())
     .chain(ExplainedStatement::point_reads(&subject))
     .chain(FINDING_DETAIL.iter().map(|detail| detail(width)))
+    .chain([ExplainedStatement::FindingRules(width)])
     // The write registry is one slot here, and its own census is the bar's.
     .chain([ExplainedStatement::Write(WriteStatement::all()[0])])
     .collect();
@@ -1179,6 +1386,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
             "a_class_read_seeks_the_suffix_key_its_root_probes",
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead",
+            "a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
             "a_pins_typed_value_clear_reads_only_the_rows_that_hold_one",
@@ -1247,7 +1455,7 @@ fn the_path_discard_seeks_finding_paths_path_key() {
 }
 
 /// **A pillar's enumeration is a seek, not a pass over what was already
-/// drained.** Each of these four pages is drained end to end by a caller
+/// drained.** Each of these five pages is drained end to end by a caller
 /// accounting for a whole pillar, so a page that reaches its first row by
 /// stepping over the rows ahead of it makes that drain cost the pillar once per
 /// page of it.
@@ -1256,7 +1464,8 @@ fn the_path_discard_seeks_finding_paths_path_key() {
 ///
 /// - The findings page seeks `findings.id`, which is the row id, so the order
 ///   the page states is the order the primary key already holds and nothing
-///   sorts.
+///   sorts. The rule-set page seeks `rule_sets.id` the same way, and walks each
+///   set's names out of its spelling in the page's order.
 /// - The tombstone page seeks `tombstones_path`, which is unique, so `path`
 ///   orders the table totally and the page states that order.
 /// - The suffix-key page seeks `documents_path`, unique for the same reason, and
@@ -1307,6 +1516,12 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
             .expect("a query plan"),
     )
     .assert_searches("findings");
+    plan(
+        request
+            .emitted_plan(ExplainedStatement::StoredRuleSetPage)
+            .expect("a query plan"),
+    )
+    .assert_searches_through("rule_sets", Access::RowId);
     let tombstones = plan(
         request
             .emitted_plan(ExplainedStatement::StoredTombstonePage)
@@ -1495,7 +1710,9 @@ fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
         | ExplainedStatement::LinkHealthFoundLinks
         | ExplainedStatement::LinkHealthDiscard
         | ExplainedStatement::LinkHealthOccupied
-        | ExplainedStatement::Write(_) => None,
+        | ExplainedStatement::Write(_)
+        | ExplainedStatement::StoredRuleSetPage
+        | ExplainedStatement::FindingRules(_) => None,
     }
 }
 
@@ -1674,6 +1891,69 @@ fn a_finding_detail_chunk_seeks_the_primary_key_its_ids_lead() {
             "a chunk of {above} ids is not one a reader emits, and the seam explained it"
         );
     }
+}
+
+/// **A finding's rules are read through the set its row cites, by row id.**
+/// A findings read collects the rules of a chunk of findings by one statement:
+/// each id a seek of the findings' row id, its set a seek of the rule sets'
+/// row id, and the set's names walked out of its spelling, so the chunk costs
+/// its findings and their sets and nothing sorts. The bar ranges over every
+/// width a read can emit, judged against the statement it was taken of, as
+/// the detail chunks are; a width above the chunk bound is refused.
+///
+/// Control: a plan that reads the findings end to end fails the bar.
+#[test]
+fn a_finding_rules_chunk_seeks_each_finding_and_its_rule_set_by_row_id() {
+    let scratch = Scratch::new("finding-rules-plans");
+    let mut store = scratch.open();
+    let request = store.begin_request();
+    let judge = |chunk: &QueryPlan| {
+        chunk.assert_no_full_scan();
+        chunk.assert_searches_through("findings", Access::RowId);
+        chunk.assert_searches_through("rule_sets", Access::RowId);
+        chunk.assert_no_temp_btree();
+    };
+    for ids in 1..=norn_store::FINDING_ID_CHUNK {
+        let width = NonZeroUsize::new(ids).expect("the range starts at one");
+        let chunk = plan(
+            request
+                .emitted_plan(ExplainedStatement::FindingRules(width))
+                .expect("a query plan for a finding-rules chunk"),
+        );
+        assert!(
+            chunk.sql().contains(&format!("?{ids}"))
+                && !chunk.sql().contains(&format!("?{}", ids + 1)),
+            "the plan judged as a chunk of {ids} ids was taken of a statement that binds some \
+             other number of them: {}",
+            chunk.sql()
+        );
+        judge(&chunk);
+    }
+    let above = NonZeroUsize::new(norn_store::FINDING_ID_CHUNK + 1).expect("above one");
+    assert!(
+        matches!(
+            request.emitted_plan(ExplainedStatement::FindingRules(above)),
+            Err(StoreError::Bound { given, .. }) if given == above.get()
+        ),
+        "a chunk of {above} ids is not one a reader emits, and the seam explained it"
+    );
+
+    let scanning = QueryPlan::new(
+        "scanning",
+        vec![
+            PlanRow::new(2, 0, "SCAN f".to_string()),
+            PlanRow::new(
+                3,
+                0,
+                "SEARCH rs USING INTEGER PRIMARY KEY (rowid=?)".to_string(),
+            ),
+        ],
+    );
+    let held = std::panic::catch_unwind(|| judge(&scanning));
+    assert!(
+        held.is_err(),
+        "the bar held a plan reading the findings end to end"
+    );
 }
 
 /// **Every enumeration is complete and drains one page at a time.** A pillar
@@ -2309,7 +2589,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
             }
         }
     }
-    // The four enumerations bind the same shape over their own column: the
+    // The five enumerations bind the same shape over their own column: the
     // cursor is `COALESCE`'s first argument, and the floor it falls back to is
     // below every key the column holds.
     for statement in ENUMERATIONS {
@@ -2355,7 +2635,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
         judged += 1;
     }
     assert_eq!(
-        judged, 18,
+        judged, 19,
         "a scope, an order, a pillar or a feed went unjudged"
     );
 }
@@ -3959,6 +4239,23 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
                 "(vault_schema_fingerprint>?)",
             ),
         ],
+        // The collection a deleted finding's trigger runs: the set by its row
+        // id, and another citer through the index on the citation.
+        CollectRuleSet => &[
+            ("rule_sets", Access::RowId, "(rowid=?)"),
+            (
+                "findings",
+                Access::Index("findings_rule_set"),
+                "(rule_set=?)",
+            ),
+        ],
+        FindRuleSet => &[(
+            "rule_sets",
+            Access::Index("rule_sets_fingerprint_rules"),
+            "(vault_schema_fingerprint=? AND rules=?)",
+        )],
+        // The finding's key is read off the row just written, by its id.
+        InsertFindingRule => &[("findings", Access::RowId, "(rowid=?)")],
         NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
         UpsertDocument
         | InsertLink
@@ -3972,6 +4269,7 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertFindingCandidate
         | InsertFindingClass
         | InsertFindingPath
+        | InsertRuleSet
         | PutMeta => &[],
     };
     WriteBar { seeks }
@@ -4007,8 +4305,9 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
 /// values than its text names is an error here.
 ///
 /// Controls: the index each keyed statement seeks is dropped, and the same bar
-/// fails — for the two statements that seek a primary key, whose index cannot
-/// be dropped, a plan that scans the table is handed to the same judgment. The
+/// fails — for the three statements that seek a primary key or a row id, whose
+/// index cannot be dropped, a plan that scans the table is handed to the same
+/// judgment. The
 /// no-scan half has its own control: with the index a foreign-key action seeks
 /// dropped, the plan keeps the seek the bar names and adds a scan, and the bar
 /// still fails.
@@ -4032,6 +4331,8 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
     for (statement, table) in [
         (WriteStatement::DiscardFields, "document_fields"),
         (WriteStatement::NextGeneration, "meta"),
+        (WriteStatement::InsertFindingRule, "findings"),
+        (WriteStatement::CollectRuleSet, "rule_sets"),
     ] {
         let scanning = QueryPlan::new(
             "scanning",
@@ -4054,8 +4355,9 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
             .map(|(at, (table, access, constraint))| {
                 let index = match access {
                     Access::PrimaryKey => "PRIMARY KEY".to_string(),
+                    Access::RowId => "INTEGER PRIMARY KEY".to_string(),
                     Access::Index(name) => format!("INDEX {name}"),
-                    _ => unreachable!("a write bar names a primary key or an index"),
+                    _ => unreachable!("a write bar names a primary key, a row id or an index"),
                 };
                 PlanRow::new(
                     at as i64 + 2,
@@ -4128,6 +4430,13 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
                 "findings_fingerprint_kind_severity_nocase",
             ],
         ),
+        (
+            &[WriteStatement::FindRuleSet],
+            &["rule_sets_fingerprint_rules"],
+        ),
+        // A rule set's collection checks no finding still cites it, through
+        // the index on the citation.
+        (&[WriteStatement::CollectRuleSet], &["findings_rule_set"]),
     ] {
         let scratch = Scratch::new("write-plans-control");
         let mut store = scratch.open();
