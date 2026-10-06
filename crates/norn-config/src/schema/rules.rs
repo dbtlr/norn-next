@@ -694,11 +694,12 @@ impl VaultSchema {
 
     /// The value `raw` is compared by under `field`, by a selector, a closed
     /// set and the disjointness the ceiling credits alike: a tag key — the
-    /// tag carrier `tags`, declared or not, or a key declared `tags` — by the
-    /// tag `raw` names, `#` marker optional, under the tag fold; a key
-    /// declared `number`, `boolean` or `date` by its typed value; and any
-    /// other key exactly as written. `None` where `raw` does not read as the
-    /// declared type, which equals nothing.
+    /// tag carrier `tags`, declared or not and whatever type it is declared
+    /// with, or a key declared `tags` — by the tag `raw` names, `#` marker
+    /// optional, under the tag fold; any other key declared `number`,
+    /// `boolean` or `date` by its typed value; and any other key exactly as
+    /// written. `None` where `raw` does not read as the declared type, which
+    /// equals nothing — the tag carrier included.
     ///
     /// Find's field equality is owed the same reading (NORN-358): today it
     /// compares a tag key's text exactly.

@@ -81,6 +81,15 @@
 //! one walk per route and one per group, each under that constant times
 //! `2^18`, beside the ceiling's own comparisons: the square of the rule count
 //! times the selector keys compared.
+//!
+//! **A declared limit: the read's total grows with its walks.** No budget
+//! spans walks, so a schema of many routes or groups each near the ceiling
+//! reads slowly: globs built of hundreds of wildcards take about a second a
+//! walk in a release build, and sixteen such groups about eighteen seconds.
+//! Globs of ordinary length weigh far below the ceiling and read in
+//! microseconds. Only the vault's owner writes the schema, so the cost falls
+//! on that owner's own reloads; a budget across walks would let one rule's
+//! weight refuse an unrelated rule.
 
 use std::collections::BTreeMap;
 
