@@ -21,6 +21,13 @@
 //! broken, ambiguous, or missing the heading or block its target names — per
 //! ADR 0027; the document it stands in still derives whole.
 //!
+//! **No producer files a schema-judged kind yet.** The nine kinds a schema
+//! judgment files — the seven `field/…` kinds, `document/misplaced` and
+//! `document/rules-conflict` — are dormant carriers: rule judgment in
+//! derivation files them (NORN-358), and until it lands the store's own suite
+//! is all that writes one, so every surface naming them answers from rows
+//! nothing derives yet.
+//!
 //! **A rule kind's severity is its rules'.** A finding judged against the
 //! schema rules cites every rule contributing to the constraint it breaches
 //! and is reported at the highest of their severities, so the severity a
@@ -227,9 +234,13 @@ pub enum FindingKind {
     /// `field/rules-conflict` — the rules selecting the document constrain the
     /// field in ways nothing satisfies: one requires it and another forbids
     /// it, or their closed sets share no member where the field is required or
-    /// holds a value. One finding per field whatever value it holds, so it
-    /// names no value; the field is its `target`, and it cites every
-    /// contributing rule.
+    /// holds a value. One finding per field whatever value it holds: the value
+    /// is the finding's payload, not part of what makes two conflicts one, so
+    /// the write gate judging a conflict (NORN-359) compares it by field. Where the field
+    /// holds a value, that whole value — its canonical JSON for a list or a
+    /// map — is the finding's value; where the field is absent the finding
+    /// names none. The field is its `target`, and it cites every contributing
+    /// rule.
     #[serde(rename = "field/rules-conflict")]
     FieldRulesConflict,
 }

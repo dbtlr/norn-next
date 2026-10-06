@@ -785,6 +785,11 @@ pub struct FindingFacts {
     /// contributing to the constraint it breaches, and empty for a finding
     /// that cites none.
     ///
+    /// A dormant carrier, as [`FindingFacts::value`] is: rule judgment in
+    /// derivation fills both (NORN-358), and until it lands every producer
+    /// files them empty, so only the store's own suite reaches the write
+    /// they drive.
+    ///
     /// **Held as a set, once per schema fingerprint.** The write files the
     /// names under the one rule set of that fingerprint holding exactly them,
     /// making it where none does, and the finding row carries the set's
@@ -795,7 +800,9 @@ pub struct FindingFacts {
     /// The offending value the finding judged, whole: a scalar or one list
     /// element as the document writes it — the text its field row holds — or,
     /// for a list or a map, its canonical JSON. `None` for a finding about no
-    /// value.
+    /// value. A conflict between rules over a field the document holds carries
+    /// that whole value; one over an absent field, or over where a document
+    /// may stand, carries none.
     ///
     /// The write keeps its head, its length and its hash
     /// ([`norn_wire::ValueHead`]), never the whole, so a finding's bytes at

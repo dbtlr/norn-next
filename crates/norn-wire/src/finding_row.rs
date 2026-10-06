@@ -270,7 +270,9 @@ impl ValueHead {
     ///
     /// The wire hashes nothing ([`ContentHash`]), so the caller hands the hash
     /// of the very text it hands here; the store's finding write is that
-    /// caller, and it hashes the value it is writing.
+    /// caller, and it hashes the value it is writing. A dormant carrier: that
+    /// write takes a value only from a finding judging one, which rule
+    /// judgment in derivation files (NORN-358) and nothing files yet.
     pub fn of(full: &str, hash: ContentHash) -> Self {
         let mut cut = full.len().min(VALUE_HEAD_BYTES);
         while !full.is_char_boundary(cut) {
@@ -546,7 +548,10 @@ pub struct FindingRow {
     pub rule_set: Option<u64>,
     /// The offending value the finding judged, as its bounded head, and `null`
     /// for a finding about no value — a missing field, a misplaced document, a
-    /// conflict between rules.
+    /// conflict between rules over where a document may stand, and a
+    /// conflict over a field the document does not hold. A conflict over a
+    /// field the document holds carries that whole value, its canonical JSON
+    /// for a list or a map.
     pub value: Option<ValueHead>,
 }
 
@@ -583,6 +588,10 @@ impl FindingRow {
     }
 
     /// The same row, citing the rule set `rule_set`.
+    ///
+    /// A dormant carrier: no finding cites a rule until rule judgment in
+    /// derivation files one (NORN-358), so today only the store's own suite
+    /// and this crate's reach it.
     #[must_use]
     pub const fn citing(mut self, rule_set: u64) -> Self {
         self.rule_set = Some(rule_set);
@@ -590,6 +599,10 @@ impl FindingRow {
     }
 
     /// The same row, about the offending value `value`.
+    ///
+    /// A dormant carrier for the same reason as [`FindingRow::citing`]: no
+    /// finding judges a value until rule judgment in derivation files one
+    /// (NORN-358).
     #[must_use]
     pub fn with_value(mut self, value: ValueHead) -> Self {
         self.value = Some(value);

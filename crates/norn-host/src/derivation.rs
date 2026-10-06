@@ -973,8 +973,9 @@ const fn field_shape(shape: Shape) -> FieldShape {
 }
 
 /// `rule` as `describe` reports it: every part as the schema writes it — a
-/// selector's values as written, each glob and route as its source text, a
-/// default as its source — and every part the rule does not declare left out.
+/// selector's every value in the order written and in the spelling it is
+/// compared by, each glob and route as its source text, a default as its
+/// source — and every part the rule does not declare left out.
 fn schema_rule(rule: &Rule) -> SchemaRule {
     let selector = rule.selector();
     let declared = SchemaRule::new(rule.name(), rule.severity())

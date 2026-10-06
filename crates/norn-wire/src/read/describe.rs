@@ -36,7 +36,10 @@
 //! what it fills to. A part the rule does not declare is left out of the
 //! facet rather than spelled empty, and its severity is always stated:
 //! `warning` where the rule states none. A selector value is always a list,
-//! however many values the rule wrote. The combined constraint the rules
+//! however many values the rule wrote, each in the order written, repeats
+//! included, and in the spelling the selector compares it by — a field row's
+//! spelling of the scalar, so `1.50` reads `1.5`, and `1` and `"1"` both read
+//! `1` — where a default and a template stay as written. The combined constraint the rules
 //! selecting one document make is no facet: it is a function of these, read
 //! where a document is judged.
 
@@ -212,7 +215,9 @@ pub enum PathRuleKind {
 #[non_exhaustive]
 pub struct RuleMatch {
     /// Each frontmatter key the rule selects by, in key order, with the
-    /// values any of which it matches, as written.
+    /// values any of which it matches, in the order written and in the
+    /// spelling the selector compares each by: a field row's spelling of the
+    /// scalar, so `1.50` reads `1.5`, and `1` and `"1"` both read `1`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub frontmatter: BTreeMap<String, Vec<String>>,
     /// The path glob the rule selects by, captures and all.

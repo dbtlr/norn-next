@@ -272,8 +272,9 @@ pub struct Selector {
     exclude: Vec<Pattern>,
 }
 
-/// One `match.frontmatter` key's any-of values: as written, and as the
-/// equality keys a document's value is compared by.
+/// One `match.frontmatter` key's any-of values: in the order written, each in
+/// a field row's spelling of the scalar — `1.50` reads `1.5`, and `1` and `"1"`
+/// both read `1` — and as the equality keys a document's value is compared by.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SelectorValues {
     written: Vec<String>,
@@ -282,7 +283,8 @@ struct SelectorValues {
 
 impl Selector {
     /// Each `match.frontmatter` key, in key order, with the values any of
-    /// which it matches, as written.
+    /// which it matches, in the order written and in a field row's spelling
+    /// of each scalar.
     pub fn frontmatter(&self) -> impl Iterator<Item = (&str, &[String])> {
         self.frontmatter
             .iter()

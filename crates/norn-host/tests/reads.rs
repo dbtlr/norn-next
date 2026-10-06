@@ -1103,6 +1103,38 @@ fn a_describe_answers_the_rules_and_shapes_its_schema_declares() {
     );
 }
 
+/// **A rule's selector is described with every value it matches any of**, in
+/// the order the schema writes them, repeats included, each in the spelling
+/// the selector compares by — the field-row spelling, so `1.50` reads `1.5`
+/// and `1` and `"1"` both read `1`.
+#[test]
+fn a_describe_answers_every_value_a_selector_matches_any_of() {
+    const ANY_OF_SCHEMA: &str = "version: 1\nrules:\n  chores:\n    match: {frontmatter: {type: [task, chore, task], rank: [1.50, 1, \"1\"]}}\n    required:\n      status:\n";
+    let (_sandbox, vault, host) = a_verb_vault("host-reads-describe-any-of", &[]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), ANY_OF_SCHEMA)
+        .expect("write a schema declaring an any-of selector");
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let answered = host
+        .describe(&DescribeParams::new(address(vault.name())).with_facets([FacetKind::Rule]))
+        .expect("an attached vault answers a describe");
+    let strings = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect();
+    assert_eq!(
+        answered.answer.report.rows,
+        vec![Facet::rule(
+            SchemaRule::new("chores", Severity::Warning)
+                .with_match(RuleMatch::new(
+                    [
+                        ("rank".to_string(), strings(&["1.5", "1", "1"])),
+                        ("type".to_string(), strings(&["task", "chore", "task"])),
+                    ],
+                    None,
+                ))
+                .with_required("status", None),
+        )]
+    );
+}
+
 /// **A validate naming a rule the pinned schema does not declare is refused
 /// by name**, as `vault/unknown-rule`, on a page and on a summary; **one
 /// naming a declared rule answers the findings citing it**, which no

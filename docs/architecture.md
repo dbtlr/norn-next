@@ -973,8 +973,10 @@ byte order of the text that keys them — narrowed to the kinds a request names.
 only. The declared facets — each declared field with its type and the shape it declares,
 the declared tags, the tag patterns, the path rules, the stance on an undeclared tag, each
 creation rule and the inbox with every template reported as its source text, and each schema
-rule as the schema writes it, every part it declares spelled as written and every part it
-does not left out — are read off the declaration the host hands the store,
+rule as the schema writes it, every part it declares spelled as written — save a
+selector's values, each reported in the spelling the selector compares it by, a field row's
+spelling of the scalar, so `1.50` reads `1.5` — and every part it does not left out — are
+read off the declaration the host hands the store,
 which carries the pinned schema's declared fields with their types and shapes, its tag facet, its path
 rules, its creation rules and inbox and its schema rules, and is refused unless it names the
 schema the snapshot pins; they are a read of memory, drawn from the page's position, and run
