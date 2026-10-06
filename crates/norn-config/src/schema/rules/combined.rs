@@ -149,8 +149,10 @@ impl<'s> CombinedConstraint<'s> {
     /// alone, and a finding reports one on an unrequired field only where the
     /// document holds an element the closed sets judge. Schema read asks this
     /// of groups of rules that always select together; rule judgment decides
-    /// placement itself, where one rule's allowed paths admitting no document
-    /// path is a conflict too ([`VaultSchema::judge`]).
+    /// placement itself ([`VaultSchema::judge`]). One rule's allowed paths
+    /// are no set to share: schema read refuses a rule whose allowed paths
+    /// admit no document path on its own, before any group is asked, so a
+    /// lone placement rule here always admits one.
     pub fn conflicts(&self, case: CaseFold) -> Vec<RulesConflict> {
         let mut conflicts = self.field_conflicts();
         let placed: Vec<&Rule> = self.placement_rules().collect();
@@ -286,7 +288,8 @@ pub enum RulesConflict {
         /// Every rule closing or requiring it, in name order.
         rules: Vec<String>,
     },
-    /// Allowed paths that share no document path.
+    /// Allowed paths that share no document path: one rule's admitting none,
+    /// or several rules' sharing none.
     DisjointPlacement {
         /// Every rule stating allowed paths, in name order.
         rules: Vec<String>,
@@ -324,6 +327,11 @@ impl fmt::Display for RulesConflict {
                 } else {
                     ""
                 },
+                named(rules)
+            ),
+            RulesConflict::DisjointPlacement { rules } if rules.len() == 1 => write!(
+                formatter,
+                "the allowed paths of the rule {} admit no document path",
                 named(rules)
             ),
             RulesConflict::DisjointPlacement { rules } => write!(

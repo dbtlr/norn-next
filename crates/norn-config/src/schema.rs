@@ -588,7 +588,8 @@ pub enum VaultSchemaError {
         weight: u64,
     },
     /// Rules that select every document any of them selects together state
-    /// constraints no document can meet together.
+    /// constraints no document can meet together, or one rule's allowed
+    /// paths admit no document path.
     RulesConflict {
         /// The conflict, naming every contributing rule.
         conflict: RulesConflict,

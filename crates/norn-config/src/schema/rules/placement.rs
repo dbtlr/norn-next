@@ -27,11 +27,12 @@ use super::{Rule, RuleWork};
 /// length in characters plus one, which bounds the states of the automaton
 /// the globs make together, so the product bounds the states the walk
 /// deciding whether co-selecting rules leave a document any path visits —
-/// the walk schema read takes over the rules a statically unavoidable
-/// conflict groups, and that rule judgment takes over the placement rules
-/// selecting a misplaced document, once per set of them
-/// ([`VaultSchema::judge`]). The schema refuses at read any neighbourhood of
-/// rules whose weight could pass it.
+/// the walk schema read takes over each rule's allowed paths alone and over
+/// the rules a statically unavoidable conflict groups, and that rule
+/// judgment takes over the two or more placement rules selecting a
+/// misplaced document, once per set of them ([`VaultSchema::judge`]). The
+/// schema refuses at read any neighbourhood of rules whose weight could pass
+/// it.
 pub const PLACEMENT_CEILING: u64 = 1 << 18;
 
 /// The weight of `globs`: the sum over them of each glob's length in
@@ -63,9 +64,10 @@ pub(super) fn product_weight<'a>(rules: impl IntoIterator<Item = &'a Rule>) -> u
 /// rules' weights, which a caller holds under [`PLACEMENT_CEILING`] before
 /// asking: schema read refuses every neighbourhood that could pass it. It is
 /// the one procedure deciding placement emptiness: schema read asks it of
-/// each group of rules that always select together, and rule judgment asks it
-/// of the placement rules selecting a misplaced document, through the
-/// schema's memo of verdicts ([`PlacementVerdicts`]).
+/// each rule stating allowed paths alone and of each group of rules that
+/// always select together, and rule judgment asks it of the two or more
+/// placement rules selecting a misplaced document, through the schema's memo
+/// of verdicts ([`PlacementVerdicts`]).
 pub(super) fn share_a_path(rules: &[&Rule], case: CaseFold) -> bool {
     let sets: Vec<&[Pattern]> = rules
         .iter()

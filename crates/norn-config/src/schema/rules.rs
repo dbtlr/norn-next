@@ -104,6 +104,8 @@
 //! - a `rename_to` onto a field the same rule forbids, or onto a field
 //!   another of its forbidden fields renames to;
 //! - a neighbourhood of allowed paths past [`PLACEMENT_CEILING`];
+//! - a rule whose `allowed_paths` admit no document path, a **statically
+//!   unavoidable conflict** on every document it selects, naming that rule;
 //! - a **statically unavoidable conflict** among rules that select together
 //!   on every document any of them selects — where one is selectorless, or
 //!   where their selectors are identical once any-of and `exclude.path` lists
@@ -116,9 +118,13 @@
 //! declared `shape: single` with value sets sharing no equality key, and the
 //! ceiling weighs each rule's allowed paths with those of every rule that
 //! may select beside it. A conflict between rules holds on every root, so it
-//! is judged under the wider fold, [`CaseFold::Ascii`]; a route is one
-//! author's spelling against their own globs, judged exactly. Only a path a
-//! document could stand at counts as a path two sets share.
+//! is judged under the wider fold, [`CaseFold::Ascii`], and so is one rule's
+//! allowed paths alone; a route is one author's spelling against their own
+//! globs, judged exactly. Only a path a document could stand at counts as a
+//! path a set admits or two sets share. A schema read costs at most one walk
+//! bounded by the ceiling per route, per rule with allowed paths and per
+//! group of rules that select together — a declared limit, since no budget
+//! spans walks.
 //!
 //! Every other conflict — one that depends on a value or a path — and every
 //! templated default are judged where a document is.

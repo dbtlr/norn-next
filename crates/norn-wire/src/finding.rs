@@ -185,11 +185,12 @@ pub enum FindingKind {
     /// value.
     #[serde(rename = "document/misplaced")]
     Misplaced,
-    /// `document/rules-conflict` — the rules selecting the document state
-    /// allowed paths admitting no document path in common — one rule's alone
-    /// included — so no place satisfies them all. One finding per document
-    /// whatever path it stands at, citing every rule stating allowed paths
-    /// that selects it. It names no field and no value.
+    /// `document/rules-conflict` — two or more rules selecting the document
+    /// state allowed paths admitting no document path in common, so no place
+    /// satisfies them all. (One rule's allowed paths admitting none is
+    /// refused at schema read.) One finding per document whatever path it
+    /// stands at, citing every rule stating allowed paths that selects it. It
+    /// names no field and no value.
     #[serde(rename = "document/rules-conflict")]
     DocumentRulesConflict,
     /// `field/required-missing` — a field some rule selecting the document

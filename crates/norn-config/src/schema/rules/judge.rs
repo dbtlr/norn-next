@@ -72,9 +72,12 @@
 //! **Placement is judged where it fails.** A document standing where some
 //! contributing rule's allowed paths do not admit it is
 //! [`Breach::Misplaced`], citing every rule stating allowed paths — unless
-//! those rules' allowed paths share no document path at all, one rule's
-//! alone included, which makes it [`Breach::DocumentRulesConflict`] instead,
-//! citing the same rules. Neither names a field or a value.
+//! two or more of them share no document path at all, which makes it
+//! [`Breach::DocumentRulesConflict`] instead, citing the same rules. Neither
+//! names a field or a value. One rule's allowed paths alone always admit
+//! some document path, since schema read refuses a rule whose allowed paths
+//! admit none, so a document one placement rule selects is misplaced or
+//! placed, never in conflict.
 //!
 //! A finding citing rules is reported at the highest of their severities.
 //!
@@ -91,12 +94,13 @@
 //! depend on the verdicts the parsed schema has already reached, which the
 //! next paragraph states.
 //!
-//! **The placement walk is paid once per set of placement rules.** Whether
-//! the allowed paths of a set of rules share a document path depends on the
-//! set alone, so the verdict is memoized on the schema per set and fold
-//! ([`PlacementVerdicts`](super::placement::PlacementVerdicts)), and a
-//! misplaced document whose set was decided before reads the verdict instead
-//! of walking. A walk costs at most a constant times
+//! **The placement walk is paid once per set of two or more placement
+//! rules.** Whether the allowed paths of a set of rules share a document path
+//! depends on the set alone, so the verdict is memoized on the schema per set
+//! and fold ([`PlacementVerdicts`](super::placement::PlacementVerdicts)), and
+//! a misplaced document whose set was decided before reads the verdict
+//! instead of walking. A set of one rule is never walked: schema read
+//! decided it. A walk costs at most a constant times
 //! [`PLACEMENT_CEILING`](super::PLACEMENT_CEILING): about a second on globs
 //! built of hundreds of wildcards, microseconds on globs of ordinary length.
 //!
@@ -203,7 +207,8 @@ pub enum Breach {
     /// The rules selecting the document constrain a field so nothing meets
     /// it.
     FieldRulesConflict,
-    /// The placement rules selecting the document share no document path.
+    /// The placement rules selecting the document, two or more, share no
+    /// document path.
     DocumentRulesConflict,
 }
 
@@ -288,8 +293,8 @@ pub struct RuleWork {
     /// Characters of every glob a path was matched against, selectors' and
     /// allowed paths' alike.
     pub pattern_characters: u64,
-    /// Placement walks run, each over a set of rules whose verdict no
-    /// earlier judgment had reached.
+    /// Placement walks run, each over a set of two or more rules whose
+    /// verdict no earlier judgment had reached.
     pub placement_walks: u64,
     /// The weight those walks carried: the product of each walked set's
     /// allowed-path weights ([`Rule::placement_weight`]).
@@ -596,9 +601,11 @@ impl VaultSchema {
     }
 
     /// Judge where the document stands against the placement rules of
-    /// `combined` and, where they do not admit it, whether they admit any
-    /// document path at all — one rule's alone included — reading the
-    /// memoized verdict where one was reached.
+    /// `combined` and, where they do not admit it, whether two or more of
+    /// them share any document path, reading the memoized verdict where one
+    /// was reached. One rule alone is no walk: schema read refuses a rule
+    /// whose allowed paths admit no document path, so a lone rule's set
+    /// always holds one.
     fn judge_placement(
         &self,
         combined: &CombinedConstraint<'_>,
@@ -615,7 +622,7 @@ impl VaultSchema {
         if combined.admits_path(path, case, work) {
             return;
         }
-        let breach = if self.placement_shared(&placed, case, work) {
+        let breach = if placed.len() == 1 || self.placement_shared(&placed, case, work) {
             Breach::Misplaced
         } else {
             Breach::DocumentRulesConflict

@@ -629,8 +629,9 @@ rules:
 }
 
 /// **The placement walk is paid once per set of rules**: the verdict a first
-/// misplaced document's set walked is read by every later one, and a set of
-/// one rule is a set like any other.
+/// misplaced document's set walked is read by every later one. A set of one
+/// rule is never walked: schema read refuses a rule whose allowed paths admit
+/// no document path, so a document it alone places is misplaced.
 #[test]
 fn a_placement_verdict_is_walked_once_per_set_of_rules() {
     let schema = schema(
@@ -659,16 +660,19 @@ rules:
     let folded = schema.judge("c.md", &both, CaseFold::Ascii).work();
     assert_eq!(folded.placement_walks, 1, "a verdict is held per fold");
     let one = frontmatter(&[("kind", text("task"))]);
-    let alone = schema.judge("a.md", &one, CaseFold::Exact).work();
+    let alone = schema.judge("a.md", &one, CaseFold::Exact);
     assert_eq!(
-        (alone.placement_walks, alone.placement_verdicts_reused),
-        (1, 0),
-        "a set of one rule is walked once"
+        summaries(alone.findings()),
+        [(Breach::Misplaced, None, None, names(&["tasks"]))]
     );
-    let again = schema.judge("b.md", &one, CaseFold::Exact).work();
     assert_eq!(
-        (again.placement_walks, again.placement_verdicts_reused),
-        (0, 1)
+        (
+            alone.work().placement_walks,
+            alone.work().placement_weight,
+            alone.work().placement_verdicts_reused
+        ),
+        (0, 0, 0),
+        "a set of one rule is not walked"
     );
 }
 
@@ -1040,40 +1044,6 @@ rules:
             (Breach::FieldRulesConflict, Some("n".to_string())),
         ]
     );
-}
-
-/// **One rule whose allowed paths admit no document path is a document
-/// conflict**, as rules sharing none are: no place satisfies it. Its verdict
-/// is walked once and read by every later document it selects.
-#[test]
-fn one_rule_admitting_no_document_path_is_a_document_conflict() {
-    for allowed in ["'*.txt'", "shared"] {
-        let schema = schema(&format!(
-            "version: 1
-rules:
-  r: {{ match: {{ frontmatter: {{ kind: x }} }}, allowed_paths: {{ paths: [{allowed}] }} }}
-"
-        ));
-        let selected = frontmatter(&[("kind", text("x"))]);
-        let first = schema.judge("a.md", &selected, CaseFold::Exact);
-        assert_eq!(
-            summaries(first.findings()),
-            [(Breach::DocumentRulesConflict, None, None, names(&["r"]))],
-            "allowed {allowed}"
-        );
-        assert_eq!(
-            (
-                first.work().placement_walks,
-                first.work().placement_verdicts_reused
-            ),
-            (1, 0)
-        );
-        let second = schema.judge("b.md", &selected, CaseFold::Exact).work();
-        assert_eq!(
-            (second.placement_walks, second.placement_verdicts_reused),
-            (0, 1)
-        );
-    }
 }
 
 /// **Each constraint judged is counted once**: a value against its declared

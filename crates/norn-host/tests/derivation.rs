@@ -64,15 +64,14 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(9),
-    "5295ea73fc4301a45587c552562ef9987b327c901d0d069ef049e1aa894d8f4d",
+    "643214a4906a4c2e06fa4b59ea5a499a749d2ec8c8e7ed278dc1e886ae280de1",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
 /// declared type and of each declared shape, a tag facet that reports what it
 /// does not declare, and schema rules that select the documents under
 /// `rules/` by their `kind` — two selecting each document, so a finding cites
-/// a set of rules, one pair whose allowed paths share none, and one rule
-/// whose allowed paths admit no document path at all.
+/// a set of rules, and one pair whose allowed paths share none.
 const SCHEMA: &str = "\
 version: 1
 fields:
@@ -150,8 +149,6 @@ rules:
     match:
       frontmatter: { kind: box }
     forbidden: { colour: }
-    allowed_paths:
-      paths: [\"rules/*.txt\"]
 ";
 
 /// The schema of the second vault: the other stance a tag facet can take on
@@ -283,8 +280,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
             b"---\nkind: chore\nowner: me\n---\n# A chore\n".to_vec(),
         ),
         // A box `red` and `blue` close `colour` over sets sharing no member,
-        // which no rule requires, and `bare` forbids, standing where no
-        // document could stand under `bare`'s allowed paths.
+        // which no rule requires, and `bare` forbids.
         (
             "rules/box.md",
             b"---\nkind: box\ncolour: red\n---\n# A box\n".to_vec(),
@@ -1265,10 +1261,9 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "no value spelled `{spelled}` is exercised"
         );
     }
-    // A value written three ways is one finding, at its first spelling; an
+    // A value written three ways is one finding, at its first spelling; and an
     // empty closed set on a field no rule requires stands beside the field's
-    // forbidden finding; and one rule admitting no document path is a
-    // document conflict.
+    // forbidden finding.
     let at = |path: &str, kind: FindingKind| -> Vec<(Option<&str>, Vec<&str>)> {
         findings
             .iter()
@@ -1294,12 +1289,10 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         (
             at("rules/box.md", FindingKind::Forbidden),
             at("rules/box.md", FindingKind::FieldRulesConflict),
-            at("rules/box.md", FindingKind::DocumentRulesConflict),
         ),
         (
             vec![(Some("red"), vec!["bare"])],
             vec![(Some("red"), vec!["blue", "red"])],
-            vec![(None, vec!["bare"])],
         ),
         "the box's conflicts are not exercised as judged"
     );
