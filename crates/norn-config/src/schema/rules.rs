@@ -780,8 +780,9 @@ impl VaultSchema {
 
     /// **The one matcher**: whether `rule` selects a document at `path` whose
     /// frontmatter holds `entries`, tallying in `work` the rule evaluated,
-    /// each selector term evaluated up to the first that fails, and the
-    /// characters of each glob matched.
+    /// each selector term evaluated up to the first that fails, the bytes of
+    /// each `match.frontmatter` term's key and values, and the characters of
+    /// each glob matched.
     fn selects_counted(
         &self,
         rule: &Rule,
@@ -799,6 +800,8 @@ impl VaultSchema {
         };
         selector.frontmatter.iter().all(|(key, values)| {
             work.selector_terms += 1;
+            work.declaration_bytes +=
+                (key.len() + values.written.iter().map(String::len).sum::<usize>()) as u64;
             self.matches_value(key, value_in(entries, key), &values.keys)
         }) && selector
             .path

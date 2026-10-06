@@ -637,9 +637,9 @@ scratch: x
 /// (2000), each attached under [`RULE_SCHEMA`], costs the same at both: the
 /// documents its job derives, the files it opens, the changeset it lands and
 /// every logical count of the judgment — rules evaluated and selected,
-/// selector terms, constraint entries combined, constraints judged, glob
-/// characters matched, the placement walk and its weight, and the findings
-/// minted.
+/// selector terms, constraint entries combined, declaration bytes read,
+/// constraints judged, glob characters matched, the placement walk and its
+/// weight, and the findings minted.
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn rule_judgment_of_one_document_costs_the_same_at_both_scales() {
@@ -739,7 +739,8 @@ fn judged_work(_: &attach::ServingHost) -> CounterSnapshot {
 }
 
 /// The probe every rule-parameter variant judges: its kind, eight keys a
-/// selector may name, a status and a title, at `probe.md`.
+/// selector may name, a status the closed-set variants admit and a title, at
+/// `probe.md`.
 const PARAMETER_PROBE: &str = "---
 kind: probe
 k1: v
@@ -750,7 +751,7 @@ k5: v
 k6: v
 k7: v
 k8: v
-status: s
+status: m0
 title: abcdefgh
 ---
 # Probe
@@ -842,15 +843,18 @@ fn judged_by_parameter(
 /// alone:
 ///
 /// - **rule count R**: R rules none of which selects the document evaluate R
-///   rules and R selector terms;
+///   rules and R selector terms, and read each term's ten bytes;
 /// - **selector complexity**: one rule naming K frontmatter keys the document
-///   holds evaluates K selector terms;
+///   holds evaluates K selector terms, and reads each term's three bytes;
 /// - **constraint cardinality**: one rule requiring C fields the document
-///   holds combines C entries and judges C constraints, and one closing a
-///   field over V values combines V entries and judges one;
-/// - **encoded declaration size**: one rule whose `match.path` glob is L
-///   characters long matches L characters, and two rules whose allowed paths
-///   share none walk once, at the product of their weights.
+///   holds combines C entries, reads each field's two-byte name and judges C
+///   constraints, and one closing a field over V two-byte values combines V
+///   entries, reads their bytes and judges one;
+/// - **encoded declaration size**: one rule closing a field over one member
+///   of B bytes reads B declaration bytes and nothing else more, one rule
+///   whose `match.path` glob is L characters long matches L characters, and
+///   two rules whose allowed paths share none walk once, at the product of
+///   their weights.
 ///
 /// Every other rule count stays where the parameter's first value left it.
 #[test]
@@ -868,11 +872,19 @@ fn the_logical_rule_counters_follow_each_declared_parameter() {
             (count, rules)
         })
         .collect();
+    // Each rule's one term reads `kind` and `other{at}`: ten bytes.
     judged_by_parameter(
         "rule-count",
-        &["rule_rules_evaluated", "rule_selector_terms"],
+        &[
+            "rule_rules_evaluated",
+            "rule_selector_terms",
+            "rule_declaration_bytes",
+        ],
         &rule_count,
-        |_, count| count,
+        |count, rules| match count {
+            "rule_declaration_bytes" => 10 * rules,
+            _ => rules,
+        },
     );
 
     let selector: Vec<(u64, String)> = [2u64, 4, 8]
@@ -888,11 +900,15 @@ fn the_logical_rule_counters_follow_each_declared_parameter() {
             )
         })
         .collect();
+    // Each term reads `k{at}` and `v`: three bytes.
     judged_by_parameter(
         "selector-complexity",
-        &["rule_selector_terms"],
+        &["rule_selector_terms", "rule_declaration_bytes"],
         &selector,
-        |_, keys| keys,
+        |count, keys| match count {
+            "rule_declaration_bytes" => 3 * keys,
+            _ => keys,
+        },
     );
 
     let required: Vec<(u64, String)> = [2u64, 4, 8]
@@ -902,19 +918,25 @@ fn the_logical_rule_counters_follow_each_declared_parameter() {
             (fields, format!("  r:\n    required:\n{named}"))
         })
         .collect();
+    // Each entry reads its field's name, `k{at}`: two bytes.
     judged_by_parameter(
         "required-fields",
-        &["rule_constraint_entries", "rule_constraints_judged"],
+        &[
+            "rule_constraint_entries",
+            "rule_declaration_bytes",
+            "rule_constraints_judged",
+        ],
         &required,
-        |_, fields| fields,
+        |count, fields| match count {
+            "rule_declaration_bytes" => 2 * fields,
+            _ => fields,
+        },
     );
 
     let closed: Vec<(u64, String)> = [2u64, 4, 8]
         .into_iter()
         .map(|members| {
-            let values: Vec<String> = std::iter::once("s".to_string())
-                .chain((1..members).map(|at| format!("m{at}")))
-                .collect();
+            let values: Vec<String> = (0..members).map(|at| format!("m{at}")).collect();
             (
                 members,
                 format!(
@@ -924,11 +946,34 @@ fn the_logical_rule_counters_follow_each_declared_parameter() {
             )
         })
         .collect();
+    // Each member, `m{at}`, is two bytes, and the probe's status is `m0`.
     judged_by_parameter(
         "closed-set-size",
-        &["rule_constraint_entries"],
+        &["rule_constraint_entries", "rule_declaration_bytes"],
         &closed,
-        |_, members| members,
+        |count, members| match count {
+            "rule_declaration_bytes" => 2 * members,
+            _ => members,
+        },
+    );
+
+    // One member of B bytes, which the probe's status is not: the closed set
+    // judges one element and mints one finding whatever B is.
+    let declared: Vec<(u64, String)> = [16u64, 128, 1024]
+        .into_iter()
+        .map(|bytes| {
+            let member = "z".repeat(usize::try_from(bytes).expect("a member's length"));
+            (
+                bytes,
+                format!("  r: {{ one_of: {{ status: {{ values: ['{member}'] }} }} }}\n"),
+            )
+        })
+        .collect();
+    judged_by_parameter(
+        "declaration-size",
+        &["rule_declaration_bytes"],
+        &declared,
+        |_, bytes| bytes,
     );
 
     let globs: Vec<(u64, String)> = [1usize, 2, 4]

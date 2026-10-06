@@ -1093,3 +1093,33 @@ fn each_constraint_judged_is_counted_once() {
         "the field's presence against `required`"
     );
 }
+
+/// **The bytes of the declaration a judgment reads are counted**: the
+/// selector values it compares and the constraint entries it combines, so
+/// two schemas differing only in how large a closed set's member is judge
+/// alike and pay apart, in proportion to the member's bytes.
+#[test]
+fn the_declaration_bytes_a_judgment_reads_are_counted() {
+    let closing = |member: &str| {
+        schema(&format!(
+            "version: 1\nrules:\n  r: {{ match: {{ frontmatter: {{ kind: x }} }}, one_of: {{ status: {{ values: ['{member}'] }} }} }}\n"
+        ))
+    };
+    let document = frontmatter(&[("kind", text("x")), ("status", text("other"))]);
+    let small = closing("a").judge("a.md", &document, CaseFold::Exact);
+    let large = closing(&"a".repeat(257)).judge("a.md", &document, CaseFold::Exact);
+    assert_eq!(small.findings(), large.findings());
+    // The selector's key and value, then the member.
+    assert_eq!(small.work().declaration_bytes, 4 + 1 + 1);
+    assert_eq!(large.work().declaration_bytes, 4 + 1 + 257);
+    let unselected = closing(&"a".repeat(257)).judge(
+        "a.md",
+        &frontmatter(&[("kind", text("y"))]),
+        CaseFold::Exact,
+    );
+    assert_eq!(
+        unselected.work().declaration_bytes,
+        4 + 1,
+        "a rule not selecting the document has its constraints read by no combination"
+    );
+}

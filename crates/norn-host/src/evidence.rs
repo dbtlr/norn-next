@@ -354,6 +354,9 @@ fn rule_work_since(later: RuleWork, earlier: RuleWork) -> RuleWork {
         constraint_entries: later
             .constraint_entries
             .saturating_sub(earlier.constraint_entries),
+        declaration_bytes: later
+            .declaration_bytes
+            .saturating_sub(earlier.declaration_bytes),
         constraints_judged: later
             .constraints_judged
             .saturating_sub(earlier.constraints_judged),
@@ -823,6 +826,7 @@ mod tests {
             selector_terms: 5,
             rules_selected: 2,
             constraint_entries: 7,
+            declaration_bytes: 17,
             constraints_judged: 4,
             pattern_characters: 11,
             placement_walks: 1,

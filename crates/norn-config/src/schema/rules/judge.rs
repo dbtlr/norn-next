@@ -85,8 +85,9 @@
 //! but the placement counts is a function of the document and the schema
 //! alone — never of another document — and grows with the parameters the
 //! schema declares: the rule count, the terms a selector holds, the
-//! constraints and closed-set members the selecting rules state, and the
-//! characters of the globs a path is matched against. The placement counts
+//! constraints and closed-set members the selecting rules state, the bytes
+//! of the selector values and constraint entries read, and the characters
+//! of the globs a path is matched against. The placement counts
 //! depend on the verdicts the parsed schema has already reached, which the
 //! next paragraph states.
 //!
@@ -273,6 +274,12 @@ pub struct RuleWork {
     /// Constraint entries the selecting rules' combination read: one per
     /// field required, forbidden or limited, and one per closed-set member.
     pub constraint_entries: u64,
+    /// Bytes of the declaration the judgment read, beside the globs whose
+    /// characters [`RuleWork::pattern_characters`] counts: each
+    /// `match.frontmatter` term evaluated, its key and every value it
+    /// matches, and each constraint entry combined, a required, forbidden or
+    /// limited field by its name and a closed-set member as written.
+    pub declaration_bytes: u64,
     /// Constraints judged: a field's presence against `required` or
     /// `forbidden`, one element against its type, a closed set or a limit, a
     /// value against its declared shape, a field's combined constraint found
@@ -300,6 +307,7 @@ impl RuleWork {
         selector_terms: 0,
         rules_selected: 0,
         constraint_entries: 0,
+        declaration_bytes: 0,
         constraints_judged: 0,
         pattern_characters: 0,
         placement_walks: 0,
@@ -309,12 +317,13 @@ impl RuleWork {
     };
 
     /// Every count by name, in declaration order.
-    pub fn counts(self) -> [(&'static str, u64); 10] {
+    pub fn counts(self) -> [(&'static str, u64); 11] {
         [
             ("rules_evaluated", self.rules_evaluated),
             ("selector_terms", self.selector_terms),
             ("rules_selected", self.rules_selected),
             ("constraint_entries", self.constraint_entries),
+            ("declaration_bytes", self.declaration_bytes),
             ("constraints_judged", self.constraints_judged),
             ("pattern_characters", self.pattern_characters),
             ("placement_walks", self.placement_walks),
@@ -332,6 +341,7 @@ impl RuleWork {
             selector_terms: self.selector_terms + other.selector_terms,
             rules_selected: self.rules_selected + other.rules_selected,
             constraint_entries: self.constraint_entries + other.constraint_entries,
+            declaration_bytes: self.declaration_bytes + other.declaration_bytes,
             constraints_judged: self.constraints_judged + other.constraints_judged,
             pattern_characters: self.pattern_characters + other.pattern_characters,
             placement_walks: self.placement_walks + other.placement_walks,
@@ -502,6 +512,7 @@ impl VaultSchema {
         if !selected.is_empty() {
             let combined = self.combined(&selected);
             work.constraint_entries += selected.iter().map(|rule| entries_of(rule)).sum::<u64>();
+            work.declaration_bytes += selected.iter().map(|rule| bytes_of(rule)).sum::<u64>();
             let conflicts = combined.field_conflicts();
             for (field, constraint) in combined.fields() {
                 let value = value_in(entries, field);
@@ -846,4 +857,20 @@ fn normal_form(value: &AuthoredValue) -> AuthoredValue {
 fn entries_of(rule: &Rule) -> u64 {
     let members: usize = rule.one_of.values().map(|set| set.values.len()).sum();
     (rule.required.len() + rule.forbidden.len() + rule.max_length.len() + members) as u64
+}
+
+/// The bytes of the constraint entries `rule` states: each field it
+/// requires, forbids or limits by its name, and each member of each closed
+/// set as written.
+fn bytes_of(rule: &Rule) -> u64 {
+    let fields = rule
+        .required
+        .keys()
+        .chain(rule.forbidden.keys())
+        .chain(rule.max_length.keys());
+    let members = rule.one_of.values().flat_map(|set| &set.values);
+    fields
+        .chain(members)
+        .map(|written| written.len() as u64)
+        .sum()
 }
