@@ -5470,6 +5470,10 @@ mod tests {
             "version: 1\nfields:\n  created:\n    type: instant\n",
             // A pattern naming no set.
             "version: 1\npaths:\n  ambiguity_ignore: [\"\"]\n",
+            // A declared folder, which the grammar no longer holds.
+            "version: 1\nfolders:\n  - path: journal\n",
+            // Schema rules that conflict on every document they select.
+            "version: 1\nrules:\n  all: { required: { status: } }\n  tasks: { match: { frontmatter: { type: task } }, forbidden: { status: } }\n",
         ] {
             fs::write(f.vault().join(".norn/schema.yaml"), declaration).unwrap();
             let refusal = host

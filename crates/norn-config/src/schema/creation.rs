@@ -18,7 +18,9 @@
 //! in a rule names a variable the rule declares. A frontmatter default's key
 //! is the field name it lands as: not empty, not the merge key `<<`, and
 //! holding no `{{`. The inbox's target carries `{{seq}}` and names no
-//! variable, since untyped capture is supplied nothing.
+//! variable, since untyped capture is supplied nothing. No template of a
+//! creation rule or the inbox reads a path capture: `{{path.NAME}}` reads what
+//! a schema rule's `match.path` bound, and a creation rule matches no path.
 //!
 //! **What a token's value may be is judged when the rule is filled.** A value
 //! filled into a target that is empty, holds `/`, `\` or `:`, or is `.` or
@@ -399,7 +401,7 @@ fn literal(segment: &[Piece<'_>]) -> Option<String> {
 /// One frontmatter default: a value written as is, or a string scalar, which
 /// is a template.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum DefaultValue {
+pub(crate) enum DefaultValue {
     /// Null, a boolean or a number.
     Plain(AuthoredValue),
     Text(Template),
@@ -409,7 +411,7 @@ enum DefaultValue {
 
 impl DefaultValue {
     /// The value as the schema writes it.
-    fn source(&self) -> AuthoredValue {
+    pub(crate) fn source(&self) -> AuthoredValue {
         match self {
             DefaultValue::Plain(value) => value.clone(),
             DefaultValue::Text(template) => AuthoredValue::string(template.as_str()),
@@ -420,7 +422,7 @@ impl DefaultValue {
 
     /// The value filled under `values`: a string as its template fills, and
     /// every other value as written.
-    fn fill(&self, values: &TemplateValues) -> Result<AuthoredValue, FillError> {
+    pub(crate) fn fill(&self, values: &TemplateValues) -> Result<AuthoredValue, FillError> {
         Ok(match self {
             DefaultValue::Plain(value) => value.clone(),
             DefaultValue::Text(template) => AuthoredValue::String(template.fill(values)?),
@@ -519,6 +521,12 @@ pub enum CreationProblem {
         /// The variable named.
         name: String,
     },
+    /// A template reads a path capture, which only a schema rule's default
+    /// or route reads.
+    PathCapture {
+        /// The capture read.
+        name: String,
+    },
 }
 
 impl fmt::Display for CreationProblem {
@@ -589,6 +597,10 @@ impl fmt::Display for CreationProblem {
             CreationProblem::InboxVariable { name } => write!(
                 formatter,
                 "names the variable `{name}`, and the inbox is supplied no variables"
+            ),
+            CreationProblem::PathCapture { name } => write!(
+                formatter,
+                "reads the path capture `{name}`, and only a schema rule's default or route reads a path capture"
             ),
         }
     }
@@ -741,7 +753,21 @@ fn read_target(at_path: &str, mapping: &Mapping) -> Result<Target, VaultSchemaEr
         .ok_or_else(|| section_error(at_path, "a target path", value))?;
     let template = Template::parse(source)
         .map_err(|error| refusal(at_path, CreationProblem::Template(error)))?;
+    reads_no_capture(at_path, &template)?;
     Target::read(template).map_err(|problem| refusal(at_path, problem))
+}
+
+/// Refuses a creation template that reads a path capture.
+fn reads_no_capture(at_path: &str, template: &Template) -> Result<(), VaultSchemaError> {
+    match template.path_captures().next() {
+        Some(name) => Err(refusal(
+            at_path,
+            CreationProblem::PathCapture {
+                name: name.to_string(),
+            },
+        )),
+        None => Ok(()),
+    }
 }
 
 /// `source` as a template that holds no `{{seq}}`, which stands only in a
@@ -752,6 +778,7 @@ fn templated(at_path: &str, source: &str) -> Result<Template, VaultSchemaError> 
     if template.seq_count() > 0 {
         return Err(refusal(at_path, CreationProblem::SeqOutsideTarget));
     }
+    reads_no_capture(at_path, &template)?;
     Ok(template)
 }
 

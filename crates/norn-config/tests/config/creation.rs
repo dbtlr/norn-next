@@ -609,6 +609,12 @@ fn a_template_outside_the_grammar_is_refused() {
                 name: "a b".to_string(),
             },
         ),
+        (
+            "{{path.a b}}",
+            TemplateError::CaptureName {
+                name: "a b".to_string(),
+            },
+        ),
         ("x {{date", TemplateError::Unclosed { at: 2 }),
     ] {
         let (at, problem, message) =

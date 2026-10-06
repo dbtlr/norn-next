@@ -24,6 +24,14 @@
 //! - Every other character matches itself. There is no escape and no character
 //!   class: a pattern is a name with holes in it, not a regular expression.
 //!
+//! A pattern read with [`Pattern::parse_capturing`] also reads a **named
+//! capture**: a whole segment spelled `<name>`. A capture matches exactly as a
+//! whole-segment `*` does — one segment, whatever it holds — and the segment
+//! it takes is bound to its name ([`Pattern::bind`]). [`Pattern::parse`] reads
+//! no capture, so `<name>` there is the literal segment it spells; which
+//! names a capture may carry, and where a capture may stand, is the reader's
+//! to judge.
+//!
 //! A pattern is anchored at both ends. `archive` matches the subject `archive`
 //! and nothing under it; `archive/*` matches exactly one level under it;
 //! `archive/**` matches `archive` and everything under it, because `**` covers
@@ -55,7 +63,11 @@
 //! - the ambiguity-ignore set, where the store's resolver reads a class;
 //! - the path part of a find, a count and a validate, where the store's read
 //!   builders run the glob inside a statement, under the order the snapshot
-//!   reads.
+//!   reads;
+//! - a vault schema rule's path selectors and allowed paths, which the
+//!   schema's selection is handed the fold for. A schema read judges a rule's
+//!   globs on every root at once, under the wider [`CaseFold::Ascii`], so a
+//!   refusal holds wherever the schema is pinned.
 //!
 //! A tag facet's patterns name tags, not paths, and no root's fold reaches
 //! them: the facet folds the pattern and the tag by the tag fold
@@ -96,6 +108,22 @@ enum Segment {
     AnyDepth,
     /// A segment matched against one subject segment, with `*` and `?` holes.
     Within(String),
+    /// A whole segment spelled `<name>`, read by [`Pattern::parse_capturing`]:
+    /// it matches one subject segment as a whole-segment `*` does, and binds
+    /// that segment to the name.
+    Capture(String),
+}
+
+impl Segment {
+    /// The segment's shape as the in-segment grammar reads it, where it
+    /// matches one subject segment: a capture's is `*`.
+    fn shape(&self) -> Option<&str> {
+        match self {
+            Segment::AnyDepth => None,
+            Segment::Within(shape) => Some(shape),
+            Segment::Capture(_) => Some("*"),
+        }
+    }
 }
 
 impl Pattern {
@@ -120,9 +148,87 @@ impl Pattern {
         })
     }
 
+    /// Reads `source` as a pattern in which a whole segment spelled
+    /// `<name>` is a named capture, or says why it is not one.
+    ///
+    /// Any text between the angle brackets is taken as the name, the empty
+    /// text included; a reader that admits captures judges the names.
+    pub fn parse_capturing(source: &str) -> Result<Self, PatternError> {
+        let mut pattern = Self::parse(source)?;
+        for segment in &mut pattern.segments {
+            if let Segment::Within(shape) = segment
+                && let Some(name) = shape
+                    .strip_prefix('<')
+                    .and_then(|rest| rest.strip_suffix('>'))
+            {
+                *segment = Segment::Capture(name.to_string());
+            }
+        }
+        Ok(pattern)
+    }
+
     /// The pattern as it was written.
     pub fn as_str(&self) -> &str {
         &self.source
+    }
+
+    /// The name of every capture the pattern holds, in the order written.
+    pub fn captures(&self) -> impl Iterator<Item = &str> {
+        self.segments.iter().filter_map(|segment| match segment {
+            Segment::Capture(name) => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The segments `subject` binds to this pattern's captures, and whether
+    /// that binding is the only one.
+    ///
+    /// **A match can bind a capture several ways**, because `**` takes any
+    /// run of segments: `**/<area>/**` matches `red/blue/a.md` with `area`
+    /// bound to `red` and with it bound to `blue`. Two bindings differ where
+    /// some capture takes a different segment text; two matches binding every
+    /// capture to the same text are one binding. The answer is
+    /// [`Binding::Unique`] where every match binds alike, and
+    /// [`Binding::Several`] with two bindings that differ otherwise; the walk
+    /// stops at the second binding it finds.
+    ///
+    /// **The cost is the matching bound.** The walk fills two tables — which
+    /// prefixes of the pattern match which prefixes of the subject, and which
+    /// suffixes match which suffixes — over one table of which pattern segment
+    /// matches which subject segment, then reads each capture's admissible
+    /// segments off them and traces at most two matches back through them. Each
+    /// table has one cell per pattern segment and subject segment, and the
+    /// segment table's cells cost the two segments' lengths together, so the
+    /// whole answer costs a constant times this pattern's length times the
+    /// subject's.
+    pub fn bind(&self, subject: &str, case: CaseFold) -> Binding {
+        let subject: Vec<&str> = subject.split('/').collect();
+        let tables = Tables::new(&self.segments, &subject, case);
+        if !tables.prefix(self.segments.len(), subject.len()) {
+            return Binding::Unmatched;
+        }
+        for (at, segment) in self.segments.iter().enumerate() {
+            if !matches!(segment, Segment::Capture(_)) {
+                continue;
+            }
+            let mut first: Option<usize> = None;
+            for taken in 0..subject.len() {
+                if !tables.capture_takes(at, taken) {
+                    continue;
+                }
+                match first {
+                    None => first = Some(taken),
+                    Some(held) if subject[held] != subject[taken] => {
+                        return Binding::Several(Box::new([
+                            tables.witness(&self.segments, &subject, at, held),
+                            tables.witness(&self.segments, &subject, at, taken),
+                        ]));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Binding::Unique(tables.trace(&self.segments, &subject))
     }
 
     /// Whether `subject` is in the set this pattern names.
@@ -141,10 +247,11 @@ impl Pattern {
             &self.segments,
             &subject,
             |segment| matches!(segment, Segment::AnyDepth),
-            |segment, subject| match segment {
-                // Taken by the predicate above, which is read first.
-                Segment::AnyDepth => false,
-                Segment::Within(shape) => matches_within(shape, subject, case),
+            |segment, subject| {
+                // `**` is taken by the predicate above, which is read first.
+                segment
+                    .shape()
+                    .is_some_and(|shape| matches_within(shape, subject, case))
             },
         )
     }
@@ -210,6 +317,382 @@ fn matches_within(shape: &str, subject: &str, case: CaseFold) -> bool {
         |character| *character == '*',
         |shape, subject| *shape == '?' || case.equal(*shape, *subject),
     )
+}
+
+/// What a capturing pattern binds in a subject: see [`Pattern::bind`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Binding {
+    /// The pattern does not match the subject.
+    Unmatched,
+    /// Every match binds each capture to the same segment text.
+    Unique(Captures),
+    /// Two matches bind some capture to different segment texts: the first
+    /// two bindings the walk found.
+    Several(Box<[Captures; 2]>),
+}
+
+/// The segment each capture of one match took, in the order the captures are
+/// written.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Captures(Vec<(String, String)>);
+
+impl Captures {
+    /// Each capture's name and the segment it took, in the order written.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(name, segment)| (name.as_str(), segment.as_str()))
+    }
+
+    /// The segment the capture `name` took, where the pattern holds it.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(held, _)| held == name)
+            .map(|(_, segment)| segment.as_str())
+    }
+}
+
+/// The three tables [`Pattern::bind`] reads: which pattern segment matches
+/// which subject segment, which pattern prefix matches which subject prefix,
+/// and which suffix matches which suffix. Each holds one cell per pattern
+/// position and subject position.
+struct Tables {
+    width: usize,
+    unit: Vec<bool>,
+    prefix: Vec<bool>,
+    suffix: Vec<bool>,
+}
+
+impl Tables {
+    fn new(pattern: &[Segment], subject: &[&str], case: CaseFold) -> Self {
+        let (rows, width) = (pattern.len() + 1, subject.len() + 1);
+        let mut unit = vec![false; rows * width];
+        for (at, segment) in pattern.iter().enumerate() {
+            if let Some(shape) = segment.shape() {
+                for (taken, name) in subject.iter().enumerate() {
+                    unit[at * width + taken] = matches_within(shape, name, case);
+                }
+            }
+        }
+        let any_depth = |at: usize| matches!(pattern[at], Segment::AnyDepth);
+        // `prefix[i][j]`: the first `i` pattern segments match the first `j`
+        // subject segments.
+        let mut prefix = vec![false; rows * width];
+        prefix[0] = true;
+        for i in 1..rows {
+            for j in 0..width {
+                prefix[i * width + j] = if any_depth(i - 1) {
+                    prefix[(i - 1) * width + j] || (j > 0 && prefix[i * width + j - 1])
+                } else {
+                    j > 0 && unit[(i - 1) * width + j - 1] && prefix[(i - 1) * width + j - 1]
+                };
+            }
+        }
+        // `suffix[i][j]`: the pattern from segment `i` matches the subject
+        // from segment `j`.
+        let mut suffix = vec![false; rows * width];
+        suffix[rows * width - 1] = true;
+        for i in (0..rows - 1).rev() {
+            for j in (0..width).rev() {
+                suffix[i * width + j] = if any_depth(i) {
+                    suffix[(i + 1) * width + j] || (j + 1 < width && suffix[i * width + j + 1])
+                } else {
+                    j + 1 < width && unit[i * width + j] && suffix[(i + 1) * width + j + 1]
+                };
+            }
+        }
+        Tables {
+            width,
+            unit,
+            prefix,
+            suffix,
+        }
+    }
+
+    fn prefix(&self, i: usize, j: usize) -> bool {
+        self.prefix[i * self.width + j]
+    }
+
+    fn suffix(&self, i: usize, j: usize) -> bool {
+        self.suffix[i * self.width + j]
+    }
+
+    /// Whether some whole match has the capture at pattern segment `at` take
+    /// subject segment `taken`.
+    fn capture_takes(&self, at: usize, taken: usize) -> bool {
+        self.prefix(at, taken)
+            && self.unit[at * self.width + taken]
+            && self.suffix(at + 1, taken + 1)
+    }
+
+    /// The binding of one whole match: any match, traced back from its end.
+    fn trace(&self, pattern: &[Segment], subject: &[&str]) -> Captures {
+        let mut bound = Vec::new();
+        self.trace_prefix(pattern, subject, pattern.len(), subject.len(), &mut bound);
+        Captures(ordered(pattern, bound))
+    }
+
+    /// The binding of one whole match in which the capture at pattern
+    /// segment `at` takes subject segment `taken`.
+    fn witness(&self, pattern: &[Segment], subject: &[&str], at: usize, taken: usize) -> Captures {
+        let mut bound = Vec::new();
+        self.trace_prefix(pattern, subject, at, taken, &mut bound);
+        bound.push((at, subject[taken].to_string()));
+        let (mut i, mut j) = (at + 1, taken + 1);
+        while (i, j) != (pattern.len(), subject.len()) {
+            if matches!(pattern[i], Segment::AnyDepth) {
+                if self.suffix(i + 1, j) {
+                    i += 1;
+                } else {
+                    j += 1;
+                }
+            } else {
+                if matches!(pattern[i], Segment::Capture(_)) {
+                    bound.push((i, subject[j].to_string()));
+                }
+                (i, j) = (i + 1, j + 1);
+            }
+        }
+        Captures(ordered(pattern, bound))
+    }
+
+    /// Walks a prefix match ending at `(i, j)` back to its start, recording
+    /// the segment each capture on the way took.
+    fn trace_prefix(
+        &self,
+        pattern: &[Segment],
+        subject: &[&str],
+        mut i: usize,
+        mut j: usize,
+        bound: &mut Vec<(usize, String)>,
+    ) {
+        while (i, j) != (0, 0) {
+            if matches!(pattern[i - 1], Segment::AnyDepth) {
+                if self.prefix(i - 1, j) {
+                    i -= 1;
+                } else {
+                    j -= 1;
+                }
+            } else {
+                if matches!(pattern[i - 1], Segment::Capture(_)) {
+                    bound.push((i - 1, subject[j - 1].to_string()));
+                }
+                (i, j) = (i - 1, j - 1);
+            }
+        }
+    }
+}
+
+/// Each capture's name beside the segment it took, in pattern order.
+fn ordered(pattern: &[Segment], mut bound: Vec<(usize, String)>) -> Vec<(String, String)> {
+    bound.sort_by_key(|(at, _)| *at);
+    bound
+        .into_iter()
+        .map(|(at, segment)| match &pattern[at] {
+            Segment::Capture(name) => (name.clone(), segment),
+            _ => unreachable!("only a capture is recorded"),
+        })
+        .collect()
+}
+
+/// Whether one subject is matched, for every set in `sets`, by some pattern of
+/// that set: whether the sets' unions share a member.
+///
+/// A subject here is what a vault path is: one or more segments, none of
+/// them empty. A capture matches as a whole-segment `*`. The answer is exact
+/// — it neither misses a shared subject nor reports one where there is none
+/// — under `case`, which says how literal letters compare, between the
+/// patterns and with the subject alike.
+///
+/// **The walk is the product of the patterns' automata.** Each set is read as
+/// one automaton whose states are the positions between its patterns'
+/// segments, and the walk explores tuples of one state per set, consuming one
+/// subject segment at a time; whether one segment can stand where several
+/// in-segment shapes each match it is the same product one level down, over
+/// characters, asked once per tuple of shapes. Write a set's weight as the
+/// sum over its patterns of each pattern's length in characters plus one.
+/// For patterns holding no empty segment, the segment-level walk visits at
+/// most twice the product of the sets' weights in states, and the
+/// character-level walks together visit at most as many, each state taking a
+/// step per set. The product is what a caller bounds before asking.
+pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
+    if sets.iter().any(|set| set.is_empty()) {
+        return false;
+    }
+    // Each set's positions, numbered across its patterns: a position is a
+    // pattern and the number of its segments already matched.
+    let positions: Vec<Vec<(usize, usize)>> = sets
+        .iter()
+        .map(|set| {
+            set.iter()
+                .enumerate()
+                .flat_map(|(at, pattern)| {
+                    (0..=pattern.segments.len()).map(move |matched| (at, matched))
+                })
+                .collect()
+        })
+        .collect();
+    let index_of = |set: usize, at: usize, matched: usize| {
+        positions[set]
+            .iter()
+            .position(|held| *held == (at, matched))
+            .expect("every position is numbered")
+    };
+    let segment = |set: usize, state: usize| {
+        let (at, matched) = positions[set][state];
+        sets[set][at].segments.get(matched)
+    };
+
+    let mut starts: Vec<Vec<usize>> = vec![Vec::new()];
+    for (set, patterns) in sets.iter().enumerate() {
+        starts = starts
+            .into_iter()
+            .flat_map(|start| {
+                (0..patterns.len()).map(move |at| {
+                    let mut next = start.clone();
+                    next.push(index_of(set, at, 0));
+                    next
+                })
+            })
+            .collect();
+    }
+
+    let mut seen: std::collections::HashSet<(Vec<usize>, bool)> = std::collections::HashSet::new();
+    let mut feasible: std::collections::HashMap<Vec<(usize, usize)>, bool> =
+        std::collections::HashMap::new();
+    let mut pending: Vec<(Vec<usize>, bool)> = Vec::new();
+    for start in starts {
+        if seen.insert((start.clone(), false)) {
+            pending.push((start, false));
+        }
+    }
+    while let Some((state, consumed)) = pending.pop() {
+        if consumed
+            && state
+                .iter()
+                .enumerate()
+                .all(|(set, held)| segment(set, *held).is_none())
+        {
+            return true;
+        }
+        let mut next_states = Vec::new();
+        // A `**` may match no segment: step past it without consuming one.
+        for (set, held) in state.iter().enumerate() {
+            if matches!(segment(set, *held), Some(Segment::AnyDepth)) {
+                let mut next = state.clone();
+                next[set] = held + 1;
+                next_states.push((next, consumed));
+            }
+        }
+        // Consume one segment: a `**` keeps its place, every other segment
+        // shape must match the segment taken, and a spent pattern takes none.
+        let mut next = state.clone();
+        let mut shapes = Vec::new();
+        let mut live = true;
+        for (set, held) in state.iter().enumerate() {
+            match segment(set, *held) {
+                None => {
+                    live = false;
+                    break;
+                }
+                Some(Segment::AnyDepth) => {}
+                Some(_) => {
+                    shapes.push((set, *held));
+                    next[set] = held + 1;
+                }
+            }
+        }
+        if live {
+            let fits = *feasible.entry(shapes.clone()).or_insert_with(|| {
+                let shapes: Vec<&str> = shapes
+                    .iter()
+                    .map(|(set, held)| {
+                        segment(*set, *held)
+                            .and_then(Segment::shape)
+                            .expect("a shape is recorded only where one stands")
+                    })
+                    .collect();
+                shapes_share_a_segment(&shapes, case)
+            });
+            if fits {
+                next_states.push((next, true));
+            }
+        }
+        for next in next_states {
+            if seen.insert(next.clone()) {
+                pending.push(next);
+            }
+        }
+    }
+    false
+}
+
+/// Whether one non-empty segment matches every shape in `shapes`, each read
+/// by the in-segment grammar: the product of their automata over characters.
+fn shapes_share_a_segment(shapes: &[&str], case: CaseFold) -> bool {
+    let shapes: Vec<Vec<char>> = shapes.iter().map(|shape| shape.chars().collect()).collect();
+    let start = vec![0usize; shapes.len()];
+    let mut seen = std::collections::HashSet::new();
+    seen.insert((start.clone(), false));
+    let mut pending = vec![(start, false)];
+    while let Some((state, consumed)) = pending.pop() {
+        if consumed
+            && state
+                .iter()
+                .zip(&shapes)
+                .all(|(held, shape)| *held == shape.len())
+        {
+            return true;
+        }
+        let mut next_states = Vec::new();
+        // A `*` may match no character.
+        for (at, held) in state.iter().enumerate() {
+            if shapes[at].get(*held) == Some(&'*') {
+                let mut next = state.clone();
+                next[at] = held + 1;
+                next_states.push((next, consumed));
+            }
+        }
+        // Consume one character: a `*` keeps its place, a `?` takes any, a
+        // literal takes one its case compares equal with, and a spent shape
+        // takes none. One character fits every literal at once only where the
+        // literals compare equal with one another, which the case keeps an
+        // equivalence.
+        let mut next = state.clone();
+        let mut literal: Option<char> = None;
+        let mut live = true;
+        for (at, held) in state.iter().enumerate() {
+            match shapes[at].get(*held) {
+                None => {
+                    live = false;
+                    break;
+                }
+                Some('*') => {}
+                Some('?') => next[at] = held + 1,
+                Some(character) => {
+                    match literal {
+                        Some(held_literal) if !case.equal(held_literal, *character) => {
+                            live = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => literal = Some(*character),
+                    }
+                    next[at] = held + 1;
+                }
+            }
+        }
+        if live {
+            next_states.push((next, true));
+        }
+        for next in next_states {
+            if seen.insert(next.clone()) {
+                pending.push(next);
+            }
+        }
+    }
+    false
 }
 
 /// How a pattern's literal characters compare with a subject's.
@@ -346,6 +829,164 @@ mod tests {
                 "{pattern} vs {subject}, folded"
             );
         }
+    }
+
+    fn capturing(pattern: &str) -> Pattern {
+        Pattern::parse_capturing(pattern).expect("a capturing pattern")
+    }
+
+    fn bound(pairs: &[(&str, &str)]) -> Captures {
+        Captures(
+            pairs
+                .iter()
+                .map(|(name, segment)| (name.to_string(), segment.to_string()))
+                .collect(),
+        )
+    }
+
+    /// **A capture is a whole segment `<name>`, read only where captures
+    /// are.** It matches one segment as a whole-segment `*` does; the plain
+    /// reading keeps `<name>` the literal segment it spells.
+    #[test]
+    fn a_capture_matches_one_segment_as_a_whole_segment_star_does() {
+        let pattern = capturing("projects/<project>/**");
+        assert_eq!(pattern.captures().collect::<Vec<_>>(), ["project"]);
+        for subject in ["projects/norn/a.md", "projects/norn", "projects/x/y/z.md"] {
+            assert!(pattern.matches(subject, CaseFold::Exact), "{subject}");
+            assert_eq!(
+                pattern.matches(subject, CaseFold::Exact),
+                matches("projects/*/**", subject, CaseFold::Exact),
+                "{subject}"
+            );
+        }
+        assert!(!pattern.matches("projects", CaseFold::Exact));
+        assert!(!pattern.matches("archive/norn/a.md", CaseFold::Exact));
+        // An empty segment is matched as `*` matches one; no document path
+        // holds one.
+        assert_eq!(
+            capturing("a/<x>/b").matches("a//b", CaseFold::Exact),
+            matches("a/*/b", "a//b", CaseFold::Exact)
+        );
+        let plain = Pattern::parse("projects/<project>/**").expect("a pattern");
+        assert_eq!(plain.captures().count(), 0);
+        assert!(plain.matches("projects/<project>/a.md", CaseFold::Exact));
+        assert!(!plain.matches("projects/norn/a.md", CaseFold::Exact));
+        // Only a whole segment captures.
+        assert_eq!(capturing("p-<id>.md").captures().count(), 0);
+    }
+
+    /// **A binding every match agrees on is unique; one two matches differ
+    /// on is several, and both are named.**
+    #[test]
+    fn a_capture_binds_uniquely_or_names_two_bindings() {
+        assert_eq!(
+            capturing("projects/<project>/**").bind("projects/norn/tasks/a.md", CaseFold::Exact),
+            Binding::Unique(bound(&[("project", "norn")]))
+        );
+        assert_eq!(
+            capturing("<area>/<file>").bind("notes/a.md", CaseFold::Exact),
+            Binding::Unique(bound(&[("area", "notes"), ("file", "a.md")]))
+        );
+        assert_eq!(
+            capturing("**/<area>/**").bind("red/blue/a.md", CaseFold::Exact),
+            Binding::Several(Box::new([
+                bound(&[("area", "red")]),
+                bound(&[("area", "blue")]),
+            ]))
+        );
+        // Two matches binding one text are one binding.
+        assert_eq!(
+            capturing("**/<area>/**/x.md").bind("same/same/x.md", CaseFold::Exact),
+            Binding::Unique(bound(&[("area", "same")]))
+        );
+        // Each of several bindings is a whole match: every capture bound.
+        let Binding::Several(several) =
+            capturing("<root>/**/<leaf>/**").bind("r/a/b/c.md", CaseFold::Exact)
+        else {
+            panic!("several bindings");
+        };
+        for captures in several.iter() {
+            assert_eq!(captures.get("root"), Some("r"));
+            assert!(captures.get("leaf").is_some());
+        }
+        assert_ne!(several[0], several[1]);
+        assert_eq!(
+            capturing("projects/<p>/**").bind("archive/a.md", CaseFold::Exact),
+            Binding::Unmatched
+        );
+        assert_eq!(
+            capturing("Projects/<p>").bind("projects/norn", CaseFold::Ascii),
+            Binding::Unique(bound(&[("p", "norn")]))
+        );
+    }
+
+    /// **Binding keeps the matching bound.** Captures between runs of `**`
+    /// against a long subject are decided at once, stopping at the second
+    /// binding.
+    #[test]
+    fn binding_keeps_the_matching_bound() {
+        let pattern = capturing("**/<a>/<last>/**");
+        let subject = vec!["s"; 2_000].join("/");
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            pattern.bind(&subject, CaseFold::Exact),
+            Binding::Unique(_)
+        ));
+        let varied: Vec<String> = (0..2_000).map(|at| format!("s{at}")).collect();
+        assert!(matches!(
+            pattern.bind(&varied.join("/"), CaseFold::Exact),
+            Binding::Several(_)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    fn share(sets: &[&[&str]], case: CaseFold) -> bool {
+        let sets: Vec<Vec<Pattern>> = sets
+            .iter()
+            .map(|set| {
+                set.iter()
+                    .map(|glob| Pattern::parse(glob).expect("a pattern"))
+                    .collect()
+            })
+            .collect();
+        let borrowed: Vec<&[Pattern]> = sets.iter().map(Vec::as_slice).collect();
+        sets_share_a_subject(&borrowed, case)
+    }
+
+    /// **Sets share a subject exactly where some path every set admits
+    /// exists**: over `**`, `*`, `?` and literals, alone and together, with
+    /// each set read as the union of its patterns.
+    #[test]
+    fn sets_share_a_subject_exactly_where_one_path_meets_them_all() {
+        let cases: &[(&[&[&str]], bool)] = &[
+            (&[&["a/*"], &["*/b"]], true),
+            (&[&["a/**"], &["b/**"]], false),
+            (&[&["**"], &["x"]], true),
+            (&[&["**"]], true),
+            (&[&["**/x/**"], &["**/y/**"]], true),
+            (&[&["a/b"], &["a/b/c"]], false),
+            (&[&["?"], &["ab"]], false),
+            (&[&["?b"], &["a?"]], true),
+            (&[&["a*"], &["*z"]], true),
+            (&[&["a*"], &["*z"], &["?"]], false),
+            (&[&["*.md"], &["notes"]], false),
+            (&[&["projects/*/tasks/**"], &["projects/norn/**"]], true),
+            (&[&["projects/*/tasks/**"], &["archive/**"]], false),
+            (&[&["a/**", "b/**"], &["b/x"]], true),
+            (&[&["a/**", "b/**"], &["c/x", "d/**"]], false),
+            (&[&["a"], &[]], false),
+            // A subject's segments are not empty, so `*` alone needs one
+            // character and `**` one segment where a path stands.
+            (&[&["*"], &["**"]], true),
+            (&[&["x/**"], &["x"]], true),
+            (&[&["x/*/y"], &["x/y"]], false),
+        ];
+        for (sets, shared) in cases {
+            assert_eq!(share(sets, CaseFold::Exact), *shared, "{sets:?}");
+        }
+        assert!(!share(&[&["A"], &["a"]], CaseFold::Exact));
+        assert!(share(&[&["A"], &["a"]], CaseFold::Ascii));
+        assert!(!share(&[&["É"], &["é"]], CaseFold::Ascii));
     }
 
     /// **The fold keeps the matching bound.** A pattern whose stars would each

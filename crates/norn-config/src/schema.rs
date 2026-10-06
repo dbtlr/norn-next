@@ -3,9 +3,10 @@
 //! A vault schema is a YAML file the author writes and norn never edits. Until
 //! this module existed it was bytes: read, hashed, pinned, and opaque to every
 //! consumer. [`VaultSchema`] is the typed reading of those bytes — the declared
-//! fields with their types, the declared tag facet, the path rules, and the
-//! creation rules and inbox that say how a new document is made — and it is
-//! what makes a declaration something
+//! fields with their types and shapes, the declared tag facet, the path rules,
+//! the schema rules that constrain the documents they select, and the creation
+//! rules and inbox that say how a new document is made — and it is what makes
+//! a declaration something
 //! derivation and the read surface can act on.
 //!
 //! **The model is a pure function of the bytes, and its identity is the schema
@@ -26,12 +27,27 @@
 //!     type: date
 //!   status:
 //!     type: text
+//!     shape: single
 //! tags:
 //!   declared: [project, area]
 //!   patterns: ["person/**"]
 //!   undeclared: report
 //! paths:
 //!   ambiguity_ignore: ["archive/**"]
+//! rules:
+//!   task:
+//!     description: A tracked task
+//!     severity: error
+//!     match:
+//!       frontmatter: { type: [task, chore] }
+//!       path: "projects/<project>/**"
+//!     required:
+//!       status: { default: todo }
+//!     one_of:
+//!       status: { values: [todo, doing, done], synonyms: { complete: done } }
+//!     allowed_paths:
+//!       paths: ["projects/*/tasks/**"]
+//!       route: "projects/{{path.project}}/tasks/"
 //! creatable:
 //!   task:
 //!     target: "tasks/{{var.project}}-{{seq}}.md"
@@ -43,6 +59,12 @@
 //! inbox:
 //!   target: "inbox/{{date}}-{{seq}}.md"
 //! ```
+//!
+//! **A field declaration is a type and a shape, and nothing else.** `type` is
+//! one of the five [`FieldType`]s, text where absent; `shape` is `single` or
+//! `list`, and either is admitted where it is absent ([`Shape`]). Whether a
+//! field is required, which values it holds and where a document may stand
+//! are constraints a schema rule states — see [`rules`].
 //!
 //! **A creation rule is a template, and so is the inbox.** `target`, `body`
 //! and every string scalar in `frontmatter_defaults` are written in the
@@ -108,9 +130,12 @@
 //! applies them wherever a target's class is read, and `describe` reports the
 //! same set as path rules. `describe` reports each creation rule and the
 //! inbox as facets, templates as their source text; no derivation reads
-//! either.
+//! either. The schema rules and the fields' shapes are read at schema read
+//! alone, where the rules judge themselves; what consumes them beyond that is
+//! stated in [`rules`].
 
 pub mod creation;
+pub mod rules;
 pub mod template;
 pub mod typed;
 
@@ -121,7 +146,12 @@ use serde_yaml::Value;
 
 pub use creation::{CreationProblem, CreationRule, Inbox, SeqSlot, Target};
 use norn_wire::fold_tag;
-pub use norn_wire::{CaseFold, Pattern, PatternError};
+pub use norn_wire::{Binding, Captures, CaseFold, Pattern, PatternError};
+pub use rules::{
+    AllowedPaths, ClosedSet, CombinedConstraint, DefaultCandidate, DefaultsConflict,
+    ElementProblem, FieldConstraint, ForbiddenFix, OneOfIntersection, PLACEMENT_CEILING, Route,
+    Rule, RuleDefault, RuleDefaultsRefusal, RuleProblem, RulesConflict, Selector,
+};
 pub use template::{
     FillError, LocalTimestamp, NotALocalTimestamp, Template, TemplateError, TemplateValues,
     UnsafeValue,
@@ -136,10 +166,18 @@ pub use typed::{Comparison, ComparisonSignal, DateValue, FieldType, Offset, Type
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// The sections a schema declares, which is every key its root holds.
-const ROOT_KEYS: &[&str] = &["version", "fields", "tags", "paths", "creatable", "inbox"];
+const ROOT_KEYS: &[&str] = &[
+    "version",
+    "fields",
+    "tags",
+    "paths",
+    "rules",
+    "creatable",
+    "inbox",
+];
 
 /// The keys one field's declaration holds.
-const FIELD_KEYS: &[&str] = &["type"];
+const FIELD_KEYS: &[&str] = &["type", "shape"];
 
 /// The keys the tag facet holds.
 const TAG_KEYS: &[&str] = &["declared", "patterns", "undeclared"];
@@ -153,6 +191,7 @@ pub struct VaultSchema {
     fields: BTreeMap<String, DeclaredField>,
     tags: TagFacet,
     ambiguity_ignore: Vec<Pattern>,
+    rules: BTreeMap<String, Rule>,
     creation_rules: BTreeMap<String, CreationRule>,
     inbox: Option<Inbox>,
 }
@@ -180,13 +219,18 @@ impl VaultSchema {
         };
         read_version(&document)?;
         known_keys_only("", &document, ROOT_KEYS)?;
-        Ok(VaultSchema {
-            fields: read_fields(&document)?,
+        let fields = read_fields(&document)?;
+        let rules = rules::read_rules(&document, &fields)?;
+        let schema = VaultSchema {
+            fields,
             tags: read_tags(&document)?,
             ambiguity_ignore: read_ambiguity_ignore(&document)?,
+            rules,
             creation_rules: creation::read_creatable(&document)?,
             inbox: creation::read_inbox(&document)?,
-        })
+        };
+        rules::check_rules(&schema)?;
+        Ok(schema)
     }
 
     /// The declared fields, in key order.
@@ -315,16 +359,65 @@ impl VaultSchema {
     }
 }
 
-/// One declared frontmatter field.
+/// One declared frontmatter field: its type and, where declared, its shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeclaredField {
     kind: FieldType,
+    shape: Option<Shape>,
 }
 
 impl DeclaredField {
-    /// The field's declared type.
+    /// The field's declared type. Under [`Shape::List`] it is each element's.
     pub fn kind(&self) -> FieldType {
         self.kind
+    }
+
+    /// The field's declared shape, where the schema declares one; a field
+    /// declaring none admits either.
+    ///
+    /// Read at schema read, where a rule's default and selectors are judged
+    /// against it, and by selection: a selector on a key declared
+    /// [`Shape::Single`] reads a scalar value alone. Its other consumers are
+    /// not built: the finding a value of the wrong shape mints (NORN-358),
+    /// and `describe`, which reports it with the field's declaration
+    /// (NORN-357).
+    pub fn shape(&self) -> Option<Shape> {
+        self.shape
+    }
+}
+
+/// Whether a field holds one value or a list of them.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Shape {
+    /// One value, never a list.
+    Single,
+    /// A list of values, each read as the field's declared type.
+    List,
+}
+
+impl Shape {
+    /// Every shape the grammar holds, in declaration order.
+    pub const ALL: [Shape; 2] = [Shape::Single, Shape::List];
+
+    /// The shape as the schema spells it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Shape::Single => "single",
+            Shape::List => "list",
+        }
+    }
+
+    /// The shape a schema's spelling names, or nothing.
+    pub fn named(spelling: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|shape| shape.as_str() == spelling)
+    }
+}
+
+impl fmt::Display for Shape {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -457,6 +550,94 @@ pub enum VaultSchemaError {
         /// What is wrong there.
         problem: CreationProblem,
     },
+    /// A glob the schema states breaks a rule placed on its segments.
+    Glob {
+        /// The dotted path to the glob, `rules.task.match.path`.
+        at: String,
+        /// The glob, as written.
+        glob: String,
+        /// What is wrong with it.
+        problem: GlobProblem,
+    },
+    /// A schema rule states something its own constraints, the field
+    /// declarations or the template grammar refuse.
+    Rule {
+        /// The dotted path to the offending node,
+        /// `rules.task.required.status.default`.
+        at: String,
+        /// What is wrong there.
+        problem: RuleProblem,
+    },
+    /// The allowed paths of a rule and of every rule that may select a
+    /// document beside it weigh more than [`PLACEMENT_CEILING`]: the bound on
+    /// the walk that decides whether those rules leave a document any path.
+    PlacementCeiling {
+        /// The rule whose neighbourhood is weighed.
+        rule: String,
+        /// That rule and every rule with allowed paths that may select a
+        /// document beside it, in name order.
+        rules: Vec<String>,
+        /// What they weigh: the product of each rule's allowed-path weight.
+        weight: u64,
+    },
+    /// Rules that select every document any of them selects together state
+    /// constraints no document can meet together.
+    RulesConflict {
+        /// The conflict, naming every contributing rule.
+        conflict: RulesConflict,
+    },
+}
+
+/// What is wrong with a glob the schema states.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GlobProblem {
+    /// It holds `<` or `>`, which spell a path capture, and only a rule's
+    /// `match.path` binds one.
+    CaptureOutsideMatch,
+    /// A `<NAME>` capture whose name is not an identifier.
+    CaptureName {
+        /// The name, as written between the brackets.
+        name: String,
+    },
+    /// A `<` or `>` that does not spell a whole segment: a capture binds a
+    /// whole path segment or nothing.
+    CaptureNotWholeSegment {
+        /// The segment, as written.
+        segment: String,
+    },
+    /// One capture name written twice.
+    CaptureTwice {
+        /// The name written twice.
+        name: String,
+    },
+    /// An empty segment — a leading, trailing or doubled `/` — which no
+    /// document path holds.
+    EmptySegment,
+}
+
+impl fmt::Display for GlobProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const IDENTIFIER: &str = "an ASCII letter or `_` followed by letters, digits, `_` or `-`";
+        match self {
+            GlobProblem::CaptureOutsideMatch => formatter.write_str(
+                "holds `<` or `>`, which spell a path capture, and only a rule's `match.path` binds one",
+            ),
+            GlobProblem::CaptureName { name } => write!(
+                formatter,
+                "captures `<{name}>`, and a capture's name is {IDENTIFIER}"
+            ),
+            GlobProblem::CaptureNotWholeSegment { segment } => write!(
+                formatter,
+                "holds the segment `{segment}`, and a capture `<NAME>` is a whole segment"
+            ),
+            GlobProblem::CaptureTwice { name } => {
+                write!(formatter, "captures `<{name}>` twice")
+            }
+            GlobProblem::EmptySegment => formatter.write_str(
+                "holds an empty segment, which no document path holds",
+            ),
+        }
+    }
 }
 
 impl fmt::Display for VaultSchemaError {
@@ -494,6 +675,23 @@ impl fmt::Display for VaultSchemaError {
                 known.join(", ")
             ),
             VaultSchemaError::Creation { at, problem } => write!(formatter, "`{at}` {problem}"),
+            VaultSchemaError::Glob { at, glob, problem } => {
+                write!(formatter, "`{at}` holds the glob `{glob}`, which {problem}")
+            }
+            VaultSchemaError::Rule { at, problem } => write!(formatter, "`{at}` {problem}"),
+            VaultSchemaError::PlacementCeiling {
+                rule,
+                rules,
+                weight,
+            } => write!(
+                formatter,
+                "the allowed paths of the rule `{rule}` and of every rule that may select a document beside it ({}) weigh {weight}, past the ceiling of {PLACEMENT_CEILING}",
+                rules::named(rules)
+            ),
+            VaultSchemaError::RulesConflict { conflict } => write!(
+                formatter,
+                "rules that select every document any of them selects conflict: {conflict}"
+            ),
         }
     }
 }
@@ -650,7 +848,13 @@ fn read_field(key: &str, declaration: &Value) -> Result<DeclaredField, VaultSche
             section_error(&format!("fields.{key}.type"), "a declared type", value)
         })?,
     };
-    Ok(DeclaredField { kind })
+    let shape = match at(declaration, "shape") {
+        None => None,
+        Some(value) => Some(value.as_str().and_then(Shape::named).ok_or_else(|| {
+            section_error(&format!("fields.{key}.shape"), "`single` or `list`", value)
+        })?),
+    };
+    Ok(DeclaredField { kind, shape })
 }
 
 fn read_tags(document: &serde_yaml::Mapping) -> Result<TagFacet, VaultSchemaError> {
@@ -753,6 +957,13 @@ fn read_patterns(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSche
             let source = item
                 .as_str()
                 .ok_or_else(|| section_error(at_path, "a sequence of patterns", item))?;
+            if source.contains(['<', '>']) {
+                return Err(VaultSchemaError::Glob {
+                    at: at_path.to_string(),
+                    glob: source.to_string(),
+                    problem: GlobProblem::CaptureOutsideMatch,
+                });
+            }
             Pattern::parse(source).map_err(|error| VaultSchemaError::Section {
                 at: at_path.to_string(),
                 wanted: "a pattern",

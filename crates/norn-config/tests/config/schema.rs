@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 
 use norn_config::schema::typed::{Comparison, ComparisonSignal, Offset};
 use norn_config::schema::{
-    CaseFold, FieldType, Pattern, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
+    CaseFold, FieldType, Pattern, Shape, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
 };
 
 /// A schema declaring one of everything the grammar has.
@@ -24,12 +24,19 @@ fields:
     type: boolean
   status:
     type: text
+    shape: single
 tags:
   declared: [area, project]
   patterns: [\"person/**\"]
   undeclared: report
 paths:
   ambiguity_ignore: [\"archive/**\", \"attachments/*\"]
+rules:
+  draft:
+    match:
+      frontmatter: { draft: true }
+    required:
+      title:
 ";
 
 #[test]
@@ -74,6 +81,14 @@ fn a_whole_schema_reads_every_section_it_declares() {
             .collect::<Vec<_>>(),
         vec!["archive/**", "attachments/*"]
     );
+    assert_eq!(
+        schema.field("status").and_then(|field| field.shape()),
+        Some(Shape::Single)
+    );
+    assert_eq!(
+        schema.rules().map(|rule| rule.name()).collect::<Vec<_>>(),
+        ["draft"]
+    );
 }
 
 #[test]
@@ -83,6 +98,7 @@ fn a_schema_that_declares_only_its_version_judges_no_document() {
     assert_eq!(schema.fields().count(), 0);
     assert_eq!(schema.tags().declared().count(), 0);
     assert!(schema.ambiguity_ignore().is_empty());
+    assert_eq!(schema.rules().count(), 0);
     assert!(!schema.rederives_documents());
 }
 
