@@ -1414,3 +1414,63 @@ rules:
         ]
     );
 }
+
+// ---- what a selector value compares by ----
+
+/// The rules `a` to `l`, each selecting its own letter of `kind` and
+/// allowing every path, under `kind` declared `declaration`. Any twelve of
+/// them together weigh `3^12`, past the ceiling; eleven weigh under it.
+fn twelve_kind_rules(declaration: &str) -> String {
+    let mut bytes = format!("version: 1\nfields:\n  kind: {declaration}\nrules:\n");
+    for letter in 'a'..='l' {
+        bytes.push_str(&format!(
+            "  {letter}: {{ match: {{ frontmatter: {{ kind: {letter} }} }}, allowed_paths: {{ paths: ['**'] }} }}\n"
+        ));
+    }
+    bytes
+}
+
+/// **A list under a key declared single matches no selector on it**: the
+/// value does not read as the key's declared shape, so it has nothing to
+/// compare, as a value that fails its declared type has no typed value.
+#[test]
+fn a_list_or_map_under_a_single_shaped_key_selects_no_rule() {
+    let schema = VaultSchema::parse(twelve_kind_rules("{ type: text, shape: single }").as_bytes())
+        .expect("twelve rules on a single-shaped key");
+    let listed = AuthoredValue::list([text("a"), text("b")]);
+    assert!(selected(&schema, "a.md", &[("kind", listed)]).is_empty());
+    let one = AuthoredValue::list([text("a")]);
+    assert!(selected(&schema, "a.md", &[("kind", one)]).is_empty());
+    let mapped = AuthoredValue::map([("a".to_string(), text("a"))]).expect("a map");
+    assert!(selected(&schema, "a.md", &[("kind", mapped)]).is_empty());
+    assert_eq!(selected(&schema, "a.md", &[("kind", text("a"))]), ["a"]);
+}
+
+/// **A list under a key with no shape declared matches as find's equality
+/// does**: every rule whose value is one of its elements selects it.
+#[test]
+fn a_list_under_an_unshaped_key_selects_every_rule_whose_value_it_holds() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  kind: { type: text }\nrules:\n  a: { match: { frontmatter: { kind: a } } }\n  b: { match: { frontmatter: { kind: b } } }\n  c: { match: { frontmatter: { kind: c } } }\n",
+    )
+    .expect("three rules on an unshaped key");
+    let listed = AuthoredValue::list([text("a"), text("c")]);
+    assert_eq!(selected(&schema, "a.md", &[("kind", listed)]), ["a", "c"]);
+}
+
+/// **Disjoint values on a single-shaped key are provably disjoint for the
+/// ceiling, and on an unshaped key they earn no credit**: twelve rules
+/// allowing `**` load where `kind` is single, and the same rules refuse at
+/// the ceiling where `kind` declares no shape.
+#[test]
+fn twelve_disjoint_rules_load_only_on_a_single_shaped_key() {
+    let schema = VaultSchema::parse(twelve_kind_rules("{ type: text, shape: single }").as_bytes())
+        .expect("twelve disjoint rules on a single-shaped key");
+    assert_eq!(schema.rules().count(), 12);
+    let error = refused(twelve_kind_rules("{ type: text }").as_bytes());
+    assert!(
+        matches!(&error, VaultSchemaError::PlacementCeiling { rule, rules, weight }
+            if rule == "a" && rules.len() == 12 && *weight == 3u64.pow(12)),
+        "{error}"
+    );
+}
