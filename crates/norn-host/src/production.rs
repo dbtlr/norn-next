@@ -28,7 +28,9 @@ use crate::derivation::{
     Cause, Decided, Declared, Plan, PlannedFinding, Quarantine, SIDES, UNREAD_BLOCK_KINDS,
     WALKED_KINDS, document_path, plan_document, plan_quarantine,
 };
-use crate::evidence::{JobEvidence, count_changeset, count_document_derived, count_increment_work};
+use crate::evidence::{
+    JobEvidence, count_changeset, count_document_derived, count_increment_work, count_rule_work,
+};
 use crate::planner::control::{SchemaPlace, SchemaSite};
 use crate::reload::{EngineConfigReceiver, ReloadCandidate};
 use crate::{
@@ -3762,7 +3764,9 @@ impl<'s> Pending<'s> {
     ///
     /// The changeset entry and the finding are each queued here when the plan
     /// carries one. **Every vault document's bytes reach derivation here**, so
-    /// this is where the job's account counts a document derived.
+    /// this is where the job's account counts a document derived, and what
+    /// judging it against the vault schema's field declarations and rules
+    /// paid.
     fn rederive(
         &mut self,
         path: &Path,
@@ -3775,7 +3779,7 @@ impl<'s> Pending<'s> {
         let Plan {
             change,
             findings,
-            rule_work: _,
+            rule_work,
         } = plan_document(
             path,
             spelling,
@@ -3785,6 +3789,7 @@ impl<'s> Pending<'s> {
             &self.declared.model,
             self.store.path_order().glob_case(),
         );
+        count_rule_work(rule_work);
         if let Some(change) = change {
             self.push(change);
         }

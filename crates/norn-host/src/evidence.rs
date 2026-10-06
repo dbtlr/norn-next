@@ -56,9 +56,10 @@
 //! the two would make a job's reading move when a client read a vault.
 
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use norn_config::schema::RuleWork;
 use norn_fs::reads::ReadWindow;
 use norn_store::{DerivationCounters, IncrementOutcome, SnapshotCounters};
 
@@ -96,6 +97,9 @@ pub struct JobEvidence {
     apply_statements: AtomicU64,
     apply_vm_steps: AtomicU64,
     apply_full_scan_steps: AtomicU64,
+    /// What the jobs' rule judgments paid, summed: one total of several
+    /// counts, folded whole under its lock when a job ends.
+    rule_work: Mutex<RuleWork>,
     /// The file each counted read of every job read, in the order the jobs
     /// ended, where a [`norn_fs::reads::FileRecording`] was armed while they
     /// ran: nothing is kept while none is.
@@ -243,6 +247,18 @@ pub struct EvidenceReading {
     pub apply_vm_steps: u64,
     /// Steps those statements took walking a table or an index end to end.
     pub apply_full_scan_steps: u64,
+    /// What judging the documents the jobs derived against the vault
+    /// schema's field declarations and rules paid, as the judge tallies it
+    /// ([`RuleWork`]): the logical counts of rule work, which no statement
+    /// counter sees because judgment runs in this process and reads no
+    /// database.
+    ///
+    /// **Tallied where a document's bytes reach derivation**, beside
+    /// [`EvidenceReading::documents_derived`], and folded with it when the job
+    /// ends. A judgment reads the one document and the schema, so every count
+    /// here is the sum over the documents derived of what each one's
+    /// judgment paid.
+    pub rule_work: RuleWork,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -320,7 +336,40 @@ impl EvidenceReading {
             apply_full_scan_steps: self
                 .apply_full_scan_steps
                 .saturating_sub(earlier.apply_full_scan_steps),
+            rule_work: rule_work_since(self.rule_work, earlier.rule_work),
         }
+    }
+}
+
+/// What `later`, a total of rule work, holds beyond `earlier`, count by
+/// count, flooring at zero as [`EvidenceReading::since`] does.
+#[cfg(any(feature = "induced-failure", test))]
+fn rule_work_since(later: RuleWork, earlier: RuleWork) -> RuleWork {
+    RuleWork {
+        rules_evaluated: later
+            .rules_evaluated
+            .saturating_sub(earlier.rules_evaluated),
+        selector_terms: later.selector_terms.saturating_sub(earlier.selector_terms),
+        rules_selected: later.rules_selected.saturating_sub(earlier.rules_selected),
+        constraint_entries: later
+            .constraint_entries
+            .saturating_sub(earlier.constraint_entries),
+        constraints_judged: later
+            .constraints_judged
+            .saturating_sub(earlier.constraints_judged),
+        pattern_characters: later
+            .pattern_characters
+            .saturating_sub(earlier.pattern_characters),
+        placement_walks: later
+            .placement_walks
+            .saturating_sub(earlier.placement_walks),
+        placement_weight: later
+            .placement_weight
+            .saturating_sub(earlier.placement_weight),
+        placement_verdicts_reused: later
+            .placement_verdicts_reused
+            .saturating_sub(earlier.placement_verdicts_reused),
+        findings: later.findings.saturating_sub(earlier.findings),
     }
 }
 
@@ -373,6 +422,10 @@ impl JobEvidence {
             apply_statements: get(&self.apply_statements),
             apply_vm_steps: get(&self.apply_vm_steps),
             apply_full_scan_steps: get(&self.apply_full_scan_steps),
+            rule_work: *self
+                .rule_work
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
         }
     }
 
@@ -465,6 +518,15 @@ impl JobEvidence {
 
         self.documents_derived
             .fetch_add(take_documents_derived(), Ordering::Relaxed);
+        // Read through a poison for the reason the file log is: this runs
+        // while a failed job unwinds.
+        let judged = take_rule_work();
+        let mut rule_work = self
+            .rule_work
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *rule_work = rule_work.plus(judged);
+        drop(rule_work);
 
         let changesets = take_changeset_tally();
         self.changesets_applied
@@ -499,6 +561,7 @@ impl JobEvidence {
         let window = ReadWindow::open();
         let _ = take_changeset_tally();
         let _ = take_documents_derived();
+        let _ = take_rule_work();
         Attribution {
             account: Arc::clone(self),
             window: Some(window),
@@ -659,6 +722,24 @@ fn take_documents_derived() -> u64 {
     DOCUMENTS_DERIVED.with(|cell| cell.replace(0))
 }
 
+thread_local! {
+    static RULE_WORK: Cell<RuleWork> = const { Cell::new(RuleWork::NONE) };
+}
+
+/// Record what judging one document against the vault schema's field
+/// declarations and rules paid.
+///
+/// Tallied on the thread that derived the document, beside
+/// [`count_document_derived`], and folded into the account by the job that
+/// thread runs, as a changeset is.
+pub(crate) fn count_rule_work(work: RuleWork) {
+    RULE_WORK.with(|cell| cell.set(cell.get().plus(work)));
+}
+
+fn take_rule_work() -> RuleWork {
+    RULE_WORK.with(|cell| cell.replace(RuleWork::NONE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +810,39 @@ mod tests {
         count_document_derived();
         drop(evidence.attributing());
         assert_eq!(evidence.read().documents_derived, 2);
+    }
+
+    /// **Rule work a job judged reaches the account when the job ends**,
+    /// count by count, and work judged between two jobs belongs to neither:
+    /// the logical counts no statement counter sees are a job's account like
+    /// its documents derived.
+    #[test]
+    fn the_rule_work_a_job_judged_reaches_the_account_when_the_job_ends() {
+        let judged = RuleWork {
+            rules_evaluated: 3,
+            selector_terms: 5,
+            rules_selected: 2,
+            constraint_entries: 7,
+            constraints_judged: 4,
+            pattern_characters: 11,
+            placement_walks: 1,
+            placement_weight: 13,
+            placement_verdicts_reused: 1,
+            findings: 2,
+        };
+        let evidence = Arc::new(JobEvidence::default());
+        count_rule_work(judged);
+        {
+            let _job = evidence.attributing();
+            count_rule_work(judged);
+            count_rule_work(judged);
+            assert_eq!(evidence.read().rule_work, RuleWork::NONE);
+        }
+        count_rule_work(judged);
+        let before = evidence.read();
+        drop(evidence.attributing());
+        assert_eq!(before.rule_work, judged.plus(judged));
+        assert_eq!(evidence.read().since(before).rule_work, RuleWork::NONE);
     }
 
     #[test]

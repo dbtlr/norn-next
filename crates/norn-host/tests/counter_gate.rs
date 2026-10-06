@@ -7,7 +7,7 @@
 //! production attachment that walked it, and the derived store that attachment
 //! left behind.
 //!
-//! Five bars, all counts:
+//! Six bars, all counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
 //!   ~2k-document `realistic` profile — the scale the gates assert against. It
@@ -83,6 +83,18 @@
 //!   and steps no table or index end to end on it, and costs the same in every
 //!   count at 300 documents as at 2000. A mass delete's re-decision is held to
 //!   the Layer 3 limit per key the store's own bar holds.
+//!
+//! - **Rule judgment reads one document.** Judging a document against the
+//!   vault schema's field declarations and rules runs in the host and reads
+//!   no database, so no statement counter sees it; the judge tallies it as
+//!   logical counts the host's account folds per job. The same document
+//!   written under a live attachment of 300 documents and of 2000 costs the
+//!   same in every one of them, and in what its job derived, opened and
+//!   landed. Each declared parameter of that work — the rule count, the keys
+//!   a selector names, the constraints and closed-set members the selecting
+//!   rules state, and the characters of the globs a path is matched against
+//!   and the weight of a placement walk — is varied alone over one document,
+//!   and moves the counts it reaches in proportion and no other.
 //!
 //! **Every reading is recorded, zero included.** A gate that passes says only
 //! that nothing moved; which counters were asked and what each read is the
@@ -580,6 +592,386 @@ fn a_bounded_write_costs_the_same_at_both_scales() {
         ScaleObservation::new(&large, large_counters),
     )
     .assert_size_independent();
+}
+
+/// The vault schema the rule-judgment bars attach under: a list-shaped field,
+/// a rule its probe's frontmatter selects, a rule its path selects whose
+/// allowed paths share none with the first's, and a selectorless rule. Its
+/// keys are ones no generated profile writes, so a generated document
+/// breaches nothing but the selectorless rule's forbidden `scratch`, which
+/// none holds.
+const RULE_SCHEMA: &str = "version: 1
+fields:
+  probe_status: { type: text, shape: list }
+rules:
+  probed:
+    severity: error
+    match: { frontmatter: { probe_kind: probe } }
+    required: { probe_owner: }
+    one_of: { probe_status: { values: [todo, done] } }
+    max_length: { probe_title: 8 }
+    allowed_paths: { paths: ['probes/**'] }
+  gated:
+    match: { path: 'counter-gate/**' }
+    allowed_paths: { paths: ['gated/**'] }
+  every:
+    forbidden: { scratch: }
+";
+
+/// The document the rule-judgment pair writes at both scales: selected by
+/// all three rules of [`RULE_SCHEMA`], it breaches each of their
+/// constraints — a required field missing, a forbidden one present, two list
+/// elements outside the closed set, a value past its limit — and stands
+/// where its two placement rules allow no path in common.
+const RULE_PROBE: &str = "---
+probe_kind: probe
+probe_status: [todo, bogus, stalled]
+probe_title: a title past eight
+scratch: x
+---
+# A rule probe
+";
+
+/// **Rule judgment reads no other document.** The same document written
+/// under a live attachment of `ambiguous` (300 documents) and of `realistic`
+/// (2000), each attached under [`RULE_SCHEMA`], costs the same at both: the
+/// documents its job derives, the files it opens, the changeset it lands and
+/// every logical count of the judgment — rules evaluated and selected,
+/// selector terms, constraint entries combined, constraints judged, glob
+/// characters matched, the placement walk and its weight, and the findings
+/// minted.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn rule_judgment_of_one_document_costs_the_same_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_judged_write("counter-gate-rules-ambiguous", &small);
+    let large_counters = one_judged_write("counter-gate-rules-realistic", &large);
+    for counters in [&small_counters, &large_counters] {
+        for (count, expected) in [
+            ("documents_derived", 1),
+            ("rule_rules_selected", 3),
+            ("rule_findings", 6),
+            ("rule_placement_walks", 1),
+        ] {
+            assert_eq!(
+                counters.get(count),
+                expected,
+                "the probe's judgment counted `{count}` as {}: {counters:?}",
+                counters.get(count)
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "judging one document against the schema rules",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` under [`RULE_SCHEMA`], then count what the host spends
+/// deriving [`RULE_PROBE`] written under the live attachment.
+fn one_judged_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), RULE_SCHEMA)
+        .expect("write the rule schema");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    assert_the_attachment_derived_the_profile(&mut vault.store(), profile);
+
+    let written = vault.path().join("counter-gate/rule-probe.md");
+    std::fs::create_dir_all(written.parent().expect("the probe's folder"))
+        .expect("creating the probe's folder");
+    let spent = the_host_judges(
+        &host,
+        || std::fs::write(&written, RULE_PROBE).expect("writing the rule probe"),
+        "derive and judge the rule probe",
+    );
+    record_the_counters(
+        &format!("one document judged over `{}`", profile.name),
+        &spent,
+    );
+    spent
+}
+
+/// What the host's account moved, its rule work included, from just before
+/// `act` until the job deriving what `act` wrote has folded its rule work in.
+fn the_host_judges(host: &attach::ServingHost, act: impl FnOnce(), what: &str) -> CounterSnapshot {
+    let before = judged_work(host);
+    act();
+    wait_until(
+        &format!("the host to {what}"),
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = before
+                .delta(&judged_work(host))
+                .expect("two readings of one account");
+            if spent.get("documents_derived") > 0 && spent.get("rule_rules_evaluated") > 0 {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!("the host's account reads {spent:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// [`vault_work`], beside every logical count of the rule work the host's
+/// jobs judged, each named `rule_` and the judge's own name.
+#[cfg(feature = "induced-failure")]
+fn judged_work(host: &attach::ServingHost) -> CounterSnapshot {
+    let mut snapshot = vault_work(host);
+    for (count, value) in host.evidence().rule_work.counts() {
+        snapshot.set(format!("rule_{count}"), value);
+    }
+    snapshot
+}
+
+/// A build without `induced-failure` carries no reader of the host's account.
+#[cfg(not(feature = "induced-failure"))]
+fn judged_work(_: &attach::ServingHost) -> CounterSnapshot {
+    unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
+}
+
+/// The probe every rule-parameter variant judges: its kind, eight keys a
+/// selector may name, a status and a title, at `probe.md`.
+const PARAMETER_PROBE: &str = "---
+kind: probe
+k1: v
+k2: v
+k3: v
+k4: v
+k5: v
+k6: v
+k7: v
+k8: v
+status: s
+title: abcdefgh
+---
+# Probe
+";
+
+/// What one judgment of [`PARAMETER_PROBE`] under `rules` paid: a vault
+/// holding that one document, attached by a fresh host, whose account is
+/// then that one derivation's.
+fn judged_under(label: &str, rules: &str) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let root = sandbox.work_dir().join("judged");
+    let tree = root.join("vault");
+    std::fs::create_dir_all(tree.join(".norn")).expect("creating the vault");
+    std::fs::write(tree.join("probe.md"), PARAMETER_PROBE).expect("writing the probe");
+    std::fs::write(
+        tree.join(".norn/schema.yaml"),
+        format!("version: 1\nrules:\n{rules}"),
+    )
+    .expect("writing the schema");
+    let vault = attach::Vault::adopt(&root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    wait_until(
+        &format!("the host to judge the probe under `{label}`"),
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = judged_work(&host);
+            if spent.get("rule_rules_evaluated") > 0 {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!("the host's account reads {spent:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// The rule counts of `snapshot`, every count but `varied` — the ones a
+/// parameter must leave alone.
+fn the_rest(snapshot: &CounterSnapshot, varied: &[&str]) -> Vec<(String, u64)> {
+    snapshot
+        .names()
+        .filter(|name| name.starts_with("rule_") && !varied.contains(name))
+        .map(|name| (name.to_string(), snapshot.get(name)))
+        .collect()
+}
+
+/// Judge [`PARAMETER_PROBE`] under each of `variants` — a parameter value
+/// and the rules it writes — and hold that each variant moves `varied` to
+/// what `expected` says of its value and leaves every other rule count where
+/// the first variant left it.
+fn judged_by_parameter(
+    parameter: &str,
+    varied: &[&str],
+    variants: &[(u64, String)],
+    expected: impl Fn(&str, u64) -> u64,
+) {
+    let mut first: Option<Vec<(String, u64)>> = None;
+    for (value, rules) in variants {
+        let spent = judged_under(&format!("counter-gate-{parameter}-{value}"), rules);
+        record_the_counters(&format!("judged with {parameter} {value}"), &spent);
+        assert_eq!(
+            spent.get("documents_derived"),
+            1,
+            "the variant derived other than its one probe: {spent:?}"
+        );
+        for count in varied {
+            assert_eq!(
+                spent.get(count),
+                expected(count, *value),
+                "{parameter} {value} moved `{count}` to {}: {spent:?}",
+                spent.get(count)
+            );
+        }
+        let rest = the_rest(&spent, varied);
+        match &first {
+            None => first = Some(rest),
+            Some(first) => assert_eq!(
+                &rest, first,
+                "{parameter} {value} moved a rule count the parameter does not reach"
+            ),
+        }
+    }
+}
+
+/// **The logical rule counters follow each declared parameter, and only
+/// proportionally.** One document is judged under schemas differing in one
+/// parameter at a time, each by a fresh host over a vault of that document
+/// alone:
+///
+/// - **rule count R**: R rules none of which selects the document evaluate R
+///   rules and R selector terms;
+/// - **selector complexity**: one rule naming K frontmatter keys the document
+///   holds evaluates K selector terms;
+/// - **constraint cardinality**: one rule requiring C fields the document
+///   holds combines C entries and judges C constraints, and one closing a
+///   field over V values combines V entries and judges one;
+/// - **encoded declaration size**: one rule whose `match.path` glob is L
+///   characters long matches L characters, and two rules whose allowed paths
+///   share none walk once, at the product of their weights.
+///
+/// Every other rule count stays where the parameter's first value left it.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn the_logical_rule_counters_follow_each_declared_parameter() {
+    the_hosts_account_is_readable();
+    let rule_count: Vec<(u64, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|count| {
+            let rules: String = (0..count)
+                .map(|at| {
+                    format!("  r{at}: {{ match: {{ frontmatter: {{ kind: other{at} }} }} }}\n")
+                })
+                .collect();
+            (count, rules)
+        })
+        .collect();
+    judged_by_parameter(
+        "rule-count",
+        &["rule_rules_evaluated", "rule_selector_terms"],
+        &rule_count,
+        |_, count| count,
+    );
+
+    let selector: Vec<(u64, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|keys| {
+            let named: Vec<String> = (1..=keys).map(|at| format!("k{at}: v")).collect();
+            (
+                keys,
+                format!(
+                    "  r: {{ match: {{ frontmatter: {{ {} }} }} }}\n",
+                    named.join(", ")
+                ),
+            )
+        })
+        .collect();
+    judged_by_parameter(
+        "selector-complexity",
+        &["rule_selector_terms"],
+        &selector,
+        |_, keys| keys,
+    );
+
+    let required: Vec<(u64, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|fields| {
+            let named: String = (1..=fields).map(|at| format!("      k{at}:\n")).collect();
+            (fields, format!("  r:\n    required:\n{named}"))
+        })
+        .collect();
+    judged_by_parameter(
+        "required-fields",
+        &["rule_constraint_entries", "rule_constraints_judged"],
+        &required,
+        |_, fields| fields,
+    );
+
+    let closed: Vec<(u64, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|members| {
+            let values: Vec<String> = std::iter::once("s".to_string())
+                .chain((1..members).map(|at| format!("m{at}")))
+                .collect();
+            (
+                members,
+                format!(
+                    "  r: {{ one_of: {{ status: {{ values: [{}] }} }} }}\n",
+                    values.join(", ")
+                ),
+            )
+        })
+        .collect();
+    judged_by_parameter(
+        "closed-set-size",
+        &["rule_constraint_entries"],
+        &closed,
+        |_, members| members,
+    );
+
+    let globs: Vec<(u64, String)> = [1usize, 2, 4]
+        .into_iter()
+        .map(|depth| {
+            let glob = format!("{}probe.md", "**/".repeat(depth));
+            (
+                glob.chars().count() as u64,
+                format!("  r: {{ match: {{ path: '{glob}' }} }}\n"),
+            )
+        })
+        .collect();
+    judged_by_parameter(
+        "match-path-length",
+        &["rule_pattern_characters"],
+        &globs,
+        |_, length| length,
+    );
+
+    let placements: Vec<(u64, String)> = [1usize, 3, 7]
+        .into_iter()
+        .map(|depth| {
+            let glob = format!("{}b.md", "*/".repeat(depth));
+            let weight = (glob.chars().count() as u64 + 1) * ("a/**".len() as u64 + 1);
+            (
+                weight,
+                format!(
+                    "  a: {{ allowed_paths: {{ paths: ['a/**'] }} }}\n  b: {{ match: {{ frontmatter: {{ kind: probe }} }}, allowed_paths: {{ paths: ['{glob}'] }} }}\n"
+                ),
+            )
+        })
+        .collect();
+    judged_by_parameter(
+        "allowed-path-weight",
+        &["rule_placement_weight", "rule_pattern_characters"],
+        &placements,
+        |count, weight| match count {
+            "rule_placement_weight" => weight,
+            // The path is matched against `a/**` alone: the first placement
+            // rule, by name, refuses it before the second is asked.
+            _ => "a/**".len() as u64,
+        },
+    );
 }
 
 /// Attach `profile`, then count what upserting one document into its derived

@@ -275,6 +275,20 @@ pub struct RuleWork {
 }
 
 impl RuleWork {
+    /// No work at all.
+    pub const NONE: RuleWork = RuleWork {
+        rules_evaluated: 0,
+        selector_terms: 0,
+        rules_selected: 0,
+        constraint_entries: 0,
+        constraints_judged: 0,
+        pattern_characters: 0,
+        placement_walks: 0,
+        placement_weight: 0,
+        placement_verdicts_reused: 0,
+        findings: 0,
+    };
+
     /// Every count by name, in declaration order.
     pub fn counts(self) -> [(&'static str, u64); 10] {
         [

@@ -2437,7 +2437,17 @@ and is not built; with it, the
 walk would pay only where the schema states something a document is judged or derived
 against — a tag vocabulary that reports, a declared field, whose type and shape every
 document's values are judged against and whose typed order a type not ordered as its text
-fills, or a schema rule. Beside
+fills, or a schema rule. **The walk's rule work is declared in the schema's parameters.**
+It is the sum over the documents the walk derives of each one's judgment, which reads that
+document and the schema alone and grows with the rule count, the terms each selector holds,
+the constraints and closed-set members the selecting rules state, and the characters of the
+globs a path is matched against — beside one placement walk per set of placement rules a
+misplaced document is selected by, each under the allowed-paths ceiling. No statement counter
+sees that work, so the judge tallies it as logical counts the host's account folds per job,
+and the counter lane holds each to its parameter: one document costs the same at two vault
+sizes, and each parameter varied alone moves its counts in proportion and no other. The rule
+defaults' capture count and defaulted fields are parameters of the defaults fixpoint, which
+`new` and inbox capture run and derivation does not (NORN-359). Beside
 that, a row whose own defect implies a **document-scoped** finding that is not standing
 beside it is read again: the row records the defect, the walk asks whether a finding of the
 kinds that defect implies stands, and restores it where none does. A finding of another kind
