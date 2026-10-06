@@ -6,7 +6,7 @@
 
 use norn_config::schema::{
     CaseFold, CreationProblem, ElementProblem, FieldType, ForbiddenFix, GlobProblem,
-    PLACEMENT_CEILING, RuleProblem, RulesConflict, Shape, TypedValue, VaultSchema,
+    PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, VaultSchema,
     VaultSchemaError,
 };
 use norn_wire::{AuthoredValue, PathProblem, Severity, ValueMap};
@@ -1261,7 +1261,12 @@ rules:
 
 fn selected(schema: &VaultSchema, path: &str, entries: &[(&str, AuthoredValue)]) -> Vec<String> {
     schema
-        .selecting_rules(path, &frontmatter(entries), CaseFold::Exact)
+        .selecting_rules(
+            path,
+            &frontmatter(entries),
+            CaseFold::Exact,
+            &mut RuleWork::default(),
+        )
         .iter()
         .map(|rule| rule.name().to_string())
         .collect()
@@ -1350,7 +1355,7 @@ rules:
     .expect("two rules");
     let at = "tasks/a.md";
     let document = frontmatter(&[("type", text("task"))]);
-    let rules = schema.selecting_rules(at, &document, CaseFold::Exact);
+    let rules = schema.selecting_rules(at, &document, CaseFold::Exact, &mut RuleWork::default());
     let combined = schema.combined(&rules);
     assert_eq!(
         combined
@@ -1372,8 +1377,9 @@ rules:
         combined.field("title").and_then(|title| title.max_length()),
         Some(40)
     );
-    assert!(combined.admits_path("tasks/a.md", CaseFold::Exact));
-    assert!(!combined.admits_path("notes/a.md", CaseFold::Exact));
+    let mut work = RuleWork::default();
+    assert!(combined.admits_path("tasks/a.md", CaseFold::Exact, &mut work));
+    assert!(!combined.admits_path("notes/a.md", CaseFold::Exact, &mut work));
     assert!(combined.conflicts(CaseFold::Exact).is_empty());
 
     let warning_only = schema.combined(&[schema.rule("wide").expect("wide")]);

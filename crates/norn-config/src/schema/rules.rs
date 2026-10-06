@@ -125,11 +125,15 @@
 //!
 //! # Where rules are consumed
 //!
-//! Selection ([`VaultSchema::selecting_rules`]), the combined constraint
+//! Selection ([`VaultSchema::selecting_rules`], one rule at a time
+//! [`VaultSchema::selects`]), the combined constraint
 //! ([`VaultSchema::combined`]), rule judgment ([`VaultSchema::judge`]) and
 //! the defaults fixpoint ([`VaultSchema::fill_rule_defaults`]) are pure
 //! functions of a path, a frontmatter and the schema. **Derivation judges
-//! every document by them**: `norn-host` files each finding the judgment
+//! every document by them**: `norn-host` calls [`VaultSchema::judge`] alone,
+//! which selects through [`VaultSchema::selecting_rules`], combines through
+//! [`VaultSchema::combined`] and places through
+//! [`CombinedConstraint::admits_path`], and files each finding the judgment
 //! concludes in the document's own changeset, citing its rules and naming its
 //! offending value, so a rule is a term of
 //! [`VaultSchema::rederives_documents`]. **Dormant carriers beyond that:**
@@ -738,29 +742,24 @@ impl VaultSchema {
     }
 
     /// Every rule that selects the document at `path` holding `frontmatter`,
-    /// in name order. See [`VaultSchema::selects`] for `case`.
+    /// in name order, tallying in `work` each rule evaluated, each selector
+    /// term evaluated and the rules selected. See [`VaultSchema::selects`]
+    /// for `case`.
+    ///
+    /// Rule judgment selects a document's rules through it
+    /// ([`VaultSchema::judge`]), so the selection a caller reads and the one
+    /// derivation judges by are one function.
     pub fn selecting_rules(
         &self,
         path: &str,
         frontmatter: &ValueMap,
-        case: CaseFold,
-    ) -> Vec<&Rule> {
-        self.select_counted(path, frontmatter.entries(), case, &mut RuleWork::default())
-    }
-
-    /// Every rule that selects a document at `path` whose frontmatter holds
-    /// `entries`, in name order, tallying the selectors evaluated in `work`.
-    fn select_counted(
-        &self,
-        path: &str,
-        entries: &[(String, AuthoredValue)],
         case: CaseFold,
         work: &mut RuleWork,
     ) -> Vec<&Rule> {
         let selected: Vec<&Rule> = self
             .rules
             .values()
-            .filter(|rule| self.selects_counted(rule, path, entries, case, work))
+            .filter(|rule| self.selects_counted(rule, path, frontmatter.entries(), case, work))
             .collect();
         work.rules_selected += selected.len() as u64;
         selected

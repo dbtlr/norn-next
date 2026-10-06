@@ -508,7 +508,7 @@ impl VaultSchema {
             admissible.push((field, held));
         }
 
-        let selected = self.select_counted(path, entries, case, &mut work);
+        let selected = self.selecting_rules(path, frontmatter, case, &mut work);
         if !selected.is_empty() {
             let combined = self.combined(&selected);
             work.constraint_entries += selected.iter().map(|rule| entries_of(rule)).sum::<u64>();
@@ -612,7 +612,7 @@ impl VaultSchema {
             return;
         }
         work.constraints_judged += 1;
-        if combined.admits_path_counted(path, case, work) {
+        if combined.admits_path(path, case, work) {
             return;
         }
         let breach = if self.placement_shared(&placed, case, work) {

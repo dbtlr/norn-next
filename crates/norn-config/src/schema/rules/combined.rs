@@ -126,19 +126,11 @@ impl<'s> CombinedConstraint<'s> {
     }
 
     /// Whether every contributing rule's allowed paths admit `path`, under
-    /// `case` (see [`VaultSchema::selects`]).
-    pub fn admits_path(&self, path: &str, case: CaseFold) -> bool {
-        self.admits_path_counted(path, case, &mut RuleWork::default())
-    }
-
-    /// [`CombinedConstraint::admits_path`], tallying in `work` the characters
-    /// of each glob matched, up to the first rule admitting nothing.
-    pub(super) fn admits_path_counted(
-        &self,
-        path: &str,
-        case: CaseFold,
-        work: &mut RuleWork,
-    ) -> bool {
+    /// `case` (see [`VaultSchema::selects`]), tallying in `work` the
+    /// characters of each glob matched, up to the first rule admitting
+    /// nothing. Rule judgment places a document through it
+    /// ([`VaultSchema::judge`]).
+    pub fn admits_path(&self, path: &str, case: CaseFold, work: &mut RuleWork) -> bool {
         self.placement_rules().all(|rule| {
             rule.allowed_paths
                 .as_ref()
