@@ -494,12 +494,14 @@ fn asked_amiss(refusal: PageRefusal) -> Result<String, PageRefusal> {
         | PageRefusal::AmbiguousTarget(_)
         | PageRefusal::UnknownTarget { .. }
         | PageRefusal::PartNotTaken { .. } => Ok(refusal.to_string()),
-        // A matcher sends no cursor and pins its own declaration, so these
-        // are host defects or the store's own failure, answered as a read's.
+        // A matcher sends no cursor, pins its own declaration and is a find,
+        // which names no rule, so these are host defects or the store's own
+        // failure, answered as a read's.
         PageRefusal::DeclarationNotPinned { .. }
         | PageRefusal::OrderChanged(_)
         | PageRefusal::CursorNotTaken { .. }
         | PageRefusal::SummaryNotPaged
+        | PageRefusal::UnknownRule { .. }
         | PageRefusal::Store(_) => Err(refusal),
     }
 }

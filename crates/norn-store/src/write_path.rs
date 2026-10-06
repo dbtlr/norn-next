@@ -17,8 +17,9 @@
 //!
 //! The increment's prepared statements — the document upsert, the per-table fact
 //! discards and inserts, the document delete, the tombstone record and the row
-//! probe — the findings writes, the generation and pinned-scalar writes, and the
-//! discard a schema pin runs over findings stamped under another fingerprint. The
+//! probe — the findings writes, the rule-set writes a finding citing rules
+//! makes, the generation and pinned-scalar writes, and the discards a schema pin
+//! runs over findings and rule sets stamped under another fingerprint. The
 //! findings discards an increment runs are
 //! [`crate::ExplainedStatement::SubjectDiscard`] and
 //! [`crate::ExplainedStatement::PathDiscard`], which carry their own bars, and the
@@ -97,9 +98,22 @@ registry! {
     InsertFindingClass,
     /// One path key a finding is held under.
     InsertFindingPath,
+    /// The rule set of a fingerprint holding exactly the names a finding
+    /// cites, where one stands.
+    FindRuleSet,
+    /// A rule set a finding cites and none of its fingerprint holds yet.
+    InsertRuleSet,
+    /// One rule of a rule set.
+    InsertRuleSetRule,
+    /// One rule a finding cites, with the finding's key copied beside it in
+    /// the order a validate selecting by rule seeks.
+    InsertFindingRule,
     /// The discard a schema pin runs over findings stamped under another
     /// fingerprint.
     DiscardStaleFindings,
+    /// The discard a schema pin runs over rule sets held under another
+    /// fingerprint, after the findings citing them are gone.
+    DiscardStaleRuleSets,
     /// The write generation's increment, which takes and records it in one
     /// statement.
     NextGeneration,
@@ -205,8 +219,10 @@ impl WriteStatement {
                 "INSERT INTO findings (
                      vault_schema_fingerprint, generation, kind, severity, path, target,
                      span_line, span_column, span_offset, candidates_total, message, detail,
-                     ordinal
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ordinal, rule_set, value_head, value_bytes, value_hash
+                 ) VALUES (
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+                 )
                  RETURNING id"
             }
             Self::InsertFindingCandidate => {
@@ -219,11 +235,35 @@ impl WriteStatement {
             Self::InsertFindingPath => {
                 "INSERT INTO finding_paths (finding, path_key) VALUES (?1, ?2)"
             }
+            Self::FindRuleSet => {
+                "SELECT id FROM rule_sets WHERE vault_schema_fingerprint = ?1 AND rules = ?2"
+            }
+            Self::InsertRuleSet => {
+                "INSERT INTO rule_sets (vault_schema_fingerprint, rules) VALUES (?1, ?2)
+                 RETURNING id"
+            }
+            Self::InsertRuleSetRule => {
+                "INSERT INTO rule_set_rules (rule_set, rule) VALUES (?1, ?2)"
+            }
+            // The finding's key is copied from the row just written rather than
+            // bound again, so the copy the rule's index orders by is the row's.
+            Self::InsertFindingRule => {
+                "INSERT INTO finding_rules (
+                     finding, rule, vault_schema_fingerprint, kind, severity, path, position
+                 )
+                 SELECT id, ?2, vault_schema_fingerprint, kind, severity, path, position
+                 FROM findings WHERE id = ?1"
+            }
             // Two open ranges rather than `<>`: an inequality is not a predicate
             // an index can answer, so it would read every finding in the table
             // on every pin — including the pins that discard nothing.
             Self::DiscardStaleFindings => {
                 "DELETE FROM findings
+                 WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1"
+            }
+            // The same two ranges, over the rule sets' own fingerprint.
+            Self::DiscardStaleRuleSets => {
+                "DELETE FROM rule_sets
                  WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1"
             }
             Self::NextGeneration => NEXT_GENERATION_SQL,

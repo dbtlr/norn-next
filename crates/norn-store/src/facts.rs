@@ -781,6 +781,26 @@ pub struct FindingFacts {
     /// Anything further, as text the caller has already projected. It travels in
     /// only: nothing reads it back as a typed shape.
     pub detail: Option<String>,
+    /// The names of the schema rules the finding cites: every rule
+    /// contributing to the constraint it breaches, and empty for a finding
+    /// that cites none.
+    ///
+    /// **Held as a set, once per schema fingerprint.** The write files the
+    /// names under the one rule set of that fingerprint holding exactly them,
+    /// making it where none does, and the finding row carries the set's
+    /// identity alone; one `finding_rules` row per name is what a validate
+    /// selecting by rule seeks. So the finding row's bytes do not grow with
+    /// the rules it cites.
+    pub rules: BTreeSet<String>,
+    /// The offending value the finding judged, whole: a scalar or one list
+    /// element as the document writes it — the text its field row holds — or,
+    /// for a list or a map, its canonical JSON. `None` for a finding about no
+    /// value.
+    ///
+    /// The write keeps its head, its length and its hash
+    /// ([`norn_wire::ValueHead`]), never the whole, so a finding's bytes at
+    /// rest do not grow with the value.
+    pub value: Option<String>,
 }
 
 /// A finding's candidate list is a **bounded head**: the first five in
@@ -813,6 +833,12 @@ pub struct StoredFinding {
     pub candidates_total: u64,
     pub message: String,
     pub detail: Option<String>,
+    /// The names of the rules the finding cites, read through its rule set;
+    /// empty for a finding citing none.
+    pub rules: BTreeSet<String>,
+    /// The head of the offending value the finding judged, and `None` for a
+    /// finding about no value.
+    pub value: Option<norn_wire::ValueHead>,
     /// The vault-schema fingerprint this finding was derived under, which is
     /// what a schema edit invalidates it by.
     pub vault_schema_fingerprint: String,

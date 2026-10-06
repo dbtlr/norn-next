@@ -11,7 +11,8 @@
 use crate::common::{
     Scratch, class, class_named, classes, document, document_with_every_fact, drained,
     full_text_matches, path, path_names_no_document_for_target, path_names_no_document_in_class,
-    record_death, violation, write_document, write_documents, written_links, written_tags,
+    record_death, unread_block, violation, write_document, write_documents, written_links,
+    written_tags,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, PathKey, Provenance, Store,
@@ -23,7 +24,7 @@ use norn_testkit::equivalence::assert_operationally_valid;
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_testkit::readings;
 use norn_testkit::work::WorkBar;
-use norn_wire::FindingKind;
+use norn_wire::{FindingKind, Severity};
 
 /// The plan the store reported for one of its named statements, in the shape the
 /// harness asserts over. The pairing is the store's: a plan bar over SQL nobody
@@ -209,6 +210,44 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             panic!("`{column}` outside its vocabulary was reported as {error:?}");
         };
         assert!(what.contains(column), "{what}");
+    }
+}
+
+/// **A rule row's copy of its finding's key is checked rather than trusted.**
+/// Each rule a finding cites stands in `finding_rules` beside a copy of the
+/// finding's fingerprint, kind, severity, path and position, which is the
+/// order a validate by rule pages it in; nothing structural keeps the copy
+/// equal to the finding after the write, so a copy that strayed — to another
+/// kind the vocabulary holds, another severity, another place — is damage the
+/// verification has to see, as a value outside a closed vocabulary is.
+#[test]
+fn a_rule_row_that_disagrees_with_its_finding_is_damage() {
+    for (arrange, strayed) in [
+        ("UPDATE finding_rules SET kind = 'field/forbidden'", "kind"),
+        ("UPDATE finding_rules SET severity = 'error'", "severity"),
+        ("UPDATE finding_rules SET path = 'b.md'", "path"),
+        ("UPDATE finding_rules SET position = 3", "position"),
+    ] {
+        let scratch = Scratch::new("rule-row");
+        let mut store = scratch.open();
+        let mut finding = unread_block("a.md");
+        finding.kind = FindingKind::NotOneOf;
+        finding.severity = Severity::Warning;
+        finding.rules = ["tasks".to_string()].into_iter().collect();
+        finding.value = Some("someday".to_string());
+        store
+            .begin_request()
+            .record_finding(&finding)
+            .expect("recording a rule finding");
+        store.verify_integrity().expect("a store just written to");
+
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("writing a copy nothing writes");
+        let error = store.verify_integrity().unwrap_err();
+        let StoreError::Damaged { what } = &error else {
+            panic!("a rule row's {strayed} that strayed was reported as {error:?}");
+        };
+        assert!(what.contains("rule rows disagree"), "{strayed}: {what}");
     }
 }
 
@@ -3959,6 +3998,26 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
                 "(vault_schema_fingerprint>?)",
             ),
         ],
+        // The same two ranges over the rule sets' fingerprint.
+        DiscardStaleRuleSets => &[
+            (
+                "rule_sets",
+                Access::Index("rule_sets_fingerprint_rules"),
+                "(vault_schema_fingerprint<?)",
+            ),
+            (
+                "rule_sets",
+                Access::Index("rule_sets_fingerprint_rules"),
+                "(vault_schema_fingerprint>?)",
+            ),
+        ],
+        FindRuleSet => &[(
+            "rule_sets",
+            Access::Index("rule_sets_fingerprint_rules"),
+            "(vault_schema_fingerprint=? AND rules=?)",
+        )],
+        // The finding's key is read off the row just written, by its id.
+        InsertFindingRule => &[("findings", Access::RowId, "(rowid=?)")],
         NextGeneration => &[("meta", Access::PrimaryKey, "(key=?)")],
         UpsertDocument
         | InsertLink
@@ -3972,6 +4031,8 @@ fn write_bar(statement: WriteStatement) -> WriteBar {
         | InsertFindingCandidate
         | InsertFindingClass
         | InsertFindingPath
+        | InsertRuleSet
+        | InsertRuleSetRule
         | PutMeta => &[],
     };
     WriteBar { seeks }
@@ -4007,8 +4068,9 @@ fn write_plan(store: &mut Store, statement: WriteStatement) -> QueryPlan {
 /// values than its text names is an error here.
 ///
 /// Controls: the index each keyed statement seeks is dropped, and the same bar
-/// fails — for the two statements that seek a primary key, whose index cannot
-/// be dropped, a plan that scans the table is handed to the same judgment. The
+/// fails — for the three statements that seek a primary key or a row id, whose
+/// index cannot be dropped, a plan that scans the table is handed to the same
+/// judgment. The
 /// no-scan half has its own control: with the index a foreign-key action seeks
 /// dropped, the plan keeps the seek the bar names and adds a scan, and the bar
 /// still fails.
@@ -4032,6 +4094,7 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
     for (statement, table) in [
         (WriteStatement::DiscardFields, "document_fields"),
         (WriteStatement::NextGeneration, "meta"),
+        (WriteStatement::InsertFindingRule, "findings"),
     ] {
         let scanning = QueryPlan::new(
             "scanning",
@@ -4054,8 +4117,9 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
             .map(|(at, (table, access, constraint))| {
                 let index = match access {
                     Access::PrimaryKey => "PRIMARY KEY".to_string(),
+                    Access::RowId => "INTEGER PRIMARY KEY".to_string(),
                     Access::Index(name) => format!("INDEX {name}"),
-                    _ => unreachable!("a write bar names a primary key or an index"),
+                    _ => unreachable!("a write bar names a primary key, a row id or an index"),
                 };
                 PlanRow::new(
                     at as i64 + 2,
@@ -4127,6 +4191,19 @@ fn every_write_path_statement_scans_no_table_and_each_keyed_one_seeks() {
                 "findings_fingerprint_kind_nocase",
                 "findings_fingerprint_kind_severity_nocase",
             ],
+        ),
+        (
+            &[
+                WriteStatement::FindRuleSet,
+                WriteStatement::DiscardStaleRuleSets,
+            ],
+            &["rule_sets_fingerprint_rules"],
+        ),
+        // A rule set's discard checks no finding still cites it, through the
+        // index on the citation.
+        (
+            &[WriteStatement::DiscardStaleRuleSets],
+            &["findings_rule_set"],
         ),
     ] {
         let scratch = Scratch::new("write-plans-control");

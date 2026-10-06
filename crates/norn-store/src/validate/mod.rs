@@ -33,6 +33,25 @@
 //! total it heads, and the hint that names the `find` enumerating its class,
 //! all read off what the pillar stores.
 //!
+//! # A rule selects the findings citing it, off the rule's own rows
+//!
+//! A request naming a rule answers only the findings whose rule set holds
+//! it. `finding_rules` holds one row per finding and rule it cites, carrying
+//! the finding's key beside the rule and indexed in the findings' own order
+//! one column further in, so a rule's page is the same seek a kind page is
+//! and its tally the same covered aggregate a summary is, each led by the
+//! rule. Every other part composes with it as it does without one. **A rule
+//! the pinned declaration does not declare is refused by name**
+//! ([`PageRefusal::UnknownRule`]), never answered with an empty page, which
+//! would say the rule holds everywhere.
+//!
+//! # A page carries each rule set its findings cite once
+//!
+//! A finding row cites its rule set by identity, and the page reads the rules
+//! of each set its rows cite — exactly those, each once — by one statement
+//! over all of them, so what a page carries grows with the distinct sets it
+//! cites, never with how many rules one finding cites.
+//!
 //! # A path part judges the finding's path; every other part its document
 //!
 //! The conjunction is compiled by the one compilation every read builder
@@ -68,7 +87,7 @@ mod statement;
 use norn_db::EmittedPlan;
 use norn_wire::{
     AnswerAdvisory, Cursor, CursorKey, FindingKind, FindingRow, KindTally, Moved, Page, PagedRows,
-    Severity, Unsatisfied, ValidateParams, ValidateReport,
+    RuleSet, Severity, Unsatisfied, ValidateParams, ValidateReport,
 };
 
 use crate::error::{self, StoreError};
@@ -80,7 +99,7 @@ use crate::read::{
 use crate::request::unreadable;
 use crate::store::Snapshot;
 
-use statement::{Findings, compose_findings};
+use statement::{Findings, compose_findings, compose_rule_sets};
 pub use statement::{VALIDATE_STATEMENTS, ValidateStatement};
 
 /// What [`Snapshot::validate`] answers: the findings or their tally, what the
@@ -104,12 +123,16 @@ pub struct Validated {
 
 /// What a validate answers with.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // One per answer, moved once into its report: a page is the common answer, and boxing it would allocate for the rarer tally's sake.
 pub enum Validation {
     /// A page of findings, in `(kind, path, position, id)` order with the path
     /// in the answer's path order.
     Findings {
         /// The findings, at most the page bound of them.
         rows: Vec<FindingRow>,
+        /// Every rule set the rows cite, each once, in the order of its
+        /// identity; empty where no row cites one.
+        rule_sets: Vec<RuleSet>,
         /// Where the next page begins, and `None` where this page is the last.
         next: Option<Cursor>,
         /// What moved between the cursor this page continued and the snapshot
@@ -129,9 +152,12 @@ impl Validated {
     /// in a [`norn_wire::VaultAnswer`].
     pub fn into_report(self) -> (Vec<Unsatisfied>, Vec<AnswerAdvisory>, ValidateReport) {
         let report = match self.answer {
-            Validation::Findings { rows, next, moved } => {
-                ValidateReport::findings(Page::new(rows, next, moved), [])
-            }
+            Validation::Findings {
+                rows,
+                rule_sets,
+                next,
+                moved,
+            } => ValidateReport::findings(Page::new(rows, next, moved), rule_sets),
             Validation::Summary { by_kind } => ValidateReport::summary(by_kind),
         };
         (self.unsatisfied, self.advisories, report)
@@ -143,7 +169,8 @@ impl Validated {
 /// **The finding counters are the page or summary statements' cost as SQLite
 /// ran them**, read off each statement's own status once its rows are read
 /// and summed over those statements — never the probes the conjunction's
-/// compilation ran, nor the statements that read the page's candidate heads.
+/// compilation ran, nor the statements that read the page's candidate heads
+/// or its rule sets.
 /// A pair of validates over two vault sizes reads whether a validate's work
 /// grows with the vault by comparing them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -202,6 +229,8 @@ pub struct ValidatePlan {
 /// The request compiled: what it narrows the findings by.
 struct Narrowing {
     fingerprint: String,
+    /// The one rule whose findings are read, and `None` for every finding.
+    rule: Option<String>,
     kinds: Vec<&'static str>,
     severities: Option<Vec<&'static str>>,
     conjunction: Conjunction,
@@ -224,8 +253,9 @@ impl Snapshot {
     /// from another schema than the snapshot pins, a part the store keeps no
     /// index of, and a bound that does not read as its key's declared type.
     /// And refused as a cursor that names no position among a validate's
-    /// findings ([`PageRefusal::CursorNotTaken`]), and as any cursor on a
-    /// summary, which is not paged ([`PageRefusal::SummaryNotPaged`]).
+    /// findings ([`PageRefusal::CursorNotTaken`]), as any cursor on a
+    /// summary, which is not paged ([`PageRefusal::SummaryNotPaged`]), and as
+    /// a rule `declared` does not declare ([`PageRefusal::UnknownRule`]).
     pub fn validate(
         &self,
         params: &ValidateParams,
@@ -276,6 +306,11 @@ impl Snapshot {
             page_limit(params.limit)?
         };
         self.declaration_pinned(declared, lookups)?;
+        if let Some(rule) = params.rule.as_ref()
+            && !declared.declares_rule(rule)
+        {
+            return Err(PageRefusal::UnknownRule { rule: rule.clone() });
+        }
         let conjunction = self.compile_conjunction(
             &params.predicates,
             ResolvesPart::NotApplicable,
@@ -284,6 +319,7 @@ impl Snapshot {
         )?;
         let narrowing = Narrowing {
             fingerprint: self.fingerprint(lookups)?.unwrap_or_default(),
+            rule: params.rule.clone(),
             kinds: kinds_read(&params.kinds),
             severities: params
                 .severity
@@ -331,8 +367,14 @@ impl Snapshot {
             let next = next
                 .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.finding_key()?)))
                 .transpose()?;
+            let rule_sets = self.rule_sets(&mut lookups.ran, &bases)?;
             let rows = self.finding_rows(&mut lookups.ran, bases)?;
-            Validation::Findings { rows, next, moved }
+            Validation::Findings {
+                rows,
+                rule_sets,
+                next,
+                moved,
+            }
         };
         let advisories =
             self.offset_advisories(&narrowing.conjunction.date_comparisons([]), lookups)?;
@@ -369,22 +411,26 @@ impl Snapshot {
             .iter()
             .map(|filter| filter.shape())
             .collect();
+        let statement = match narrowing.rule {
+            Some(_) => ValidateStatement::RulePage,
+            None => ValidateStatement::KindPage,
+        };
         let page = self.read_page(
             sections,
             limit,
             &mut lookups.ran,
             |record, (kind, after), rows| {
                 let composed = compose_findings(&Findings {
-                    statement: ValidateStatement::KindPage,
+                    statement,
                     fingerprint: &narrowing.fingerprint,
+                    rule: narrowing.rule.as_deref(),
                     kinds: &[kind],
                     severities: narrowing.severities.as_deref(),
                     after,
                     filters: &narrowing.conjunction.filters,
                     rows,
                 });
-                let section =
-                    Ran::new(ValidateStatement::KindPage, composed).narrowed_by(shapes.clone());
+                let section = Ran::new(statement, composed).narrowed_by(shapes.clone());
                 self.run_statement(record, section, finding_base)
                     .map_err(|problem| error::sql("reading a page of findings", problem))?
                     .into_iter()
@@ -406,16 +452,21 @@ impl Snapshot {
         if narrowing.conjunction.matches_nothing {
             return Ok(Vec::new());
         }
+        let statement = match narrowing.rule {
+            Some(_) => ValidateStatement::RuleSummary,
+            None => ValidateStatement::Summary,
+        };
         let composed = compose_findings(&Findings {
-            statement: ValidateStatement::Summary,
+            statement,
             fingerprint: &narrowing.fingerprint,
+            rule: narrowing.rule.as_deref(),
             kinds: &narrowing.kinds,
             severities: narrowing.severities.as_deref(),
             after: None,
             filters: &narrowing.conjunction.filters,
             rows: 0,
         });
-        let summary = Ran::new(ValidateStatement::Summary, composed).narrowed_by(
+        let summary = Ran::new(statement, composed).narrowed_by(
             narrowing
                 .conjunction
                 .filters
@@ -447,6 +498,48 @@ impl Snapshot {
                 let severity = Severity::try_from(severity.as_str())
                     .map_err(|_| unreadable("findings.severity", &severity))?;
                 Ok(KindTally::new(kind, severity, count))
+            })
+            .collect()
+    }
+
+    /// The rule sets `bases` cite, each once, in the order of its identity,
+    /// each with its rules in byte order: one
+    /// [`ValidateStatement::RuleSets`] over all of them, recorded in
+    /// `record`. No set cited, no statement.
+    fn rule_sets(
+        &self,
+        record: &mut Vec<Ran>,
+        bases: &[FindingBase],
+    ) -> Result<Vec<RuleSet>, StoreError> {
+        let mut ids: Vec<i64> = bases.iter().filter_map(|base| base.rule_set).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let read = self
+            .run_statement(
+                record,
+                Ran::new(ValidateStatement::RuleSets, compose_rule_sets(&ids)),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|problem| error::sql("reading the rule sets a page cites", problem))?;
+        let mut sets: Vec<(i64, Vec<String>)> = ids.iter().map(|id| (*id, Vec::new())).collect();
+        for (set, rule) in read {
+            if let Ok(at) = sets.binary_search_by_key(&set, |(id, _)| *id) {
+                sets[at].1.push(rule);
+            }
+        }
+        sets.into_iter()
+            .map(|(id, rules)| {
+                if rules.is_empty() {
+                    return Err(StoreError::Damaged {
+                        what: format!("a finding cites the rule set {id}, which holds no rule"),
+                    });
+                }
+                let id = u64::try_from(id)
+                    .map_err(|_| unreadable("findings.rule_set", &id.to_string()))?;
+                Ok(RuleSet::new(id, rules))
             })
             .collect()
     }

@@ -9,6 +9,11 @@
 //! of those findings and nothing else. So the head and the hint a finding
 //! carries are the same on every verb that carries it.
 //!
+//! **A rule finding's citation and value are read off the row too.** The row
+//! carries the identity of the rule set it cites and the head of the value it
+//! judged, both as the pillar stores them; resolving a set to its rules is a
+//! validate page's, once per set it holds rather than once per row.
+//!
 //! **The head and the hint are read off what the pillar stores.** The head is
 //! the finding's candidate rows, which were bounded at
 //! [`crate::CANDIDATE_HEAD`] when they were written, and the total beside them
@@ -36,14 +41,14 @@ use crate::error::{self, StoreError};
 use crate::facts::Span;
 use crate::find::{FindStatement, compose_finding_candidates, compose_finding_classes};
 use crate::path::ClassKey;
-use crate::request::{Reading, optional_span, unreadable};
+use crate::request::{Reading, optional_span, optional_value_head, unreadable};
 use crate::store::Snapshot;
 
 /// A finding's own columns, in the order [`finding_base`] reads them, under
 /// the alias `f`.
 pub(crate) const FINDING_ROW_COLUMNS: &str = "f.id, f.kind, f.severity, f.path, f.target, \
      f.span_line, f.span_column, f.span_offset, f.candidates_total, f.message, f.generation, \
-     f.ordinal, f.position";
+     f.ordinal, f.position, f.rule_set, f.value_head, f.value_bytes, f.value_hash";
 
 /// A finding's own columns, as a statement read them, before its head and its
 /// hint are read beside them.
@@ -67,6 +72,9 @@ pub(crate) struct FindingBase {
     /// Where the finding stands among its path's findings, as the column
     /// `findings.position` holds it.
     position: i64,
+    /// The rule set the finding cites, and `None` for one citing none.
+    pub(crate) rule_set: Option<i64>,
+    value: Option<norn_wire::ValueHead>,
 }
 
 impl FindingBase {
@@ -132,6 +140,10 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         Ok(span) => span,
         Err(damaged) => return Ok(Err(damaged)),
     };
+    let value = match optional_value_head(row, 14)? {
+        Ok(value) => value,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     Ok(Ok(FindingBase {
         id: row.get(0)?,
         kind: row.get(1)?,
@@ -144,6 +156,8 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
         generation: row.get(10)?,
         ordinal: row.get(11)?,
         position: row.get(12)?,
+        rule_set: row.get(13)?,
+        value,
     }))
 }
 
@@ -279,7 +293,14 @@ fn finding_row(
     let id = u64::try_from(base.id).map_err(|_| unreadable("findings.id", &base.id.to_string()))?;
     let generation = u64::try_from(base.generation)
         .map_err(|_| unreadable("findings.generation", &base.generation.to_string()))?;
-    Ok(FindingRow::new(
+    let rule_set = base
+        .rule_set
+        .map(|rule_set| {
+            u64::try_from(rule_set)
+                .map_err(|_| unreadable("findings.rule_set", &rule_set.to_string()))
+        })
+        .transpose()?;
+    let row = FindingRow::new(
         id,
         kind,
         severity,
@@ -291,7 +312,15 @@ fn finding_row(
         hint,
         base.message,
         generation,
-    ))
+    );
+    let row = match rule_set {
+        Some(rule_set) => row.citing(rule_set),
+        None => row,
+    };
+    Ok(match base.value {
+        Some(value) => row.with_value(value),
+        None => row,
+    })
 }
 
 #[cfg(test)]

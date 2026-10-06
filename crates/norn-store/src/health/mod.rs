@@ -1238,6 +1238,9 @@ fn finding(
         candidates_total: total,
         message: message.to_string(),
         detail: None,
+        // A link's health is judged against no rule and names no value.
+        rules: BTreeSet::new(),
+        value: None,
     })
 }
 

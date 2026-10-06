@@ -30,10 +30,11 @@ use norn_store::{
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows, Pattern,
-    Predicate, ResolutionTarget, Severity, Sort, SortKey, Unsatisfied, ValidateParams,
-    ValidateReport, VaultAddress, VaultName,
+    ContentHash, Cursor, CursorKey, Direction, FindingKind, FindingRow, Hint, KindTally, PagedRows,
+    Pattern, Predicate, ResolutionTarget, RuleSet, SchemaRule, Severity, Sort, SortKey,
+    Unsatisfied, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, VaultAddress, VaultName,
 };
+use sha2::{Digest, Sha256};
 
 // ---- fixtures ----
 
@@ -41,7 +42,12 @@ use norn_wire::{
 const VALIDATE_SCHEMA: &str = "validate-schema";
 
 fn declared() -> ContentModel {
-    ContentModel::under(VALIDATE_SCHEMA).declare("status")
+    ContentModel::under(VALIDATE_SCHEMA)
+        .declare("status")
+        .declare_rule(SchemaRule::new("tasks", Severity::Error))
+        .declare_rule(SchemaRule::new("open", Severity::Warning))
+        .declare_rule(SchemaRule::new("idle", Severity::Warning))
+        .declare_rule(SchemaRule::new("bulk", Severity::Warning))
 }
 
 /// A tag the vault's declared tag facet does not admit, on the document at
@@ -934,6 +940,7 @@ fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
         malformed.answer,
         Validation::Findings {
             rows: Vec::new(),
+            rule_sets: Vec::new(),
             next: None,
             moved: Vec::new()
         }
@@ -957,6 +964,7 @@ fn a_part_a_validate_cannot_apply_is_reported_as_a_find_reports_it() {
         unknown.answer,
         Validation::Findings {
             rows: Vec::new(),
+            rule_sets: Vec::new(),
             next: None,
             moved: Vec::new()
         }
@@ -981,6 +989,7 @@ fn a_wordless_match_part_is_reported_and_a_validates_answer_holds_no_finding() {
         answered.answer,
         Validation::Findings {
             rows: Vec::new(),
+            rule_sets: Vec::new(),
             next: None,
             moved: Vec::new()
         }
@@ -1285,6 +1294,11 @@ fn statement_barred_by(statement: ValidateStatement) -> &'static str {
     match statement {
         ValidateStatement::KindPage => "a_kind_page_seeks_its_kind_from_the_pages_position",
         ValidateStatement::Summary => "a_summary_aggregates_over_the_kind_and_severity_index",
+        ValidateStatement::RulePage => "a_rule_page_seeks_the_rules_rows_from_the_pages_position",
+        ValidateStatement::RuleSummary => {
+            "a_rule_summary_aggregates_over_the_rule_kind_and_severity_index"
+        }
+        ValidateStatement::RuleSets => "the_rule_sets_a_page_cites_are_read_by_their_key",
     }
 }
 
@@ -1902,16 +1916,19 @@ fn every_driving_part_narrows_a_validates_work_to_the_findings_it_admits() {
 
 /// **No statement a validate runs reads a document's payload.** Every
 /// statement a page of findings and a summary emit — the kind page, the
-/// summary, the probes the conjunction's compilation runs and the reads of
-/// each finding row's head and classes — under every narrowing the drain
-/// reads, a continuation, and a document part driving each, reads none of
+/// summary, a rule's page and tally, the probes the conjunction's compilation
+/// runs and the reads of each finding row's head, classes and rule sets —
+/// under every narrowing the drain reads, by kind and by rule, a
+/// continuation, and a document part driving each, reads none of
 /// [`crate::common::DOCUMENT_PAYLOAD`] as SQLite's authorizer reports the
 /// columns it reads: so what a page or a summary costs never includes the
 /// body bytes of the documents its findings stand over.
 #[test]
 fn no_statement_a_validate_runs_reads_a_documents_payload() {
-    let validating_store = Validating::new("validate-payload");
+    let validating_store =
+        Validating::with_rules_under("validate-payload", 0, StoredPathOrder::Sensitive);
     let mut narrowings = requests();
+    narrowings.extend(rule_requests());
     narrowings.push(validating().with_predicates([Predicate::tag("draft")]));
     narrowings.push(
         validating()
@@ -1960,4 +1977,797 @@ fn a_validates_work_reads_out_every_count_by_name() {
             ("validate_vm_steps", 5),
         ]
     );
+}
+
+// ---- selecting by rule ----
+//
+// The rule suite stands six findings judged against the schema rules over the
+// fixture, recorded in this order so their ids ascend down it:
+//
+// | finding | kind | severity | path | field | rules | value |
+// |---|---|---|---|---|---|---|
+// | `someday` | field/not-one-of | error | `a.md` | `status` | open, tasks | `someday` |
+// | `later` | field/not-one-of | error | `a.md` | `status` | open, tasks | `later` |
+// | `due` | field/required-missing | warning | `b.md` | `due` | tasks | none |
+// | `misplaced` | document/misplaced | warning | `notes/c.md` | none | open | none |
+// | `title` | field/too-long | warning | `notes/c.md` | `title` | tasks | 400 bytes |
+// | `soon` | field/type-mismatch | warning | `b.md` | `due` | none | `soon` |
+//
+// `idle` is declared and cited by none of them, and `bulk` only by the bulk.
+
+/// A finding judged against the schema rules at `at`: `kind` at `severity`,
+/// about `field` where it names one, citing `rules` and judging `value`.
+fn judged(
+    kind: FindingKind,
+    severity: Severity,
+    at: &str,
+    field: Option<&str>,
+    rules: &[&str],
+    value: Option<&str>,
+) -> FindingFacts {
+    let mut finding = unread_block(at);
+    finding.kind = kind;
+    finding.severity = severity;
+    finding.target = field.map(str::to_string);
+    finding.message = format!("`{at}` breaches {kind}");
+    finding.detail = None;
+    finding.rules = rules.iter().map(|rule| rule.to_string()).collect();
+    finding.value = value.map(str::to_string);
+    finding
+}
+
+/// The value the `title` finding judged: past the head's bound.
+fn long_title() -> String {
+    "x".repeat(400)
+}
+
+/// The rule suite's findings, in the order they are recorded.
+fn rule_findings() -> Vec<FindingFacts> {
+    vec![
+        judged(
+            FindingKind::NotOneOf,
+            Severity::Error,
+            "a.md",
+            Some("status"),
+            &["tasks", "open"],
+            Some("someday"),
+        ),
+        judged(
+            FindingKind::NotOneOf,
+            Severity::Error,
+            "a.md",
+            Some("status"),
+            &["open", "tasks"],
+            Some("later"),
+        ),
+        judged(
+            FindingKind::RequiredMissing,
+            Severity::Warning,
+            "b.md",
+            Some("due"),
+            &["tasks"],
+            None,
+        ),
+        judged(
+            FindingKind::Misplaced,
+            Severity::Warning,
+            "notes/c.md",
+            None,
+            &["open"],
+            None,
+        ),
+        judged(
+            FindingKind::TooLong,
+            Severity::Warning,
+            "notes/c.md",
+            Some("title"),
+            &["tasks"],
+            Some(&long_title()),
+        ),
+        judged(
+            FindingKind::TypeMismatch,
+            Severity::Warning,
+            "b.md",
+            Some("due"),
+            &[],
+            Some("soon"),
+        ),
+    ]
+}
+
+impl Validating {
+    /// The fixture with the rule suite's findings standing over it, and
+    /// `bulk` more documents under `bulk/`, each with the fixture's
+    /// undeclared-tag warning and two warnings judged against the rules: a
+    /// closed-set breach citing `bulk` alone, and a missing field citing
+    /// `tasks` and `bulk`. So a rule's findings grow with the vault, and the
+    /// findings of a kind the fixture's `tasks` findings are filed under do
+    /// too, under another rule.
+    fn with_rules_under(label: &str, bulk: usize, order: StoredPathOrder) -> Self {
+        let mut validating_store = Self::with_bulk_under(label, bulk, order);
+        let mut request = validating_store.store.begin_request();
+        for finding in rule_findings() {
+            request
+                .record_finding(&finding)
+                .expect("recording a rule finding");
+        }
+        for at in 0..bulk {
+            let at = format!("bulk/{at:04}.md");
+            for finding in [
+                judged(
+                    FindingKind::NotOneOf,
+                    Severity::Warning,
+                    &at,
+                    Some("status"),
+                    &["bulk"],
+                    Some("filed"),
+                ),
+                judged(
+                    FindingKind::RequiredMissing,
+                    Severity::Warning,
+                    &at,
+                    Some("due"),
+                    &["tasks", "bulk"],
+                    None,
+                ),
+            ] {
+                request
+                    .record_finding(&finding)
+                    .expect("recording a bulk rule finding");
+            }
+        }
+        validating_store
+    }
+
+    /// The page `params` answers with the rule sets it carries.
+    fn page_citing(&self, params: &ValidateParams) -> (Vec<FindingRow>, Vec<RuleSet>) {
+        match self.validate(params).answer {
+            Validation::Findings {
+                rows, rule_sets, ..
+            } => (rows, rule_sets),
+            Validation::Summary { .. } => panic!("a page of {params:?} answered a summary"),
+        }
+    }
+}
+
+/// The rule suite's fixture, with no bulk.
+fn ruling(label: &str) -> Validating {
+    Validating::with_rules_under(label, 0, StoredPathOrder::Sensitive)
+}
+
+/// A request for the findings citing `rule`.
+fn citing(rule: &str) -> ValidateParams {
+    validating().with_rule(rule)
+}
+
+/// The findings citing `tasks`, in `(kind, path, position, id)` order.
+fn tasks_findings() -> Vec<(FindingKind, String, Option<String>)> {
+    vec![
+        finding(FindingKind::NotOneOf, "a.md", Some("status")),
+        finding(FindingKind::NotOneOf, "a.md", Some("status")),
+        finding(FindingKind::RequiredMissing, "b.md", Some("due")),
+        finding(FindingKind::TooLong, "notes/c.md", Some("title")),
+    ]
+}
+
+/// Every request the rule suite's drains and tallies are judged over: a rule
+/// alone and composed with each other part.
+fn rule_requests() -> Vec<ValidateParams> {
+    vec![
+        citing("tasks"),
+        citing("open"),
+        citing("idle"),
+        citing("tasks").with_kinds([FindingKind::NotOneOf, FindingKind::TooLong]),
+        citing("tasks").with_severity(Severity::Error),
+        citing("tasks").with_predicates([Predicate::path("notes/**")]),
+        citing("tasks").with_predicates([Predicate::equal_to("status", "open")]),
+        citing("open").with_predicates([Predicate::path("*.md"), Predicate::tag("draft")]),
+        citing("tasks").with_predicates([Predicate::not_equal_to("status", "open")]),
+    ]
+}
+
+/// **A rule selects the findings citing it, whatever else they cite, in
+/// `(kind, path, position, id)` order**, and composes with every other part:
+/// the kinds, a severity floor, a path part on the finding's path and a
+/// document part on the document at it. A rule the schema declares that no
+/// finding cites answers no finding, and a validate naming no rule answers
+/// every finding, those citing no rule among them.
+#[test]
+fn a_rule_selects_the_findings_citing_it_and_composes_with_every_other_part() {
+    let validating_store = ruling("validate-rule-select");
+    let rows = |params: ValidateParams| names(&validating_store.rows(&params));
+    let tasks = tasks_findings();
+
+    let cited = validating_store.rows(&citing("tasks"));
+    assert_eq!(names(&cited), tasks);
+    assert!(
+        cited[0].id < cited[1].id,
+        "one kind at one path orders by id"
+    );
+    assert_eq!(
+        rows(citing("open")),
+        vec![
+            finding(FindingKind::Misplaced, "notes/c.md", None),
+            tasks[0].clone(),
+            tasks[1].clone(),
+        ]
+    );
+    assert_eq!(rows(citing("idle")), Vec::new());
+    assert_eq!(
+        rows(citing("tasks").with_kinds([FindingKind::TooLong, FindingKind::NotOneOf])),
+        vec![tasks[0].clone(), tasks[1].clone(), tasks[3].clone()]
+    );
+    assert_eq!(
+        rows(citing("tasks").with_severity(Severity::Error)),
+        tasks[..2].to_vec()
+    );
+    assert_eq!(
+        rows(citing("tasks").with_predicates([Predicate::path("notes/**")])),
+        vec![tasks[3].clone()]
+    );
+    assert_eq!(
+        rows(citing("tasks").with_predicates([Predicate::equal_to("status", "open")])),
+        vec![tasks[0].clone(), tasks[1].clone(), tasks[3].clone()],
+        "a document part judges the document at the finding's path"
+    );
+    assert_eq!(
+        rows(citing("tasks").with_predicates([Predicate::not_equal_to("status", "open")])),
+        vec![tasks[2].clone()]
+    );
+    assert_eq!(
+        rows(citing("open").with_predicates([Predicate::path("*.md"), Predicate::tag("draft")])),
+        tasks[..2].to_vec()
+    );
+    let every = rows(validating());
+    assert!(
+        every.contains(&finding(FindingKind::TypeMismatch, "b.md", Some("due"))),
+        "a validate naming no rule answers a finding citing none: {every:?}"
+    );
+    assert_eq!(every.len(), every_finding().len() + rule_findings().len());
+}
+
+/// **A page carries exactly the rule sets its rows cite, each once.** Two
+/// findings citing the same rules cite one set, however their rules were
+/// listed; a finding citing other rules cites another; a page whose rows cite
+/// none carries none, and a row citing none names no set. Each set names its
+/// rules in byte order, and a page carries a set only where one of its own
+/// rows cites it, page by page.
+#[test]
+fn a_page_carries_exactly_the_rule_sets_its_rows_cite() {
+    let validating_store = ruling("validate-rule-sets");
+    let (rows, rule_sets) = validating_store.page_citing(&citing("tasks"));
+    let (both, tasks) = (rows[0].rule_set, rows[2].rule_set);
+    assert_eq!(
+        rows[1].rule_set, both,
+        "two findings citing one set cite it once"
+    );
+    assert_eq!(rows[3].rule_set, tasks);
+    assert_ne!(both, tasks);
+    let (both, tasks) = (
+        both.expect("a rule finding cites a set"),
+        tasks.expect("a rule finding cites a set"),
+    );
+    assert_eq!(
+        rule_sets,
+        vec![
+            RuleSet::new(both, ["open".to_string(), "tasks".to_string()]),
+            RuleSet::new(tasks, ["tasks".to_string()]),
+        ]
+    );
+    assert_eq!(
+        rule_sets[0].rules,
+        ["open", "tasks"],
+        "a set names its rules in byte order"
+    );
+
+    let (first, first_sets) = validating_store.page_citing(&citing("tasks").with_limit(2));
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first_sets,
+        vec![RuleSet::new(
+            both,
+            ["open".to_string(), "tasks".to_string()]
+        )]
+    );
+    let (_, next) = validating_store.page(&citing("tasks").with_limit(2));
+    let (_, second_sets) = validating_store.page_citing(
+        &citing("tasks")
+            .with_limit(2)
+            .with_after(next.expect("a next page")),
+    );
+    assert_eq!(
+        second_sets,
+        vec![RuleSet::new(tasks, ["tasks".to_string()])]
+    );
+
+    let (untagged, none) = validating_store.page_citing(
+        &validating().with_kinds([FindingKind::UndeclaredTag, FindingKind::TypeMismatch]),
+    );
+    assert_eq!(untagged.len(), 4);
+    assert!(untagged.iter().all(|row| row.rule_set.is_none()));
+    assert_eq!(none, Vec::new(), "a page citing no set carries none");
+    let (_, _, report) = validating_store.validate(&citing("open")).into_report();
+    let ValidateReport::Findings { rule_sets, .. } = report else {
+        panic!("a page answered a summary");
+    };
+    assert_eq!(rule_sets.len(), 2, "{rule_sets:?}");
+}
+
+/// **A rule finding's value is kept as its head**: a value within the bound
+/// whole, a longer one cut to the bound, each with the length and the
+/// SHA-256 of the whole value; a finding about no value carries none.
+#[test]
+fn a_rule_findings_value_is_kept_as_its_head() {
+    let validating_store = ruling("validate-rule-value");
+    let sha256 = |text: &str| ContentHash::from_sha256(Sha256::digest(text.as_bytes()).into());
+    let rows = validating_store.rows(&citing("tasks"));
+
+    let someday = rows[0]
+        .value
+        .as_ref()
+        .expect("a closed-set breach names its value");
+    assert_eq!(
+        (someday.text(), someday.byte_length(), someday.hash()),
+        ("someday", 7, &sha256("someday"))
+    );
+    assert!(!someday.is_truncated());
+    let later = rows[1]
+        .value
+        .as_ref()
+        .expect("a closed-set breach names its value");
+    assert_ne!(later.hash(), someday.hash());
+    assert_eq!(rows[2].value, None, "a missing field names no value");
+    let title = rows[3]
+        .value
+        .as_ref()
+        .expect("a length breach names its value");
+    assert_eq!(title.text(), "x".repeat(VALUE_HEAD_BYTES));
+    assert_eq!(title.byte_length(), long_title().len() as u64);
+    assert_eq!(title.hash(), &sha256(&long_title()));
+    assert!(title.is_truncated());
+}
+
+/// **A rule the pinned schema does not declare is refused by name**, on a
+/// page and on a summary alike, rather than answered with an empty page: no
+/// finding can cite it, and an empty answer would say it holds everywhere.
+#[test]
+fn a_rule_the_schema_does_not_declare_is_refused_by_name() {
+    let validating_store = ruling("validate-rule-unknown");
+    for params in [citing("tsks"), citing("tsks").summarized()] {
+        assert_eq!(
+            validating_store
+                .snapshot()
+                .validate(&params, &declared())
+                .map(|answered| answered.answer),
+            Err(PageRefusal::UnknownRule {
+                rule: "tsks".to_string()
+            }),
+            "{params:?}"
+        );
+    }
+}
+
+/// **A drain by rule answers what one page does, and its summary tallies
+/// it**: for every rule request, a page at a time, each finding once and in
+/// order, across kinds and within one path; and a summary counting only the
+/// findings citing the rule, one tally per kind and severity.
+#[test]
+fn a_drain_by_rule_answers_one_page_and_its_summary_tallies_it() {
+    let validating_store = ruling("validate-rule-drain");
+    for params in rule_requests() {
+        let whole = validating_store.rows(&params);
+        let drained_rows = drained(&validating_store, &params, 1);
+        assert_eq!(names(&drained_rows), names(&whole), "{params:?}");
+        assert_eq!(
+            tallied(&validating_store.summary(&params)),
+            tallies_of(&whole),
+            "{params:?}"
+        );
+    }
+    assert_eq!(
+        tallied(&validating_store.summary(&citing("tasks"))),
+        vec![
+            (FindingKind::NotOneOf, Severity::Error, 2),
+            (FindingKind::RequiredMissing, Severity::Warning, 1),
+            (FindingKind::TooLong, Severity::Warning, 1),
+        ]
+    );
+}
+
+/// The index a rule's page seeks one kind's findings through.
+const RULE_KIND_INDEX: &str = "finding_rules_fingerprint_rule_kind_nocase";
+
+/// That index's seek from a page's position.
+const RULE_KIND_SEEK: &str = "(vault_schema_fingerprint=? AND rule=? AND kind=? AND \
+     (path,path,position,finding)>(?,?,?,?))";
+
+/// The same seek bounded above by a path part's folded range.
+const RULE_KIND_RANGE_SEEK: &str = "(vault_schema_fingerprint=? AND rule=? AND kind=? AND \
+     (path,path,position,finding)>(?,?,?,?) AND path<?)";
+
+/// The index a rule's page admitting one severity seeks through, and a rule's
+/// summary its `(kind, severity)` cells.
+const RULE_SEVERITY_INDEX: &str = "finding_rules_fingerprint_rule_kind_severity_nocase";
+
+/// That index's seek of one kind at one severity from a page's position.
+const RULE_SEVERITY_SEEK: &str = "(vault_schema_fingerprint=? AND rule=? AND kind=? AND \
+     severity=? AND (path,path,position,finding)>(?,?,?,?))";
+
+/// Judge a rule page no document part drives: every section a seek of
+/// `index` under `constraint`, each rule row reaching its finding by row id,
+/// with nothing read end to end and nothing sorted.
+fn judge_rule_seek(page: &QueryPlan, index: &str, constraint: &str) {
+    page.assert_no_full_scan();
+    page.assert_no_temp_btree();
+    let rules = rows_of(page, "fr");
+    rules.assert_searches_through("finding_rules", Access::Index(index));
+    rules.assert_search_constraint("finding_rules", constraint);
+    rows_of(page, "f").assert_searches_through("findings", Access::RowId);
+}
+
+/// Judge a rule's statement a document part drives: the matched documents by
+/// row id, each one's rule rows by one seek at its path, never a seek of a
+/// rule's kind from a position.
+fn judge_rule_driven(page: &QueryPlan) {
+    page.assert_no_full_scan();
+    rows_of(page, "dv").assert_searches_through("documents", Access::RowId);
+    let rules = rows_of(page, "fr");
+    rules.assert_searches("finding_rules");
+    assert!(
+        rules
+            .rows()
+            .iter()
+            .all(|row| row.constraint().is_some_and(|seek| seek.contains("path=?"))),
+        "a driven statement reached a rule's rows other than at a matched path: {:?}\n\
+         emitted SQL: {}",
+        page.rows(),
+        page.sql()
+    );
+}
+
+/// **A rule's page seeks the rule's own rows from the page's position, on
+/// either root.** Each section is one seek of
+/// `finding_rules_fingerprint_rule_kind_nocase` at `(fingerprint, rule,
+/// kind)` bounded below by the page's position, on a first page and a
+/// continuation alike, each rule row reaching its finding by row id, and
+/// nothing sorts. A path part bounds the same seek by its glob's folded
+/// range; a severity floor admitting one severity seeks
+/// `finding_rules_fingerprint_rule_kind_severity_nocase` at `(fingerprint,
+/// rule, kind, severity)`; and a document part that keeps what it seeks
+/// drives the section from the documents it matched, each reaching the rule's
+/// rows by one seek at its path.
+///
+/// Controls: a continuation rebuilt without its position bound fails; a
+/// driven section rebuilt to seek the rule's kind fails; each index dropped,
+/// the sections it served read something else.
+#[test]
+fn a_rule_page_seeks_the_rules_rows_from_the_pages_position() {
+    for order in ROOTS {
+        let mut validating_store =
+            Validating::with_rules_under("validate-rule-page-plan", 0, order);
+        let pages = |validating_store: &Validating, params: &ValidateParams| {
+            plans_of(&validating_store.plans(params), ValidateStatement::RulePage)
+        };
+        let continuing = |validating_store: &Validating, params: &ValidateParams| {
+            let (_, next) = validating_store.page(&params.clone().with_limit(1));
+            params.clone().with_after(next.expect("a next page"))
+        };
+        let tasks = citing("tasks");
+        for params in [tasks.clone(), continuing(&validating_store, &tasks)] {
+            for page in pages(&validating_store, &params) {
+                judge_rule_seek(&page, RULE_KIND_INDEX, RULE_KIND_SEEK);
+            }
+        }
+        let severity = tasks.clone().with_severity(Severity::Error);
+        for params in [severity.clone(), continuing(&validating_store, &severity)] {
+            for page in pages(&validating_store, &params) {
+                judge_rule_seek(&page, RULE_SEVERITY_INDEX, RULE_SEVERITY_SEEK);
+            }
+        }
+        for glob in ["notes/**", "NOTES/**", "*.md"] {
+            for page in pages(
+                &validating_store,
+                &tasks.clone().with_predicates([Predicate::path(glob)]),
+            ) {
+                judge_rule_seek(&page, RULE_KIND_INDEX, RULE_KIND_RANGE_SEEK);
+            }
+        }
+        let driven = pages(
+            &validating_store,
+            &tasks
+                .clone()
+                .with_predicates([Predicate::equal_to("status", "open")]),
+        );
+        for page in &driven {
+            judge_rule_driven(page);
+        }
+        for page in pages(
+            &validating_store,
+            &severity
+                .clone()
+                .with_predicates([Predicate::tag("draft"), Predicate::path("*.md")]),
+        ) {
+            judge_rule_driven(&page);
+        }
+        // An excluding part alone drives nothing: the section seeks the rule's
+        // kind and tests each finding's document by its path.
+        for page in pages(
+            &validating_store,
+            &tasks
+                .clone()
+                .with_predicates([Predicate::not_equal_to("status", "open")]),
+        ) {
+            judge_rule_seek(&page, RULE_KIND_INDEX, RULE_KIND_SEEK);
+        }
+
+        // Control: the continuation's position taken out of the seek.
+        let continued = pages(&validating_store, &continuing(&validating_store, &tasks));
+        let unbounded = rewritten(&continued[0], |detail| {
+            detail.replace(" AND (path,path,position,finding)>(?,?,?,?)", "")
+        });
+        failure_of("a rule page that seeks from no position", || {
+            judge_rule_seek(&unbounded, RULE_KIND_INDEX, RULE_KIND_SEEK)
+        });
+        // Control: a driven section that seeks the rule's kind from a position.
+        let undriven = rewritten(&driven[0], |detail| {
+            if detail.starts_with("SEARCH fr ") {
+                format!("SEARCH fr USING INDEX {RULE_KIND_INDEX} {RULE_KIND_SEEK}")
+            } else {
+                detail.to_string()
+            }
+        });
+        failure_of("a driven rule section that seeks its kind", || {
+            judge_rule_driven(&undriven)
+        });
+
+        validating_store.drop_index(RULE_SEVERITY_INDEX);
+        let page = pages(&validating_store, &severity);
+        failure_of(&format!("{RULE_SEVERITY_INDEX} dropped"), || {
+            judge_rule_seek(&page[0], RULE_SEVERITY_INDEX, RULE_SEVERITY_SEEK)
+        });
+        validating_store.drop_index(RULE_KIND_INDEX);
+        let page = pages(&validating_store, &tasks);
+        failure_of(&format!("{RULE_KIND_INDEX} dropped"), || {
+            judge_rule_seek(&page[0], RULE_KIND_INDEX, RULE_KIND_SEEK)
+        });
+    }
+}
+
+/// The rule's kind and severity index's seek of one `(kind, severity)` cell.
+const RULE_SUMMARY_SEEK: &str = "(vault_schema_fingerprint=? AND rule=? AND kind=? AND severity=?)";
+
+/// The same cell's seek over a path part's folded range.
+const RULE_SUMMARY_RANGE_SEEK: &str = "(vault_schema_fingerprint=? AND rule=? AND kind=? AND \
+     severity=? AND path>? AND path<?)";
+
+/// Judge a rule's summary: a covering seek of the rule's kind and severity
+/// index at each `(kind, severity)` cell under `constraint`, reading neither a
+/// finding nor a rule row, with nothing read end to end and nothing sorted.
+fn judge_rule_summary(summary: &QueryPlan, constraint: &str) {
+    summary.assert_no_full_scan();
+    summary.assert_no_temp_btree();
+    let rules = rows_of(summary, "fr");
+    rules.assert_searches_through("finding_rules", Access::Index(RULE_SEVERITY_INDEX));
+    rules.assert_search_constraint("finding_rules", constraint);
+    assert!(
+        rules
+            .rows()
+            .iter()
+            .all(|row| row.detail.contains("COVERING INDEX")),
+        "a rule's summary read a rule row: {:?}\nemitted SQL: {}",
+        summary.rows(),
+        summary.sql()
+    );
+    assert!(
+        rows_of(summary, "f").rows().is_empty(),
+        "a rule's summary reached a finding: {:?}",
+        summary.rows()
+    );
+}
+
+/// **A rule's summary aggregates over the rule's kind and severity index, on
+/// either root.** Its tallies are one covering seek of
+/// `finding_rules_fingerprint_rule_kind_severity_nocase` per `(kind,
+/// severity)` cell, grouped in the index's order, reading neither a finding
+/// nor a rule row and sorting nothing; a path part bounds each cell by its
+/// glob's folded range, and a document part drives it as it drives a page.
+///
+/// Control: the index dropped, the summary reads something else.
+#[test]
+fn a_rule_summary_aggregates_over_the_rule_kind_and_severity_index() {
+    for order in ROOTS {
+        let mut validating_store =
+            Validating::with_rules_under("validate-rule-summary-plan", 0, order);
+        let summary = |validating_store: &Validating, params: &ValidateParams| {
+            let summary = plans_of(
+                &validating_store.plans(&params.clone().summarized()),
+                ValidateStatement::RuleSummary,
+            );
+            assert_eq!(summary.len(), 1);
+            summary[0].clone()
+        };
+        for (params, constraint) in [
+            (citing("tasks"), RULE_SUMMARY_SEEK),
+            (
+                citing("tasks").with_severity(Severity::Error),
+                RULE_SUMMARY_SEEK,
+            ),
+            (
+                citing("tasks").with_kinds([FindingKind::NotOneOf]),
+                RULE_SUMMARY_SEEK,
+            ),
+            (
+                citing("tasks").with_predicates([Predicate::path("NOTES/**")]),
+                RULE_SUMMARY_RANGE_SEEK,
+            ),
+        ] {
+            judge_rule_summary(&summary(&validating_store, &params), constraint);
+        }
+        let driven = summary(
+            &validating_store,
+            &citing("tasks").with_predicates([Predicate::equal_to("status", "open")]),
+        );
+        judge_rule_driven(&driven);
+        assert!(
+            rows_of(&driven, "fr").rows().iter().all(|row| row
+                .detail
+                .contains(&format!("COVERING INDEX {RULE_SEVERITY_INDEX}"))),
+            "a driven rule summary read a rule row: {:?}",
+            driven.rows()
+        );
+
+        validating_store.drop_index(RULE_SEVERITY_INDEX);
+        let dropped = summary(&validating_store, &citing("tasks"));
+        failure_of(
+            &format!("{RULE_SEVERITY_INDEX} dropped under {order:?}"),
+            || judge_rule_summary(&dropped, RULE_SUMMARY_SEEK),
+        );
+    }
+}
+
+/// **The rule sets a page cites are read by their key**: one seek of
+/// `rule_set_rules`' primary key per set the page's rows cite, reading
+/// nothing end to end and sorting nothing, and a page citing no set reads
+/// none.
+///
+/// Control: a plan scanning the table fails the bar.
+#[test]
+fn the_rule_sets_a_page_cites_are_read_by_their_key() {
+    let validating_store = ruling("validate-rule-sets-plan");
+    let judge = |plan: &QueryPlan| {
+        plan.assert_no_full_scan();
+        plan.assert_no_temp_btree();
+        let sets = rows_of(plan, "rule_set_rules");
+        sets.assert_searches_through("rule_set_rules", Access::PrimaryKey);
+        sets.assert_search_constraint("rule_set_rules", "(rule_set=?)");
+    };
+    for params in [citing("tasks"), validating(), citing("open").with_limit(1)] {
+        let read = plans_of(
+            &validating_store.plans(&params),
+            ValidateStatement::RuleSets,
+        );
+        assert_eq!(read.len(), 1, "{params:?}");
+        judge(&read[0]);
+    }
+    let none = validating_store.plans(&validating().with_kinds([FindingKind::UndeclaredTag]));
+    assert!(
+        none.iter()
+            .all(|plan| plan.statement != ReadStatement::Validate(ValidateStatement::RuleSets)),
+        "a page citing no rule set read one"
+    );
+
+    let read = plans_of(
+        &validating_store.plans(&citing("tasks")),
+        ValidateStatement::RuleSets,
+    );
+    let scanned = rewritten(&read[0], |detail| {
+        if detail.starts_with("SEARCH rule_set_rules ") {
+            "SCAN rule_set_rules".to_string()
+        } else {
+            detail.to_string()
+        }
+    });
+    failure_of("the rule sets read end to end", || judge(&scanned));
+}
+
+/// **Selecting by rule narrows a validate's work with each other part, on
+/// either root.** Over the rule suite's fixture and 50, then 500, more
+/// documents each carrying findings of the fixture's kinds — one citing
+/// `tasks` and another rule, and one of the kind the fixture's `tasks`
+/// closed-set breaches are filed under citing another rule alone — a
+/// validate selecting `tasks` together with a kind, a severity, a path part in
+/// either case, a document part that drives and one that excludes runs the
+/// same statements and the same VM steps at both sizes, as a page and as a
+/// summary, and steps through no full scan.
+///
+/// Controls: a validate selecting `tasks` alone reads the bulk's `tasks`
+/// findings, so its summary grows with the vault; and each of the rule's
+/// indexes dropped on the larger vault, the narrowing it served reaches
+/// findings it does not admit, and the bar fails.
+#[test]
+fn selecting_by_rule_narrows_a_validates_work_with_each_other_part() {
+    for order in ROOTS {
+        let small = Validating::with_rules_under("validate-rule-work-small", 50, order);
+        let mut large = Validating::with_rules_under("validate-rule-work-large", 500, order);
+        let narrowing = [
+            citing("tasks").with_kinds([FindingKind::NotOneOf]),
+            citing("tasks").with_severity(Severity::Error),
+            citing("tasks").with_predicates([Predicate::path("notes/**")]),
+            citing("tasks").with_predicates([Predicate::path("NOTES/**")]),
+            citing("tasks").with_predicates([Predicate::equal_to("status", "open")]),
+            citing("tasks").with_predicates([Predicate::tag("draft")]),
+        ];
+        for params in &narrowing {
+            judge_narrow(&small, &large, params);
+            judge_narrow(&small, &large, &params.clone().summarized());
+        }
+        assert!(
+            large.validate(&citing("tasks").summarized()).work.vm_steps
+                > small.validate(&citing("tasks").summarized()).work.vm_steps * 4,
+            "a rule's unnarrowed summary did not grow with the findings citing it"
+        );
+
+        large.drop_index(RULE_SEVERITY_INDEX);
+        failure_of(
+            &format!("{RULE_SEVERITY_INDEX} dropped under {order:?}"),
+            || judge_narrow(&small, &large, &narrowing[1]),
+        );
+        failure_of(
+            &format!("{RULE_SEVERITY_INDEX} dropped under {order:?}, a summary"),
+            || judge_narrow(&small, &large, &narrowing[0].clone().summarized()),
+        );
+        large.drop_index(RULE_KIND_INDEX);
+        failure_of(
+            &format!("{RULE_KIND_INDEX} dropped under {order:?}"),
+            || judge_narrow(&small, &large, &narrowing[0]),
+        );
+    }
+}
+
+/// **A page of a rule's broad range costs the page, not the range, on either
+/// root.** Over 50, then 500, bulk documents each with a missing-field
+/// warning citing `tasks`, a page of five of them — selected by the rule and
+/// the kind, and by the rule and `**` — costs the same at both sizes on its
+/// first page and on the pages that continue it into the bulk, sorts nothing
+/// and steps through no full scan.
+///
+/// Control: the rule's kind index dropped on the larger vault, a page reaches
+/// the whole range, and the bar fails.
+#[test]
+fn a_page_of_a_rules_broad_range_costs_the_page_not_the_range() {
+    for order in ROOTS {
+        let small = Validating::with_rules_under("validate-rule-range-small", 50, order);
+        let mut large = Validating::with_rules_under("validate-rule-range-large", 500, order);
+        let missing = || citing("tasks").with_kinds([FindingKind::RequiredMissing]);
+        let broad = [
+            missing(),
+            missing().with_predicates([Predicate::path("**")]),
+        ];
+        let judge = |large: &Validating, params: &ValidateParams| {
+            for pages in [0, 1, 4] {
+                let (at_small, at_large) = (
+                    paged_work(&small, params, 5, pages),
+                    paged_work(large, params, 5, pages),
+                );
+                assert_eq!(
+                    at_small, at_large,
+                    "page {pages} of {params:?} grew with the vault under {order:?}"
+                );
+                assert_eq!(
+                    (at_large.sorts, at_large.full_scan_steps),
+                    (0, 0),
+                    "page {pages} of {params:?} sorted or scanned under {order:?}: {at_large:?}"
+                );
+            }
+        };
+        for params in &broad {
+            judge(&large, params);
+        }
+        large.drop_index(RULE_KIND_INDEX);
+        large.drop_index(RULE_SEVERITY_INDEX);
+        failure_of(
+            &format!("{RULE_KIND_INDEX} dropped under {order:?}"),
+            || judge(&large, &broad[0]),
+        );
+    }
 }

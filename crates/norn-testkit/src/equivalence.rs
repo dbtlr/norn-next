@@ -176,6 +176,11 @@ pub struct ProjectedFinding {
     pub candidates_total: u64,
     pub class_keys: BTreeSet<String>,
     pub path_keys: BTreeSet<String>,
+    /// The names of the rules the finding cites, read through its rule set.
+    pub rules: BTreeSet<String>,
+    /// The head of the offending value — its text, its whole length and its
+    /// hash — and `None` for a finding about no value.
+    pub value: Option<(String, u64, String)>,
     pub vault_schema_fingerprint: String,
 }
 
@@ -636,6 +641,13 @@ impl StoreProjection {
             for (index, key) in finding.path_keys.iter().enumerate() {
                 entries.push((format!("{at}.path_key[{index}]"), quoted(key)));
             }
+            // The rules a finding cites by their names, in byte order: the
+            // rule set's identity is where it landed, and two stores agree
+            // about a finding's rules by naming the same ones.
+            entries.push((format!("{at}.rule count"), finding.rules.len().to_string()));
+            for (index, rule) in finding.rules.iter().enumerate() {
+                entries.push((format!("{at}.rule[{index}]"), quoted(rule)));
+            }
             *ordinal += 1;
         }
         for term in &self.terms {
@@ -1058,6 +1070,14 @@ fn project_finding(finding: StoredFinding) -> ProjectedFinding {
             .iter()
             .map(|key| key.as_str().to_string())
             .collect(),
+        rules: finding.rules,
+        value: finding.value.map(|value| {
+            (
+                value.text().to_string(),
+                value.byte_length(),
+                value.hash().as_str().to_string(),
+            )
+        }),
         vault_schema_fingerprint: finding.vault_schema_fingerprint,
     }
 }
@@ -1116,6 +1136,14 @@ const NULL: &str = "(none)";
 ///   pin — write generations, dropped for [`ProjectedFinding`]'s own reason.
 /// - **`position`** on `findings` — a generated column the database computes
 ///   from `ordinal`, which is rendered.
+/// - **`rule_set`** on `findings`, and the rule sets themselves — the set's
+///   row identifier, where it landed. The rules it holds are rendered by name
+///   under the finding that cites them, which is what `rule_set_rules` holds.
+/// - **`finding_rules`** — one row per rule a finding cites, each the rule's
+///   name, rendered under the finding as above, beside a copy of the
+///   finding's own fingerprint, kind, severity, path and position, which are
+///   rendered on the finding and which the store's own verification holds
+///   equal to it.
 /// - **`derived_at`** on `documents` and every other timestamp — when a row was
 ///   written, never a fact about the vault.
 ///
@@ -1285,6 +1313,20 @@ impl StoredColumns for ProjectedFinding {
             ("candidates_total", self.candidates_total.to_string()),
             ("message", quoted(&self.message)),
             ("detail", optional_text(self.detail.as_deref())),
+            (
+                "value_head",
+                optional_text(self.value.as_ref().map(|(text, _, _)| text.as_str())),
+            ),
+            (
+                "value_bytes",
+                self.value
+                    .as_ref()
+                    .map_or_else(|| NULL.to_string(), |(_, bytes, _)| bytes.to_string()),
+            ),
+            (
+                "value_hash",
+                optional_text(self.value.as_ref().map(|(_, _, hash)| hash.as_str())),
+            ),
             (
                 "vault_schema_fingerprint",
                 quoted(&self.vault_schema_fingerprint),

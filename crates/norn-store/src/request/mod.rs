@@ -130,7 +130,7 @@ pub(crate) type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 /// reads them.
 const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span_column,
             span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation,
-            ordinal";
+            ordinal, value_head, value_bytes, value_hash";
 
 /// The columns every reader of a document row selects, in the order
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
@@ -545,6 +545,14 @@ impl<'a> Request<'a> {
             )
             .map_err(|error| error::sql("discarding schema-dependent state", error))?
             as u64;
+        // After the findings, which are what cites a rule set: a set no
+        // finding of the new key can cite goes with the key it was held under.
+        transaction
+            .execute(
+                WriteStatement::DiscardStaleRuleSets.sql(),
+                params![fingerprint],
+            )
+            .map_err(|error| error::sql("discarding the stale rule sets", error))?;
         let typed_discarded = transaction
             .execute(TYPED_VALUE_DISCARD_SQL, [])
             .map_err(|error| error::sql("clearing the typed field values", error))?
@@ -1468,6 +1476,17 @@ impl<'a> Request<'a> {
                     findings[*position].path_keys.insert(path_key);
                 }
             }
+            let rules = self.read_all(
+                &finding_rules_sql(chunk.len()),
+                finding_id_parameters(chunk),
+                |row| Ok(Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))),
+                "reading the rules a finding cites",
+            )?;
+            for (finding, rule) in rules {
+                if let Some(position) = positions.get(&finding) {
+                    findings[*position].rules.insert(rule);
+                }
+            }
         }
         Ok(ids.into_iter().zip(findings).collect())
     }
@@ -1733,13 +1752,22 @@ pub(crate) fn check_finding_paths(
     )
 }
 
-/// Write one finding, its candidate head, its class memberships and its path
-/// keys, inside the transaction the caller is composing.
+/// Write one finding, its candidate head, its class memberships, its path
+/// keys and the rules it cites, inside the transaction the caller is
+/// composing.
 ///
 /// **The transaction is the caller's**, which is what lets a finding be written
 /// in the same act as the changeset that derived it. The generation and the
 /// pinned schema fingerprint are read inside it, so a finding is stamped with
 /// the key standing at the instant it lands.
+///
+/// **The rules a finding cites are filed once per fingerprint.** The row
+/// carries the identity of the fingerprint's rule set holding exactly those
+/// names — the one standing, or one made here with its rules — and one
+/// `finding_rules` row per name copies the finding's key beside it. **The
+/// offending value is kept as its head**: its first
+/// [`norn_wire::VALUE_HEAD_BYTES`], its length and its hash, which is taken
+/// here over the whole value being written.
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -1748,6 +1776,8 @@ pub(crate) fn write_finding(
     let fingerprint: String =
         norn_db::meta::get_meta(transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
             .unwrap_or_default();
+    let rule_set = cited_rule_set(transaction, &fingerprint, &finding.rules)?;
+    let value = finding.value.as_deref().map(crate::hash::value_head);
 
     // Each statement is cached: a changeset's re-decision files a finding per
     // link it finds wanting, each through these same statements.
@@ -1769,6 +1799,10 @@ pub(crate) fn write_finding(
                     finding.message,
                     finding.detail,
                     finding.ordinal,
+                    rule_set,
+                    value.as_ref().map(norn_wire::ValueHead::text),
+                    value.as_ref().map(norn_wire::ValueHead::byte_length),
+                    value.as_ref().map(|value| value.hash().as_str()),
                 ],
                 |row| row.get(0),
             )
@@ -1812,7 +1846,64 @@ pub(crate) fn write_finding(
                 .map_err(|error| error::sql("writing a finding's path key", error))?;
         }
     }
+
+    {
+        let mut insert = transaction
+            .prepare_cached(WriteStatement::InsertFindingRule.sql())
+            .map_err(|error| error::sql("preparing a finding rule write", error))?;
+        for rule in &finding.rules {
+            insert
+                .execute(params![id, rule])
+                .map_err(|error| error::sql("writing a rule a finding cites", error))?;
+        }
+    }
     Ok(())
+}
+
+/// The identity of the rule set of `fingerprint` holding exactly `rules`,
+/// made with its rules where none stands, and `None` for no rule.
+///
+/// A set is found by its canonical spelling: the names in byte order, as the
+/// canonical JSON of a list of them, which tells every two sets apart however
+/// their names are spelled. Nothing reads the spelling back; a set's names are
+/// read off its `rule_set_rules` rows.
+fn cited_rule_set(
+    transaction: &rusqlite::Transaction<'_>,
+    fingerprint: &str,
+    rules: &BTreeSet<String>,
+) -> Result<Option<i64>, StoreError> {
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    let spelled = crate::json::canonical_json(&crate::json::FrontmatterValue::Sequence(
+        rules
+            .iter()
+            .map(|rule| crate::json::FrontmatterValue::String(rule.clone()))
+            .collect(),
+    ))?;
+    let standing: Option<i64> = transaction
+        .prepare_cached(WriteStatement::FindRuleSet.sql())
+        .and_then(|mut find| {
+            find.query_row(params![fingerprint, spelled], |row| row.get(0))
+                .optional()
+        })
+        .map_err(|error| error::sql("finding a rule set", error))?;
+    if let Some(id) = standing {
+        return Ok(Some(id));
+    }
+    let id: i64 = transaction
+        .prepare_cached(WriteStatement::InsertRuleSet.sql())
+        .and_then(|mut insert| insert.query_row(params![fingerprint, spelled], |row| row.get(0)))
+        .map_err(|error| error::sql("writing a rule set", error))?;
+    let mut insert = transaction
+        .prepare_cached(WriteStatement::InsertRuleSetRule.sql())
+        .map_err(|error| error::sql("preparing a rule set's rule write", error))?;
+    for rule in rules {
+        insert
+            .execute(params![id, rule])
+            .map_err(|error| error::sql("writing a rule set's rule", error))?;
+    }
+    Ok(Some(id))
 }
 
 /// Discard the findings of `scope` about `path`, inside the caller's
@@ -2036,6 +2127,18 @@ fn finding_paths_sql(ids: usize) -> String {
     format!(
         "SELECT finding, path_key FROM finding_paths
          WHERE finding IN ({}) ORDER BY finding, path_key",
+        finding_id_placeholders(ids)
+    )
+}
+
+/// The statement a findings read emits for the rules a chunk of `ids`
+/// findings cite. The primary key `(finding, rule)` is the finding direction
+/// of the table, so the chunk is one seek per id; the rule's indexes are the
+/// direction a validate selecting by rule seeks.
+fn finding_rules_sql(ids: usize) -> String {
+    format!(
+        "SELECT finding, rule FROM finding_rules
+         WHERE finding IN ({}) ORDER BY finding, rule",
         finding_id_placeholders(ids)
     )
 }
@@ -2667,6 +2770,10 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
             &ordinal.map(|at| at.to_string()).unwrap_or_default(),
         )));
     };
+    let value = match optional_value_head(row, 14)? {
+        Ok(value) => value,
+        Err(damaged) => return Ok(Err(damaged)),
+    };
     Ok(DocumentPath::new(&path).map(|path| {
         (
             id,
@@ -2683,6 +2790,8 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
                 candidates_total,
                 message,
                 detail,
+                rules: BTreeSet::new(),
+                value,
                 vault_schema_fingerprint,
                 generation,
             },
@@ -2866,6 +2975,34 @@ pub(crate) fn optional_span(row: &Row<'_>, first: usize, table: &str) -> Reading
     Ok(written_span(table, line, column, byte_offset).map(Some))
 }
 
+/// The head of a finding's offending value, from the three columns starting
+/// at `first`: its text, its whole length and its hash, all present or all
+/// absent. A head the wire's grammar refuses — text past the bound or the
+/// length, a hash outside its spelling — is a row this crate did not write:
+/// [`StoreError::Damaged`].
+pub(crate) fn optional_value_head(
+    row: &Row<'_>,
+    first: usize,
+) -> Reading<Option<norn_wire::ValueHead>> {
+    let text: Option<String> = row.get(first)?;
+    let byte_length: Option<i64> = row.get(first + 1)?;
+    let hash: Option<String> = row.get(first + 2)?;
+    let (Some(text), Some(byte_length), Some(hash)) = (text, byte_length, hash) else {
+        return Ok(Ok(None));
+    };
+    let read = || {
+        let byte_length = position(byte_length, "findings.value_bytes")?;
+        let hash = norn_wire::ContentHash::new(&hash)
+            .map_err(|_| unreadable("findings.value_hash", &hash))?;
+        norn_wire::ValueHead::new(text, byte_length, hash)
+            .map(Some)
+            .map_err(|problem| StoreError::Damaged {
+                what: format!("a finding's value head is no value's head: {problem}"),
+            })
+    };
+    Ok(read())
+}
+
 /// The span a `table` row holds as `line`, `column` and `byte_offset`.
 fn written_span(table: &str, line: i64, column: i64, byte_offset: i64) -> Result<Span, StoreError> {
     let at = |written: i64, column: &str| position(written, &format!("{table}.{column}"));
@@ -2904,11 +3041,11 @@ pub(crate) fn unix_seconds() -> i64 {
 mod tests {
     use super::*;
 
-    /// [`findings`] chunks its three follow-up `IN` lists at
+    /// [`findings`] chunks its four follow-up `IN` lists at
     /// [`FINDING_ID_CHUNK`], which this build shrinks to 4. Ten findings, each
-    /// with one candidate, one class and one path key of its own, cross that
-    /// boundary twice, and every one has to come back paired with the
-    /// candidate, class and path key it — and only it — wrote.
+    /// with one candidate, one class, one path key and one rule of its own,
+    /// cross that boundary twice, and every one has to come back paired with
+    /// the candidate, class, path key and rule it — and only it — wrote.
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
@@ -2942,6 +3079,8 @@ mod tests {
                     candidates_total: 1,
                     message: format!("finding {index}"),
                     detail: None,
+                    rules: [format!("rule-{index}")].into_iter().collect(),
+                    value: None,
                 })
                 .expect("recording a finding");
         }
@@ -2969,16 +3108,21 @@ mod tests {
                 [expected].into_iter().collect(),
                 "finding {index} lost or gained a path key at a chunk boundary"
             );
+            assert_eq!(
+                finding.rules,
+                [format!("rule-{index}")].into_iter().collect(),
+                "finding {index} lost or gained a rule at a chunk boundary"
+            );
         }
     }
 
-    /// A findings read runs its three detail statements once per chunk of
+    /// A findings read runs its four detail statements once per chunk of
     /// [`FINDING_ID_CHUNK`] ids, and no more often or less.
     ///
     /// Ten findings under a chunk bound of 4 are three chunks, so the read is
     /// the statement that found them and three reads of each detail table. A
-    /// reader that bound every id into one list would run four statements, and
-    /// one that read id by id would run thirty-one.
+    /// reader that bound every id into one list would run five statements, and
+    /// one that read id by id would run forty-one.
     #[test]
     fn a_findings_read_runs_each_detail_statement_once_per_chunk_of_ids() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk-count");
@@ -3009,6 +3153,8 @@ mod tests {
                     candidates_total: 0,
                     message: format!("finding {index}"),
                     detail: None,
+                    rules: BTreeSet::new(),
+                    value: None,
                 })
                 .expect("recording a finding");
         }
@@ -3019,9 +3165,198 @@ mod tests {
         let chunks = findings.div_ceil(FINDING_ID_CHUNK) as u64;
         assert_eq!(
             request.read_statements() - before,
-            1 + 3 * chunks,
+            1 + 4 * chunks,
             "a read of {findings} findings under a chunk bound of {FINDING_ID_CHUNK} is one \
              statement that finds them and {chunks} of each detail statement"
         );
+    }
+
+    /// **A finding's row at rest does not grow with the rules it cites or the
+    /// value it judged.** Two findings, one citing one rule about a value just
+    /// past the head's bound and one citing forty rules about a value a
+    /// hundred times longer, hold rows of the same bytes: the rules ride one
+    /// rule-set identity, and the value its bounded head, its length and its
+    /// hash. What grows with the rules is `finding_rules`, one row per rule,
+    /// which is the selection a validate by rule seeks, and the set's own
+    /// rules, held once per schema fingerprint however many findings cite it.
+    /// The element count of a list and the size of the combined expectation
+    /// have no field to reach a finding through.
+    #[test]
+    fn a_findings_bytes_at_rest_do_not_grow_with_its_rules_or_its_value() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-finding-bytes");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let finding = |rules: usize, value: usize| FindingFacts {
+            kind: FindingKind::NotOneOf,
+            severity: norn_wire::Severity::Warning,
+            path: DocumentPath::new("tasks/a.md").expect("a document path"),
+            class_keys: BTreeSet::new(),
+            path_keys: BTreeSet::new(),
+            target: Some("status".to_string()),
+            span: None,
+            ordinal: None,
+            candidates: Vec::new(),
+            candidates_total: 0,
+            message: "a value outside the closed set".to_string(),
+            detail: None,
+            rules: (0..rules).map(|rule| format!("rule-{rule:02}")).collect(),
+            value: Some("x".repeat(value)),
+        };
+        let mut request = store.begin_request();
+        for (rules, value) in [
+            (1, norn_wire::VALUE_HEAD_BYTES + 1),
+            (40, 100 * 300),
+            (40, 300),
+        ] {
+            request
+                .record_finding(&finding(rules, value))
+                .expect("recording a finding");
+        }
+
+        let connection = store.connection();
+        let bytes: Vec<i64> = connection
+            .prepare(
+                "SELECT length(CAST(kind AS BLOB)) + length(CAST(severity AS BLOB))
+                      + length(CAST(path AS BLOB)) + length(CAST(target AS BLOB))
+                      + length(CAST(message AS BLOB)) + length(CAST(rule_set AS BLOB))
+                      + length(CAST(value_head AS BLOB)) + length(CAST(value_hash AS BLOB))
+                 FROM findings ORDER BY id",
+            )
+            .and_then(|mut read| {
+                read.query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<i64>>>()
+            })
+            .expect("measuring the finding rows");
+        assert_eq!(bytes.len(), 3);
+        assert!(
+            bytes.iter().all(|row| *row == bytes[0]),
+            "a finding's row grew with its rules or its value: {bytes:?}"
+        );
+        let count = |sql: &str| -> i64 {
+            connection
+                .query_row(sql, [], |row| row.get(0))
+                .expect("counting rows")
+        };
+        assert_eq!(count("SELECT count(*) FROM finding_rules"), 1 + 40 + 40);
+        assert_eq!(
+            count("SELECT count(*) FROM rule_sets"),
+            2,
+            "two findings citing one set hold it once"
+        );
+        assert_eq!(count("SELECT count(*) FROM rule_set_rules"), 1 + 40);
+        assert_eq!(
+            count("SELECT max(length(CAST(value_head AS BLOB))) FROM findings"),
+            norn_wire::VALUE_HEAD_BYTES as i64
+        );
+    }
+
+    /// **A schema pin discards the rule sets of the schema it replaces**, with
+    /// the findings citing them, in the pin's one act: a rule set is held under
+    /// the fingerprint its findings were derived under, and a finding derived
+    /// under the new schema files its rules under a set of the new
+    /// fingerprint. A pin that moves nothing discards nothing.
+    #[test]
+    fn a_schema_pin_discards_the_rule_sets_of_the_schema_it_replaces() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-rule-set-pin");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let finding = FindingFacts {
+            kind: FindingKind::RequiredMissing,
+            severity: norn_wire::Severity::Warning,
+            path: DocumentPath::new("tasks/a.md").expect("a document path"),
+            class_keys: BTreeSet::new(),
+            path_keys: BTreeSet::new(),
+            target: Some("due".to_string()),
+            span: None,
+            ordinal: None,
+            candidates: Vec::new(),
+            candidates_total: 0,
+            message: "a required field is missing".to_string(),
+            detail: None,
+            rules: ["tasks".to_string()].into_iter().collect(),
+            value: None,
+        };
+        let sets = |store: &Store| -> Vec<(String, String)> {
+            store
+                .connection()
+                .prepare(
+                    "SELECT vault_schema_fingerprint, rule FROM rule_sets
+                     JOIN rule_set_rules ON rule_set = id ORDER BY id",
+                )
+                .and_then(|mut read| {
+                    read.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .expect("reading the rule sets")
+        };
+        let mut request = store.begin_request();
+        request
+            .pin_vault_schema(b"one", "schema-one")
+            .expect("pinning a schema");
+        request
+            .record_finding(&finding)
+            .expect("recording a finding");
+        request
+            .pin_vault_schema(b"one", "schema-one")
+            .expect("pinning the same schema");
+        assert_eq!(
+            sets(&store),
+            vec![("schema-one".to_string(), "tasks".to_string())],
+            "a pin that moves nothing discards nothing"
+        );
+
+        let pinned = store
+            .begin_request()
+            .pin_vault_schema(b"two", "schema-two")
+            .expect("pinning another schema");
+        assert_eq!(pinned.invalidated.findings_discarded, 1);
+        assert_eq!(sets(&store), Vec::new());
+        store
+            .begin_request()
+            .record_finding(&finding)
+            .expect("recording a finding");
+        assert_eq!(
+            sets(&store),
+            vec![("schema-two".to_string(), "tasks".to_string())]
+        );
+    }
+
+    /// **The value head's bound holds at rest structurally**: the table
+    /// refuses a head past [`norn_wire::VALUE_HEAD_BYTES`], one longer than
+    /// the value it heads, and a head without its length or its hash, so a
+    /// payload the wire refuses cannot be written either.
+    #[test]
+    fn the_findings_table_refuses_a_value_head_past_its_bound() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-value-bound");
+        let store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let insert = |head: Option<String>, bytes: Option<i64>, hash: Option<&str>| {
+            store.connection().execute(
+                "INSERT INTO findings (
+                     vault_schema_fingerprint, generation, kind, severity, path,
+                     candidates_total, message, value_head, value_bytes, value_hash
+                 ) VALUES ('', 1, 'field/too-long', 'warning', 'a.md', 0, 'm', ?1, ?2, ?3)",
+                params![head, bytes, hash],
+            )
+        };
+        let bound = norn_wire::VALUE_HEAD_BYTES;
+        assert!(insert(Some("x".repeat(bound)), Some(1_000), Some("sha256:x")).is_ok());
+        assert!(insert(Some("x".repeat(bound + 1)), Some(1_000), Some("sha256:x")).is_err());
+        assert!(insert(Some("done".to_string()), Some(3), Some("sha256:x")).is_err());
+        assert!(insert(Some("done".to_string()), None, Some("sha256:x")).is_err());
+        assert!(insert(Some("done".to_string()), Some(4), None).is_err());
+        assert!(insert(None, None, None).is_ok());
     }
 }

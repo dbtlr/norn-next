@@ -263,6 +263,10 @@ pub enum PageRefusal {
     AmbiguousTarget(Box<TargetAmbiguity>),
     /// The target names no document.
     UnknownTarget { target: ResolutionTarget },
+    /// The request selects the findings citing `rule`, and the declaration it
+    /// was compiled under declares no rule of that name: no finding can cite
+    /// it, and an empty answer would say it holds everywhere.
+    UnknownRule { rule: String },
     /// The request carries `part`, which the answer it asks for — `answer` —
     /// does not take: an anchor or a column on a collection page, a column on
     /// a section or a block, or a cursor or a limit on anything but a
@@ -336,6 +340,9 @@ impl std::fmt::Display for PageRefusal {
             ),
             PageRefusal::UnknownTarget { target } => {
                 write!(formatter, "`{target}` names no document")
+            }
+            PageRefusal::UnknownRule { rule } => {
+                write!(formatter, "the vault's schema declares no rule `{rule}`")
             }
             PageRefusal::PartNotTaken { part, answer } => write!(
                 formatter,

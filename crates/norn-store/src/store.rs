@@ -997,13 +997,14 @@ impl Store {
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Seven checks, because a store has seven kinds of consistency to lose:
+    /// Eight checks, because a store has eight kinds of consistency to lose:
     /// the pages themselves, the foreign keys that carry cascade deletion, the
     /// full-text index against the column it is an index of, the frontmatter
     /// projection against being JSON at all, the closed vocabularies against
-    /// the values a reader will accept, the document and tombstone pillars
-    /// against each other, and each document's sub-fingerprints against the
-    /// columns they are hashes of. The third is what an external-content FTS5
+    /// the values a reader will accept, the rule rows against the findings
+    /// whose key they copy, the document and tombstone pillars against each
+    /// other, and each document's sub-fingerprints against the columns they
+    /// are hashes of. The third is what an external-content FTS5
     /// table can lose without anything else noticing, which is exactly why the
     /// index is maintained by triggers — and it is asked at **rank 1**, which
     /// checks the index against `documents.body` rather than only against
@@ -1011,12 +1012,15 @@ impl Store {
     /// reader that will be asked to query it. The fifth closes the gap between
     /// "the doctor says healthy" and a read that fails: a value outside a
     /// closed vocabulary is damage the reader reports, so the verification has
-    /// to see it too. The sixth is the disjointness the
-    /// `tombstones_clear_on_derive` trigger maintains — nothing structural
-    /// holds it, so it is checked at rest rather than trusted, the same ruling
-    /// the vocabularies get.
+    /// to see it too. The sixth is the copy of a finding's key each rule row
+    /// carries, which the write takes from the finding's own row and nothing
+    /// structural keeps equal after it; a rule row that disagrees would page
+    /// its finding under another kind or place. The seventh is the
+    /// disjointness the `tombstones_clear_on_derive` trigger maintains —
+    /// nothing structural holds it, so it is checked at rest rather than
+    /// trusted, the same ruling the vocabularies get.
     ///
-    /// The seventh is a **recompute at rest**, for the reason the stored suffix
+    /// The eighth is a **recompute at rest**, for the reason the stored suffix
     /// key gets one: a sub-fingerprint is a derived column, and every read that
     /// would notice one drifting from the column it hashes is a read that has
     /// already trusted it. A change-feed consumer triages on these values and
@@ -1119,6 +1123,16 @@ impl Store {
                 "severity",
                 quoted(Severity::ALL.iter().map(Severity::as_str)),
             ),
+            (
+                "finding_rules",
+                "kind",
+                quoted(FindingKind::ALL.iter().map(FindingKind::as_str)),
+            ),
+            (
+                "finding_rules",
+                "severity",
+                quoted(Severity::ALL.iter().map(Severity::as_str)),
+            ),
         ] {
             let outside: i64 = self
                 .connection()
@@ -1136,6 +1150,26 @@ impl Store {
                     ),
                 });
             }
+        }
+
+        // A rule row carries its finding's key so a validate by rule seeks it
+        // in the findings' order; a copy that disagrees with its finding
+        // would page that finding under another kind, severity or place.
+        let strayed: i64 = self
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM finding_rules AS fr JOIN findings AS f ON f.id = fr.finding
+                 WHERE fr.vault_schema_fingerprint IS NOT f.vault_schema_fingerprint
+                    OR fr.kind IS NOT f.kind OR fr.severity IS NOT f.severity
+                    OR fr.path IS NOT f.path OR fr.position IS NOT f.position",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("checking the rules findings cite", error))?;
+        if strayed != 0 {
+            return Err(StoreError::Damaged {
+                what: format!("{strayed} rule rows disagree with the finding they cite a rule of"),
+            });
         }
 
         let undead: i64 = self

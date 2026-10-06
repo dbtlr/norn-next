@@ -13,6 +13,8 @@
 //!
 //! `status` is declared and observed, `aliases` and `meta` are observed and
 //! undeclared, and `due` and `reviewer` are declared and carried by nothing.
+//! `status` is declared `single` and `reviewer` a `list`; `due` declares no
+//! shape. Two schema rules are declared, `tasks` after `areas`.
 
 use std::sync::Arc;
 
@@ -26,8 +28,9 @@ use norn_store::{
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
     AuthoredValue, ContainerKind, Cursor, CursorKey, DescribeParams, Direction, Facet, FacetKind,
-    FieldType, PagedRows, PathRuleKind, Pattern, Sort, SortKey, TagStance, ValueMap, VaultAddress,
-    VaultName,
+    FieldShape, FieldType, PagedRows, PathRuleKind, Pattern, RuleAllowedPaths, RuleClosedSet,
+    RuleForbiddenFix, RuleMatch, SchemaRule, Severity, Sort, SortKey, TagStance, ValueMap,
+    VaultAddress, VaultName,
 };
 
 // ---- fixtures ----
@@ -38,14 +41,22 @@ const DESCRIBE_SCHEMA: &str = "describe-schema";
 /// One declaration of every declared shape, under the fixture's schema.
 fn declared() -> ContentModel {
     ContentModel::under(DESCRIBE_SCHEMA)
-        .declare_field("status", FieldDeclaration::text())
+        .declare_field(
+            "status",
+            FieldDeclaration::text().with_shape(Some(FieldShape::Single)),
+        )
         // An ISO day sorts as its own text, which is the order this date reads
         // into.
         .declare_field(
             "due",
             FieldDeclaration::date(TypedOrder::new(|raw| Some(raw.to_string()))),
         )
-        .declare("reviewer")
+        .declare_field(
+            "reviewer",
+            FieldDeclaration::text().with_shape(Some(FieldShape::List)),
+        )
+        .declare_rule(tasks_rule())
+        .declare_rule(areas_rule())
         .declare_tag("project")
         .declare_tag("area")
         .declare_tag_pattern("person/**")
@@ -66,6 +77,37 @@ fn declared() -> ContentModel {
             None,
         )
         .declare_inbox("inbox/{{date}}-{{seq}}.md")
+}
+
+/// The fixture's `tasks` rule, declaring a part of every kind.
+fn tasks_rule() -> SchemaRule {
+    SchemaRule::new("tasks", Severity::Error)
+        .with_description("what a task holds")
+        .with_match(RuleMatch::new(
+            [("type".to_string(), vec!["task".to_string()])],
+            None,
+        ))
+        .with_required("status", Some(AuthoredValue::string("todo")))
+        .with_forbidden(
+            "assignee",
+            Some(RuleForbiddenFix::RenameTo("owner".to_string())),
+        )
+        .with_one_of(
+            "status",
+            RuleClosedSet::new(
+                ["todo".to_string(), "done".to_string()],
+                [("complete".to_string(), "done".to_string())],
+            ),
+        )
+        .with_max_length("title", 80)
+}
+
+/// The fixture's `areas` rule: a path alone, adding an area's requirement.
+fn areas_rule() -> SchemaRule {
+    SchemaRule::new("areas", Severity::Warning)
+        .with_match(RuleMatch::new([], Some("areas/<area>/**".to_string())))
+        .with_required("area", Some(AuthoredValue::string("{{path.area}}")))
+        .with_allowed_paths(RuleAllowedPaths::new(["areas/**".to_string()], None))
 }
 
 /// The frontmatter the fixture's `task` rule starts a document with.
@@ -240,7 +282,7 @@ fn observed_only() -> DescribeParams {
 
 /// Every facet the fixture answers, in `(kind, key)` order: the kinds in the
 /// byte order of their codes — `creation_rule`, `declared_field`,
-/// `declared_tag`, `inbox`, `observed_field`, `path_rule`,
+/// `declared_tag`, `inbox`, `observed_field`, `path_rule`, `rule`,
 /// `tag_pattern`, `undeclared_tags`.
 fn every_facet() -> Vec<Facet> {
     vec![
@@ -259,8 +301,8 @@ fn every_facet() -> Vec<Facet> {
             Some("# {{var.project}}\n".to_string()),
         ),
         Facet::declared_field("due", FieldType::Date, None),
-        Facet::declared_field("reviewer", FieldType::Text, None),
-        Facet::declared_field("status", FieldType::Text, None),
+        Facet::declared_field("reviewer", FieldType::Text, Some(FieldShape::List)),
+        Facet::declared_field("status", FieldType::Text, Some(FieldShape::Single)),
         Facet::declared_tag("area"),
         Facet::declared_tag("project"),
         Facet::inbox("inbox/{{date}}-{{seq}}.md"),
@@ -268,6 +310,8 @@ fn every_facet() -> Vec<Facet> {
         Facet::observed_field("meta", [ContainerKind::Map]),
         Facet::observed_field("status", [ContainerKind::Scalar]),
         Facet::path_rule(PathRuleKind::AmbiguityIgnore, "archive/**"),
+        Facet::rule(areas_rule()),
+        Facet::rule(tasks_rule()),
         Facet::tag_pattern("person/**"),
         Facet::undeclared_tags(TagStance::Report),
     ]
@@ -302,6 +346,55 @@ fn every_facet_answers_in_kind_then_key_order() {
     );
     let report = answered.into_report();
     assert_eq!(report.rows, every_facet());
+}
+
+/// **A schema rule is described as the schema writes it, one facet per
+/// rule, in the byte order of its name**, keyed by the name a page stops at:
+/// `areas` before `tasks` whatever order they were declared in, each part the
+/// rule declares spelled as written and every part it does not left out. A
+/// page of one facet stops at a rule and the next resumes after it.
+#[test]
+fn a_rule_is_described_as_the_schema_writes_it_in_the_order_of_its_name() {
+    let describing_store = Describing::new("describe-rules");
+    let rules = describing().with_facets([FacetKind::Rule]);
+    assert_eq!(
+        describing_store.describe(&rules).facets,
+        vec![Facet::rule(areas_rule()), Facet::rule(tasks_rule())]
+    );
+    let first = describing_store.describe(&rules.clone().with_limit(1));
+    assert_eq!(first.facets, vec![Facet::rule(areas_rule())]);
+    let next = first.next.expect("a next page");
+    assert_eq!(next.key(), &CursorKey::facet(FacetKind::Rule, "areas"));
+    assert_eq!(
+        describing_store
+            .describe(&rules.with_limit(1).with_after(next))
+            .facets,
+        vec![Facet::rule(tasks_rule())]
+    );
+}
+
+/// **A declared field carries the shape its declaration gives it, and none
+/// where it declares none**, which admits either.
+#[test]
+fn a_declared_field_carries_its_shape_where_it_declares_one() {
+    let describing_store = Describing::new("describe-shapes");
+    let shapes: Vec<(String, Option<FieldShape>)> = describing_store
+        .describe(&describing().with_facets([FacetKind::DeclaredField]))
+        .facets
+        .into_iter()
+        .map(|facet| match facet {
+            Facet::DeclaredField { key, shape, .. } => (key, shape),
+            other => panic!("a declared field's facet: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            ("due".to_string(), None),
+            ("reviewer".to_string(), Some(FieldShape::List)),
+            ("status".to_string(), Some(FieldShape::Single)),
+        ]
+    );
 }
 
 /// **An observed field lists every container its documents hold the key
@@ -385,7 +478,7 @@ fn the_empty_key_is_observed_first() {
     );
     assert_eq!(observed.len(), 4);
     assert_eq!(drained(&describing_store, &observed_only(), 1), observed);
-    assert_eq!(drained(&describing_store, &describing(), 2).len(), 15);
+    assert_eq!(drained(&describing_store, &describing(), 2).len(), 17);
 }
 
 /// The key a facet's cursor names.
@@ -882,7 +975,7 @@ fn a_declared_section_adds_no_statement_work_to_a_page() {
     let declared_only = describing_store.describe(&describing().with_facets(declared_kinds));
     assert_eq!(
         declared_only.facets.len(),
-        11,
+        13,
         "every declared facet answers"
     );
     assert_eq!(steps(declared_only.work), (0, 0, 0));

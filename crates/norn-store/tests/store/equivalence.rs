@@ -451,6 +451,83 @@ fn a_changed_finding_path_key_is_a_divergence() {
     assert_names(&divergence, "finding[one/glossary.md][0].path_key");
 }
 
+/// A finding judged against the schema rules at `at`, citing `rules` and
+/// judging `value`.
+fn ruled(at: &str, rules: &[&str], value: Option<&str>) -> norn_store::FindingFacts {
+    let mut finding = unread_block(at);
+    finding.kind = norn_wire::FindingKind::NotOneOf;
+    finding.severity = norn_wire::Severity::Warning;
+    finding.target = Some("status".to_string());
+    finding.rules = rules.iter().map(|rule| rule.to_string()).collect();
+    finding.value = value.map(str::to_string);
+    finding
+}
+
+/// **The rules a finding cites are projected, by name.** The same finding
+/// citing one rule in one store and another in the second is two findings: a
+/// validate selecting either rule answers one of them and not the other.
+#[test]
+fn a_changed_finding_rule_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-rule");
+    pair.left
+        .begin_request()
+        .record_finding(&ruled("one/glossary.md", &["tasks"], Some("someday")))
+        .expect("recording a finding");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .record_finding(&ruled("one/glossary.md", &["open"], Some("someday")))
+            .expect("recording a finding");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].rule");
+}
+
+/// **The value a finding judged is projected.** The same finding about one
+/// value in one store and another in the second is two findings.
+#[test]
+fn a_changed_finding_value_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-value");
+    pair.left
+        .begin_request()
+        .record_finding(&ruled("one/glossary.md", &["tasks"], Some("someday")))
+        .expect("recording a finding");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .record_finding(&ruled("one/glossary.md", &["tasks"], Some("later")))
+            .expect("recording a finding");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].value_");
+}
+
+/// **A rule set's identity is where it landed, and is not projected.** One
+/// store files a set nothing cites any longer ahead of the set its finding
+/// cites, so the two stores give the same rules two identities, and they
+/// compare equal: a finding's rules are compared by name.
+#[test]
+fn a_rule_sets_identity_leaves_two_stores_equal() {
+    let mut pair = Pair::new("pin-rule-set-identity");
+    {
+        let mut request = pair.left.begin_request();
+        request
+            .record_finding(&ruled("two/notes.md", &["stale"], None))
+            .expect("recording a finding");
+        request
+            .discard_findings_about(
+                &path("two/notes.md"),
+                norn_store::DiscardScope::Kinds(&[norn_wire::FindingKind::NotOneOf]),
+            )
+            .expect("discarding the finding");
+    }
+    for store in [&mut pair.left, &mut pair.right] {
+        store
+            .begin_request()
+            .record_finding(&ruled("one/glossary.md", &["tasks"], Some("someday")))
+            .expect("recording a finding");
+    }
+    pair.assert_equivalent();
+}
+
 /// **A store whose finding is keyed by a path, after that path dies, equals
 /// the store built from zero over what is left.** The incremental store holds
 /// a finding about a link to `dir/t.md` and then records that path's death;
