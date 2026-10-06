@@ -34,9 +34,9 @@ use norn_wire::{
     SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span,
     StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, Transition,
     TrustState, UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason,
-    Unsatisfied, UntrustedReason, ValidateParams, ValidateReport, ValueMap, VaultAddress,
-    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
-    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead,
+    ValueMap, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
+    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -2101,6 +2101,37 @@ fn a_candidate_head_advertises_the_ceiling_it_is_read_through() {
         candidates["items"]["$ref"].as_str(),
         Some("#/$defs/Candidate"),
         "the head restates a candidate rather than referring to it: {schema}"
+    );
+}
+
+/// **A value head advertises the bound it is read through**, as the text's
+/// `maxLength`. A schema counts characters where the bound counts bytes, and a
+/// character is at least a byte, so the advertised bound is the sound looser
+/// one: a surface validating against it passes no text longer than this
+/// crate reads. The bound is read off the constant rather than written down a
+/// second time.
+#[test]
+fn a_value_head_advertises_the_bound_it_is_read_through() {
+    let schema = schema_of::<ValueHead>();
+    assert_eq!(
+        property_names(&schema),
+        ["text", "byte_length", "hash"].into_iter().collect()
+    );
+    let text = &schema["properties"]["text"];
+    assert_eq!(text["type"].as_str(), Some("string"));
+    assert_eq!(
+        text["maxLength"].as_u64(),
+        Some(VALUE_HEAD_BYTES as u64),
+        "the head does not advertise the bound it is read through: {schema}"
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["text", "byte_length", "hash"])
+    );
+    assert_eq!(
+        schema["properties"]["hash"]["$ref"].as_str(),
+        Some("#/$defs/ContentHash"),
+        "the head restates a hash rather than referring to it: {schema}"
     );
 }
 

@@ -25,29 +25,29 @@ use norn_wire::{
     ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
     FilePath, FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
     FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    IllegalContentHash, IllegalOperationId, IllegalValueHead, InitParams, InitReport,
-    InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily,
-    LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport, MaintainerIdentity,
-    MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal, ModelIdentity, MoveParams,
-    MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems, NoRetrievalRung,
-    NonFiniteScore, NotReady, Operation, OperationId, OperationKind, OperationsTag, Page,
-    PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument, PlanFault, PollBackend,
-    Predicate, Provenance, Published, ReadFailure, ReasonCode, RefusedCheck, RegisterParams,
-    RegisterReport, Registration, RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome,
-    ReloadParams, ReloadReport, ReloadStage, RequestBound, RequestPart, RequestScope,
-    ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan, ResolvedTag, Resolves,
-    RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude,
-    RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason,
-    SchemaRule, SchemaSource, SchemaViolation, Score, SearchParams, SearchReport, SetParams,
-    Severity, SidecarRevision, SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams,
-    StatusReport, TagRow, TagSource, TagStance, Tally, TargetResult, TotalBelowHead, Transition,
-    TrustState, UnknownAddressing, UnknownFindingKind, UnknownPollBackend, UnknownRequestScope,
-    UnknownSeverity, UnknownVerb, UnregisterParams, UnregisterReport, UnresolvedOperation,
-    UnresolvedReason, Unsatisfied, UntrustedReason, VALUE_HEAD_BYTES, ValidateParams,
-    ValidateReport, ValueHead, ValueMap, Variables, VaultAddress, VaultAnswer, VaultChange,
-    VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport, VaultStatus, Verb,
-    WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character, is_refused_segment,
-    leaf_stem,
+    IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
+    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
+    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
+    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
+    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
+    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
+    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
+    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
+    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
+    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
+    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths,
+    RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport,
+    RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource, SchemaViolation, Score,
+    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
+    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
+    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
+    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
+    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
+    VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap, Variables, VaultAddress,
+    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
+    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
+    is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -976,10 +976,10 @@ fn validate_reports() -> Vec<ValidateReport> {
         ValidateReport::findings(Page::new(vec![finding_row()], None, vec![]), []),
         ValidateReport::findings(
             Page::new(vec![rule_finding_row()], None, vec![]),
-            [RuleSet::new(
-                3,
-                ["tasks".to_string(), "open-tasks".to_string()],
-            )],
+            [
+                RuleSet::new(3, ["tasks".to_string(), "open-tasks".to_string()])
+                    .expect("a rule set"),
+            ],
         ),
         ValidateReport::summary([KindTally::new(
             FindingKind::UndeclaredTag,
@@ -4958,6 +4958,67 @@ fn a_value_head_no_value_was_cut_to_is_refused() {
     assert!(ValueHead::new("done", 4, value_hash()).is_ok());
 }
 
+/// **A value within the bound is carried whole.** Only a value longer than
+/// [`VALUE_HEAD_BYTES`] is cut, so a head shorter than a value of at most
+/// that many bytes is no value's head, however close to the bound it stops:
+/// it is refused where it is built and where it is read alike.
+#[test]
+fn a_value_within_the_bound_is_carried_whole() {
+    let near = "x".repeat(VALUE_HEAD_BYTES - 3);
+    for byte_length in [
+        VALUE_HEAD_BYTES as u64 - 2,
+        VALUE_HEAD_BYTES as u64 - 1,
+        VALUE_HEAD_BYTES as u64,
+    ] {
+        assert_eq!(
+            ValueHead::new(near.as_str(), byte_length, value_hash()),
+            Err(IllegalValueHead::NotWhole {
+                text: VALUE_HEAD_BYTES - 3,
+                byte_length,
+            })
+        );
+        let json = format!(
+            r#"{{"text":"{near}","byte_length":{byte_length},"hash":"{}"}}"#,
+            value_hash()
+        );
+        assert!(
+            serde_json::from_str::<ValueHead>(&json).is_err(),
+            "{json} was read as a head"
+        );
+    }
+    assert_eq!(
+        ValueHead::new("done", 5, value_hash()),
+        Err(IllegalValueHead::NotWhole {
+            text: 4,
+            byte_length: 5
+        })
+    );
+    let whole = "x".repeat(VALUE_HEAD_BYTES);
+    assert!(ValueHead::new(whole, VALUE_HEAD_BYTES as u64, value_hash()).is_ok());
+}
+
+/// **The cut is the longest a character boundary allows.** A value of 128
+/// two-byte characters is exactly the bound and is kept whole; a value whose
+/// bound falls inside a character keeps every character that ends at or
+/// below the bound, which stops one, two or three bytes short of it as the
+/// straddling character is two, three or four bytes wide.
+#[test]
+fn a_value_head_keeps_the_longest_prefix_a_character_boundary_allows() {
+    let accented = "é".repeat(128);
+    let head = ValueHead::of(&accented, value_hash());
+    assert_eq!(head.text(), accented);
+    assert_eq!(head.text().len(), VALUE_HEAD_BYTES);
+    assert!(!head.is_truncated());
+
+    for (straddling, kept) in [("é", 255), ("€", 254), ("𝄞", 253)] {
+        let value = format!("{}{straddling}tail", "a".repeat(kept));
+        let head = ValueHead::of(&value, value_hash());
+        assert_eq!(head.text().len(), kept, "{straddling}");
+        assert_eq!(head.text(), &value[..kept], "{straddling}");
+        assert!(head.is_truncated(), "{straddling}");
+    }
+}
+
 /// **A finding's bytes do not grow with the value it judged or the rules it
 /// cites.** A row carries its rule set as one number and its value as a head
 /// bounded at [`VALUE_HEAD_BYTES`], so rows about values of any length past
@@ -4992,7 +5053,8 @@ fn a_validate_page_carries_the_rule_sets_its_rows_cite() {
                 "open-tasks".to_string(),
                 "tasks".to_string(),
             ],
-        )],
+        )
+        .expect("a rule set")],
     );
     let json = serde_json::to_value(&report).expect("a report as JSON");
     assert_eq!(json["shape"], "findings");
@@ -5007,6 +5069,32 @@ fn a_validate_page_carries_the_rule_sets_its_rows_cite() {
     ))
     .expect("a report as JSON");
     assert_eq!(none["rule_sets"], serde_json::json!([]));
+}
+
+/// **A rule set names at least one rule, in byte order, each once**, and a set
+/// that does not is refused where it is read: an empty list, names out of
+/// byte order, and a name given twice are no set a response carries. The
+/// constructor puts what it is handed in that order and refuses an empty set.
+#[test]
+fn a_rule_set_names_its_rules_in_byte_order_each_once() {
+    assert_eq!(
+        RuleSet::new(1, Vec::<String>::new()),
+        Err(IllegalRuleSet::Empty)
+    );
+    let set = RuleSet::new(1, ["b".to_string(), "a".to_string(), "b".to_string()])
+        .expect("a set of two rules");
+    assert_eq!(set.rules, ["a", "b"]);
+    for (rules, refusal) in [
+        ("[]", "no rule"),
+        (r#"["b","a"]"#, "byte order"),
+        (r#"["a","a"]"#, "twice"),
+    ] {
+        let json = format!(r#"{{"id":1,"rules":{rules}}}"#);
+        let error = serde_json::from_str::<RuleSet>(&json)
+            .expect_err(&format!("{json} was read as a rule set"));
+        assert!(error.to_string().contains(refusal), "{json}: {error}");
+    }
+    round_trip(&set);
 }
 
 /// The refusal a target that names more than one document earns carries the

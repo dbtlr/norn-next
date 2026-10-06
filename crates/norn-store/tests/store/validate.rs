@@ -2250,8 +2250,8 @@ fn a_page_carries_exactly_the_rule_sets_its_rows_cite() {
     assert_eq!(
         rule_sets,
         vec![
-            RuleSet::new(both, ["open".to_string(), "tasks".to_string()]),
-            RuleSet::new(tasks, ["tasks".to_string()]),
+            RuleSet::new(both, ["open".to_string(), "tasks".to_string()]).expect("a set"),
+            RuleSet::new(tasks, ["tasks".to_string()]).expect("a set"),
         ]
     );
     assert_eq!(
@@ -2264,10 +2264,7 @@ fn a_page_carries_exactly_the_rule_sets_its_rows_cite() {
     assert_eq!(first.len(), 2);
     assert_eq!(
         first_sets,
-        vec![RuleSet::new(
-            both,
-            ["open".to_string(), "tasks".to_string()]
-        )]
+        vec![RuleSet::new(both, ["open".to_string(), "tasks".to_string()]).expect("a set")]
     );
     let (_, next) = validating_store.page(&citing("tasks").with_limit(2));
     let (_, second_sets) = validating_store.page_citing(
@@ -2277,7 +2274,7 @@ fn a_page_carries_exactly_the_rule_sets_its_rows_cite() {
     );
     assert_eq!(
         second_sets,
-        vec![RuleSet::new(tasks, ["tasks".to_string()])]
+        vec![RuleSet::new(tasks, ["tasks".to_string()]).expect("a set")]
     );
 
     let (untagged, none) = validating_store.page_citing(

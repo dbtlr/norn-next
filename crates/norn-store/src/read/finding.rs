@@ -204,7 +204,9 @@ impl Snapshot {
             .map(|(id, _, rules)| {
                 let id = u64::try_from(id)
                     .map_err(|_| unreadable("findings.rule_set", &id.to_string()))?;
-                Ok(RuleSet::new(id, rules))
+                RuleSet::new(id, rules).map_err(|problem| StoreError::Damaged {
+                    what: format!("the rule set {id} is no rule set: {problem}"),
+                })
             })
             .collect()
     }

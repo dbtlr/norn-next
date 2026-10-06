@@ -637,7 +637,7 @@ pub use read::search::{
     Hit, NoRetrievalRung, RUNG_DEPTH, RungSelection, RungSet, RungSubtraction, SearchParams,
     SearchReport,
 };
-pub use read::validate::{KindTally, RuleSet, ValidateParams, ValidateReport};
+pub use read::validate::{IllegalRuleSet, KindTally, RuleSet, ValidateParams, ValidateReport};
 pub use reading::{
     AnswerReading, EngineSection, Freshness, LadderDeclaration, MalformedLadder, ModelIdentity,
     Rung, RungReport,

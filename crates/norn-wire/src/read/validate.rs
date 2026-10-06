@@ -31,8 +31,10 @@
 //! [`Unsatisfied::ResolvesNotApplicable`](crate::Unsatisfied::ResolvesNotApplicable)
 //! rather than refusing.
 
+use std::fmt;
+
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page};
@@ -63,15 +65,19 @@ impl KindTally {
     }
 }
 
-/// One set of schema rules a page's findings cite: its identity, which a
-/// finding row cites it by, and the names of its rules.
+/// One set of schema rules a response's finding rows cite: its identity, which
+/// a finding row cites it by, and the names of its rules.
 ///
 /// On the wire a set is a plain object: `{"id":3,"rules":["open-tasks","tasks"]}`.
-/// The names are in byte order, each once.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+/// The names are in byte order, each once, and there is at least one; a set
+/// that is not is refused where it is built and where it is read alike.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct RuleSet {
-    /// The identity a finding row cites the set by.
+    /// The identity a finding row cites the set by. It resolves only against
+    /// the rule sets of the response carrying it: an identity is where the
+    /// store filed the set, so it is not stable across responses, and a
+    /// schema pin files the sets again under new ones.
     pub id: u64,
     /// The names of the rules in the set, in byte order, each once.
     pub rules: Vec<String>,
@@ -79,12 +85,100 @@ pub struct RuleSet {
 
 impl RuleSet {
     /// The set `id` of `rules`, named in byte order, each once, whatever order
-    /// they are handed in.
-    pub fn new(id: u64, rules: impl IntoIterator<Item = String>) -> Self {
+    /// they are handed in, or [`IllegalRuleSet::Empty`] where none is.
+    pub fn new(id: u64, rules: impl IntoIterator<Item = String>) -> Result<Self, IllegalRuleSet> {
         let mut rules: Vec<String> = rules.into_iter().collect();
         rules.sort_unstable();
         rules.dedup();
-        RuleSet { id, rules }
+        IllegalRuleSet::check(&rules)?;
+        Ok(RuleSet { id, rules })
+    }
+}
+
+/// A list of names that is no rule set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IllegalRuleSet {
+    /// The set names no rule. A finding citing no rule cites no set.
+    Empty,
+    /// `rule` stands after a name it sorts before in byte order.
+    OutOfOrder {
+        /// The name out of order.
+        rule: String,
+    },
+    /// `rule` is named twice.
+    Repeated {
+        /// The name given twice.
+        rule: String,
+    },
+}
+
+impl IllegalRuleSet {
+    /// Whether `rules` names a set: at least one rule, in byte order, each
+    /// once.
+    fn check(rules: &[String]) -> Result<(), Self> {
+        if rules.is_empty() {
+            return Err(IllegalRuleSet::Empty);
+        }
+        for pair in rules.windows(2) {
+            match pair[0].cmp(&pair[1]) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    return Err(IllegalRuleSet::Repeated {
+                        rule: pair[1].clone(),
+                    });
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(IllegalRuleSet::OutOfOrder {
+                        rule: pair[1].clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for IllegalRuleSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IllegalRuleSet::Empty => write!(formatter, "a rule set names no rule"),
+            IllegalRuleSet::OutOfOrder { rule } => write!(
+                formatter,
+                "a rule set names `{rule}` after a rule it sorts before in byte order"
+            ),
+            IllegalRuleSet::Repeated { rule } => {
+                write!(formatter, "a rule set names `{rule}` twice")
+            }
+        }
+    }
+}
+
+impl std::error::Error for IllegalRuleSet {}
+
+/// The rule set as it arrives, before its names are checked. The field names
+/// and order are the set's, so the bytes a reader accepts are the bytes a
+/// writer produces.
+#[derive(Deserialize)]
+struct RuleSetFields {
+    id: u64,
+    rules: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for RuleSet {
+    /// A set arrives as its identity and its names and is read back through
+    /// the check the constructor holds, so a set naming no rule, or its rules
+    /// out of byte order or twice, refuses the read rather than landing as a
+    /// set two spellings could name.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = RuleSetFields::deserialize(deserializer)?;
+        IllegalRuleSet::check(&fields.rules).map_err(D::Error::custom)?;
+        Ok(RuleSet {
+            id: fields.id,
+            rules: fields.rules,
+        })
     }
 }
 

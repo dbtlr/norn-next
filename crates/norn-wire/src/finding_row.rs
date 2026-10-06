@@ -239,9 +239,18 @@ pub const VALUE_HEAD_BYTES: usize = 256;
 /// whole value's text, which tells two values apart that share their head.
 /// A head that could not have been cut from a value of its length is refused
 /// where it is built and where it is read alike: text past the bound, text
-/// longer than the length it heads, or a cut short of the bound by more than
-/// one character.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+/// longer than the length it heads, a value within the bound carried other
+/// than whole, or a longer value cut short of the bound by more than one
+/// character.
+///
+/// **What the head alone decides, and what it does not.** Which character
+/// follows a cut is not in the head, so a head of a value past the bound that
+/// stops one to three bytes short of it is accepted: a character that wide
+/// may follow it, and whether one does cannot be told from the head. The wire
+/// hashes nothing, so `hash` is not verified here either; it is the writer's
+/// declaration of the whole value's SHA-256, which the store takes over the
+/// value it writes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct ValueHead {
     /// The value's text, at most 256 bytes of it, cut at a character
@@ -326,6 +335,14 @@ pub enum IllegalValueHead {
         /// The length claimed for the whole value.
         byte_length: u64,
     },
+    /// The value is within the bound and the text is shorter than it: a
+    /// value of at most [`VALUE_HEAD_BYTES`] bytes is carried whole.
+    NotWhole {
+        /// The text's length in bytes.
+        text: usize,
+        /// The length claimed for the whole value.
+        byte_length: u64,
+    },
     /// The text was cut short of the bound by more than one character, which
     /// no cut at the last boundary at or below the bound leaves.
     CutShort {
@@ -353,7 +370,16 @@ impl IllegalValueHead {
                 byte_length,
             });
         }
-        if (length as u64) < byte_length && length + Self::WIDEST_CHARACTER <= VALUE_HEAD_BYTES {
+        if (length as u64) == byte_length {
+            return Ok(());
+        }
+        if byte_length <= VALUE_HEAD_BYTES as u64 {
+            return Err(IllegalValueHead::NotWhole {
+                text: length,
+                byte_length,
+            });
+        }
+        if length + Self::WIDEST_CHARACTER <= VALUE_HEAD_BYTES {
             return Err(IllegalValueHead::CutShort {
                 text: length,
                 byte_length,
@@ -374,6 +400,11 @@ impl fmt::Display for IllegalValueHead {
                 formatter,
                 "a head of {text} bytes cannot head a value of {byte_length}"
             ),
+            IllegalValueHead::NotWhole { text, byte_length } => write!(
+                formatter,
+                "a value of {byte_length} bytes is within {VALUE_HEAD_BYTES} bytes and \
+                 carried whole, and this head holds {text}"
+            ),
             IllegalValueHead::CutShort { text, byte_length } => write!(
                 formatter,
                 "a value of {byte_length} bytes is cut within one character of \
@@ -384,6 +415,45 @@ impl fmt::Display for IllegalValueHead {
 }
 
 impl std::error::Error for IllegalValueHead {}
+
+impl JsonSchema for ValueHead {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("ValueHead")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("norn_wire::ValueHead")
+    }
+
+    /// The object a derive would describe, with the bound the reader keeps
+    /// advertised as the text's `maxLength`. A schema counts characters and
+    /// the bound counts bytes; a character is at least one byte, so a text
+    /// within the byte bound is within the same number of characters, and the
+    /// advertised bound is the sound looser one. Whether the text is cut where
+    /// its length says is the read's to refuse, as the description states.
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let hash = generator.subschema_for::<ContentHash>();
+        json_schema!({
+            "type": "object",
+            "description": "The offending value a finding judged, as its bounded head, its whole length and its hash. A value within the bound is carried whole and a longer one is cut at the last character boundary at or below it; a head that could not have been cut from a value of its length is refused by the read.",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The value's text, at most the bound in bytes, cut at a character boundary.",
+                    "maxLength": VALUE_HEAD_BYTES,
+                },
+                "byte_length": {
+                    "type": "integer",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "description": "How many bytes the whole value has, which is what makes the text a head.",
+                },
+                "hash": hash,
+            },
+            "required": ["text", "byte_length", "hash"],
+        })
+    }
+}
 
 /// The value head as it arrives, before its text is checked against the
 /// length it heads. The field names and order are the head's, so the bytes a
