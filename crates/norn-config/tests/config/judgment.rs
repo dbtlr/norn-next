@@ -808,6 +808,33 @@ rules:
     );
 }
 
+/// **A scalar not reading as its field's type is one offending element by its
+/// text**: the integer `7` and the string `"7"` under a boolean field are one
+/// type mismatch, not one for each kind of YAML scalar.
+#[test]
+fn a_mistyped_integer_and_its_string_are_one_type_mismatch() {
+    let schema = schema(
+        "version: 1
+fields:
+  b: { type: boolean }
+",
+    );
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[(
+            "b",
+            AuthoredValue::list([AuthoredValue::Integer(7), text("7")]),
+        )],
+    );
+    let mismatches: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.breach() == Breach::TypeMismatch)
+        .map(|finding| finding.field().map(str::to_string))
+        .collect();
+    assert_eq!(mismatches, [Some("b".to_string())]);
+}
+
 /// **Two key orders of one map are one offending value**: a map with no
 /// equality key is told apart by its structure, entries in key order.
 #[test]
@@ -1092,6 +1119,14 @@ fn each_constraint_judged_is_counted_once() {
         1,
         "the field's presence against `required`"
     );
+    assert_eq!(
+        judged_count(
+            "version: 1\nrules:\n  a: { match: { frontmatter: { kind: x } }, required: { owner: } }\n  b: { match: { path: 'tasks/**' }, forbidden: { owner: } }\n",
+            &[("kind", text("x")), ("owner", text("me"))]
+        ),
+        1,
+        "the rules conflict over the field, in place of its presence judgments"
+    );
 }
 
 /// **The bytes of the declaration a judgment reads are counted**: the
@@ -1122,4 +1157,13 @@ fn the_declaration_bytes_a_judgment_reads_are_counted() {
         4 + 1,
         "a rule not selecting the document has its constraints read by no combination"
     );
+    // A forbidden field and a length-limited one are each read by their name.
+    let declared_bytes = |declaration: &str| {
+        schema(&format!("version: 1\nrules:\n  r: {{ {declaration} }}\n"))
+            .judge("a.md", &frontmatter(&[]), CaseFold::Exact)
+            .work()
+            .declaration_bytes
+    };
+    assert_eq!(declared_bytes("forbidden: { scratch: }"), 7);
+    assert_eq!(declared_bytes("max_length: { title: 3 }"), 5);
 }
