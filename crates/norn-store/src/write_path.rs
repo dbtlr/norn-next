@@ -18,8 +18,12 @@
 //! The increment's prepared statements — the document upsert, the per-table fact
 //! discards and inserts, the document delete, the tombstone record and the row
 //! probe — the findings writes, the rule-set writes a finding citing rules
-//! makes, the generation and pinned-scalar writes, and the discards a schema pin
-//! runs over findings and rule sets stamped under another fingerprint. The
+//! makes, the generation and pinned-scalar writes, and the discard a schema pin
+//! runs over findings stamped under another fingerprint. One registered
+//! statement is run by a trigger rather than prepared:
+//! [`WriteStatement::CollectRuleSet`] is the body of
+//! `findings_collect_rule_set`, which the DDL builds from this text, so its
+//! bar is a plan of what the trigger runs. The
 //! findings discards an increment runs are
 //! [`crate::ExplainedStatement::SubjectDiscard`] and
 //! [`crate::ExplainedStatement::PathDiscard`], which carry their own bars, and the
@@ -101,19 +105,19 @@ registry! {
     /// The rule set of a fingerprint holding exactly the names a finding
     /// cites, where one stands.
     FindRuleSet,
-    /// A rule set a finding cites and none of its fingerprint holds yet.
+    /// A rule set a finding cites and none of its fingerprint holds yet,
+    /// held as its canonical spelling.
     InsertRuleSet,
-    /// One rule of a rule set.
-    InsertRuleSetRule,
     /// One rule a finding cites, with the finding's key copied beside it in
     /// the order a validate selecting by rule seeks.
     InsertFindingRule,
     /// The discard a schema pin runs over findings stamped under another
     /// fingerprint.
     DiscardStaleFindings,
-    /// The discard a schema pin runs over rule sets held under another
-    /// fingerprint, after the findings citing them are gone.
-    DiscardStaleRuleSets,
+    /// The collection of a rule set no finding cites any longer, which the
+    /// trigger `findings_collect_rule_set` runs as each finding citing a set
+    /// is deleted, the deleted finding's citation bound in place of `?1`.
+    CollectRuleSet,
     /// The write generation's increment, which takes and records it in one
     /// statement.
     NextGeneration,
@@ -242,9 +246,6 @@ impl WriteStatement {
                 "INSERT INTO rule_sets (vault_schema_fingerprint, rules) VALUES (?1, ?2)
                  RETURNING id"
             }
-            Self::InsertRuleSetRule => {
-                "INSERT INTO rule_set_rules (rule_set, rule) VALUES (?1, ?2)"
-            }
             // The finding's key is copied from the row just written rather than
             // bound again, so the copy the rule's index orders by is the row's.
             Self::InsertFindingRule => {
@@ -261,10 +262,11 @@ impl WriteStatement {
                 "DELETE FROM findings
                  WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1"
             }
-            // The same two ranges, over the rule sets' own fingerprint.
-            Self::DiscardStaleRuleSets => {
+            // The set goes only where no finding cites it any longer, which
+            // is one seek of the citation's index.
+            Self::CollectRuleSet => {
                 "DELETE FROM rule_sets
-                 WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1"
+                 WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM findings WHERE rule_set = ?1)"
             }
             Self::NextGeneration => NEXT_GENERATION_SQL,
             Self::PutMeta => PUT_META_SQL,

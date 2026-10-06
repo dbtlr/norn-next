@@ -500,13 +500,116 @@ fn a_changed_finding_value_is_a_divergence() {
     assert_names(&divergence, "finding[one/glossary.md][0].value_");
 }
 
+/// **A value is compared past its head, by its length and its hash.** Two
+/// values sharing their first [`norn_wire::VALUE_HEAD_BYTES`] keep the same
+/// head; one longer than the other differs in its length, and two of one
+/// length differ in their hash, and each is a divergence named by the column
+/// that tells them apart.
+#[test]
+fn a_value_that_differs_past_its_head_is_a_divergence() {
+    let shared = "x".repeat(norn_wire::VALUE_HEAD_BYTES);
+    for (left, right, column) in [
+        (format!("{shared}a"), format!("{shared}ab"), "value_bytes"),
+        (format!("{shared}a"), format!("{shared}b"), "value_hash"),
+    ] {
+        let mut pair = Pair::new("pin-finding-value-tail");
+        pair.left
+            .begin_request()
+            .record_finding(&ruled("one/glossary.md", &["tasks"], Some(&left)))
+            .expect("recording a finding");
+        let divergence = pair.diverged(|store| {
+            store
+                .begin_request()
+                .record_finding(&ruled("one/glossary.md", &["tasks"], Some(&right)))
+                .expect("recording a finding");
+        });
+        assert_names(
+            &divergence,
+            &format!("finding[one/glossary.md][0].{column}"),
+        );
+    }
+}
+
 /// **A rule set's identity is where it landed, and is not projected.** One
-/// store files a set nothing cites any longer ahead of the set its finding
-/// cites, so the two stores give the same rules two identities, and they
-/// compare equal: a finding's rules are compared by name.
+/// store files a set ahead of the set its standing finding cites and then
+/// discards the finding citing the first, so the two stores give the same
+/// rules two identities, and they compare equal: a finding's rules and the
+/// sets themselves are compared by name, and the set nothing cites any longer
+/// went with its last citer.
 #[test]
 fn a_rule_sets_identity_leaves_two_stores_equal() {
     let mut pair = Pair::new("pin-rule-set-identity");
+    {
+        let mut request = pair.left.begin_request();
+        for finding in [
+            ruled("two/notes.md", &["stale"], None),
+            ruled("one/glossary.md", &["tasks"], Some("someday")),
+        ] {
+            request
+                .record_finding(&finding)
+                .expect("recording a finding");
+        }
+        request
+            .discard_findings_about(
+                &path("two/notes.md"),
+                norn_store::DiscardScope::Kinds(&[norn_wire::FindingKind::NotOneOf]),
+            )
+            .expect("discarding the finding");
+    }
+    pair.right
+        .begin_request()
+        .record_finding(&ruled("one/glossary.md", &["tasks"], Some("someday")))
+        .expect("recording a finding");
+    pair.assert_equivalent();
+}
+
+/// **A finding's rules are the set its row cites.** Two stores filing the same
+/// findings are equal; moving one finding's citation to another set out of
+/// band, with its `finding_rules` rows left as they were, makes the finding
+/// cite the other set's rules on every verb, and the pair diverges at the
+/// finding's rules — the projection reads them through the citation, as the
+/// wire does, and not off the copy a validate by rule seeks. The store's own
+/// verification reports the same edit as damage.
+#[test]
+fn a_finding_pointed_at_another_rule_set_is_a_divergence() {
+    let mut pair = Pair::new("pin-finding-rule-set");
+    for store in [&mut pair.left, &mut pair.right] {
+        let mut request = store.begin_request();
+        for finding in [
+            ruled("one/glossary.md", &["tasks"], Some("someday")),
+            ruled("two/notes.md", &["open"], Some("later")),
+        ] {
+            request
+                .record_finding(&finding)
+                .expect("recording a finding");
+        }
+    }
+    pair.assert_equivalent();
+    let divergence = pair.diverged(|store| {
+        norn_store::induced_failure::execute_out_of_band(
+            store,
+            "UPDATE findings SET rule_set = (SELECT rule_set FROM findings WHERE path = 'two/notes.md')
+             WHERE path = 'one/glossary.md'",
+        )
+        .expect("moving a citation out of band");
+    });
+    assert_names(&divergence, "finding[one/glossary.md][0].rule[0]");
+    assert!(
+        matches!(
+            pair.right.verify_integrity(),
+            Err(norn_store::StoreError::Damaged { .. })
+        ),
+        "a finding cited a set its rule rows disagree with and the store verified healthy"
+    );
+}
+
+/// **A rule set no finding cites is a divergence.** One store files a finding
+/// and discards it; the other never filed it. The set the discarded finding
+/// cited goes with it, so the two stay equal; a set left behind out of band
+/// is a field only one store holds.
+#[test]
+fn a_rule_set_no_finding_cites_is_a_divergence() {
+    let mut pair = Pair::new("pin-rule-set-garbage");
     {
         let mut request = pair.left.begin_request();
         request
@@ -519,13 +622,15 @@ fn a_rule_sets_identity_leaves_two_stores_equal() {
             )
             .expect("discarding the finding");
     }
-    for store in [&mut pair.left, &mut pair.right] {
-        store
-            .begin_request()
-            .record_finding(&ruled("one/glossary.md", &["tasks"], Some("someday")))
-            .expect("recording a finding");
-    }
     pair.assert_equivalent();
+    let divergence = pair.diverged(|store| {
+        norn_store::induced_failure::execute_out_of_band(
+            store,
+            "INSERT INTO rule_sets (vault_schema_fingerprint, rules) VALUES ('', '[\"stale\"]')",
+        )
+        .expect("leaving a set behind out of band");
+    });
+    assert_names(&divergence, "rule set[]");
 }
 
 /// **A store whose finding is keyed by a path, after that path dies, equals

@@ -81,9 +81,12 @@ pub enum ValidateStatement {
     /// reads neither a finding nor a rule row. A path part bounds each cell
     /// and a document part drives it as they do a summary.
     RuleSummary,
-    /// The rules of each rule set a page's findings cite: one seek of
-    /// `rule_set_rules`' primary key per set, its rules in byte order. A page
-    /// citing no set runs none.
+    /// The rules of each rule set a page's finding rows cite: one seek of
+    /// `rule_sets`' row id per set, its names walked out of its spelling in
+    /// byte order. A page citing no set runs none. Every verb answering
+    /// finding rows runs it through the one resolution the finding row
+    /// accessor holds, as a validate runs the find's finding-detail
+    /// statements.
     RuleSets,
 }
 
@@ -391,7 +394,8 @@ pub(crate) fn compose_findings(findings: &Findings<'_>) -> (String, Vec<Value>) 
 }
 
 /// The statement reading the rules of each rule set `ids` names: one seek of
-/// `rule_set_rules`' primary key per set, the rules of each in byte order.
+/// `rule_sets`' row id per set, in the order of its identity, the names of
+/// each walked out of its spelling in order ([`crate::rule_set`]).
 pub(crate) fn compose_rule_sets(ids: &[i64]) -> (String, Vec<Value>) {
     let mut binder = Binder::default();
     let listed: Vec<String> = ids
@@ -400,9 +404,11 @@ pub(crate) fn compose_rule_sets(ids: &[i64]) -> (String, Vec<Value>) {
         .collect();
     (
         format!(
-            "SELECT rule_set, rule FROM rule_set_rules
-                     WHERE rule_set IN ({})
-                     ORDER BY rule_set, rule",
+            "SELECT rs.id, {} FROM rule_sets AS rs
+                     LEFT JOIN json_each(rs.rules) AS j
+                     WHERE rs.id IN ({})
+                     ORDER BY rs.id",
+            crate::rule_set::walked_columns("rs", "j"),
             listed.join(", ")
         ),
         binder.into_values(),

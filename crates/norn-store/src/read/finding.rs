@@ -32,7 +32,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Candidate, CandidateHead, CursorKey, FindingKind, FindingRow, Hint, ResolutionTarget, Severity,
+    Candidate, CandidateHead, CursorKey, FindingKind, FindingRow, Hint, ResolutionTarget, RuleSet,
+    Severity,
 };
 
 use super::Ran;
@@ -43,6 +44,7 @@ use crate::find::{FindStatement, compose_finding_candidates, compose_finding_cla
 use crate::path::ClassKey;
 use crate::request::{Reading, optional_span, optional_value_head, unreadable};
 use crate::store::Snapshot;
+use crate::validate::{ValidateStatement, compose_rule_sets};
 
 /// A finding's own columns, in the order [`finding_base`] reads them, under
 /// the alias `f`.
@@ -162,6 +164,51 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
 }
 
 impl Snapshot {
+    /// The rule sets `bases` cite, each once, in the order of its identity,
+    /// each with its names in byte order: one
+    /// [`ValidateStatement::RuleSets`] over all of them, recorded in
+    /// `record`. No set cited, no statement.
+    ///
+    /// **Every verb answering finding rows resolves the sets they cite
+    /// here**, so a response carrying a row carries the names of the set it
+    /// cites, read one way. A set that is no set this crate wrote is
+    /// [`StoreError::Damaged`].
+    pub(crate) fn rule_sets(
+        &self,
+        record: &mut Vec<Ran>,
+        bases: &[FindingBase],
+    ) -> Result<Vec<RuleSet>, StoreError> {
+        let mut ids: Vec<i64> = bases.iter().filter_map(|base| base.rule_set).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let walked = self
+            .run_statement(
+                record,
+                Ran::new(ValidateStatement::RuleSets, compose_rule_sets(&ids)),
+                |row| crate::rule_set::walked(row, 0, 1),
+            )
+            .map_err(|problem| error::sql("reading the rule sets a page cites", problem))?;
+        let sets = crate::rule_set::owned_sets(walked)?;
+        if let Some(missing) = ids
+            .iter()
+            .find(|id| !sets.iter().any(|(set, _, _)| set == *id))
+        {
+            return Err(StoreError::Damaged {
+                what: format!("a finding cites the rule set {missing}, which is not there"),
+            });
+        }
+        sets.into_iter()
+            .map(|(id, _, rules)| {
+                let id = u64::try_from(id)
+                    .map_err(|_| unreadable("findings.rule_set", &id.to_string()))?;
+                Ok(RuleSet::new(id, rules))
+            })
+            .collect()
+    }
+
     /// The rows of the findings `bases` holds, in its order, each with its
     /// candidate head and its hint, read by two statements over all of them:
     /// [`FindStatement::FindingCandidates`] and

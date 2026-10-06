@@ -99,7 +99,8 @@ use crate::read::{
 use crate::request::unreadable;
 use crate::store::Snapshot;
 
-use statement::{Findings, compose_findings, compose_rule_sets};
+pub(crate) use statement::compose_rule_sets;
+use statement::{Findings, compose_findings};
 pub use statement::{VALIDATE_STATEMENTS, ValidateStatement};
 
 /// What [`Snapshot::validate`] answers: the findings or their tally, what the
@@ -498,48 +499,6 @@ impl Snapshot {
                 let severity = Severity::try_from(severity.as_str())
                     .map_err(|_| unreadable("findings.severity", &severity))?;
                 Ok(KindTally::new(kind, severity, count))
-            })
-            .collect()
-    }
-
-    /// The rule sets `bases` cite, each once, in the order of its identity,
-    /// each with its rules in byte order: one
-    /// [`ValidateStatement::RuleSets`] over all of them, recorded in
-    /// `record`. No set cited, no statement.
-    fn rule_sets(
-        &self,
-        record: &mut Vec<Ran>,
-        bases: &[FindingBase],
-    ) -> Result<Vec<RuleSet>, StoreError> {
-        let mut ids: Vec<i64> = bases.iter().filter_map(|base| base.rule_set).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let read = self
-            .run_statement(
-                record,
-                Ran::new(ValidateStatement::RuleSets, compose_rule_sets(&ids)),
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .map_err(|problem| error::sql("reading the rule sets a page cites", problem))?;
-        let mut sets: Vec<(i64, Vec<String>)> = ids.iter().map(|id| (*id, Vec::new())).collect();
-        for (set, rule) in read {
-            if let Ok(at) = sets.binary_search_by_key(&set, |(id, _)| *id) {
-                sets[at].1.push(rule);
-            }
-        }
-        sets.into_iter()
-            .map(|(id, rules)| {
-                if rules.is_empty() {
-                    return Err(StoreError::Damaged {
-                        what: format!("a finding cites the rule set {id}, which holds no rule"),
-                    });
-                }
-                let id = u64::try_from(id)
-                    .map_err(|_| unreadable("findings.rule_set", &id.to_string()))?;
-                Ok(RuleSet::new(id, rules))
             })
             .collect()
     }

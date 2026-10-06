@@ -104,15 +104,20 @@
 //! A finding judged against the schema rules cites every rule contributing to
 //! the constraint it breaches (ADR 0035). `findings.rule_set` names the set by
 //! one integer, so a finding row's bytes do not grow with the rules it cites.
-//! `rule_sets` holds each set once per vault-schema fingerprint, found again by
-//! its canonical spelling — the names in byte order, as a JSON list, which
-//! nothing reads back — under `rule_sets_fingerprint_rules`, and
-//! `rule_set_rules` holds its rules, which a validate page reads once per set
-//! its rows cite. A set is held under the fingerprint the findings citing it
-//! were derived under, and a schema pin discards the sets of another
-//! fingerprint after the findings citing them, by the same two ranges. The
-//! citation is a foreign key, and `findings_rule_set` is the index a set's
-//! discard checks it through, so the check costs the findings citing the set.
+//! `rule_sets` holds each set once per vault-schema fingerprint as its
+//! canonical spelling — the names in byte order, each once, as a JSON list —
+//! which is both what a write finds the set by again, under
+//! `rule_sets_fingerprint_rules`, and what a reader reads the set's names back
+//! from ([`crate::rule_set`]); the names are held nowhere else as a set. A set
+//! is held under the fingerprint the findings citing it were derived under,
+//! and it stands exactly as long as a finding cites it:
+//! `findings_collect_rule_set` deletes it as the last finding citing it is
+//! deleted, by whichever discard — a changeset's, a caller's or a schema
+//! pin's — so a store maintained through any history holds the sets a store
+//! derived from zero holds. The citation is a foreign key, and
+//! `findings_rule_set` is the index the collection's check for another citer
+//! and the foreign key's own check both seek, so collecting a set costs the
+//! findings citing it.
 //!
 //! **Selecting by rule reads a row per finding and rule.** A finding citing
 //! several rules is found by any of them, so `finding_rules` holds one row
@@ -120,10 +125,16 @@
 //! kind, severity, path and position: the key its two indexes order by, in
 //! the findings' own order, ending in the finding's id. The copy is taken from
 //! the finding's own row as the rule row is written, and the rows cascade with
-//! the finding, so a discard takes them whole; the store's verification holds
-//! the copy equal to the finding. These rows grow with the rules a finding
-//! cites, which is what selecting by any one of them costs; the finding's own
-//! row does not.
+//! the finding, so a discard takes them whole. The store's verification holds
+//! the copy equal to the finding and the rows' names equal to the set the
+//! finding cites, so the rules a validate selects a finding by are the rules
+//! its row reports. These rows grow with the rules a finding cites, which is
+//! what selecting by any one of them costs; the finding's own row does not.
+//!
+//! No finding cites a rule or carries a value until rule judgment in
+//! derivation files one (NORN-358): today only the store's own suite writes
+//! these tables and columns, through [`crate::FindingFacts::rules`] and
+//! [`crate::FindingFacts::value`].
 //!
 //! # The offending value is a head, at rest as on the wire
 //!
@@ -314,10 +325,13 @@
 //! and this column stays `TEXT`; `detail` is projected into the store by
 //! whatever composed it and is never forwarded back out as a typed shape.
 
+use crate::write_path::WriteStatement;
+
 pub(crate) fn statements() -> Vec<String> {
     let mut all = super::fixed(RULE_SET_STATEMENTS);
     all.push(findings());
     all.extend(super::fixed(STATEMENTS));
+    all.push(collect_rule_set());
     all.push(finding_candidates());
     all
 }
@@ -337,12 +351,24 @@ const RULE_SET_STATEMENTS: &[&str] = &[
     rules                    TEXT    NOT NULL
 )",
     "CREATE UNIQUE INDEX rule_sets_fingerprint_rules ON rule_sets(vault_schema_fingerprint, rules)",
-    "CREATE TABLE rule_set_rules (
-    rule_set INTEGER NOT NULL REFERENCES rule_sets(id) ON DELETE CASCADE,
-    rule     TEXT    NOT NULL,
-    PRIMARY KEY (rule_set, rule)
-) WITHOUT ROWID",
 ];
+
+/// The trigger that collects a rule set when the last finding citing it goes,
+/// its body [`WriteStatement::CollectRuleSet`] with the deleted finding's
+/// citation in place of the parameter, so the plan bar over that statement is
+/// a plan of what the trigger runs.
+fn collect_rule_set() -> String {
+    format!(
+        "CREATE TRIGGER findings_collect_rule_set AFTER DELETE ON findings
+    WHEN old.rule_set IS NOT NULL
+BEGIN
+    {};
+END",
+        WriteStatement::CollectRuleSet
+            .sql()
+            .replace("?1", "old.rule_set")
+    )
+}
 
 /// The findings table, with the position of a finding about the document
 /// taken from [`DOCUMENT_POSITION`] and the value head's bound from

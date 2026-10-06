@@ -25,8 +25,8 @@ use crate::common::{
 use crate::find::{failure_of, map, rows_of, string};
 use norn_store::{
     ContentModel, FindingFacts, PageRefusal, ReadStatement, Snapshot, SnapshotReader, Store,
-    StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan, ValidateStatement,
-    ValidateWork, Validated, Validation, induced_failure,
+    StoreError, StoredPathOrder, TagFact, TagSource, VALIDATE_STATEMENTS, ValidatePlan,
+    ValidateStatement, ValidateWork, Validated, Validation, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -2293,6 +2293,38 @@ fn a_page_carries_exactly_the_rule_sets_its_rows_cite() {
     assert_eq!(rule_sets.len(), 2, "{rule_sets:?}");
 }
 
+/// **A page citing a rule set that is no set this crate writes is damaged**,
+/// never answered with the names it happens to spell: an emptied set, one
+/// naming its rules out of byte order or twice, and one spelled other than
+/// canonically are each [`StoreError::Damaged`], as the store's own
+/// verification reports them.
+#[test]
+fn a_page_citing_a_rule_set_that_is_no_set_is_damaged() {
+    for spelled in [
+        "[]",
+        r#"["tasks","open"]"#,
+        r#"["open","open"]"#,
+        r#"[ "open", "tasks" ]"#,
+    ] {
+        let mut validating_store = ruling("validate-rule-set-damaged");
+        induced_failure::execute_out_of_band(
+            &mut validating_store.store,
+            &format!(
+                "UPDATE rule_sets SET rules = '{spelled}' WHERE rules = '[\"open\",\"tasks\"]'"
+            ),
+        )
+        .expect("respelling a set out of band");
+        let refused = validating_store
+            .snapshot()
+            .validate(&citing("tasks"), &declared())
+            .map(|answered| answered.answer);
+        assert!(
+            matches!(refused, Err(PageRefusal::Store(StoreError::Damaged { .. }))),
+            "a page citing the set spelled `{spelled}` was answered: {refused:?}"
+        );
+    }
+}
+
 /// **A rule finding's value is kept as its head**: a value within the bound
 /// whole, a longer one cut to the bound, each with the length and the
 /// SHA-256 of the whole value; a finding about no value carries none.
@@ -2626,9 +2658,9 @@ fn a_rule_summary_aggregates_over_the_rule_kind_and_severity_index() {
 }
 
 /// **The rule sets a page cites are read by their key**: one seek of
-/// `rule_set_rules`' primary key per set the page's rows cite, reading
-/// nothing end to end and sorting nothing, and a page citing no set reads
-/// none.
+/// `rule_sets`' row id per set the page's rows cite, each set's names walked
+/// out of its spelling, reading nothing end to end and sorting nothing, and a
+/// page citing no set reads none.
 ///
 /// Control: a plan scanning the table fails the bar.
 #[test]
@@ -2637,9 +2669,9 @@ fn the_rule_sets_a_page_cites_are_read_by_their_key() {
     let judge = |plan: &QueryPlan| {
         plan.assert_no_full_scan();
         plan.assert_no_temp_btree();
-        let sets = rows_of(plan, "rule_set_rules");
-        sets.assert_searches_through("rule_set_rules", Access::PrimaryKey);
-        sets.assert_search_constraint("rule_set_rules", "(rule_set=?)");
+        let sets = rows_of(plan, "rs");
+        sets.assert_searches_through("rule_sets", Access::RowId);
+        sets.assert_search_constraint("rule_sets", "(rowid=?)");
     };
     for params in [citing("tasks"), validating(), citing("open").with_limit(1)] {
         let read = plans_of(
@@ -2661,8 +2693,8 @@ fn the_rule_sets_a_page_cites_are_read_by_their_key() {
         ValidateStatement::RuleSets,
     );
     let scanned = rewritten(&read[0], |detail| {
-        if detail.starts_with("SEARCH rule_set_rules ") {
-            "SCAN rule_set_rules".to_string()
+        if detail.starts_with("SEARCH rs ") {
+            "SCAN rs".to_string()
         } else {
             detail.to_string()
         }

@@ -129,6 +129,7 @@ mod path;
 mod read;
 mod request;
 mod resolve;
+mod rule_set;
 mod search;
 mod store;
 mod validate;
@@ -142,8 +143,8 @@ pub use facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, DerivationVersion, DocumentFacts,
     FeedDocument, FeedTombstone, FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor,
     LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
-    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    StoredFinding, StoredLink, StoredLinkKey, StoredPathOrder, StoredRuleSet, StoredSuffixKeys,
+    StoredTag, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
@@ -179,7 +180,7 @@ pub use path::{
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FINDING_ID_CHUNK, FeedCursor, FindingCursor, MAX_PAGE,
-    POINT_READS, Request, STATEMENTS, SubjectScope,
+    POINT_READS, Request, RuleSetCursor, STATEMENTS, SubjectScope,
 };
 pub use resolve::{AmbiguityIgnore, TargetClass};
 pub use search::{

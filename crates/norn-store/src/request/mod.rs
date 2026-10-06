@@ -78,8 +78,8 @@ use crate::facts::{
     AnchorReadings, BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone,
     FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkAnchor, LinkFact, LinkFamily,
     PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding,
-    StoredLink, StoredLinkKey, StoredPathOrder, StoredSuffixKeys, StoredTag, StoredTombstone,
-    TagFact, TagSource, VaultSchemaPin,
+    StoredLink, StoredLinkKey, StoredPathOrder, StoredRuleSet, StoredSuffixKeys, StoredTag,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 use crate::fields::{ContentModel, FieldContainer, FieldRow, FieldRows, OffsetSpelling};
 use crate::health::{self, KeySummaries, LinkSelection};
@@ -545,14 +545,6 @@ impl<'a> Request<'a> {
             )
             .map_err(|error| error::sql("discarding schema-dependent state", error))?
             as u64;
-        // After the findings, which are what cites a rule set: a set no
-        // finding of the new key can cite goes with the key it was held under.
-        transaction
-            .execute(
-                WriteStatement::DiscardStaleRuleSets.sql(),
-                params![fingerprint],
-            )
-            .map_err(|error| error::sql("discarding the stale rule sets", error))?;
         let typed_discarded = transaction
             .execute(TYPED_VALUE_DISCARD_SQL, [])
             .map_err(|error| error::sql("clearing the typed field values", error))?
@@ -893,6 +885,57 @@ impl<'a> Request<'a> {
             .into_iter()
             .map(|(id, finding)| (FindingCursor(id), finding))
             .collect())
+    }
+
+    /// The next bounded page of **every** rule set the store holds, each with
+    /// the fingerprint it is held under and its names read off its spelling.
+    ///
+    /// A set is read by no finding that does not cite it, so a set left behind
+    /// by findings no longer standing is invisible to every keyed read; this
+    /// is the reader that enumerates them, so an empty answer means an empty
+    /// table. `after` is exclusive and the page is ordered by the set's own
+    /// row key, as [`Request::stored_findings_after`] orders its page.
+    pub fn stored_rule_sets_after(
+        &self,
+        after: Option<RuleSetCursor>,
+        limit: usize,
+    ) -> Result<Vec<(RuleSetCursor, StoredRuleSet)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a stored-rule-set page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        let walked = self.read_all(
+            &rule_set_page_sql(),
+            params_from_iter(rule_set_page_parameters(after, limit)),
+            |row| {
+                let fingerprint: String = row.get(0)?;
+                Ok(Ok((fingerprint, crate::rule_set::walked(row, 1, 1)?)))
+            },
+            "reading the rule-set page",
+        )?;
+        let mut fingerprints = std::collections::HashMap::new();
+        let mut rows = Vec::with_capacity(walked.len());
+        for (fingerprint, row) in walked {
+            fingerprints.insert(row.owner(), fingerprint);
+            rows.push(row);
+        }
+        let page = crate::rule_set::owned_sets(rows)?
+            .into_iter()
+            .map(|(id, _, rules)| {
+                let vault_schema_fingerprint = fingerprints.remove(&id).unwrap_or_default();
+                (
+                    RuleSetCursor(id),
+                    StoredRuleSet {
+                        vault_schema_fingerprint,
+                        rules,
+                    },
+                )
+            })
+            .collect();
+        Ok(page)
     }
 
     /// The next bounded page of tombstones, in path order.
@@ -1476,15 +1519,15 @@ impl<'a> Request<'a> {
                     findings[*position].path_keys.insert(path_key);
                 }
             }
-            let rules = self.read_all(
+            let walked = self.read_all(
                 &finding_rules_sql(chunk.len()),
                 finding_id_parameters(chunk),
-                |row| Ok(Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))),
+                |row| crate::rule_set::walked(row, 0, 1).map(Ok),
                 "reading the rules a finding cites",
             )?;
-            for (finding, rule) in rules {
+            for (finding, _, rules) in crate::rule_set::owned_sets(walked)? {
                 if let Some(position) = positions.get(&finding) {
-                    findings[*position].rules.insert(rule);
+                    findings[*position].rules = rules.into_iter().collect();
                 }
             }
         }
@@ -1763,11 +1806,12 @@ pub(crate) fn check_finding_paths(
 ///
 /// **The rules a finding cites are filed once per fingerprint.** The row
 /// carries the identity of the fingerprint's rule set holding exactly those
-/// names — the one standing, or one made here with its rules — and one
-/// `finding_rules` row per name copies the finding's key beside it. **The
-/// offending value is kept as its head**: its first
-/// [`norn_wire::VALUE_HEAD_BYTES`], its length and its hash, which is taken
-/// here over the whole value being written.
+/// names — the one standing, or one made here — and one `finding_rules` row
+/// per name copies the finding's key beside it. **The offending value is kept
+/// as its head**: its first [`norn_wire::VALUE_HEAD_BYTES`], its length and
+/// its hash, which is taken here over the whole value being written. Both are
+/// dormant carriers until rule judgment in derivation files a finding citing a
+/// rule or judging a value (NORN-358); no caller does yet.
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -1861,12 +1905,15 @@ pub(crate) fn write_finding(
 }
 
 /// The identity of the rule set of `fingerprint` holding exactly `rules`,
-/// made with its rules where none stands, and `None` for no rule.
+/// made where none stands, and `None` for no rule.
 ///
-/// A set is found by its canonical spelling: the names in byte order, as the
-/// canonical JSON of a list of them, which tells every two sets apart however
-/// their names are spelled. Nothing reads the spelling back; a set's names are
-/// read off its `rule_set_rules` rows.
+/// A set is found by its canonical spelling ([`crate::rule_set::spelling`]),
+/// which tells every two sets apart however their names are spelled, and is
+/// held as that spelling alone: its names are read back off it.
+///
+/// A dormant carrier: no caller files a finding citing a rule until rule
+/// judgment in derivation does (NORN-358), so today only the store's own suite
+/// reaches past the empty set.
 fn cited_rule_set(
     transaction: &rusqlite::Transaction<'_>,
     fingerprint: &str,
@@ -1875,12 +1922,7 @@ fn cited_rule_set(
     if rules.is_empty() {
         return Ok(None);
     }
-    let spelled = crate::json::canonical_json(&crate::json::FrontmatterValue::Sequence(
-        rules
-            .iter()
-            .map(|rule| crate::json::FrontmatterValue::String(rule.clone()))
-            .collect(),
-    ))?;
+    let spelled = crate::rule_set::spelling(rules)?;
     let standing: Option<i64> = transaction
         .prepare_cached(WriteStatement::FindRuleSet.sql())
         .and_then(|mut find| {
@@ -1891,19 +1933,11 @@ fn cited_rule_set(
     if let Some(id) = standing {
         return Ok(Some(id));
     }
-    let id: i64 = transaction
+    transaction
         .prepare_cached(WriteStatement::InsertRuleSet.sql())
         .and_then(|mut insert| insert.query_row(params![fingerprint, spelled], |row| row.get(0)))
-        .map_err(|error| error::sql("writing a rule set", error))?;
-    let mut insert = transaction
-        .prepare_cached(WriteStatement::InsertRuleSetRule.sql())
-        .map_err(|error| error::sql("preparing a rule set's rule write", error))?;
-    for rule in rules {
-        insert
-            .execute(params![id, rule])
-            .map_err(|error| error::sql("writing a rule set's rule", error))?;
-    }
-    Ok(Some(id))
+        .map(Some)
+        .map_err(|error| error::sql("writing a rule set", error))
 }
 
 /// Discard the findings of `scope` about `path`, inside the caller's
@@ -1934,6 +1968,12 @@ pub(crate) fn discard_about_in(
 /// cursor no further than the next page.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FindingCursor(i64);
+
+/// Where the next page of [`Request::stored_rule_sets_after`] starts: a
+/// position in a drain, never a fact about the set it came back beside, for
+/// [`FindingCursor`]'s reason.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RuleSetCursor(i64);
 
 /// Where the next page of a change feed starts.
 ///
@@ -2132,13 +2172,22 @@ fn finding_paths_sql(ids: usize) -> String {
 }
 
 /// The statement a findings read emits for the rules a chunk of `ids`
-/// findings cite. The primary key `(finding, rule)` is the finding direction
-/// of the table, so the chunk is one seek per id; the rule's indexes are the
-/// direction a validate selecting by rule seeks.
-fn finding_rules_sql(ids: usize) -> String {
+/// findings cite, read through the rule set each finding's row names — the
+/// set the wire reports it citing — rather than off `finding_rules`, which is
+/// the index a validate selecting by rule seeks.
+///
+/// Each id is a seek of the findings' row id and its set one of the sets',
+/// whose names `json_each` walks out of its spelling in order; a set walked to
+/// no name still answers its row, so an empty set reads as damage rather than
+/// as a finding citing none.
+pub(crate) fn finding_rules_sql(ids: usize) -> String {
     format!(
-        "SELECT finding, rule FROM finding_rules
-         WHERE finding IN ({}) ORDER BY finding, rule",
+        "SELECT f.id, {}
+         FROM findings AS f
+         JOIN rule_sets AS rs ON rs.id = f.rule_set
+         LEFT JOIN json_each(rs.rules) AS j
+         WHERE f.id IN ({}) ORDER BY f.id",
+        crate::rule_set::walked_columns("rs", "j"),
         finding_id_placeholders(ids)
     )
 }
@@ -2483,6 +2532,34 @@ fn finding_page_sql() -> String {
              ORDER BY id
              LIMIT ?2"
     )
+}
+
+/// The statement [`Request::stored_rule_sets_after`] emits: a page of the
+/// sets' row ids past the cursor, the seek [`finding_page_sql`] makes over
+/// the findings' own, and the names of each walked out of its spelling, in the
+/// order of the page.
+pub(crate) fn rule_set_page_sql() -> String {
+    format!(
+        "SELECT rs.vault_schema_fingerprint, {}
+             FROM (
+                 SELECT id, vault_schema_fingerprint, rules FROM rule_sets
+                 WHERE id > COALESCE(?1, {BELOW_EVERY_FINDING_KEY})
+                 ORDER BY id
+                 LIMIT ?2
+             ) AS rs
+             LEFT JOIN json_each(rs.rules) AS j
+             ORDER BY rs.id",
+        crate::rule_set::walked_columns("rs", "j")
+    )
+}
+
+/// The cursor and the page bound, in the order [`rule_set_page_sql`] numbers
+/// them.
+pub(crate) fn rule_set_page_parameters(after: Option<RuleSetCursor>, limit: usize) -> Vec<Value> {
+    vec![
+        after.map_or(Value::Null, |cursor| Value::Integer(cursor.0)),
+        Value::Integer(i64::try_from(limit).expect("the page bound fits i64")),
+    ]
 }
 
 /// The cursor and the page bound, in the order [`finding_page_sql`] numbers
@@ -3247,7 +3324,10 @@ mod tests {
             2,
             "two findings citing one set hold it once"
         );
-        assert_eq!(count("SELECT count(*) FROM rule_set_rules"), 1 + 40);
+        assert_eq!(
+            count("SELECT sum(json_array_length(rules)) FROM rule_sets"),
+            1 + 40
+        );
         assert_eq!(
             count("SELECT max(length(CAST(value_head AS BLOB))) FROM findings"),
             norn_wire::VALUE_HEAD_BYTES as i64
@@ -3287,10 +3367,7 @@ mod tests {
         let sets = |store: &Store| -> Vec<(String, String)> {
             store
                 .connection()
-                .prepare(
-                    "SELECT vault_schema_fingerprint, rule FROM rule_sets
-                     JOIN rule_set_rules ON rule_set = id ORDER BY id",
-                )
+                .prepare("SELECT vault_schema_fingerprint, rules FROM rule_sets ORDER BY id")
                 .and_then(|mut read| {
                     read.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                         .collect::<rusqlite::Result<Vec<_>>>()
@@ -3309,7 +3386,7 @@ mod tests {
             .expect("pinning the same schema");
         assert_eq!(
             sets(&store),
-            vec![("schema-one".to_string(), "tasks".to_string())],
+            vec![("schema-one".to_string(), r#"["tasks"]"#.to_string())],
             "a pin that moves nothing discards nothing"
         );
 
@@ -3325,8 +3402,82 @@ mod tests {
             .expect("recording a finding");
         assert_eq!(
             sets(&store),
-            vec![("schema-two".to_string(), "tasks".to_string())]
+            vec![("schema-two".to_string(), r#"["tasks"]"#.to_string())]
         );
+    }
+
+    /// **A rule set stands exactly as long as a finding cites it.** Two
+    /// findings cite one set and a third another; discarding one of the two
+    /// leaves their set standing for the other, and discarding the other
+    /// collects it, while the third's set stays. So a store whose findings came
+    /// and went holds the sets a store derived from zero over what stands
+    /// holds, and nothing a discard left behind.
+    #[test]
+    fn a_rule_set_goes_with_the_last_finding_citing_it() {
+        let root = norn_testkit::scratch::Scratch::new("norn-store-rule-set-collect");
+        let mut store = Store::open_throwaway(
+            root.join("store.sqlite3"),
+            StoredPathOrder::Sensitive,
+            crate::DerivationVersion::new(1),
+        )
+        .expect("opening a store");
+        let finding = |at: &str, rule: &str| FindingFacts {
+            kind: FindingKind::RequiredMissing,
+            severity: norn_wire::Severity::Warning,
+            path: DocumentPath::new(at).expect("a document path"),
+            class_keys: BTreeSet::new(),
+            path_keys: BTreeSet::new(),
+            target: Some("due".to_string()),
+            span: None,
+            ordinal: None,
+            candidates: Vec::new(),
+            candidates_total: 0,
+            message: "a required field is missing".to_string(),
+            detail: None,
+            rules: [rule.to_string()].into_iter().collect(),
+            value: None,
+        };
+        let sets = |store: &Store| -> Vec<String> {
+            store
+                .connection()
+                .prepare("SELECT rules FROM rule_sets ORDER BY rules")
+                .and_then(|mut read| {
+                    read.query_map([], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()
+                })
+                .expect("reading the rule sets")
+        };
+        let mut request = store.begin_request();
+        for (at, rule) in [("a.md", "tasks"), ("b.md", "tasks"), ("c.md", "open")] {
+            request
+                .record_finding(&finding(at, rule))
+                .expect("recording a finding");
+        }
+        let discard = |store: &mut Store, at: &str| {
+            store
+                .begin_request()
+                .discard_findings_about(
+                    &DocumentPath::new(at).expect("a document path"),
+                    DiscardScope::Kinds(&[FindingKind::RequiredMissing]),
+                )
+                .expect("discarding a subject's findings");
+        };
+
+        discard(&mut store, "a.md");
+        assert_eq!(
+            sets(&store),
+            vec![r#"["open"]"#.to_string(), r#"["tasks"]"#.to_string()],
+            "a set another finding still cites went with one of its citers"
+        );
+        discard(&mut store, "b.md");
+        assert_eq!(
+            sets(&store),
+            vec![r#"["open"]"#.to_string()],
+            "a set no finding cites any longer stayed behind"
+        );
+        store
+            .verify_integrity()
+            .expect("a store after its discards");
     }
 
     /// **The value head's bound holds at rest structurally**: the table

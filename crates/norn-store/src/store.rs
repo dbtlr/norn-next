@@ -994,6 +994,86 @@ impl Store {
         Request::new(self)
     }
 
+    /// Hold every copy of a finding's rules equal to the one the wire reports.
+    ///
+    /// A finding's rules are the set its row cites, read back off the set's
+    /// spelling; `finding_rules` holds them a second time, one row per rule,
+    /// for a validate selecting by rule to seek. Nothing structural keeps the
+    /// two equal after the write, so each way they can come apart is damage
+    /// here: a spelling that is no set this crate wrote — not JSON, empty, out
+    /// of order, named twice or spelled other than canonically — a set held
+    /// under another fingerprint than a finding citing it, and a finding whose
+    /// rule rows are not exactly the names of its set, which includes rule rows
+    /// for a finding citing no set and a set's name with no row.
+    fn verify_rule_sets(&self) -> Result<(), StoreError> {
+        let count = |sql: &str, operation: &'static str| -> Result<i64, StoreError> {
+            self.connection()
+                .query_row(sql, [], |row| row.get(0))
+                .map_err(|error| error::sql(operation, error))
+        };
+        let unreadable = count(
+            "SELECT count(*) FROM rule_sets WHERE json_valid(rules) = 0",
+            "checking the rule sets' spellings",
+        )?;
+        if unreadable != 0 {
+            return Err(StoreError::Damaged {
+                what: format!("{unreadable} rule sets are spelled as something other than JSON"),
+            });
+        }
+        let walked = self
+            .connection()
+            .prepare(&format!(
+                "SELECT rs.id, {} FROM rule_sets AS rs
+                 LEFT JOIN json_each(rs.rules) AS j ORDER BY rs.id",
+                crate::rule_set::walked_columns("rs", "j")
+            ))
+            .and_then(|mut read| {
+                read.query_map([], |row| crate::rule_set::walked(row, 0, 1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(|error| error::sql("reading the rule sets", error))?;
+        crate::rule_set::owned_sets(walked)?;
+
+        let elsewhere = count(
+            "SELECT count(*) FROM findings AS f JOIN rule_sets AS rs ON rs.id = f.rule_set
+             WHERE rs.vault_schema_fingerprint IS NOT f.vault_schema_fingerprint",
+            "checking the fingerprint a rule set is held under",
+        )?;
+        if elsewhere != 0 {
+            return Err(StoreError::Damaged {
+                what: format!(
+                    "{elsewhere} findings cite a rule set held under another fingerprint"
+                ),
+            });
+        }
+
+        let unheld = count(
+            "SELECT count(*) FROM finding_rules AS fr JOIN findings AS f ON f.id = fr.finding
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM rule_sets AS rs, json_each(rs.rules) AS j
+                 WHERE rs.id = f.rule_set AND j.value = fr.rule
+             )",
+            "checking the rule rows against their finding's set",
+        )?;
+        let unrowed = count(
+            "SELECT count(*) FROM findings AS f JOIN rule_sets AS rs ON rs.id = f.rule_set,
+                 json_each(rs.rules) AS j
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM finding_rules AS fr WHERE fr.finding = f.id AND fr.rule = j.value
+             )",
+            "checking a finding's set against its rule rows",
+        )?;
+        if unheld + unrowed != 0 {
+            return Err(StoreError::Damaged {
+                what: format!(
+                    "{unheld} rule rows name a rule their finding's rule set does not hold, and \
+                     {unrowed} rules a finding's set holds have no rule row"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
@@ -1171,6 +1251,7 @@ impl Store {
                 what: format!("{strayed} rule rows disagree with the finding they cite a rule of"),
             });
         }
+        self.verify_rule_sets()?;
 
         let undead: i64 = self
             .connection()

@@ -833,8 +833,11 @@ pub struct StoredFinding {
     pub candidates_total: u64,
     pub message: String,
     pub detail: Option<String>,
-    /// The names of the rules the finding cites, read through its rule set;
-    /// empty for a finding citing none.
+    /// The names of the rules the finding cites: the names of the rule set its
+    /// row cites, read off the set's spelling — the rules every verb reports
+    /// it citing — and empty for a finding citing none. `finding_rules`, the
+    /// copy a validate selecting by rule seeks, is not what this reads; the
+    /// store's verification holds the two equal.
     pub rules: BTreeSet<String>,
     /// The head of the offending value the finding judged, and `None` for a
     /// finding about no value.
@@ -845,6 +848,18 @@ pub struct StoredFinding {
     /// The generation a repair plan cites when it was planned against this
     /// finding.
     pub generation: i64,
+}
+
+/// A rule set as it stands: the fingerprint it is held under and the names of
+/// its rules, in byte order, each once.
+///
+/// A set stands exactly as long as a finding cites it, so a store holds the
+/// sets its findings cite and no other; its row identifier is where it
+/// landed and is not carried.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StoredRuleSet {
+    pub vault_schema_fingerprint: String,
+    pub rules: Vec<String>,
 }
 
 /// One term the full-text index holds, as the index itself reports it.
