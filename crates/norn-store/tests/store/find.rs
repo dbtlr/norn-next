@@ -17,15 +17,16 @@ use crate::common::{
     Scratch, document, path_names_no_document_in_class, violation, write_documents,
 };
 use norn_store::{
-    BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
-    FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, LinkFact, LinkFamily,
-    MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound,
-    ReadFilter, ReadStatement, Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder,
-    SuffixKey, TagFact, TagSource, TypedOrder, induced_failure,
+    BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldMatch,
+    FieldOrder, FindPlan, FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING,
+    LinkFact, LinkFamily, MAX_PAGE, MatchedColumn, NESTED_ROW_CEILING, Nested, PageDirection,
+    PageRefusal, READ_FILTERS, ReadBound, ReadFilter, ReadStatement, Snapshot, SnapshotReader,
+    Span, Store, StoreError, StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
-    Column, Cursor, CursorKey, Direction, FindParams, FindingKind, Pattern, Predicate,
+    Column, Cursor, CursorKey, Direction, FieldShape, FindParams, FindingKind, Pattern, Predicate,
     ResolutionTarget, Sort, SortKey, Unsatisfied, VaultAddress, VaultName,
 };
 
@@ -70,6 +71,28 @@ pub(crate) fn declared() -> ContentModel {
     ContentModel::under(SEED_SCHEMA)
         .declare("status")
         .declare_field("count", FieldDeclaration::number(integer_order()))
+}
+
+/// [`declared`], and a key for each other way an equality part reads a key's
+/// values: the tag carrier `tags` under the tag fold, `kind` as text declared
+/// single, `rank` with a typed order declared single, and `labels` declared
+/// `tags` and a list. A declared key is in the field universe, so a part on
+/// each compiles to its filter whatever the seeded documents carry.
+fn declared_readings() -> ContentModel {
+    declared()
+        .declare("tags")
+        .declare_field(
+            "kind",
+            FieldDeclaration::text().with_shape(Some(FieldShape::Single)),
+        )
+        .declare_field(
+            "rank",
+            FieldDeclaration::number(integer_order()).with_shape(Some(FieldShape::Single)),
+        )
+        .declare_field(
+            "labels",
+            FieldDeclaration::tags().with_shape(Some(FieldShape::List)),
+        )
 }
 
 /// `status` and `count` both declared as text, under the fixture's schema.
@@ -442,9 +465,9 @@ fn filter_barred_by(filter: ReadFilter) -> &'static str {
 fn forms_of(filter: ReadFilter) -> Vec<ReadFilter> {
     let orders = [FieldOrder::Raw, FieldOrder::Typed];
     match filter {
-        ReadFilter::Equal(_) => orders.map(ReadFilter::Equal).to_vec(),
-        ReadFilter::NotEqual(_) => orders.map(ReadFilter::NotEqual).to_vec(),
-        ReadFilter::Member(_) => orders.map(ReadFilter::Member).to_vec(),
+        ReadFilter::Equal(_) => FieldMatch::ALL.map(ReadFilter::Equal).to_vec(),
+        ReadFilter::NotEqual(_) => FieldMatch::ALL.map(ReadFilter::NotEqual).to_vec(),
+        ReadFilter::Member(_) => FieldMatch::ALL.map(ReadFilter::Member).to_vec(),
         ReadFilter::Before(_) => orders.map(ReadFilter::Before).to_vec(),
         ReadFilter::After(_) => orders.map(ReadFilter::After).to_vec(),
         ReadFilter::Resolves(_) => [SuffixKey::Raw, SuffixKey::Folded]
@@ -1336,55 +1359,69 @@ fn field_seek(alias: &'static str, index: &'static str, constraint: &'static str
     }
 }
 
-/// Every filter slot, once. A filter that compares values is spelled under both
-/// orders: `status` is declared without a type and `count` with one.
+/// An equality, an inequality or a membership spelled by `part` under every
+/// reading a key's values take ([`FieldMatch::ALL`]), each on the key
+/// [`declared_readings`] reads that way, with the index its value rows are
+/// sought in: `status` raw, `count` typed and the carrier `tags` folded, then
+/// `kind`, `rank` and `labels` the same three ways under a declared shape. A
+/// shaped reading also confirms its key's presence row, a primary-key seek
+/// the plan holds to no full scan.
+fn readings(
+    part: impl Fn(&str, &str) -> Predicate,
+    shape: fn(FieldMatch) -> ReadFilter,
+) -> Vec<(Predicate, ReadFilter, Seek)> {
+    FieldMatch::ALL
+        .into_iter()
+        .map(|reading| {
+            let key = match (reading.column, reading.shaped) {
+                (MatchedColumn::Raw, false) => "status",
+                (MatchedColumn::Typed, false) => "count",
+                (MatchedColumn::Folded, false) => "tags",
+                (MatchedColumn::Raw, true) => "kind",
+                (MatchedColumn::Typed, true) => "rank",
+                (MatchedColumn::Folded, true) => "labels",
+            };
+            let seek = match reading.column {
+                MatchedColumn::Raw => field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
+                MatchedColumn::Typed => {
+                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)")
+                }
+                MatchedColumn::Folded => {
+                    field_seek("fv", "document_fields_folded", "(key=? AND folded=?)")
+                }
+            };
+            (part(key, "9"), shape(reading), seek)
+        })
+        .collect()
+}
+
+/// Every filter slot, once. A filter that compares values is spelled under
+/// every reading of a key's values ([`readings`]), and a filter that orders
+/// under both orders: `status` is declared without a type and `count` with
+/// one.
 fn filter_bars() -> Vec<FilterBar> {
     let target = |text: &str| ResolutionTarget::new(text).expect("a target");
     vec![
         FilterBar {
-            shape: ReadFilter::Equal(FieldOrder::Raw),
-            probes: vec![
-                (
-                    Predicate::equal_to("status", "open"),
-                    ReadFilter::Equal(FieldOrder::Raw),
-                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-                ),
-                (
-                    Predicate::equal_to("count", "9"),
-                    ReadFilter::Equal(FieldOrder::Typed),
-                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
-                ),
-            ],
+            shape: ReadFilter::Equal(FieldMatch::RAW),
+            probes: readings(
+                |key, value| Predicate::equal_to(key, value),
+                ReadFilter::Equal,
+            ),
         },
         FilterBar {
-            shape: ReadFilter::NotEqual(FieldOrder::Raw),
-            probes: vec![
-                (
-                    Predicate::not_equal_to("status", "open"),
-                    ReadFilter::NotEqual(FieldOrder::Raw),
-                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-                ),
-                (
-                    Predicate::not_equal_to("count", "9"),
-                    ReadFilter::NotEqual(FieldOrder::Typed),
-                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
-                ),
-            ],
+            shape: ReadFilter::NotEqual(FieldMatch::RAW),
+            probes: readings(
+                |key, value| Predicate::not_equal_to(key, value),
+                ReadFilter::NotEqual,
+            ),
         },
         FilterBar {
-            shape: ReadFilter::Member(FieldOrder::Raw),
-            probes: vec![
-                (
-                    Predicate::in_any("status", ["open".to_string(), "done".to_string()]),
-                    ReadFilter::Member(FieldOrder::Raw),
-                    field_seek("fv", "document_fields_raw", "(key=? AND raw=?)"),
-                ),
-                (
-                    Predicate::in_any("count", ["3".to_string(), "9".to_string()]),
-                    ReadFilter::Member(FieldOrder::Typed),
-                    field_seek("fv", "document_fields_typed", "(key=? AND typed=?)"),
-                ),
-            ],
+            shape: ReadFilter::Member(FieldMatch::RAW),
+            probes: readings(
+                |key, value| Predicate::in_any(key, [value.to_string(), "3".to_string()]),
+                ReadFilter::Member,
+            ),
         },
         FilterBar {
             shape: ReadFilter::Present,
@@ -1652,7 +1689,10 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                     FindStatement::FieldValuePage(FieldOrder::Raw, PageDirection::Ascending),
                 ),
             ] {
-                let plans = roots[on(*shape)].plans(&params.with_predicates([part.clone()]));
+                let plans = roots[on(*shape)].plans_under(
+                    &params.with_predicates([part.clone()]),
+                    &declared_readings(),
+                );
                 let page = plans
                     .iter()
                     .find(|plan| plan.statement == ReadStatement::Find(statement))
@@ -1695,7 +1735,10 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                 }
                 dropped.push(index);
             }
-            let plans = roots[on(*shape)].plans(&request().with_predicates([part.clone()]));
+            let plans = roots[on(*shape)].plans_under(
+                &request().with_predicates([part.clone()]),
+                &declared_readings(),
+            );
             let page = plan_of(&plans, FindStatement::PathPage(PageDirection::Ascending));
             failure_of(&format!("{index} dropped under {part:?}"), || {
                 judge_filter(&page, seek)
@@ -2152,6 +2195,138 @@ fn a_continuation_resumes_exactly_where_its_page_stopped() {
             "other/v1.2.md"
         ]
     );
+}
+
+/// `seeded` holding each of `written` — a path under `readings/` and its
+/// frontmatter fields — derived under [`declared_readings`], and the paths a
+/// find of `part` among them answers under it.
+fn found_among_readings(
+    seeded: &mut Seeded,
+    written: &[(&str, Vec<(&str, FrontmatterValue)>)],
+) -> impl Fn(Predicate) -> Vec<String> + use<> {
+    let documents: Vec<_> = written
+        .iter()
+        .map(|(at, fields)| {
+            document(at, &format!("hash-{at}"), "a body\n")
+                .with_frontmatter(Some(map(fields.clone())), &declared_readings())
+        })
+        .collect();
+    write_documents(&mut seeded.store.begin_request(), &documents);
+    let reader = Arc::clone(&seeded.reader);
+    move |part: Predicate| {
+        let found = reader
+            .try_take()
+            .expect("an idle reader")
+            .establish()
+            .expect("a snapshot")
+            .find(
+                &request().with_predicates([Predicate::path("readings/**"), part]),
+                &declared_readings(),
+            )
+            .expect("a find");
+        row_paths(&found)
+    }
+}
+
+/// **A value of the wrong declared shape reads as no value to an equality
+/// part**, as a value failing its declared type does: under `kind`, declared
+/// single, a list holding the value is not the value, and under `labels`,
+/// declared a list, one value is not either. An inequality meets every
+/// document whose key holds no value equal to it under that reading, the
+/// wrongly shaped ones included.
+#[test]
+fn an_equality_part_reads_a_value_of_the_wrong_declared_shape_as_no_value() {
+    let mut seeded = Seeded::new("find-shaped-equality");
+    let find = found_among_readings(
+        &mut seeded,
+        &[
+            (
+                "readings/single.md",
+                vec![
+                    ("kind", string("a")),
+                    ("labels", FrontmatterValue::Sequence(vec![string("x")])),
+                ],
+            ),
+            (
+                "readings/wrong.md",
+                vec![
+                    ("kind", FrontmatterValue::Sequence(vec![string("a")])),
+                    ("labels", string("x")),
+                ],
+            ),
+        ],
+    );
+    for (key, value) in [("kind", "a"), ("labels", "x")] {
+        assert_eq!(
+            find(Predicate::equal_to(key, value)),
+            ["readings/single.md"],
+            "`{key}` equal to `{value}`"
+        );
+        assert_eq!(
+            find(Predicate::in_any(key, [value.to_string()])),
+            ["readings/single.md"],
+            "`{key}` in [`{value}`]"
+        );
+        assert_eq!(
+            find(Predicate::not_equal_to(key, value)),
+            ["readings/wrong.md"],
+            "`{key}` not equal to `{value}`"
+        );
+    }
+}
+
+/// **An equality part on a tag key compares under the tag fold**, the `#`
+/// marker optional on either side: the carrier `tags` undeclared, and
+/// `labels`, declared `tags`. A key that is no tag key compares as written.
+#[test]
+fn an_equality_part_on_a_tag_key_compares_under_the_tag_fold() {
+    let mut seeded = Seeded::new("find-folded-equality");
+    let find = found_among_readings(
+        &mut seeded,
+        &[
+            (
+                "readings/carrier.md",
+                vec![(
+                    "tags",
+                    FrontmatterValue::Sequence(vec![string("#Work"), string("Über")]),
+                )],
+            ),
+            (
+                "readings/declared.md",
+                vec![("labels", FrontmatterValue::Sequence(vec![string("WORK")]))],
+            ),
+            ("readings/text.md", vec![("status", string("Work"))]),
+        ],
+    );
+    for value in ["work", "#WORK", "Work"] {
+        assert_eq!(
+            find(Predicate::equal_to("tags", value)),
+            ["readings/carrier.md"],
+            "`tags` equal to `{value}`"
+        );
+        assert_eq!(
+            find(Predicate::equal_to("labels", value)),
+            ["readings/declared.md"],
+            "`labels` equal to `{value}`"
+        );
+    }
+    assert_eq!(
+        find(Predicate::equal_to("tags", "über")),
+        ["readings/carrier.md"]
+    );
+    assert_eq!(
+        find(Predicate::in_any("tags", ["#über".to_string()])),
+        ["readings/carrier.md"]
+    );
+    assert_eq!(
+        find(Predicate::not_equal_to("tags", "WORK")),
+        ["readings/declared.md", "readings/text.md"]
+    );
+    assert_eq!(
+        find(Predicate::equal_to("status", "Work")),
+        ["readings/text.md"]
+    );
+    assert!(find(Predicate::equal_to("status", "work")).is_empty());
 }
 
 /// **A continuation resumes exactly between paths that differ only by case.**

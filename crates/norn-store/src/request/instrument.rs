@@ -38,16 +38,16 @@ use crate::write_path::WriteStatement;
 use super::{
     DOCUMENT_BLOCKS_SQL, DOCUMENT_FIELDS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINK_KEYS_SQL,
     DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL, DiscardScope, DocumentPath, FINDING_ID_CHUNK,
-    FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE, PATH_DISCARD_SQL, PathKey, Request,
-    RuleSetCursor, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder,
-    SubjectScope, SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL, TYPED_VALUE_DISCARD_SQL, TargetClass,
-    document_feed_sql, document_page_parameters, document_page_sql, feed_page_parameters,
-    finding_candidates_sql, finding_classes_sql, finding_id_parameters, finding_page_parameters,
-    finding_page_sql, finding_paths_sql, finding_rules_sql, finding_subject_parameters,
-    finding_subjects_sql, findings_in_class_sql, probe_parameters, rule_set_page_parameters,
-    rule_set_page_sql, stored_document_sql, stored_facts_document_sql, stored_findings_sql,
-    subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
-    tombstone_feed_sql,
+    FOLDED_VALUE_DISCARD_SQL, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE,
+    PATH_DISCARD_SQL, PathKey, Request, RuleSetCursor, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL,
+    StoreError, StoredPathOrder, SubjectScope, SuffixKey, SuffixProbe, TOMBSTONE_PAGE_SQL,
+    TYPED_VALUE_DISCARD_SQL, TargetClass, document_feed_sql, document_page_parameters,
+    document_page_sql, feed_page_parameters, finding_candidates_sql, finding_classes_sql,
+    finding_id_parameters, finding_page_parameters, finding_page_sql, finding_paths_sql,
+    finding_rules_sql, finding_subject_parameters, finding_subjects_sql, findings_in_class_sql,
+    probe_parameters, rule_set_page_parameters, rule_set_page_sql, stored_document_sql,
+    stored_facts_document_sql, stored_findings_sql, subject_discard_parameters,
+    subject_discard_sql, suffix_candidates_sql, text_page_parameters, tombstone_feed_sql,
 };
 
 /// The leaf a page's explained cursor is spelled with, under whatever floor the
@@ -131,6 +131,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::PathDiscard(_) => PATH_DISCARD_SQL.to_string(),
             ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
             ExplainedStatement::TypedValueDiscard => TYPED_VALUE_DISCARD_SQL.to_string(),
+            ExplainedStatement::FoldedValueDiscard => FOLDED_VALUE_DISCARD_SQL.to_string(),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, order) => {
                 finding_subjects_sql(scope, kinds.len(), order)
             }
@@ -191,6 +192,9 @@ impl<'a> Request<'a> {
             // The pin binds nothing: every typed value is derived under the
             // schema being replaced.
             ExplainedStatement::TypedValueDiscard => database.emitted_plan(&sql, []),
+            // Nor does the fold clear: every fold it clears is a declared tag
+            // key's, derived under the schema being replaced.
+            ExplainedStatement::FoldedValueDiscard => database.emitted_plan(&sql, []),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
                 let cursor = explained_page_cursor(scope);
                 database.emitted_plan(
@@ -476,6 +480,9 @@ pub enum ExplainedStatement<'a> {
     /// The clear [`Request::pin_vault_schema`] runs over the field pillar's
     /// typed values, in the pin's transaction.
     TypedValueDiscard,
+    /// The clear [`Request::pin_vault_schema`] runs over the folds of the keys
+    /// a schema declares `tags`, in the pin's transaction.
+    FoldedValueDiscard,
     /// [`Request::finding_subjects_without_rows_after`], which a walk pages its
     /// scope's unaccounted places through.
     FindingSubjectsWithoutRows(SubjectScope<'a>, &'a [FindingKind], StoredPathOrder),
@@ -645,7 +652,7 @@ pub const POINT_READS: usize = 12;
 ///
 /// It is the length of [`ExplainedStatement::all`], which is the enumeration
 /// every other census is checked against.
-pub const STATEMENTS: usize = 43;
+pub const STATEMENTS: usize = 44;
 
 impl<'a> ExplainedStatement<'a> {
     /// Every statement this seam names, in slot order, each bound to a subject
@@ -721,6 +728,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::Write(WriteStatement::UpsertDocument),
             Self::StoredRuleSetPage,
             Self::FindingRules(ids),
+            Self::FoldedValueDiscard,
         ]
     }
 
@@ -776,6 +784,7 @@ impl<'a> ExplainedStatement<'a> {
             Self::Write(_) => 40,
             Self::StoredRuleSetPage => 41,
             Self::FindingRules(_) => 42,
+            Self::FoldedValueDiscard => 43,
         };
         assert!(
             slot < STATEMENTS,
@@ -834,6 +843,7 @@ impl<'a> ExplainedStatement<'a> {
             | Self::FindingsInClass(_)
             | Self::SubjectDiscard(..)
             | Self::TypedValueDiscard
+            | Self::FoldedValueDiscard
             | Self::FindingSubjectsWithoutRows(..)
             | Self::StoredDocumentPage(..)
             | Self::StoredFindingPage

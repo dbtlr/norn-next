@@ -126,6 +126,84 @@ impl FieldOrder {
     }
 }
 
+/// How an equality, an inequality or a membership part reads a key's values:
+/// the column it compares a value in, and whether the key's declared shape
+/// decides which of the values the key holds are its values.
+///
+/// **One reading, the schema rules' selectors'.** A tag key compares under
+/// the tag fold, a key with a typed order by its typed value, and any other
+/// key as written; and a value standing in a container the key's declared
+/// shape does not name — a list under a key declared single, one value under
+/// a key declared a list, a map under either — is no value of the key's, as a
+/// value failing its declared type has no typed value to compare.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FieldMatch {
+    /// The column a value is compared in.
+    pub column: MatchedColumn,
+    /// Whether the key declares a shape, so a value counts only where its
+    /// key's presence row names the container that shape holds.
+    pub shaped: bool,
+}
+
+/// The column an equality, an inequality or a membership part compares a
+/// value in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchedColumn {
+    /// The canonical text, as written.
+    Raw,
+    /// The declared type's typed sort key.
+    Typed,
+    /// The tag a tag key's value names under the tag fold, its `#` marker
+    /// dropped. Where the key's declaration also carries a typed order — the
+    /// tag carrier declared with one — a value counts only where it reads as
+    /// that type too.
+    Folded,
+}
+
+impl FieldMatch {
+    /// The reading of a key with no typed order, no tag fold and no declared
+    /// shape: its raw text, as written.
+    pub const RAW: FieldMatch = FieldMatch {
+        column: MatchedColumn::Raw,
+        shaped: false,
+    };
+
+    /// Every reading a part can take, unshaped then shaped, each column in
+    /// declaration order: the forms an equality part's bar probes.
+    pub const ALL: [FieldMatch; 6] = [
+        FieldMatch::RAW,
+        FieldMatch {
+            column: MatchedColumn::Typed,
+            shaped: false,
+        },
+        FieldMatch {
+            column: MatchedColumn::Folded,
+            shaped: false,
+        },
+        FieldMatch {
+            column: MatchedColumn::Raw,
+            shaped: true,
+        },
+        FieldMatch {
+            column: MatchedColumn::Typed,
+            shaped: true,
+        },
+        FieldMatch {
+            column: MatchedColumn::Folded,
+            shaped: true,
+        },
+    ];
+
+    /// The column this reading compares.
+    pub(crate) fn column(self) -> &'static str {
+        match self.column {
+            MatchedColumn::Raw => "raw",
+            MatchedColumn::Typed => "typed",
+            MatchedColumn::Folded => "folded",
+        }
+    }
+}
+
 /// A statement a read builder ran, named by the builder that names it.
 ///
 /// A read compiles its conjunction through probes the find builder names, and

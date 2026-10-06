@@ -15,7 +15,7 @@
 //! declaration — and every derived row each store holds is digested: the document rows with their sub-fingerprints, their raw and
 //! folded suffix keys and their admitting counts, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
-//! with their typed halves and the offset spelling beside a typed date, every finding with its candidates, classes and path keys, the
+//! with their typed halves, the offset spelling beside a typed date and a tag key's folds, every finding with its candidates, classes and path keys, the
 //! rules it cites and the head of the value it names, the
 //! terms the full-text index holds, and the pinned vault schema. Row
 //! identifiers, write generations and timestamps are left out, because none of
@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(9),
-    "3f00b6205dee2a475777fa74923e03c4ea7050b7d8d45b7004044a06570690d3",
+    "7ba89c06c19ae0a3ddd445ae5925a60c924f8b0f8709e1d91e089df10c21cdf2",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -985,6 +985,29 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "no typed `{key}: {raw}` is exercised"
         );
     }
+
+    // A tag key's values hold the tag each names under the tag fold: the
+    // carrier `tags`, and `topics`, declared `tags`, whose `#area/norn` and
+    // `project` fold as written and `#`-marked alike.
+    for key in ["tags", "topics"] {
+        assert!(
+            rows_under(key).iter().any(|row| matches!(
+                row,
+                FieldRow::Value {
+                    folded: Some(_),
+                    ..
+                }
+            )),
+            "no fold under the tag key `{key}` is exercised"
+        );
+    }
+    assert!(
+        rows_under("tags").iter().any(|row| matches!(
+            row,
+            FieldRow::Value { raw: Some(raw), folded: Some(folded), .. } if raw.starts_with('#') && !folded.starts_with('#')
+        )),
+        "no `#`-marked tag value folded without its marker is exercised"
+    );
 
     // A typed date records the spelling of its offset, and the corpus writes
     // both: a calendar day states none, and an instant states one.

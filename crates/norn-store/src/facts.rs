@@ -903,9 +903,9 @@ pub struct Invalidation {
     /// Parse-fact rows carry no schema key, no class and no path key, so none
     /// of them is ever counted here.
     pub findings_discarded: u64,
-    /// Field values whose typed sort key the act cleared, because it was derived
-    /// under a different vault schema. Only a schema pin clears one; the row
-    /// and its raw text stay.
+    /// Field values whose typed sort key, or whose fold under a key declared
+    /// `tags`, the act cleared, because it was derived under a different vault
+    /// schema. Only a schema pin clears one; the row and its raw text stay.
     pub typed_values_discarded: u64,
 }
 

@@ -31,6 +31,25 @@
 //!   own transaction clears every typed value, and the walk that follows
 //!   refills them.
 //!
+//! The `folded` column, the tag a value row names under a **tag key** — the
+//! tag carrier `tags`, declared or not, or a key declared `tags` — its `#`
+//! marker dropped and the tag fold applied, which an equality part compares
+//! the key by:
+//!
+//! - **Inputs.** The value rows, and, for a key other than the carrier, the
+//!   schema content model's declared field types.
+//! - **Determinism.** Deterministic: the fold is a function of the raw value,
+//!   and whether a key is a tag key a function of the key and its declared
+//!   type.
+//! - **Maintenance.** Inside the document's changeset, written by the same
+//!   statement as the value it folds.
+//! - **Invalidation key.** The carrier's is the document's content hash, as
+//!   its raw value's is: the carrier is a tag key under every schema, so its
+//!   fold is a parse fact no pin moves. A declared tag key's is the standing
+//!   schema pin: the pin's own transaction clears every fold but the
+//!   carrier's, beside the typed column, and the walk that follows refills
+//!   them.
+//!
 //! # Why clearing the typed column at the pin is safe
 //!
 //! A pin clears `typed`, `least_typed` and `offset_stated` everywhere, and the
@@ -93,6 +112,9 @@
 //!   offset_stated)`: whether a date key holds a value of either spelling is
 //!   one seek of it, which is how a read learns that an order or a comparison
 //!   over the key met both.
+//! - `document_fields_folded` holds a tag key's value rows alone, by `(key,
+//!   folded)`: an equality, an inequality and a membership on a tag key are
+//!   one seek of it, and the folds a pin clears are read off it.
 
 use crate::fields::FieldContainer;
 
@@ -115,12 +137,14 @@ pub(crate) fn statements() -> Vec<String> {
     least_raw   INTEGER NOT NULL DEFAULT 0 CHECK (least_raw IN (0, 1)),
     least_typed INTEGER NOT NULL DEFAULT 0 CHECK (least_typed IN (0, 1)),
     offset_stated INTEGER CHECK (offset_stated IN (0, 1)),
+    folded      TEXT,
     PRIMARY KEY (document, key, ordinal),
     CHECK ((ordinal = 0) = (container IS NOT NULL)),
     CHECK (ordinal > 0 OR (raw IS NULL AND typed IS NULL AND least_raw = 0 AND least_typed = 0)),
     CHECK (least_raw = 0 OR raw IS NOT NULL),
     CHECK (least_typed = 0 OR typed IS NOT NULL),
-    CHECK (offset_stated IS NULL OR typed IS NOT NULL)
+    CHECK (offset_stated IS NULL OR typed IS NOT NULL),
+    CHECK (folded IS NULL OR raw IS NOT NULL)
 ) WITHOUT ROWID"
         ),
         "CREATE INDEX document_fields_raw ON document_fields(key, raw)
@@ -142,6 +166,9 @@ pub(crate) fn statements() -> Vec<String> {
             .to_string(),
         "CREATE INDEX document_fields_offset ON document_fields(key, offset_stated)
     WHERE offset_stated IS NOT NULL"
+            .to_string(),
+        "CREATE INDEX document_fields_folded ON document_fields(key, folded)
+    WHERE folded IS NOT NULL"
             .to_string(),
     ]
 }

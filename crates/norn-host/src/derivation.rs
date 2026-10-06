@@ -2843,6 +2843,111 @@ rules:
         }
     }
 
+    /// **Find's field equality reads a value as a rule's selector reads it**
+    /// ([`VaultSchema::selects`], the reference): a value not of its key's
+    /// declared shape reads as no value — a list under a key declared
+    /// single, one value under a key declared a list, a map anywhere — and a
+    /// tag key, the `tags` carrier declared or not or a key declared `tags`,
+    /// compares under the tag fold with its `#` marker optional, while any
+    /// other key compares exactly as written. Equality and a one-value
+    /// membership find the documents a selector on the value selects, and
+    /// inequality every other document.
+    #[test]
+    fn find_equality_reads_a_value_as_the_rule_selectors_do() {
+        use norn_wire::Predicate;
+
+        const FIELDS: &str = "version: 1
+fields:
+  kind: { type: text, shape: single }
+  items: { type: text, shape: list }
+  labels: { type: tags }
+  code: { type: text }
+";
+        let documents: Vec<(&str, String)> = vec![
+            (
+                "single.md",
+                "---\nkind: a\nitems: [x]\nlabels: [Work]\ntags: [Work, '#Play']\ncode: A\n---\n"
+                    .to_string(),
+            ),
+            (
+                "listed.md",
+                "---\nkind: [a, b]\nitems: x\nlabels: '#work'\ntags: play\ncode: a\n---\n"
+                    .to_string(),
+            ),
+            (
+                "nulls.md",
+                "---\nkind: null\nitems: []\ntags: [2024]\n---\n".to_string(),
+            ),
+            ("mapped.md", "---\nkind: { a: 1 }\n---\n".to_string()),
+            ("none.md", "# none\n".to_string()),
+        ];
+        let vault = DerivedVault::new("norn-host-equality-reading", FIELDS.as_bytes(), &documents);
+        let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
+        let every: Vec<&str> = {
+            let mut paths: Vec<&str> = documents.iter().map(|(path, _)| *path).collect();
+            paths.sort_unstable();
+            paths
+        };
+
+        for (key, value) in [
+            ("kind", "a"),
+            ("items", "x"),
+            ("labels", "work"),
+            ("labels", "#WORK"),
+            ("tags", "work"),
+            ("tags", "#play"),
+            ("tags", "PLAY"),
+            ("tags", "2024"),
+            ("code", "a"),
+            ("code", "A"),
+        ] {
+            let schema = VaultSchema::parse(
+                format!("{FIELDS}rules:\n  probe: {{ match: {{ frontmatter: {{ {key}: '{value}' }} }} }}\n")
+                    .as_bytes(),
+            )
+            .expect("a schema selecting on the value");
+            let rule = schema.rule("probe").expect("the probe rule");
+            let selected: Vec<&str> = every
+                .iter()
+                .copied()
+                .filter(|path| {
+                    let (_, bytes) = documents
+                        .iter()
+                        .find(|(at, _)| at == path)
+                        .expect("a corpus document");
+                    let document = Document::parse(bytes);
+                    let frontmatter = document.frontmatter().map(map_value);
+                    schema.selects(
+                        rule,
+                        path,
+                        &authored_fields(frontmatter.as_ref()),
+                        CaseFold::Exact,
+                    )
+                })
+                .collect();
+            let unselected: Vec<&str> = every
+                .iter()
+                .copied()
+                .filter(|path| !selected.contains(path))
+                .collect();
+            assert_eq!(
+                find(Predicate::equal_to(key, value)),
+                selected,
+                "`{key}` equal to `{value}`"
+            );
+            assert_eq!(
+                find(Predicate::in_any(key, [value.to_string()])),
+                selected,
+                "`{key}` in [`{value}`]"
+            );
+            assert_eq!(
+                find(Predicate::not_equal_to(key, value)),
+                unselected,
+                "`{key}` not equal to `{value}`"
+            );
+        }
+    }
+
     /// One compared document: its path, then the raw text it writes under
     /// `when`, `weight`, `code` and `flag`.
     type Compared = (

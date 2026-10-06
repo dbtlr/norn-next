@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, ContentModel, DerivationCounters, DocumentFacts,
-    DocumentPath, EmittedPlan, FieldOrder, FindingFacts, FrontmatterValue, GetPlan, GetWork,
-    HeadingFact, IncrementOutcome, IncrementProvenance, LinkAnchor, LinkFact, LinkFamily,
+    DocumentPath, EmittedPlan, FieldMatch, FieldOrder, FindingFacts, FrontmatterValue, GetPlan,
+    GetWork, HeadingFact, IncrementOutcome, IncrementProvenance, LinkAnchor, LinkFact, LinkFamily,
     OffsetSpelling, PathKey, Provenance, ReadFilter, Request, Span, Store, StoredFacts,
     StoredPathOrder, SuffixKey, TagFact, TagSource, TypedOrder, suffix_probe,
 };
@@ -356,11 +356,11 @@ pub fn driving_parts() -> Vec<(ReadFilter, Predicate)> {
     let target = |text: &str| ResolutionTarget::new(text).expect("a target");
     vec![
         (
-            ReadFilter::Equal(FieldOrder::Raw),
+            ReadFilter::Equal(FieldMatch::RAW),
             Predicate::equal_to("status", "open"),
         ),
         (
-            ReadFilter::Member(FieldOrder::Raw),
+            ReadFilter::Member(FieldMatch::RAW),
             Predicate::in_any("status", ["open".to_string(), "closed".to_string()]),
         ),
         (ReadFilter::Present, Predicate::has("noted")),

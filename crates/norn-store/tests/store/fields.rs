@@ -34,8 +34,99 @@ fn raw(at: &str, key: &str, ordinal: u32, text: Option<&str>, least: bool) -> Fi
         offset: None,
         least_raw: least,
         least_typed: false,
+        folded: None,
         path: at.to_string(),
     }
+}
+
+/// `row` holding `fold` as the tag its value names under the tag fold.
+fn folded(row: FieldRow, fold: &str) -> FieldRow {
+    match row {
+        FieldRow::Value {
+            key,
+            ordinal,
+            raw,
+            typed,
+            offset,
+            least_raw,
+            least_typed,
+            path,
+            ..
+        } => FieldRow::Value {
+            key,
+            ordinal,
+            raw,
+            typed,
+            offset,
+            least_raw,
+            least_typed,
+            folded: Some(fold.to_string()),
+            path,
+        },
+        presence => presence,
+    }
+}
+
+/// **A tag key's value rows hold the tag each names under the tag fold**,
+/// its `#` marker dropped: the tag carrier `tags` under every declaration —
+/// none, or one declaring it text — and a key declared `tags`. Any other key's
+/// rows hold none, and neither does a null.
+#[test]
+fn a_tag_keys_value_rows_hold_the_tag_each_names_under_the_fold() {
+    let value = map(vec![
+        (
+            "tags",
+            FrontmatterValue::Sequence(vec![
+                string("#Work"),
+                string("Über"),
+                FrontmatterValue::Int(2024),
+                FrontmatterValue::Null,
+            ]),
+        ),
+        ("labels", string("#Play")),
+        ("title", string("Work")),
+    ]);
+    let at = "docs/tagged.md";
+    let folds = |declared: &ContentModel| -> Vec<(String, Option<String>)> {
+        FieldRows::derive(&path(at), Some(&value), declared)
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value { key, folded, .. } => Some((key.clone(), folded.clone())),
+                FieldRow::Presence { .. } => None,
+            })
+            .collect()
+    };
+    let carrier = vec![
+        ("tags".to_string(), Some("work".to_string())),
+        ("tags".to_string(), Some("über".to_string())),
+        ("tags".to_string(), Some("2024".to_string())),
+        ("tags".to_string(), None),
+    ];
+    let undeclared: Vec<(String, Option<String>)> = [("labels".to_string(), None)]
+        .into_iter()
+        .chain(carrier.clone())
+        .chain([("title".to_string(), None)])
+        .collect();
+    assert_eq!(folds(&ContentModel::none()), undeclared);
+    assert_eq!(
+        folds(&ContentModel::under("schema").declare("tags")),
+        undeclared,
+        "the carrier declared text is still a tag key"
+    );
+    let declared: Vec<(String, Option<String>)> =
+        [("labels".to_string(), Some("play".to_string()))]
+            .into_iter()
+            .chain(carrier)
+            .chain([("title".to_string(), None)])
+            .collect();
+    assert_eq!(
+        folds(
+            &ContentModel::under("schema")
+                .declare_field("labels", norn_store::FieldDeclaration::tags())
+        ),
+        declared
+    );
 }
 
 fn string(text: &str) -> FrontmatterValue {
@@ -129,8 +220,8 @@ fn a_documents_rows_are_a_presence_row_per_key_and_a_value_row_per_scalar() {
         presence(at, "ratio", FieldContainer::Scalar),
         raw(at, "ratio", 1, Some("1.0"), true),
         presence(at, "tags", FieldContainer::Sequence),
-        raw(at, "tags", 1, Some("b"), false),
-        raw(at, "tags", 2, Some("a"), true),
+        folded(raw(at, "tags", 1, Some("b"), false), "b"),
+        folded(raw(at, "tags", 2, Some("a"), true), "a"),
         raw(at, "tags", 3, None, false),
         presence(at, "title", FieldContainer::Scalar),
         raw(at, "title", 1, Some("second"), true),

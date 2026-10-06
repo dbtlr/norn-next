@@ -43,8 +43,10 @@
 //! except under a key declared [`Shape::Single`]. **A value that does not
 //! read as its key's declared type or shape matches no selector**: a list or
 //! map under a single-shaped key is not the key's value, as a value failing
-//! its type has no typed value to compare. Find's field equality is owed the
-//! same tag fold and shape reading (NORN-358). `match.path` is a glob whose
+//! its type has no typed value to compare. Find's field equality reads a value
+//! the same way — the tag fold on a tag key, and a value of the wrong declared
+//! shape as no value — in the store's own SQL, held to this reading by
+//! `norn-host`'s suite. `match.path` is a glob whose
 //! whole segments spelled `<name>` are captures, each matching one segment as
 //! a whole-segment `*` does; `exclude.path` lists globs none of which may
 //! match. A rule that selects by neither — or whose selectors normalize to
@@ -715,8 +717,8 @@ impl VaultSchema {
     /// written. `None` where `raw` does not read as the declared type, which
     /// equals nothing — the tag carrier included.
     ///
-    /// Find's field equality is owed the same reading (NORN-358): today it
-    /// compares a tag key's text exactly.
+    /// Find's field equality compares by the same key: the store holds a tag
+    /// key's fold beside each value it reads, and a typed key's sort key.
     pub fn equality_key(&self, field: &str, raw: &str) -> Option<TypedValue> {
         equality_key(field, self.declared_type(field), raw)
     }
@@ -814,8 +816,9 @@ impl VaultSchema {
     /// [`Shape::Single`]; a scalar matches unless the key is declared
     /// [`Shape::List`]. A value of the other shape, like a map anywhere, is
     /// not a value of the key's shape, so it has nothing to compare. The shape
-    /// is read as rule judgment reads it ([`judge::read_shape`]). Find's field
-    /// equality is owed the same shape reading (NORN-358).
+    /// is read as rule judgment reads it ([`judge::read_shape`]), and find's
+    /// field equality reads it the same way, by the container its key's
+    /// presence row names.
     fn matches_value(
         &self,
         key: &str,

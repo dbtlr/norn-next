@@ -63,6 +63,15 @@
 //! comparison; a value that does not read as the type names no place in the
 //! order and is refused. A key with no typed order compares raw text.
 //!
+//! **Equality, inequality and membership read a key's values as a schema
+//! rule's selector reads them** ([`crate::FieldMatch`]). A tag key — the tag
+//! carrier `tags`, declared or not, or a key declared `tags` — compares the
+//! tag each value names under the tag fold, `#` marker optional on both
+//! sides. And where the key declares a shape, a value standing in the other
+//! container — a list under a key declared single, one value under a key
+//! declared a list, a map under either — is no value of the key's, as a value
+//! that does not read as its declared type has no typed value.
+//!
 //! # A filter is one seek, and a page drives from it
 //!
 //! Each part of the conjunction narrows every section by the rows one index

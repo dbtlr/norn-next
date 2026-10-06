@@ -863,8 +863,14 @@ work SQLite counted running the page: no page statement reads `documents` end to
 steps through a full scan, no page without a filter builds a temporary B-tree or sorts, and
 a page driven by a filter's seek for the rows it keeps reaches them by that seek's keys
 handed it and sorts at most once per page statement. Each filter is one index seek, judged
-on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, or
-on `(key, typed)` where the key carries a typed order; presence and absence on the presence
+on the rows its own subquery reads: equality, inequality and membership on `(key, raw)`, on
+`(key, typed)` where the key carries a typed order, or on `(key, folded)` where it is a tag
+key — the `tags` carrier, declared or not, or a key declared `tags` — whose value rows hold
+the tag each names under the tag fold, `#` marker dropped, so its equality compares the tag a
+value names as a rule's selector does; where the key declares a shape, a value counts only
+where the key's presence row, one primary-key seek, names the container that shape holds, so
+a list under a key declared single and one value under a key declared a list are no value,
+as a value failing its declared type has no typed value; presence and absence on the presence
 rows; a `before` or `after` bound on the order's value column; full text through the index's
 own `MATCH` selection; a path glob on the range its literal prefix opens in the path index,
 `documents_path` where the root tells spellings apart and the folded prefix's range of
@@ -2506,7 +2512,7 @@ within its document, by position in the file. A document's frontmatter tags stan
 body tags. Two declared names that fold to one are one declaration, and so are two tag
 patterns, each held at the spelling the schema writes first.
 
-The **field projection** is the pillar a find's predicates and field orders read. **Two
+The **field projection** is the pillar a find's predicates and field orders read. **Three
 projections share its one table**, each declared under [ADR
 0027](decisions/0027-link-health-rides-the-changeset.md). The presence and value rows:
 their input is the document's canonical frontmatter projection; derivation is
@@ -2523,9 +2529,17 @@ re-pin discards**: the pin's own transaction clears every typed value, its least
 marker and its offset spelling beside the findings it discards, and the walk that follows
 refills them. That is safe because a schema reload closes the entry's reader and publishes `Warming` in its `Healing`
 phase until the heal converges, so no read observes a column the walk has half refilled.
-**The pin is the key at both ends**: the declaration the host hands the store names the
-fingerprint it was read from, an increment refuses typed values derived under any other
-than the one pinned in its own transaction, and refuses a declaration read under any other
+The fold, the tag a value row names under a tag key — the `tags` carrier, declared or not,
+or a key declared `tags` — its `#` marker dropped and the tag fold applied: its inputs are the
+value rows and, for a key other than the carrier, the declared field types; derivation is
+deterministic, one pure function from a value and whether its key is a tag key; it is
+maintained inside the document's changeset beside the value it folds; and its invalidation
+key is the document's content hash for the carrier, a tag key under every schema, and the
+standing schema pin for a declared tag key, whose folds the pin's own transaction clears
+beside the typed column for the walk to refill. **The pin is the key at both ends**: the
+declaration the host hands the store names the fingerprint it was read from, an increment
+refuses typed values, and a declared tag key's folds, derived under any other than the one
+pinned in its own transaction, and refuses a declaration read under any other
 to judge its link health by, and every read builder refuses a declaration
 its snapshot does not pin.
 
