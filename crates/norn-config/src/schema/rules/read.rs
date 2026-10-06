@@ -157,7 +157,7 @@ fn read_rule(name: &str, rule: &Value, declared: &Declared<'_>) -> Result<Rule, 
     let one_of = field_map(&section, rule, "one_of")?
         .into_iter()
         .map(|(field, value, at_path)| {
-            let set = read_closed_set(&at_path, value, declared(&field))?;
+            let set = read_closed_set(&at_path, &field, value, declared(&field))?;
             Ok((field, set))
         })
         .collect::<Result<_, VaultSchemaError>>()?;
@@ -246,7 +246,7 @@ fn read_selector(
                     .filter(|key| !key.is_empty())
                     .ok_or_else(|| section_error(&at_path, "a mapping keyed by field name", key))?;
                 let at_key = format!("{at_path}.{key}");
-                let read = read_selector_values(&at_key, values, declared(key))?;
+                let read = read_selector_values(&at_key, key, values, declared(key))?;
                 selector.frontmatter.insert(key.to_string(), read);
             }
         }
@@ -271,6 +271,7 @@ fn read_selector(
 /// the key's declared type.
 fn read_selector_values(
     at_path: &str,
+    key: &str,
     value: &Value,
     declared: FieldType,
 ) -> Result<SelectorValues, VaultSchemaError> {
@@ -286,7 +287,7 @@ fn read_selector_values(
     };
     for item in items {
         let raw = yaml_scalar_text(item).ok_or_else(|| section_error(at_path, WANTED, item))?;
-        let key = equality_key(declared, &raw).ok_or_else(|| {
+        let compared = equality_key(key, declared, &raw).ok_or_else(|| {
             refusal(
                 at_path,
                 RuleProblem::SelectorValue {
@@ -295,7 +296,7 @@ fn read_selector_values(
                 },
             )
         })?;
-        values.keys.insert(key);
+        values.keys.insert(compared);
         values.written.push(raw);
     }
     Ok(values)
@@ -443,6 +444,7 @@ fn read_forbidden(at_path: &str, value: &Value) -> Result<ForbiddenFix, VaultSch
 /// A closed set: `{values: [...], synonyms: {written: member}}`.
 fn read_closed_set(
     at_path: &str,
+    field: &str,
     value: &Value,
     declared: FieldType,
 ) -> Result<ClosedSet, VaultSchemaError> {
@@ -472,7 +474,7 @@ fn read_closed_set(
     for value in &values {
         // A member that does not read as the type is refused by the checks,
         // which name it; it compares as nothing here.
-        if let Some(key) = equality_key(declared, value) {
+        if let Some(key) = equality_key(field, declared, value) {
             members.entry(key).or_insert_with(|| value.clone());
         }
     }

@@ -34,13 +34,17 @@
 //! `warning` where absent.
 //!
 //! **Selectors.** `match.frontmatter` maps a key to one value or to an any-of
-//! list; its keys are ANDed. Each key compares as a find's equality part does
-//! ([`VaultSchema::equality_key`]): a key declared `tags` under the tag fold, a
-//! key declared `number`, `boolean` or `date` by its typed value, and any other
-//! key exactly as written. A document's list value matches where any element
-//! does, as a find's equality matches a list field — except under a key
-//! declared [`Shape::Single`], where only a scalar value is read, so a value of
-//! the wrong shape selects no rule on that key. `match.path` is a glob whose
+//! list; its keys are ANDed. Each value compares by its equality key
+//! ([`VaultSchema::equality_key`]): a tag key — the tag carrier `tags`,
+//! declared or not, or a key declared `tags` — by the tag it names under the
+//! tag fold, a key declared `number`, `boolean` or `date` by its typed value,
+//! and any other key exactly as written. A document's list value matches
+//! where any element does, as a find's equality matches a list field —
+//! except under a key declared [`Shape::Single`]. **A value that does not
+//! read as its key's declared type or shape matches no selector**: a list or
+//! map under a single-shaped key is not the key's value, as a value failing
+//! its type has no typed value to compare. Find's field equality is owed the
+//! same tag fold and shape reading (NORN-358). `match.path` is a glob whose
 //! whole segments spelled `<name>` are captures, each matching one segment as
 //! a whole-segment `*` does; `exclude.path` lists globs none of which may
 //! match. A rule that selects by neither — or whose selectors normalize to
@@ -107,7 +111,7 @@
 //!   document path in common, naming every contributing rule in name order.
 //!
 //! Two rules may select one document together unless both select on a key
-//! declared `shape: single` with value sets sharing no member, and the
+//! declared `shape: single` with value sets sharing no equality key, and the
 //! ceiling weighs each rule's allowed paths with those of every rule that
 //! may select beside it. A conflict between rules holds on every root, so it
 //! is judged under the wider fold, [`CaseFold::Ascii`]; a route is one
@@ -688,13 +692,18 @@ impl VaultSchema {
         self.rules.get(name)
     }
 
-    /// The value `raw` is compared by under `field`, as a find's equality
-    /// part compares it: under the tag fold where the field is declared
-    /// `tags`, as its typed value where it is declared `number`, `boolean` or
-    /// `date`, and exactly as written otherwise. `None` where `raw` does not
-    /// read as the declared type, which equals nothing.
+    /// The value `raw` is compared by under `field`, by a selector, a closed
+    /// set and the disjointness the ceiling credits alike: a tag key — the
+    /// tag carrier `tags`, declared or not, or a key declared `tags` — by the
+    /// tag `raw` names, `#` marker optional, under the tag fold; a key
+    /// declared `number`, `boolean` or `date` by its typed value; and any
+    /// other key exactly as written. `None` where `raw` does not read as the
+    /// declared type, which equals nothing.
+    ///
+    /// Find's field equality is owed the same reading (NORN-358): today it
+    /// compares a tag key's text exactly.
     pub fn equality_key(&self, field: &str, raw: &str) -> Option<TypedValue> {
-        equality_key(self.declared_type(field), raw)
+        equality_key(field, self.declared_type(field), raw)
     }
 
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
@@ -746,7 +755,15 @@ impl VaultSchema {
             && !selector.exclude.iter().any(|glob| glob.matches(path, case))
     }
 
-    /// Whether `value`, held under `key`, equals one of `keys`.
+    /// Whether `value`, held under `key`, equals one of `keys` by its
+    /// equality key ([`VaultSchema::equality_key`]).
+    ///
+    /// A value that does not read as its key's declared type or shape
+    /// matches no selector. A list matches where any element does, as find's
+    /// equality matches a list field, unless the key is declared
+    /// [`Shape::Single`]: a list there, like a map anywhere, is not a value
+    /// of the key's shape, so it has nothing to compare. Find's field
+    /// equality is owed the same shape reading (NORN-358).
     fn matches_value(
         &self,
         key: &str,
@@ -778,11 +795,25 @@ fn value_in<'a>(entries: &'a [(String, AuthoredValue)], key: &str) -> Option<&'a
         .map(|(_, value)| value)
 }
 
-/// The value `raw` is compared by under a field declared `declared`.
-fn equality_key(declared: FieldType, raw: &str) -> Option<TypedValue> {
-    match declared {
-        FieldType::Tags => Some(TypedValue::Text(fold_tag(raw))),
-        declared => declared.read(raw).ok(),
+/// The frontmatter field a document's tags are written in, the **tag
+/// carrier**. `norn_text::TAGS_FIELD` names the same field; this crate
+/// reaches only the vocabulary, so it spells the name itself.
+const TAGS_FIELD: &str = "tags";
+
+/// The value `raw` is compared by under `field`, declared `declared`.
+///
+/// A tag key — the tag carrier, declared or not, or a key declared `tags` —
+/// compares by the tag `raw` names: its `#` marker optional, as a frontmatter
+/// tag is read, and under the tag fold ([`fold_tag`]). Any other key compares
+/// by its typed value, which a text key's raw text is. `None` where `raw`
+/// does not read as the declared type.
+fn equality_key(field: &str, declared: FieldType, raw: &str) -> Option<TypedValue> {
+    let typed = declared.read(raw).ok()?;
+    if field == TAGS_FIELD || declared == FieldType::Tags {
+        let name = raw.strip_prefix('#').unwrap_or(raw);
+        Some(TypedValue::Text(fold_tag(name)))
+    } else {
+        Some(typed)
     }
 }
 

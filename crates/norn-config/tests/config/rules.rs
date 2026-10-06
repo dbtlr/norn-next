@@ -1474,3 +1474,191 @@ fn twelve_disjoint_rules_load_only_on_a_single_shaped_key() {
         "{error}"
     );
 }
+
+/// **A key declared `tags` selects under the tag fold**, with or without its
+/// `#` marker, as a frontmatter tag is read.
+#[test]
+fn a_key_declared_tags_selects_under_the_tag_fold() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nfields:\n  area: { type: tags }\nrules:\n  r: { match: { frontmatter: { area: foo } } }\n",
+    )
+    .expect("a rule on a tags key");
+    for written in ["Foo", "FOO", "#foo", "#Foo"] {
+        assert_eq!(
+            selected(&schema, "a.md", &[("area", text(written))]),
+            ["r"],
+            "{written}"
+        );
+    }
+    assert!(selected(&schema, "a.md", &[("area", text("föo"))]).is_empty());
+}
+
+/// **The tag carrier `tags` selects under the tag fold though no field
+/// declares it**, and as a list that may hold several tags.
+#[test]
+fn the_undeclared_tags_carrier_selects_under_the_tag_fold() {
+    let schema = VaultSchema::parse(
+        b"version: 1\nrules:\n  r: { match: { frontmatter: { tags: project } } }\n",
+    )
+    .expect("a rule on the tag carrier");
+    let tagged = AuthoredValue::list([text("Project"), text("work")]);
+    assert_eq!(selected(&schema, "a.md", &[("tags", tagged)]), ["r"]);
+    assert_eq!(
+        selected(&schema, "a.md", &[("tags", text("#PROJECT"))]),
+        ["r"]
+    );
+    assert_eq!(
+        schema.equality_key("tags", "#Project"),
+        Some(TypedValue::Text("project".to_string()))
+    );
+    // Every other undeclared key compares exactly as written.
+    assert_eq!(
+        schema.equality_key("topic", "#Project"),
+        Some(TypedValue::Text("#Project".to_string()))
+    );
+}
+
+/// **Selector identity reads the tag fold**: two selectors whose tag values
+/// fold to one tag are one selector, so a field one requires and the other
+/// forbids is a conflict on every document either selects.
+#[test]
+fn tag_selectors_one_tag_apart_in_spelling_are_identical() {
+    for (fields, left, right) in [
+        ("  area: { type: tags }", "area: Foo", "area: '#foo'"),
+        ("  other: { type: text }", "tags: Project", "tags: project"),
+    ] {
+        let bytes = format!(
+            "version: 1\nfields:\n{fields}\nrules:\n  b: {{ match: {{ frontmatter: {{ {left} }} }}, required: {{ status: }} }}\n  a: {{ match: {{ frontmatter: {{ {right} }} }}, forbidden: {{ status: }} }}\n"
+        );
+        assert_eq!(
+            conflict(bytes.as_bytes()),
+            RulesConflict::RequiredAndForbidden {
+                field: "status".to_string(),
+                rules: vec!["a".to_string(), "b".to_string()],
+            },
+            "{left} / {right}"
+        );
+    }
+}
+
+/// **Disjointness reads the tag fold**: `tags: a` and `tags: A` name one tag,
+/// so even on a single-shaped carrier the two rules may select one document
+/// and are weighed together, while `tags: a` and `tags: b` are not.
+#[test]
+fn tag_selectors_one_tag_apart_in_spelling_are_not_disjoint() {
+    let heavy = |name: &str, value: &str| {
+        format!(
+            "  {name}: {{ match: {{ frontmatter: {{ tags: {value} }} }}, allowed_paths: {{ paths: ['{}'] }} }}\n",
+            glob_of(name, 999)
+        )
+    };
+    let two = |fields: &str, left: &str, right: &str| {
+        format!(
+            "version: 1\nfields:\n{fields}\nrules:\n{}{}",
+            heavy("left", left),
+            heavy("right", right)
+        )
+    };
+    for fields in [
+        "  tags: { shape: single }",
+        "  tags: { type: tags, shape: single }",
+    ] {
+        let error = refused(two(fields, "a", "A").as_bytes());
+        assert!(
+            matches!(&error, VaultSchemaError::PlacementCeiling { rules, .. } if rules.len() == 2),
+            "{fields}: {error}"
+        );
+        VaultSchema::parse(two(fields, "a", "b").as_bytes())
+            .unwrap_or_else(|error| panic!("{fields}: disjoint tags: {error}"));
+    }
+    // Undeclared, the carrier may hold a list, so no two of its values are
+    // disjoint.
+    let error = refused(two("  other: { type: text }", "a", "b").as_bytes());
+    assert!(
+        matches!(&error, VaultSchemaError::PlacementCeiling { rules, .. } if rules.len() == 2),
+        "{error}"
+    );
+}
+
+/// Selector normal forms: each pair names one selector where `identical`,
+/// so a field one requires and the other forbids is refused, and two
+/// selectors otherwise.
+#[test]
+fn selector_normal_forms_group_only_identical_selectors() {
+    let cases: &[(&str, &str, &str, &str, bool)] = &[
+        (
+            "any-of order and repeats",
+            "",
+            "match: { frontmatter: { k: [a, b] } }",
+            "match: { frontmatter: { k: [b, a, a] } }",
+            true,
+        ),
+        (
+            "capture names, empty frontmatter",
+            "",
+            "match: { path: 'p/<a>/**' }",
+            "match: { path: 'p/<b>/**', frontmatter: {} }",
+            true,
+        ),
+        (
+            "a number's spellings",
+            "  k: { type: number }",
+            "match: { frontmatter: { k: 1 } }",
+            "match: { frontmatter: { k: 1.0 } }",
+            true,
+        ),
+        (
+            "a path of ** is absent",
+            "",
+            "match: { frontmatter: { k: v }, path: '**' }",
+            "match: { frontmatter: { k: v } }",
+            true,
+        ),
+        (
+            "a tag's fold and marker",
+            "  area: { type: tags }",
+            "match: { frontmatter: { area: Foo } }",
+            "match: { frontmatter: { area: '#foo' } }",
+            true,
+        ),
+        (
+            "excluded globs as a set",
+            "",
+            "exclude: { path: ['x/**', 'y/**'] }",
+            "exclude: { path: ['y/**', 'x/**', 'x/**'] }",
+            true,
+        ),
+        (
+            "selectorless by ** and an empty exclude",
+            "",
+            "match: { path: '**' }, exclude: { path: [] }",
+            "match: { frontmatter: {} }",
+            true,
+        ),
+        (
+            "a subset is not identical",
+            "",
+            "match: { frontmatter: { k: a } }",
+            "match: { frontmatter: { k: [a, b] } }",
+            false,
+        ),
+        (
+            "a capture is not a star",
+            "",
+            "match: { path: 'p/<a>/**' }",
+            "match: { path: 'p/*/**' }",
+            false,
+        ),
+    ];
+    for (name, fields, left, right, identical) in cases {
+        let bytes = format!(
+            "version: 1\nfields:\n  zz: {{ type: text }}\n{fields}\nrules:\n  ra: {{ {left}, required: {{ x: }} }}\n  rb: {{ {right}, forbidden: {{ x: }} }}\n"
+        );
+        let read = VaultSchema::parse(bytes.as_bytes());
+        assert_eq!(
+            matches!(read, Err(VaultSchemaError::RulesConflict { .. })),
+            *identical,
+            "{name}: {read:?}"
+        );
+    }
+}
