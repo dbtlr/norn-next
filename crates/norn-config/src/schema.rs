@@ -377,10 +377,10 @@ impl DeclaredField {
     ///
     /// Read at schema read, where a rule's default and selectors are judged
     /// against it, and by selection: a selector on a key declared
-    /// [`Shape::Single`] reads a scalar value alone. Its other consumers are
-    /// not built: the finding a value of the wrong shape mints (NORN-358),
-    /// and `describe`, which reports it with the field's declaration
-    /// (NORN-357).
+    /// [`Shape::Single`] reads a scalar value alone; and by `norn-host`, which
+    /// carries it into the declaration `describe` reports it with. Its other
+    /// consumer is not built: the finding a value of the wrong shape mints
+    /// (NORN-358).
     pub fn shape(&self) -> Option<Shape> {
         self.shape
     }

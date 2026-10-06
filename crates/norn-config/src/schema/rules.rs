@@ -129,11 +129,14 @@
 //! frontmatter and the schema. **Dormant carriers:** the schema read's own
 //! checks are their only caller today. The rule findings that judge a stored
 //! document by them land with NORN-358, the write gate that judges a plan's
-//! documents by them with NORN-359, `describe`'s rule facet with NORN-357,
-//! the fixpoint's wiring into `new` and inbox capture with NORN-359, and
-//! repair's declared fixes at Layer 5B (NORN-351); none is built, so nothing
-//! outside this crate reaches a rule yet. A rule is not yet a term of
-//! [`VaultSchema::rederives_documents`] for the same reason: no per-document
+//! documents by them with NORN-359, the fixpoint's wiring into `new` and inbox
+//! capture with NORN-359, and repair's declared fixes at Layer 5B
+//! (NORN-351); none is built, so nothing outside this crate selects by a rule
+//! or combines rules yet. What reaches a rule from outside today is its
+//! declaration: `norn-host` reads each rule's accessors into the content model
+//! the store holds, which `describe`'s rule facet reports as the schema writes
+//! it and a `validate` naming a rule is checked against. A rule is not yet a
+//! term of [`VaultSchema::rederives_documents`] because no per-document
 //! derived state reads one until NORN-358.
 //!
 //! **A path selector makes a carried move's judgment necessary.** A rule's
@@ -171,11 +174,11 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// One named schema rule: what it selects, what it requires of what it
 /// selects, and the fixes it declares.
 ///
-/// **A dormant carrier.** Schema read's own checks read it today. Its
-/// accessors are for `describe`'s rule facet (NORN-357), the rule findings
-/// (NORN-358), the write gate (NORN-359) and repair's declared fixes
-/// (NORN-351), none of which is built, so nothing outside this crate reads a
-/// rule yet.
+/// Schema read's own checks read it, and `norn-host` reads its accessors into
+/// the declaration `describe`'s rule facet reports. **A dormant carrier**
+/// beyond that: the rule findings (NORN-358), the write gate (NORN-359) and
+/// repair's declared fixes (NORN-351) read it as a constraint, and none of
+/// them is built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -298,10 +301,10 @@ impl Selector {
 
     /// Whether the selector selects every document.
     ///
-    /// Schema read groups the rules that always select together by it. Its
-    /// consumer outside this crate is `describe`'s rule facet (NORN-357),
-    /// which reports a rule that selects every document as such; it is not
-    /// built.
+    /// Schema read groups the rules that always select together by it, and
+    /// this crate's suite reads it. `describe`'s rule facet reports a selector
+    /// as the schema writes it rather than through this reading, so nothing
+    /// outside this crate reads it.
     pub fn is_selectorless(&self) -> bool {
         self.normal_form() == NormalSelector::default()
     }
@@ -685,9 +688,10 @@ impl VaultSchema {
 
     /// The rule called `name`, if the schema declares one.
     ///
-    /// Its consumers are not built: `describe`'s rule facet (NORN-357),
-    /// which answers a request naming one rule, and the rule findings
-    /// (NORN-358), which read back the rule a stored finding names.
+    /// Its consumer is not built: the rule findings (NORN-358), which read
+    /// back the rule a stored finding names. `describe` reports every rule,
+    /// in name order, and takes no rule name; a `validate` naming a rule is
+    /// checked against the declaration the store holds rather than here.
     pub fn rule(&self, name: &str) -> Option<&Rule> {
         self.rules.get(name)
     }
