@@ -3828,6 +3828,7 @@ impl<'s> Pending<'s> {
             severity,
             rules,
             value,
+            identity: _,
         } = planned;
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());

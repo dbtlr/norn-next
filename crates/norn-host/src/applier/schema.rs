@@ -1,5 +1,5 @@
-//! The schema check on a composed result: a plan refuses a violation it
-//! introduces, and one on a field it writes, unless it is forced.
+//! The schema check on a composed result: a plan refuses exactly the
+//! violations it introduces, unless it is forced (ADR 0037).
 //!
 //! **A force bypasses this check and nothing else**, and it is loud: a forced
 //! plan's violations are listed, in the shape a refusal carries them in, on
@@ -11,70 +11,99 @@
 //! pinned declaration, so the check runs that one derivation on the composed
 //! bytes and on the bytes the target held before, and compares the document
 //! findings each concludes. No second reading of the schema is written for
-//! the applier. A link's health is not a schema violation: the store judges it
-//! with the changeset, and a link a plan breaks surfaces as a finding (ADR
-//! 0032).
+//! the applier, so `new` without a required field, a `set` outside a
+//! `one_of` and a move to a disallowed path each refuse by the finding the
+//! derivation would file. Every schema finding gates whatever its severity,
+//! the field declarations' type and shape mismatches included. A link's
+//! health is not a schema violation: the store judges it with the changeset,
+//! and a link a plan breaks surfaces as a finding.
 //!
-//! **What a violation is about** is its kind and its subject inside the
-//! document: the tag a tag breach names, or the whole document for a block
-//! nothing read and a document nothing derives. A violation stood before when
-//! the same kind about the same subject is concluded from the bytes the target
-//! was composed from — the target's own before-state, or, where it was absent,
-//! a document the plan takes away, which is where a moved document's content
-//! came from.
+//! **A violation's identity** is its kind, the field it stands on, the
+//! offending value it names and the combined constraint it breaches:
 //!
-//! **A violation that stood before still refuses where the plan writes its
-//! subject** (ADR 0032). Two things write a subject:
+//! - a schema rule's or a field declaration's finding is the identity the
+//!   rule judge mints for it ([`FindingIdentity`]), its value by its equality
+//!   key and its combined constraint by value, never by the rules stating it;
+//! - an undeclared tag is its kind and the tag under the tag fold, wherever
+//!   the document writes it, in frontmatter or body;
+//! - every other kind is about the whole document — its path, its bytes, its
+//!   frontmatter block as a whole — and is its kind alone.
 //!
-//! - a frontmatter kind — set, remove, push or pop — names the field it
-//!   writes, and a violation standing on that field in the result refuses.
-//!   Only an undeclared tag stands on a field: the `tags` field
-//!   ([`norn_text::TAGS_FIELD`]), where the result's frontmatter carries the
-//!   tag. The same tag written only in the body stands on no field. Every
-//!   other kind the derivation concludes is about the whole document — its
-//!   path, its bytes, its frontmatter block as a whole — and names no field;
-//! - any kind writes a tag the result carries a different number of times
-//!   than the before-state did, which refuses a standing undeclared tag
-//!   whichever kind wrote it.
-//!
-//! The fields a plan writes are read from its operations alone
-//! ([`written_fields`]), so a preview and an apply of one plan judge alike. A
-//! whole-document kind — a create, a text replaced, a body or a section
-//! edited — writes no named field, so a violation about the whole document
-//! that stood before, and one on a field only such a kind rewrote, refuse
-//! only by the count above.
+//! **A violation stood before** when the same identity is concluded from the
+//! bytes the target was composed from — the target's own before-state, or,
+//! where it was absent, a document the plan takes away, which is where a moved
+//! document's content came from. A standing violation whose identity is
+//! unchanged does not refuse, even on a field the plan writes or for a tag
+//! the plan writes a different number of times: a repair rewriting one
+//! element of a list leaves every other element's violation as it stood.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use norn_fs::{NormalizedPath, PathNormalizer};
-use norn_store::{Change, TagSource};
+use norn_config::schema::FindingIdentity;
 use norn_wire::{
-    CaseFold, DocumentPath, FindingKind, OperationKind, ResolvedPlan, SchemaViolation,
+    CaseFold, DocumentPath, FindingKind, RefusedCheck, RuleSet, SchemaViolation, ValueHead,
 };
 
-use super::observe::identity;
-use crate::derivation::{Cause, Declared, plan_document};
+use crate::derivation::{Cause, Declared, PlannedFinding, plan_document};
+use crate::evidence::count_rule_work;
+use crate::planner::view::wire_hash;
 
 /// What the derivation concludes about one document's bytes: each violation,
-/// by kind and subject, with its message, how many times it writes each tag,
-/// and which tags its frontmatter carries, each folded.
+/// with what tells it from another and what the wire says of it.
 pub(super) struct Judged {
-    violations: Vec<((FindingKind, Option<String>), String)>,
-    tags: BTreeMap<String, usize>,
-    frontmatter_tags: BTreeSet<String>,
+    violations: Vec<Violation>,
+}
+
+/// One violation a judgment concluded.
+struct Violation {
+    identity: Identity,
+    kind: FindingKind,
+    target: Option<String>,
+    message: String,
+    /// The offending value as the store keeps a field value, where the
+    /// violation names one.
+    value: Option<String>,
+    /// The rules the violation cites, by name; empty where it cites none.
+    rules: BTreeSet<String>,
+}
+
+/// What tells one violation from another. See the [module](self).
+#[derive(Debug, PartialEq)]
+enum Identity {
+    /// A schema rule's or a field declaration's finding.
+    Rule(FindingIdentity),
+    /// An undeclared tag, under the tag fold.
+    Tag(String),
+    /// A violation about the whole document.
+    Document(FindingKind),
+}
+
+impl Violation {
+    /// The violation a planned finding states.
+    fn of(finding: PlannedFinding) -> Self {
+        let kind = finding.cause.kind();
+        let identity = match (&finding.identity, finding.cause, &finding.target) {
+            (Some(identity), _, _) => Identity::Rule(identity.clone()),
+            (None, Cause::TagBreach(_), Some(tag)) => {
+                Identity::Tag(norn_wire::fold_tag(tag).to_string())
+            }
+            _ => Identity::Document(kind),
+        };
+        Violation {
+            identity,
+            kind,
+            message: finding.cause.message(&finding.subject),
+            target: finding.target,
+            value: finding.value,
+            rules: finding.rules,
+        }
+    }
 }
 
 /// Judge `bytes` as the document at `path` under `declared`, its rules' path
-/// globs comparing letters as `case` says.
-///
-/// **The rule breaches are left out, a dormant carrier.** The derivation's
-/// judgment concludes them, and they gate a write under ADR 0037 by their
-/// identity — kind, field, offending value and combined constraint — which is
-/// the write gate NORN-359 builds. Read here by kind and subject alone they
-/// would refuse a repair of one element over every element it leaves
-/// standing, and pass a write that swaps one offending value for another, so
-/// until that gate lands they refuse nothing and are not listed.
+/// globs comparing letters as `case` says. What the rules' judgment paid is
+/// tallied as the derivation's is.
 pub(super) fn judge(
     path: &DocumentPath,
     bytes: &[u8],
@@ -91,151 +120,114 @@ pub(super) fn judge(
         declared,
         case,
     );
-    let violations = plan
-        .findings
-        .into_iter()
-        .filter(|finding| !matches!(finding.cause, Cause::RuleBreach(_)))
-        .map(|finding| {
-            (
-                (finding.cause.kind(), finding.target.clone()),
-                finding.cause.message(&finding.subject),
-            )
-        })
-        .collect();
-    let mut tags = BTreeMap::new();
-    let mut frontmatter_tags = BTreeSet::new();
-    if let Some(Change::Upsert(facts)) = &plan.change {
-        for tag in &facts.tags {
-            let folded = norn_wire::fold_tag(&tag.name).to_string();
-            if tag.source == TagSource::Frontmatter {
-                frontmatter_tags.insert(folded.clone());
-            }
-            *tags.entry(folded).or_default() += 1;
-        }
-    }
+    count_rule_work(plan.rule_work);
     Judged {
-        violations,
-        tags,
-        frontmatter_tags,
-    }
-}
-
-/// The frontmatter fields each file's operations in `plan` write, by the
-/// file's identity: the field a set, a remove, a push or a pop names, at the
-/// document its path target names. A pure function of the operations.
-pub(super) fn written_fields(
-    plan: &ResolvedPlan,
-    normalizer: &PathNormalizer,
-) -> BTreeMap<NormalizedPath, BTreeSet<String>> {
-    let mut written: BTreeMap<NormalizedPath, BTreeSet<String>> = BTreeMap::new();
-    for operation in &plan.operations {
-        let (target, field) = match &operation.kind {
-            OperationKind::SetFrontmatter { target, field, .. }
-            | OperationKind::RemoveFrontmatter { target, field }
-            | OperationKind::PushFrontmatter { target, field, .. }
-            | OperationKind::PopFrontmatter { target, field, .. } => (target, field),
-            _ => continue,
-        };
-        let Some(file) = target
-            .as_path()
-            .and_then(|path| identity(normalizer, path.as_str()))
-        else {
-            continue;
-        };
-        written.entry(file).or_default().insert(field.clone());
-    }
-    written
-}
-
-/// Whether the violation `kind` about `subject` stands on a field in
-/// `written`, the fields the plan writes into the result `after`.
-///
-/// **The field a kind stands on**: an undeclared tag stands on the `tags`
-/// field where the result's frontmatter carries it, and on no field where
-/// only its body does. Every other kind names no field here: the path, bytes
-/// and frontmatter-block kinds are about the whole document, a link's health
-/// is not a schema violation, and the schema-rule kinds are left out of the
-/// judgment this check reads until the write gate judges them ([`judge`]).
-fn on_written_field(
-    kind: FindingKind,
-    subject: Option<&str>,
-    after: &Judged,
-    written: &BTreeSet<String>,
-) -> bool {
-    match kind {
-        FindingKind::UndeclaredTag => {
-            written.contains(norn_text::TAGS_FIELD)
-                && subject.is_some_and(|tag| {
-                    after
-                        .frontmatter_tags
-                        .contains(&norn_wire::fold_tag(tag).to_string())
-                })
-        }
-        FindingKind::PathBytesNotUtf8
-        | FindingKind::PathNamesNoDocument
-        | FindingKind::BodyBytesNotUtf8
-        | FindingKind::FrontmatterTooLarge
-        | FindingKind::FrontmatterUnclosed
-        | FindingKind::FrontmatterUnreadable
-        | FindingKind::Broken
-        | FindingKind::Ambiguous
-        | FindingKind::MissingAnchor => false,
-        // The schema kinds of ADR 0035 stand on the field their target names,
-        // or on the whole document, but the judgment here leaves them out:
-        // the write gate that judges a plan's documents by the rules is
-        // NORN-359, and under ADR 0037 it refuses a violation by its
-        // identity, never for standing on a field the plan writes.
-        FindingKind::Misplaced
-        | FindingKind::DocumentRulesConflict
-        | FindingKind::RequiredMissing
-        | FindingKind::Forbidden
-        | FindingKind::NotOneOf
-        | FindingKind::TooLong
-        | FindingKind::TypeMismatch
-        | FindingKind::ShapeMismatch
-        | FindingKind::FieldRulesConflict => false,
-        // A kind minted after these is about the whole document until it is
-        // given a field here.
-        _ => false,
+        violations: plan.findings.into_iter().map(Violation::of).collect(),
     }
 }
 
 /// The violations `after`, the composed result at `path`, introduces against
-/// what stood in `before`, each document it was composed from, where the plan
-/// writes the frontmatter fields `written` into it: each refuses an unforced
-/// plan, and a forced plan lets each through and lists it.
+/// what stood in `before`, each document it was composed from: each refuses
+/// an unforced plan, and a forced plan lets each through and lists it, citing
+/// its rules through `citations`.
 pub(super) fn introduced(
     path: &DocumentPath,
-    after: &Judged,
+    after: Judged,
     before: &[Judged],
-    written: &BTreeSet<String>,
+    citations: &mut Citations,
 ) -> Vec<SchemaViolation> {
-    let stood: Vec<&(FindingKind, Option<String>)> = before
-        .iter()
-        .flat_map(|judged| judged.violations.iter().map(|(violation, _)| violation))
-        .collect();
     after
         .violations
-        .iter()
-        .filter(|(violation, _)| {
-            if !stood.contains(&violation)
-                || on_written_field(violation.0, violation.1.as_deref(), after, written)
-            {
-                return true;
-            }
-            match &violation.1 {
-                Some(tag) if violation.0 == FindingKind::UndeclaredTag => {
-                    let folded = norn_wire::fold_tag(tag).to_string();
-                    let written = |judged: &Judged| judged.tags.get(&folded).copied();
-                    before
-                        .iter()
-                        .all(|judged| written(judged) != written(after))
-                }
-                _ => false,
-            }
+        .into_iter()
+        .filter(|violation| {
+            !before.iter().any(|judged| {
+                judged
+                    .violations
+                    .iter()
+                    .any(|stood| stood.identity == violation.identity)
+            })
         })
-        .map(|((kind, target), message)| {
-            SchemaViolation::new(path.clone(), *kind, target.clone(), message.clone())
+        .map(|violation| {
+            let mut wire = SchemaViolation::new(
+                path.clone(),
+                violation.kind,
+                violation.target,
+                violation.message,
+            );
+            if let Some(value) = violation.value {
+                wire = wire.with_value(value_head(&value));
+            }
+            match citations.cite(violation.rules) {
+                Some(rule_set) => wire.citing(rule_set),
+                None => wire,
+            }
         })
         .collect()
+}
+
+/// The head a violation carries of the offending value `full`, as the store's
+/// finding write keeps one: its bounded text, its length, and the SHA-256 of
+/// the whole of it.
+fn value_head(full: &str) -> ValueHead {
+    ValueHead::of(full, wire_hash(norn_fs::ContentHash::of(full.as_bytes())))
+}
+
+/// The rule sets one response's violations cite, each numbered once, from 1,
+/// in the order first cited.
+///
+/// **One numbering per response.** An apply or a preview judges its plan, and
+/// a refusal its fresh plan, through the one numbering, so an identity names
+/// one set wherever it stands in the answer: in a refusal's checks and in its
+/// forecast's forced violations alike. Each list of violations is answered
+/// beside exactly the sets it cites ([`Citations::cited_by`]), as a page of
+/// finding rows is.
+#[derive(Debug, Default)]
+pub(crate) struct Citations {
+    sets: Vec<BTreeSet<String>>,
+}
+
+impl Citations {
+    /// The identity of the set `rules` in this response, numbering it where
+    /// it is new; `None` where it names no rule, since a violation citing no
+    /// rule cites no set.
+    fn cite(&mut self, rules: BTreeSet<String>) -> Option<u64> {
+        if rules.is_empty() {
+            return None;
+        }
+        let position = match self.sets.iter().position(|set| *set == rules) {
+            Some(position) => position,
+            None => {
+                self.sets.push(rules);
+                self.sets.len() - 1
+            }
+        };
+        Some(position as u64 + 1)
+    }
+
+    /// Every set `violations` cite, each once, in the order of its identity.
+    pub(crate) fn cited_by<'a>(
+        &self,
+        violations: impl IntoIterator<Item = &'a SchemaViolation>,
+    ) -> Vec<RuleSet> {
+        let cited: BTreeSet<u64> = violations
+            .into_iter()
+            .filter_map(|violation| violation.rule_set)
+            .collect();
+        cited
+            .into_iter()
+            .filter_map(|id| {
+                let rules = self.sets.get(usize::try_from(id).ok()?.checked_sub(1)?)?;
+                RuleSet::new(id, rules.iter().cloned()).ok()
+            })
+            .collect()
+    }
+
+    /// Every set the schema violations among `checks` cite, each once, in the
+    /// order of its identity.
+    pub(crate) fn cited_by_checks(&self, checks: &[RefusedCheck]) -> Vec<RuleSet> {
+        self.cited_by(checks.iter().filter_map(|check| match check {
+            RefusedCheck::SchemaViolation { violation, .. } => Some(violation),
+            _ => None,
+        }))
+    }
 }

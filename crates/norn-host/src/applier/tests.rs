@@ -27,6 +27,7 @@ mod control;
 mod delete;
 mod differential;
 mod folder;
+mod gate;
 mod rewrite;
 
 pub(super) fn path(text: &str) -> DocumentPath {
@@ -705,9 +706,9 @@ impl Fixture {
 pub(super) const TAG_SCHEMA: &str =
     "version: 1\ntags:\n  declared: [project]\n  undeclared: report\n";
 
-/// A plan refuses a violation of the vault schema it introduces, and one on
-/// what it writes, and not one that already stood in a target and that it
-/// leaves as it was — a moved document's included.
+/// A plan refuses a violation of the vault schema it introduces, and not one
+/// that already stood in a target — one it writes again a different number of
+/// times, or leaves as it was, a moved document's included.
 #[test]
 fn a_plan_refuses_the_schema_violations_it_introduces() {
     let mut fixture = Fixture::with_schema(
@@ -749,11 +750,7 @@ fn a_plan_refuses_the_schema_violations_it_introduces() {
     ])));
     assert_eq!(
         without_message(introduced.checks),
-        vec![
-            violation("a.md", "stray"),
-            violation("b.md", "legacy"),
-            violation("d.md", "other"),
-        ]
+        vec![violation("a.md", "stray"), violation("d.md", "other")]
     );
     assert_eq!(fixture.read("a.md").as_deref(), Some("# A\n#project\n"));
     let standing = applied(fixture.apply(fixture.plan(vec![
@@ -968,6 +965,7 @@ fn between_staging_and_publication_the_applier_holds_no_handle_and_no_content() 
         &view,
         &declared,
         &links.index(),
+        &mut super::schema::Citations::default(),
     )
     .expect("the plan stages");
     let between = norn_testkit::process::open_fd_count().expect("a count");
@@ -1177,6 +1175,7 @@ fn each_outcome_crosses_under_its_wire_code() {
         folders_made: Vec::new(),
         folders_removed: Vec::new(),
         forced: Vec::new(),
+        citations: super::schema::Citations::default(),
     })
     .into_wire()
     .expect("an applied plan is answered")
@@ -1203,6 +1202,7 @@ fn each_outcome_crosses_under_its_wire_code() {
             plan: plan.clone(),
             forecast: Forecast::new(Vec::new(), Vec::new(), Vec::new()),
             checks: Vec::new(),
+            citations: super::schema::Citations::default(),
             unresolved: Vec::new(),
             landed: Vec::new(),
             healing: Vec::new(),
@@ -1229,6 +1229,7 @@ fn each_outcome_crosses_under_its_wire_code() {
             landed: vec![path("a.md")],
             cause: InterruptionCause::io_failure("a sync failed"),
             forced: Vec::new(),
+            citations: super::schema::Citations::default(),
             changeset: ChangesetOutcome::Committed,
         }))),
         (ReasonCode::VaultPlanInterrupted, true)
@@ -1841,7 +1842,7 @@ fn a_result_is_judged_against_the_document_its_content_came_from() {
     assert_eq!(fixture.read("old.md").as_deref(), Some("# Old\n#legacy\n"));
 }
 
-fn refused_for(outcome: ApplyOutcome) -> Vec<norn_wire::RefusedCheck> {
+pub(super) fn refused_for(outcome: ApplyOutcome) -> Vec<norn_wire::RefusedCheck> {
     refused(outcome).checks
 }
 
@@ -3151,14 +3152,14 @@ fn tag_list(names: &[&str]) -> norn_wire::AuthoredValue {
     )
 }
 
-/// **An unforced write keeps no schema violation standing on the field it
-/// rewrites**: a set or a push of `tags` that leaves an undeclared tag in
-/// the field refuses on it, though the tag stood before; forced, the set
-/// applies and lists it. A violation on no field the plan writes still does
-/// not refuse: an undeclared tag in the body beside a rewritten `tags`, and
-/// one in `tags` beside a rewritten `status`.
+/// **A plan rewriting tags refuses an undeclared tag it introduces and not a
+/// standing one, in frontmatter or body** (ADR 0037): a set of `tags` that
+/// keeps a standing undeclared tag, a push beside one, a body that writes a
+/// standing tag twice, and a tag moved from `tags` into the body each apply,
+/// listing nothing even forced; a push of a new undeclared tag and a body
+/// gaining one each refuse on that tag alone.
 #[test]
-fn an_unforced_write_keeps_no_violation_standing_on_the_field_it_rewrites() {
+fn a_tag_rewrite_refuses_only_an_undeclared_tag_it_introduces() {
     let mut fixture = Fixture::with_schema(
         TAG_SCHEMA,
         &[
@@ -3168,52 +3169,49 @@ fn an_unforced_write_keeps_no_violation_standing_on_the_field_it_rewrites() {
             ("d.md", "---\ntags: [stray]\n---\n# D\n"),
         ],
     );
-    let set = fixture.plan(vec![setting(
-        "a.md",
-        "tags",
-        tag_list(&["stray", "project"]),
-    )]);
-    let checks = refused_for(fixture.apply(set.clone()));
-    let [norn_wire::RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
-        panic!("the set refuses on the tag its field keeps: {checks:?}");
-    };
-    assert_eq!(violation.path, path("a.md"));
-    assert_eq!(violation.kind, norn_wire::FindingKind::UndeclaredTag);
-    assert_eq!(violation.target.as_deref(), Some("stray"));
-    let pushed = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
-        norn_wire::WriteTarget::path(path("b.md")),
-        "tags",
-        norn_wire::AuthoredValue::string("project"),
-    ))]);
-    assert!(matches!(
-        refused_for(fixture.apply(pushed)).as_slice(),
-        [norn_wire::RefusedCheck::SchemaViolation { .. }]
-    ));
+    let mut kept = fixture.plan(vec![
+        setting("a.md", "tags", tag_list(&["stray", "project"])),
+        Operation::new(OperationKind::push_frontmatter(
+            norn_wire::WriteTarget::path(path("b.md")),
+            "tags",
+            norn_wire::AuthoredValue::string("project"),
+        )),
+        editing("c.md", "#stray", "#stray and #stray"),
+        setting("d.md", "tags", tag_list(&[])),
+        editing("d.md", "# D", "# D\n#stray"),
+    ]);
+    kept.force = true;
+    let (_, forecast) = fixture
+        .preview(kept.clone())
+        .expect("the forced plan previews");
+    assert!(forecast.forced.is_empty(), "{:?}", forecast.forced);
+    kept.force = false;
+    let landed = applied(fixture.apply(kept));
+    assert!(landed.forced.is_empty());
     assert_eq!(
         fixture.read("a.md").as_deref(),
-        Some("---\ntags: [stray]\n---\n# A\n")
+        Some("---\ntags: [stray, project]\n---\n# A\n")
     );
 
-    let mut forced = set;
-    forced.force = true;
-    let (_, forecast) = fixture
-        .preview(forced.clone())
-        .expect("the forced set previews");
-    assert_eq!(forecast.forced, vec![violation.clone()]);
-    assert_eq!(
-        applied(fixture.apply(forced)).forced,
-        vec![violation.clone()]
-    );
-
-    let elsewhere = applied(fixture.apply(fixture.plan(vec![
-        setting("c.md", "tags", tag_list(&["project"])),
-        setting("d.md", "status", norn_wire::AuthoredValue::string("done")),
-    ])));
-    assert!(elsewhere.forced.is_empty());
-    assert_eq!(
-        fixture.read("c.md").as_deref(),
-        Some("---\ntags: [project]\n---\n# C\n#stray\n")
-    );
+    let introducing = fixture.plan(vec![
+        Operation::new(OperationKind::push_frontmatter(
+            norn_wire::WriteTarget::path(path("a.md")),
+            "tags",
+            norn_wire::AuthoredValue::string("other"),
+        )),
+        editing("c.md", "# C", "# C #fresh"),
+    ]);
+    let refused = refused_for(fixture.apply(introducing));
+    let named: Vec<(&str, Option<&str>)> = refused
+        .iter()
+        .map(|check| match check {
+            norn_wire::RefusedCheck::SchemaViolation { violation, .. } => {
+                (violation.path.as_str(), violation.target.as_deref())
+            }
+            other => panic!("a schema check: {other:?}"),
+        })
+        .collect();
+    assert_eq!(named, [("a.md", Some("other")), ("c.md", Some("fresh"))]);
     fixture.assert_store_is_a_build_from_zero();
 }
 
@@ -3836,6 +3834,7 @@ fn observed_and_confirmed_progress_survives_a_refresh_read_failure() {
         &crate::derivation::Declared::unpinned(),
         Vec::new(),
         &index,
+        super::schema::Citations::default(),
     );
     assert!(
         index.fired.get(),

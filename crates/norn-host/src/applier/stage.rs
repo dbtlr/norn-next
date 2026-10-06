@@ -20,7 +20,7 @@ use super::observe::{
 };
 use super::place::{Ground, Landing};
 use super::recompose::{Recomposed, disagreement, recompose};
-use super::schema;
+use super::schema::{self, Citations};
 use super::shape::shape_disagrees;
 use crate::derivation::Declared;
 use crate::derivation::document_links;
@@ -178,8 +178,9 @@ pub(super) fn check_and_stage(
     view: &TreeView,
     declared: &Declared,
     links: Links<'_>,
+    citations: &mut Citations,
 ) -> Result<StagedPlan, Stop> {
-    let checked = check(plan, view, declared, links).map_err(Stop::from)?;
+    let checked = check(plan, view, declared, links, citations).map_err(Stop::from)?;
     stage(ground, shadows, plan, view.normalizer(), checked)
 }
 
@@ -240,8 +241,10 @@ pub(super) enum Written {
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
-/// one it records; and every result passes the vault schema, or, for a forced
-/// plan, has each violation it introduces listed rather than refused. A plan
+/// one it records; and every result introduces no schema violation, or, for a
+/// forced plan, has each violation it introduces listed rather than refused,
+/// each citing its rules through `citations`, the numbering of the response
+/// this judgment answers in. A plan
 /// whose shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
@@ -260,6 +263,7 @@ pub(super) fn check<V: VaultView>(
     view: &V,
     declared: &Declared,
     links: Links<'_>,
+    citations: &mut Citations,
 ) -> Result<Checked, Unfit>
 where
     V::Error: std::fmt::Display,
@@ -397,18 +401,11 @@ where
         normalizer,
         declared,
     };
-    let violations = schema.violations(&units, &contents);
+    let violations = schema.violations(&units, &contents, citations);
     let forced = if plan.force {
         violations
     } else {
-        checks.extend(violations.into_iter().map(|violation| {
-            RefusedCheck::schema_violation(
-                violation.path,
-                violation.kind,
-                violation.target,
-                violation.message,
-            )
-        }));
+        checks.extend(violations.into_iter().map(RefusedCheck::violation));
         Vec::new()
     };
     if !checks.is_empty() {
@@ -747,12 +744,10 @@ impl Judging<'_> {
     ///
     /// **Each result is judged against the document its content came from**:
     /// its own before-state where it is edited in place, the moved document's
-    /// where a move carried it, and nothing where an operation wrote it.
-    ///
-    /// **The fields written into a result** are those the plan's frontmatter
-    /// kinds write at its path, or at the path its content came from, since
-    /// an operation composes on the document before or after a move carries
-    /// it.
+    /// where a move carried it, and nothing where an operation wrote it. A
+    /// result refuses each violation whose identity no such document carried
+    /// ([`schema::introduced`]), and no other, whatever fields the plan
+    /// writes into it.
     ///
     /// **A carried document is not judged again.** Its bytes are the moved
     /// document's own, unchanged, and the vault schema concludes about a
@@ -766,11 +761,14 @@ impl Judging<'_> {
     /// necessary again — the same bytes can violate a rule at one path and not
     /// another — and the write gate that judges rules (NORN-359) judges a
     /// carried move at its destination.
-    fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
+    fn violations(
+        &self,
+        units: &[Unit],
+        contents: &[Option<Written>],
+        citations: &mut Citations,
+    ) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
-        let written_fields = schema::written_fields(self.plan, self.normalizer);
         let case = crate::stored_path_order(self.normalizer.case_sensitivity()).glob_case();
-        let no_field = BTreeSet::new();
         let mut checks = Vec::new();
         for (unit, content) in units.iter().zip(contents) {
             let Some(Written::Bytes(after)) = content else {
@@ -795,12 +793,6 @@ impl Judging<'_> {
             let drawn_from = source
                 .as_ref()
                 .and_then(|source| index_of.get(source).copied());
-            let fields: BTreeSet<String> = [file.as_ref(), source.as_ref()]
-                .into_iter()
-                .flatten()
-                .flat_map(|file| written_fields.get(file).unwrap_or(&no_field))
-                .cloned()
-                .collect();
             let before: Vec<schema::Judged> = drawn_from
                 .and_then(|index| match &self.states[index] {
                     TargetState::AtBefore(Some(Body::Held(bytes))) => Some(schema::judge(
@@ -814,7 +806,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared, case);
-            checks.extend(schema::introduced(path, &after, &before, &fields));
+            checks.extend(schema::introduced(path, after, &before, citations));
         }
         checks
     }

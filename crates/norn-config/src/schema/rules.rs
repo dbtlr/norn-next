@@ -142,11 +142,13 @@
 //! [`CombinedConstraint::admits_path`], and files each finding the judgment
 //! concludes in the document's own changeset, citing its rules and naming its
 //! offending value, so a rule is a term of
-//! [`VaultSchema::rederives_documents`]. **Dormant carriers beyond that:**
-//! the write gate that judges a plan's documents by the same judgment lands
-//! with NORN-359, and so does the fixpoint's wiring into `new` and inbox
-//! capture; repair's declared fixes land at Layer 5B (NORN-351). Until the
-//! gate lands, a plan's schema check leaves the rule breaches out. A rule's
+//! [`VaultSchema::rederives_documents`]. **The write gate judges a plan's
+//! documents by the same judgment**: `norn-host`'s applier runs the
+//! derivation on each composed result and refuses each violation whose
+//! identity ([`FindingIdentity`]) no document it was composed from held.
+//! **Dormant carriers beyond that:** the fixpoint's wiring into `new` and
+//! inbox capture lands with NORN-359; repair's declared fixes land at Layer
+//! 5B (NORN-351). A rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
@@ -175,7 +177,7 @@ use norn_wire::{AuthoredValue, Captures, CaseFold, Severity, ValueMap, fold_tag}
 
 pub use combined::{CombinedConstraint, FieldConstraint, OneOfIntersection, RulesConflict};
 pub use defaults::{DefaultCandidate, DefaultsConflict, RuleDefaultsRefusal};
-pub use judge::{Breach, Judgment, RuleFinding, RuleWork};
+pub use judge::{Breach, FindingIdentity, Judgment, RuleFinding, RuleWork};
 pub use placement::PLACEMENT_CEILING;
 
 pub(super) use checks::check_rules;
@@ -190,10 +192,10 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// selects, and the fixes it declares.
 ///
 /// Schema read's own checks read it, rule judgment reads it as a constraint
-/// ([`VaultSchema::judge`]), and `norn-host` reads its accessors into the
-/// declaration `describe`'s rule facet reports. **A dormant carrier** beyond
-/// that: the write gate (NORN-359) and repair's declared fixes (NORN-351) read
-/// it as a constraint, and neither is built.
+/// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
+/// `norn-host` reads its accessors into the declaration `describe`'s rule
+/// facet reports. **A dormant carrier** beyond that: repair's declared fixes
+/// (NORN-351) read it as a constraint, and are not built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -736,8 +738,8 @@ impl VaultSchema {
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
     ///
     /// The defaults fixpoint and rule judgment select by the same reading
-    /// ([`VaultSchema::judge`]). The write gate (NORN-359), which selects a
-    /// planned document's rules through it, is not built.
+    /// ([`VaultSchema::judge`]), and the write gate selects a planned
+    /// document's rules through that judgment.
     ///
     /// `case` says how the path globs' literal letters compare with the
     /// path's: the store's recorded path order names it

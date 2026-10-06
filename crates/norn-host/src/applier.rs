@@ -111,6 +111,7 @@ use crate::production::{PlanEffect, commit_plan_changeset, pinned_declaration};
 pub(crate) use observe::copied_sources;
 use place::Ground;
 use publish::{Progress, Publisher, Stopped};
+use schema::Citations;
 pub(crate) use stage::Links;
 use stage::Stop;
 
@@ -198,6 +199,7 @@ impl Applier<'_> {
             Ok(declared) => declared,
             Err(failure) => return write_failed(plan, format!("{failure:?}"), Vec::new()),
         };
+        let mut citations = Citations::default();
         let mut staged = match stage::check_and_stage(
             &self.ground(),
             self.shadows,
@@ -205,9 +207,10 @@ impl Applier<'_> {
             &view,
             &declared,
             self.links,
+            &mut citations,
         ) {
             Ok(staged) => staged,
-            Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks),
+            Err(Stop::Refused(checks)) => return self.refuse(plan, &declared, checks, citations),
             Err(Stop::Invalid(fault)) => return ApplyOutcome::Invalid(fault),
             Err(Stop::RootReplaced) => return self.root_replaced(plan),
             Err(Stop::Failed(detail)) => return write_failed(plan, detail, Vec::new()),
@@ -230,17 +233,25 @@ impl Applier<'_> {
             own_writes: self.own_writes,
         };
         let (progress, stopped) = publisher.publish(&plan, staged);
-        self.answer(plan, progress, stopped, forced, &declared, store)
+        self.answer(
+            plan,
+            progress,
+            stopped,
+            (forced, citations),
+            &declared,
+            store,
+        )
     }
 
     /// The outcome of a publication that ran as far as `progress`, whose
-    /// force let `forced` through, under the declaration `declared`.
+    /// force let `forced` through citing `citations`, under the declaration
+    /// `declared`.
     fn answer(
         &self,
         plan: ResolvedPlan,
         progress: Progress,
         stopped: Option<Stopped>,
-        forced: Vec<SchemaViolation>,
+        (forced, citations): (Vec<SchemaViolation>, Citations),
         declared: &Declared,
         store: &RefCell<&mut Store>,
     ) -> ApplyOutcome {
@@ -300,6 +311,7 @@ impl Applier<'_> {
                 folders_made: folder_paths(&progress.folders_made),
                 folders_removed: folder_paths(&progress.folders_removed),
                 forced,
+                citations,
             });
         };
         if progress.published {
@@ -322,6 +334,7 @@ impl Applier<'_> {
                 landed,
                 cause,
                 forced,
+                citations,
                 changeset,
             }));
         }
@@ -334,12 +347,18 @@ impl Applier<'_> {
             Vec::new()
         };
         let outcome = match stopped {
-            Stopped::ForeignEdit { path, holds } => {
-                self.refuse(plan, declared, vec![RefusedCheck::drifted(path, holds)])
-            }
-            Stopped::NameTaken { path } => {
-                self.refuse(plan, declared, vec![RefusedCheck::name_taken(path)])
-            }
+            Stopped::ForeignEdit { path, holds } => self.refuse(
+                plan,
+                declared,
+                vec![RefusedCheck::drifted(path, holds)],
+                citations,
+            ),
+            Stopped::NameTaken { path } => self.refuse(
+                plan,
+                declared,
+                vec![RefusedCheck::name_taken(path)],
+                citations,
+            ),
             Stopped::RootReplaced => self.root_replaced(plan),
             Stopped::Io(detail) => write_failed(plan, detail, Vec::new()),
         };
@@ -347,15 +366,19 @@ impl Applier<'_> {
     }
 
     /// Refuse `plan` for `checks`, answering with a fresh plan judged under
-    /// `declared`.
+    /// `declared`, every violation in the answer citing its rules through
+    /// `citations`.
     fn refuse(
         &self,
         plan: ResolvedPlan,
         declared: &Declared,
         checks: Vec<RefusedCheck>,
+        citations: Citations,
     ) -> ApplyOutcome {
         match TreeView::open(self.anchor, self.exclusions, self.schema) {
-            Ok(view) => refresh::refuse_and_refresh(plan, &view, declared, checks, self.links),
+            Ok(view) => {
+                refresh::refuse_and_refresh(plan, &view, declared, checks, self.links, citations)
+            }
             Err(error) => write_failed(plan, error.to_string(), Vec::new()),
         }
     }
@@ -425,14 +448,16 @@ pub(crate) fn preview(
         root,
         schema,
     };
-    let stop = match stage::check(&plan, &view, declared, links) {
+    let mut citations = Citations::default();
+    let stop = match stage::check(&plan, &view, declared, links, &mut citations) {
         Ok(checked) => match stage::judge(&ground, &plan, view.normalizer(), &checked) {
             Ok(()) => {
+                let cited = citations.cited_by(&checked.forced);
                 return match forecast(&plan.transitions, &view) {
                     Ok(forecast) => Ok((
                         plan,
                         forecast
-                            .with_forced(checked.forced)
+                            .with_forced(checked.forced, cited)
                             .with_links(checked.links),
                     )),
                     Err(error) => Err(Box::new(write_failed(plan, error.to_string(), Vec::new()))),
@@ -443,7 +468,9 @@ pub(crate) fn preview(
         Err(unfit) => Stop::from(unfit),
     };
     Err(Box::new(match stop {
-        Stop::Refused(checks) => refresh::refuse_and_refresh(plan, &view, declared, checks, links),
+        Stop::Refused(checks) => {
+            refresh::refuse_and_refresh(plan, &view, declared, checks, links, citations)
+        }
         Stop::Invalid(fault) => ApplyOutcome::Invalid(fault),
         Stop::RootReplaced => root_replaced(anchor, plan),
         Stop::Failed(detail) => write_failed(plan, detail, Vec::new()),

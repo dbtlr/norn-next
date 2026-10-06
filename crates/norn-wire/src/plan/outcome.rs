@@ -25,16 +25,21 @@
 //!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
-//! refused check carries the finding kind, the subject inside the document and
-//! the message a finding would, rather than a second vocabulary for the same
-//! facts.
+//! refused check carries the finding kind, the subject inside the document,
+//! the offending value's head, the rules it cites and the message a finding
+//! would, rather than a second vocabulary for the same facts. **A violation
+//! cites its rules by set, as a finding row does**: one number,
+//! [`SchemaViolation::rule_set`], resolving against the
+//! [`RuleSet`](crate::RuleSet)s every response carrying violations carries
+//! beside them, each set once. The combined constraint that tells two
+//! violations apart is the gate's to compare, and stays off the wire.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::document::DocumentPath;
 use crate::finding::FindingKind;
-use crate::finding_row::CandidateHead;
+use crate::finding_row::{CandidateHead, ValueHead};
 use crate::plan::document::{FileState, PlanCondition};
 use crate::plan::operation::{Operation, OperationId};
 
@@ -71,8 +76,9 @@ pub enum RefusedCheck {
         /// it.
         condition: PlanCondition,
     },
-    /// A target's result would violate the vault schema where the plan writes,
-    /// or where no violation stood before the plan.
+    /// A target's result would carry a schema violation that did not stand
+    /// before the plan: one whose kind, field, offending value or combined
+    /// constraint no document the result was composed from carried.
     #[non_exhaustive]
     SchemaViolation {
         /// The violation.
@@ -105,7 +111,7 @@ impl RefusedCheck {
     }
 
     /// The result at `path` would be filed under `kind`, about `target`,
-    /// described by `message`.
+    /// described by `message`, naming no value and citing no rule.
     pub fn schema_violation(
         path: DocumentPath,
         kind: FindingKind,
@@ -115,6 +121,11 @@ impl RefusedCheck {
         RefusedCheck::SchemaViolation {
             violation: SchemaViolation::new(path, kind, target, message),
         }
+    }
+
+    /// A result would carry `violation`, which did not stand before the plan.
+    pub const fn violation(violation: SchemaViolation) -> Self {
+        RefusedCheck::SchemaViolation { violation }
     }
 
     /// Something stands at `path`, where a create would publish.
@@ -127,7 +138,7 @@ impl RefusedCheck {
 /// one a forced plan lets through.
 ///
 /// On the wire a violation is an object:
-/// `{"path":"notes/a.md","kind":"document/undeclared-tag","target":"draft","message":"…"}`.
+/// `{"path":"notes/a.md","kind":"field/not-one-of","target":"status","message":"…","value":{"text":"someday",…},"rule_set":1}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SchemaViolation {
@@ -141,11 +152,23 @@ pub struct SchemaViolation {
     pub target: Option<String>,
     /// The violation in words, for a person reading a report.
     pub message: String,
+    /// The offending value the violation names, as its bounded head, as a
+    /// finding row carries it, and `null` for a violation about no value — a
+    /// missing field, a misplaced document, a null — and for every kind but
+    /// the schema rules' and the field declarations'.
+    pub value: Option<ValueHead>,
+    /// The set of schema rules the violation cites, by an identity resolving
+    /// against the rule sets of the response carrying it, and `null` for a
+    /// violation citing no rule: a type or shape mismatch, and every kind but
+    /// the schema rules'. The identity is the response's own, so it is not
+    /// stable across responses; within one response it names one set
+    /// wherever it stands.
+    pub rule_set: Option<u64>,
 }
 
 impl SchemaViolation {
     /// The result at `path` would be filed under `kind`, about `target`,
-    /// described by `message`.
+    /// described by `message`, naming no value and citing no rule.
     pub fn new(
         path: DocumentPath,
         kind: FindingKind,
@@ -157,7 +180,24 @@ impl SchemaViolation {
             kind,
             target,
             message: message.into(),
+            value: None,
+            rule_set: None,
         }
+    }
+
+    /// The same violation, naming the offending value `value`.
+    #[must_use]
+    pub fn with_value(mut self, value: ValueHead) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    /// The same violation, citing the rule set `rule_set` of the response
+    /// carrying it.
+    #[must_use]
+    pub const fn citing(mut self, rule_set: u64) -> Self {
+        self.rule_set = Some(rule_set);
+        self
     }
 }
 

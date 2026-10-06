@@ -876,6 +876,94 @@ fn a_forced_operations_plan_previews_its_violation_and_applies_the_same() {
     );
 }
 
+/// A vault schema closing the list field `status` over `[todo, done]`, with
+/// `complete` a synonym of `done`.
+const STATUS_SCHEMA: &str = "version: 1
+fields:
+  status: { type: text, shape: list }
+rules:
+  states: { one_of: { status: { values: [todo, done], synonyms: { complete: done } } } }
+";
+
+/// **A write refuses an element violation it introduces and not one standing,
+/// end to end** (ADR 0037): rewriting the subject's `status: [complete,
+/// bogus]` to `[done, bogus]` writes the field and leaves `bogus` holding the
+/// identity it held, so it applies; a write adding `wrong` beside it is
+/// refused, preview and apply alike, on `wrong` alone.
+#[test]
+fn a_write_refuses_an_element_violation_it_introduces_and_not_one_standing() {
+    let (_sandbox, vault) = a_vault("host-applies-element-gate");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), STATUS_SCHEMA)
+        .expect("write the schema");
+    std::fs::write(
+        vault.path().join(SUBJECT),
+        "---\nstatus: [complete, bogus]\n---\n# Subject\n",
+    )
+    .expect("write the subject");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let setting = |values: &[&str]| {
+        PlanDocument::operations(AuthoredPlan::new(
+            VaultAddress::name(vault.name().clone()),
+            vec![Operation::new(OperationKind::set_frontmatter(
+                norn_wire::WriteTarget::path(DocumentPath::new(SUBJECT).expect("a document path")),
+                "status",
+                norn_wire::AuthoredValue::List(
+                    values
+                        .iter()
+                        .map(|value| norn_wire::AuthoredValue::string(*value))
+                        .collect(),
+                ),
+            ))],
+        ))
+    };
+
+    host.apply(ApplyParams::new(
+        ApplyMode::Apply,
+        setting(&["done", "bogus"]),
+    ))
+    .expect("the apply is admitted")
+    .wait()
+    .expect("a write leaving a standing violation as it stood applies");
+    let written = "---\nstatus: [done, bogus]\n---\n# Subject\n";
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        written
+    );
+
+    let answer = |mode| {
+        host.apply(ApplyParams::new(mode, setting(&["done", "bogus", "wrong"])))
+            .expect("the request is answered")
+            .wait()
+            .expect_err("a write introducing a violation is refused")
+    };
+    let previewed = answer(ApplyMode::Preview);
+    let applied = answer(ApplyMode::Apply);
+    assert_eq!(previewed.detail(), applied.detail());
+    let ErrorDetail::PlanRefused { checks, .. } = previewed.detail() else {
+        panic!("the preview answered {:?}", previewed.detail());
+    };
+    let refused: Vec<(FindingKind, Option<&str>, Option<&str>)> = checks
+        .iter()
+        .map(|check| match check {
+            RefusedCheck::SchemaViolation { violation, .. } => (
+                violation.kind,
+                violation.target.as_deref(),
+                violation.value.as_ref().map(|head| head.text()),
+            ),
+            other => panic!("a schema check: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [(FindingKind::NotOneOf, Some("status"), Some("wrong"))]
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
+        written
+    );
+}
+
 /// The document holding a link to the subject by its stem, written beside it.
 const LINKER: &str = "apply-linker.md";
 

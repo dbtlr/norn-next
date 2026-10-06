@@ -57,6 +57,7 @@ use crate::address::IllegalPath;
 use crate::document::DocumentPath;
 use crate::plan::document::LinkKey;
 use crate::plan::outcome::SchemaViolation;
+use crate::read::validate::RuleSet;
 use crate::vault_path::PathProblem;
 
 /// A path relative to the vault root under a name and a description of its
@@ -281,6 +282,9 @@ pub struct Forecast {
     /// through. Empty for a plan that is not forced, and for a forced plan
     /// whose every result is valid.
     pub forced: Vec<SchemaViolation>,
+    /// Every rule set the violations in `forced` cite, each once, in the
+    /// order of its identity; empty where none cites one.
+    pub rule_sets: Vec<RuleSet>,
     /// What the plan does to each link a caller should look at: a link its
     /// cascade left as written and why, a link it leaves broken or makes
     /// ambiguous, and an ambiguous link it retargets.
@@ -304,6 +308,7 @@ impl Forecast {
             folders_made,
             folders_removed,
             forced: Vec::new(),
+            rule_sets: Vec::new(),
             links: Vec::new(),
             left_behind: Vec::new(),
         }
@@ -323,10 +328,12 @@ impl Forecast {
         self
     }
 
-    /// The forecast of a forced plan letting `forced` through.
+    /// The forecast of a forced plan letting `forced` through, which cite
+    /// `rule_sets`.
     #[must_use]
-    pub fn with_forced(mut self, forced: Vec<SchemaViolation>) -> Self {
+    pub fn with_forced(mut self, forced: Vec<SchemaViolation>, rule_sets: Vec<RuleSet>) -> Self {
         self.forced = forced;
+        self.rule_sets = rule_sets;
         self
     }
 }

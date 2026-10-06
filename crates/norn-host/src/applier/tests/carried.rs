@@ -12,6 +12,7 @@ use super::{
     results,
 };
 use crate::applier::observe::{TargetState, observe, units};
+use crate::applier::schema::Citations;
 use crate::applier::stage::{Stop, check, stage};
 use crate::applier::{Applier, OwnWriteLedger};
 use crate::planner::compose::content_hash;
@@ -147,7 +148,14 @@ fn a_move_of_a_document_changed_since_its_indexing_plans_and_applies_holding_one
 
     let declared = crate::derivation::Declared::unpinned();
     let counted = Counted::over(&tree);
-    check(&resolution.plan, &counted, &declared, &links.index()).expect("the plan checks");
+    check(
+        &resolution.plan,
+        &counted,
+        &declared,
+        &links.index(),
+        &mut Citations::default(),
+    )
+    .expect("the plan checks");
     assert_eq!(
         counted.reads("notes/a.md"),
         Reads {
@@ -413,7 +421,8 @@ fn a_copy_whose_source_drifted_before_staging_is_the_sources_drift() {
         let declared = crate::derivation::Declared::unpinned();
         let links = fixture.links();
         let index = links.index();
-        let checked = check(&plan, &view, &declared, &index).expect("the plan checks");
+        let checked = check(&plan, &view, &declared, &index, &mut Citations::default())
+            .expect("the plan checks");
         let source = fixture.vault.join("notes/a.md");
         match what {
             "changed" => std::fs::write(&source, "# A, changed\n").expect("a foreign edit"),
@@ -720,7 +729,14 @@ fn a_carried_name_refilled_by_a_composed_document_is_read_streamed() {
         );
         let applying = Counted::over(&tree);
         let declared = crate::derivation::Declared::unpinned();
-        check(&resolution.plan, &applying, &declared, &links.index()).expect("the plan checks");
+        check(
+            &resolution.plan,
+            &applying,
+            &declared,
+            &links.index(),
+            &mut Citations::default(),
+        )
+        .expect("the plan checks");
         assert_eq!(
             applying.reads("c.md"),
             Reads {

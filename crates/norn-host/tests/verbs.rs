@@ -1394,6 +1394,85 @@ fn a_forced_sets_violations_are_exactly_the_findings_its_apply_added() {
     assert_eq!(forced.len(), 1, "{forced:?}");
 }
 
+/// A vault schema closing `status` over `[todo, done]` on documents of type
+/// `task`.
+const CLOSED_SCHEMA: &str = "version: 1
+rules:
+  tasks: { match: { frontmatter: { type: task } }, one_of: { status: { values: [todo, done] } } }
+";
+
+/// **A set outside a closed set is refused, preview and apply alike, naming
+/// its value and citing its rules by a set the refusal carries**; forced, it
+/// applies and lists the violation beside the same set.
+#[test]
+fn a_set_outside_a_closed_set_is_refused_naming_its_value_and_rules() {
+    let subject = "---\ntype: task\nstatus: todo\n---\n# Subject\n";
+    let (_sandbox, vault) = a_vault("host-verbs-set-closed", &[("subject.md", subject)]);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), CLOSED_SCHEMA)
+        .expect("write the schema");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let setting = |mode, force| {
+        SetParams::new(
+            address(&vault),
+            mode,
+            WriteTarget::path(path("subject.md")),
+            vec![FieldChange::set("status", AuthoredValue::string("someday"))],
+        )
+        .with_force(force)
+    };
+    let cited = |rule_set: Option<u64>, rule_sets: &[norn_wire::RuleSet]| {
+        rule_sets
+            .iter()
+            .find(|set| Some(set.id) == rule_set)
+            .map(|set| set.rules.clone())
+    };
+
+    let previewed = refused(host.set(setting(ApplyMode::Preview, false)));
+    let applied_refusal = refused(host.set(setting(ApplyMode::Apply, false)));
+    assert_eq!(previewed.detail(), applied_refusal.detail());
+    let ErrorDetail::PlanRefused {
+        checks, rule_sets, ..
+    } = previewed.detail()
+    else {
+        panic!("the refusal carries {:?}", previewed.detail());
+    };
+    let [RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("the set refused for {checks:?}");
+    };
+    assert_eq!(violation.kind, FindingKind::NotOneOf);
+    assert_eq!(violation.target.as_deref(), Some("status"));
+    assert_eq!(
+        violation.value.as_ref().map(|head| head.text()),
+        Some("someday")
+    );
+    assert_eq!(
+        cited(violation.rule_set, rule_sets),
+        Some(vec!["tasks".to_string()])
+    );
+    assert_eq!(read(&vault, "subject.md"), subject);
+
+    let answered = host
+        .set(setting(ApplyMode::Apply, true))
+        .expect("a forced set is admitted")
+        .wait()
+        .expect("a forced set applies");
+    let ApplyReport::Applied {
+        forced, rule_sets, ..
+    } = answered.report
+    else {
+        panic!("a forced set answered {:?}", answered.report);
+    };
+    let [listed] = forced.as_slice() else {
+        panic!("the forced set lists {forced:?}");
+    };
+    assert_eq!(listed.value, violation.value);
+    assert_eq!(
+        cited(listed.rule_set, &rule_sets),
+        Some(vec!["tasks".to_string()])
+    );
+}
+
 /// **A set guarded by an expected-absent field writes where the field is
 /// absent and is refused where it is present**: the add-only-if-absent
 /// reading of a set.

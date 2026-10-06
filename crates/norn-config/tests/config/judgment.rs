@@ -5,7 +5,7 @@
 //! vault author could have written. Judgment is pure, so a case needs no
 //! directory and no clock.
 
-use norn_config::schema::{Breach, CaseFold, RuleFinding, VaultSchema};
+use norn_config::schema::{Breach, CaseFold, FindingIdentity, RuleFinding, VaultSchema};
 use norn_wire::{AuthoredValue, Severity, ValueMap};
 
 fn schema(bytes: &str) -> VaultSchema {
@@ -1113,7 +1113,7 @@ fn the_declaration_bytes_a_judgment_reads_are_counted() {
     let document = frontmatter(&[("kind", text("x")), ("status", text("other"))]);
     let small = closing("a").judge("a.md", &document, CaseFold::Exact);
     let large = closing(&"a".repeat(257)).judge("a.md", &document, CaseFold::Exact);
-    assert_eq!(small.findings(), large.findings());
+    assert_eq!(summaries(small.findings()), summaries(large.findings()));
     // The selector's key and value, then the member.
     assert_eq!(small.work().declaration_bytes, 4 + 1 + 1);
     assert_eq!(large.work().declaration_bytes, 4 + 1 + 257);
@@ -1136,4 +1136,221 @@ fn the_declaration_bytes_a_judgment_reads_are_counted() {
     };
     assert_eq!(declared_bytes("forbidden: { scratch: }"), 7);
     assert_eq!(declared_bytes("max_length: { title: 3 }"), 5);
+}
+
+/// The identity of the one finding `schema` judges the document at `path`
+/// holding `entries` to of `breach`.
+fn identity_of(
+    schema: &VaultSchema,
+    path: &str,
+    entries: &[(&str, AuthoredValue)],
+    breach: Breach,
+) -> FindingIdentity {
+    let findings = judged(schema, path, entries);
+    let mut of_breach = findings.iter().filter(|finding| finding.breach() == breach);
+    let finding = of_breach
+        .next()
+        .unwrap_or_else(|| panic!("a {breach:?} finding at {path}: {findings:?}"));
+    assert!(
+        of_breach.next().is_none(),
+        "one {breach:?} finding: {findings:?}"
+    );
+    finding.identity().clone()
+}
+
+/// **A finding's identity compares its combined constraint by value, never by
+/// the rules stating it** (ADR 0037): a second rule requiring a field the
+/// document lacks leaves the missing field one identity, though the finding
+/// now cites both rules.
+#[test]
+fn a_second_rule_stating_the_same_requirement_leaves_the_identity_unchanged() {
+    let schema = schema(
+        "version: 1
+rules:
+  every: { required: { status: } }
+  chores: { match: { frontmatter: { type: chore } }, required: { status: } }
+",
+    );
+    let alone = judged(&schema, "a.md", &[]);
+    let beside = judged(&schema, "a.md", &[("type", text("chore"))]);
+    assert_eq!(alone[0].rules(), names(&["every"]));
+    assert_eq!(beside[0].rules(), names(&["chores", "every"]));
+    assert_eq!(alone[0].identity(), beside[0].identity());
+}
+
+/// **A closed set's identity is its intersection, by equality key**: one
+/// value outside `[todo]` and outside `[done]` breaches two constraints, so
+/// it is two identities, while two rules closing a field over one set in
+/// another order and under other names are one.
+#[test]
+fn a_value_outside_another_closed_set_is_another_identity() {
+    let schema = schema(
+        "version: 1
+rules:
+  open: { match: { path: 'open/**' }, one_of: { status: { values: [todo] } } }
+  shut: { match: { path: 'shut/**' }, one_of: { status: { values: [done] } } }
+  left: { match: { path: 'left/**' }, one_of: { status: { values: [todo, doing] } } }
+  right: { match: { path: 'right/**' }, one_of: { status: { values: [doing, todo] } } }
+",
+    );
+    let unknown = [("status", text("unknown"))];
+    assert_ne!(
+        identity_of(&schema, "open/a.md", &unknown, Breach::NotOneOf),
+        identity_of(&schema, "shut/a.md", &unknown, Breach::NotOneOf)
+    );
+    assert_eq!(
+        identity_of(&schema, "left/a.md", &unknown, Breach::NotOneOf),
+        identity_of(&schema, "right/a.md", &unknown, Breach::NotOneOf)
+    );
+}
+
+/// **An offending value's identity is its equality key**: `#Play` and `play`
+/// under the tag carrier are one value, and an element a write leaves in a
+/// list keeps its identity whatever its neighbours become.
+#[test]
+fn an_offending_value_keeps_its_identity_across_spellings_and_neighbours() {
+    let schema = schema(
+        "version: 1
+rules:
+  closed: { one_of: { tags: { values: [work] }, status: { values: [done] } } }
+",
+    );
+    assert_eq!(
+        identity_of(
+            &schema,
+            "a.md",
+            &[("tags", list(&["#Play"]))],
+            Breach::NotOneOf
+        ),
+        identity_of(
+            &schema,
+            "a.md",
+            &[("tags", list(&["play"]))],
+            Breach::NotOneOf
+        )
+    );
+    let bogus = |before: &[&str]| {
+        judged(&schema, "a.md", &[("status", list(before))])
+            .into_iter()
+            .find(|finding| {
+                finding
+                    .value()
+                    .and_then(AuthoredValue::scalar_text)
+                    .as_deref()
+                    == Some("bogus")
+            })
+            .expect("a finding naming bogus")
+            .identity()
+            .clone()
+    };
+    assert_eq!(bogus(&["complete", "bogus"]), bogus(&["done", "bogus"]));
+    assert_ne!(
+        identity_of(
+            &schema,
+            "a.md",
+            &[("status", text("bogus"))],
+            Breach::NotOneOf
+        ),
+        identity_of(
+            &schema,
+            "a.md",
+            &[("status", text("other"))],
+            Breach::NotOneOf
+        )
+    );
+}
+
+/// **A length limit's identity is the smallest limit**, and a placement's the
+/// allowed paths of each rule stating them, each rule's list as a set.
+#[test]
+fn a_smaller_limit_or_other_allowed_paths_are_another_identity() {
+    let schema = schema(
+        "version: 1
+rules:
+  wide: { match: { path: 'wide/**' }, max_length: { title: 10 } }
+  narrow: { match: { path: 'narrow/**' }, max_length: { title: 5 } }
+  also: { match: { path: 'also/**' }, max_length: { title: 10 } }
+  tasks: { match: { frontmatter: { kind: task } }, allowed_paths: { paths: ['tasks/**', 'work/**'] } }
+  jobs: { match: { frontmatter: { kind: job } }, allowed_paths: { paths: ['work/**', 'tasks/**'] } }
+  notes: { match: { frontmatter: { kind: note } }, allowed_paths: { paths: ['notes/**'] } }
+",
+    );
+    let title = [("title", text("a long title"))];
+    assert_ne!(
+        identity_of(&schema, "wide/a.md", &title, Breach::TooLong),
+        identity_of(&schema, "narrow/a.md", &title, Breach::TooLong)
+    );
+    assert_eq!(
+        identity_of(&schema, "wide/a.md", &title, Breach::TooLong),
+        identity_of(&schema, "also/a.md", &title, Breach::TooLong)
+    );
+    let placed = |kind: &str| {
+        identity_of(
+            &schema,
+            "x/a.md",
+            &[("kind", text(kind))],
+            Breach::Misplaced,
+        )
+    };
+    assert_eq!(placed("task"), placed("job"));
+    assert_ne!(placed("task"), placed("note"));
+}
+
+/// **A whole-value finding is one per field whatever the field holds**: a
+/// forbidden field, a shape mismatch and a conflict over a field name the
+/// value they judge as payload, so another value under the same field is the
+/// same identity.
+#[test]
+fn a_whole_value_finding_keeps_its_identity_whatever_the_field_holds() {
+    let schema = schema(
+        "version: 1
+fields:
+  tags: { type: tags, shape: list }
+rules:
+  bans: { forbidden: { scratch: } }
+  needs: { match: { frontmatter: { area: y } }, required: { owner: } }
+  never: { match: { frontmatter: { kind: x } }, forbidden: { owner: } }
+",
+    );
+    assert_eq!(
+        identity_of(
+            &schema,
+            "a.md",
+            &[("scratch", text("a")), ("owner", text("o"))],
+            Breach::Forbidden
+        ),
+        identity_of(
+            &schema,
+            "a.md",
+            &[("scratch", AuthoredValue::Null), ("owner", text("o"))],
+            Breach::Forbidden
+        )
+    );
+    assert_eq!(
+        identity_of(
+            &schema,
+            "a.md",
+            &[("tags", text("a")), ("owner", text("o"))],
+            Breach::ShapeMismatch
+        ),
+        identity_of(
+            &schema,
+            "a.md",
+            &[("tags", text("b")), ("owner", text("o"))],
+            Breach::ShapeMismatch
+        )
+    );
+    let conflicted = |owner: &str| {
+        identity_of(
+            &schema,
+            "a.md",
+            &[
+                ("area", text("y")),
+                ("kind", text("x")),
+                ("owner", text(owner)),
+            ],
+            Breach::FieldRulesConflict,
+        )
+    };
+    assert_eq!(conflicted("ana"), conflicted("bo"));
 }

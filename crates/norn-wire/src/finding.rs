@@ -240,8 +240,8 @@ pub enum FindingKind {
     /// it, or their closed sets share no member where the field is required or
     /// holds a value they judge. One finding per field whatever value it
     /// holds: the value is the finding's payload, not part of what makes two
-    /// conflicts one, so the write gate judging a conflict (NORN-359) compares
-    /// it by field. Where the field holds a value, that whole value — its
+    /// conflicts one, so the write gate compares a conflict by its field and
+    /// the constraints in conflict, never by the value. Where the field holds a value, that whole value — its
     /// canonical JSON for a list or a map — is the finding's value; where the
     /// field is absent or null the finding names none. The field is its
     /// `target`, and it cites every rule contributing to the conflict. A

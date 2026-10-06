@@ -396,6 +396,7 @@ mod tests {
                 checks,
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             ),
         )
     }

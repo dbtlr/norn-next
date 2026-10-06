@@ -9,6 +9,8 @@ use norn_wire::{
 use norn_fs::Batch;
 use norn_wire::{DocumentPath, FileState};
 
+use super::schema::Citations;
+
 /// What applying a resolved plan came to.
 ///
 /// **One variant per outcome the wire names, and every variant given after
@@ -84,6 +86,8 @@ pub(crate) struct Applied {
     /// Every schema violation its force let through: empty for a plan that
     /// is not forced, and for a forced plan whose every result is valid.
     pub(crate) forced: Vec<SchemaViolation>,
+    /// The rule sets the response's violations cite.
+    pub(crate) citations: Citations,
 }
 
 /// A refused plan, with the plan resolved afresh.
@@ -95,6 +99,9 @@ pub(crate) struct Refused {
     pub(crate) forecast: Forecast,
     /// Each check that refused.
     pub(crate) checks: Vec<RefusedCheck>,
+    /// The rule sets the schema violations among the checks, and those the
+    /// forecast lists, cite.
+    pub(crate) citations: Citations,
     /// Each operation the fresh plan leaves for the caller.
     pub(crate) unresolved: Vec<UnresolvedOperation>,
     /// Targets of the original plan observed at their after-states.
@@ -114,6 +121,8 @@ pub(crate) struct Interrupted {
     pub(crate) cause: InterruptionCause,
     /// Every schema violation its force let through in a target that landed.
     pub(crate) forced: Vec<SchemaViolation>,
+    /// The rule sets those violations cite.
+    pub(crate) citations: Citations,
     /// Whether the landed subset committed, or the entry owes a heal. The wire
     /// does not carry it; the apply job reads it, through
     /// [`ApplyOutcome::heal`], to arm the heal.
@@ -218,24 +227,31 @@ impl ApplyOutcome {
     /// apply's leg, which the apply job reads off the entry.
     pub(crate) fn into_wire(self) -> Option<Result<ApplyReport, ErrorEnvelope>> {
         Some(match self {
-            ApplyOutcome::Applied(applied) => Ok(ApplyReport::applied(
-                applied.plan,
-                applied.changeset,
-                applied.targets,
-                applied.folders_made,
-                applied.folders_removed,
-            )
-            .with_forced(applied.forced)),
-            ApplyOutcome::Refused(refused) => Err(ErrorEnvelope::new(
-                "a check refused the plan before anything was published",
-                ErrorDetail::plan_refused(
-                    refused.plan,
-                    refused.forecast,
-                    refused.checks,
-                    refused.unresolved,
-                    refused.landed,
-                ),
-            )),
+            ApplyOutcome::Applied(applied) => {
+                let cited = applied.citations.cited_by(&applied.forced);
+                Ok(ApplyReport::applied(
+                    applied.plan,
+                    applied.changeset,
+                    applied.targets,
+                    applied.folders_made,
+                    applied.folders_removed,
+                )
+                .with_forced(applied.forced, cited))
+            }
+            ApplyOutcome::Refused(refused) => {
+                let cited = refused.citations.cited_by_checks(&refused.checks);
+                Err(ErrorEnvelope::new(
+                    "a check refused the plan before anything was published",
+                    ErrorDetail::plan_refused(
+                        refused.plan,
+                        refused.forecast,
+                        refused.checks,
+                        cited,
+                        refused.unresolved,
+                        refused.landed,
+                    ),
+                ))
+            }
             ApplyOutcome::Invalid(fault) => Err(ErrorEnvelope::new(
                 match fault {
                     PlanFault::TransitionsDisagree { .. } => {
@@ -251,15 +267,19 @@ impl ApplyOutcome {
                 "the plan was resolved against another vault root",
                 ErrorDetail::root_changed(expected, found),
             )),
-            ApplyOutcome::Interrupted(interrupted) => Err(ErrorEnvelope::new(
-                "publication stopped after part of the plan landed; send the plan again to finish it",
-                ErrorDetail::plan_interrupted(
-                    interrupted.plan,
-                    interrupted.landed,
-                    interrupted.cause,
-                    interrupted.forced,
-                ),
-            )),
+            ApplyOutcome::Interrupted(interrupted) => {
+                let cited = interrupted.citations.cited_by(&interrupted.forced);
+                Err(ErrorEnvelope::new(
+                    "publication stopped after part of the plan landed; send the plan again to finish it",
+                    ErrorDetail::plan_interrupted(
+                        interrupted.plan,
+                        interrupted.landed,
+                        interrupted.cause,
+                        interrupted.forced,
+                        cited,
+                    ),
+                ))
+            }
             ApplyOutcome::WriteFailed {
                 plan,
                 detail,

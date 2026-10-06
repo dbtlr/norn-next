@@ -519,6 +519,7 @@ pub(crate) fn fully_resolved(resolution: Resolution) -> Result<Resolution, Error
             resolution.plan,
             resolution.forecast,
             Vec::new(),
+            Vec::new(),
             resolution.unresolved,
             Vec::new(),
         ),

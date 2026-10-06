@@ -12,6 +12,7 @@ use norn_wire::{
 
 use super::observe::{TargetState, identity, observe, units};
 use super::outcome::{ApplyOutcome, Refused};
+use super::schema::Citations;
 use super::stage::{Links, check, drifted_checks};
 use crate::derivation::Declared;
 use crate::planner::compose::touched;
@@ -66,6 +67,7 @@ pub(super) fn refuse_and_refresh(
     declared: &Declared,
     mut checks: Vec<RefusedCheck>,
     links: Links<'_>,
+    mut citations: Citations,
 ) -> ApplyOutcome {
     let normalizer = view.normalizer();
     let units = units(&plan, normalizer);
@@ -195,13 +197,15 @@ pub(super) fn refuse_and_refresh(
         }
     };
     unresolved.sort_by_key(|(position, _)| *position);
-    let forced = forced_through(&fresh, view, declared, links);
+    let forced = forced_through(&fresh, view, declared, links, &mut citations);
+    let cited = citations.cited_by(&forced);
     ApplyOutcome::Refused(Box::new(Refused {
         plan: fresh,
         forecast: Forecast::new(drifted, forecast.folders_made, forecast.folders_removed)
-            .with_forced(forced)
+            .with_forced(forced, cited)
             .with_links(forecast.links),
         checks,
+        citations,
         unresolved: unresolved.into_iter().map(|(_, left)| left).collect(),
         landed,
         healing: Vec::new(),
@@ -226,11 +230,13 @@ fn forced_through(
     view: &TreeView,
     declared: &Declared,
     links: Links<'_>,
+    citations: &mut Citations,
 ) -> Vec<norn_wire::SchemaViolation> {
     if !fresh.force {
         return Vec::new();
     }
-    check(fresh, view, declared, links).map_or_else(|_| Vec::new(), |checked| checked.forced)
+    check(fresh, view, declared, links, citations)
+        .map_or_else(|_| Vec::new(), |checked| checked.forced)
 }
 
 /// The target a drifted or a taken-name check names.

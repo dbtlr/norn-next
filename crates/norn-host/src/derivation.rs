@@ -43,8 +43,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_config::schema::{
-    Breach, FieldType, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape, TypedValue,
-    UndeclaredTags, VaultSchema,
+    Breach, FieldType, FindingIdentity, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape,
+    TypedValue, UndeclaredTags, VaultSchema,
 };
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
@@ -803,6 +803,13 @@ pub(crate) struct PlannedFinding {
     /// canonical JSON. `None` for every other cause and for a breach naming
     /// no value.
     pub(crate) value: Option<String>,
+    /// What tells a rule breach from another as the write gate compares a
+    /// plan's result with what stood before it: its kind, field, offending
+    /// value and combined constraint, the last by value
+    /// ([`norn_config::schema::FindingIdentity`]). `None` for every other
+    /// cause, which the gate tells apart by its kind and target. Never
+    /// filed: the store keys a finding by its kind, field and value.
+    pub(crate) identity: Option<FindingIdentity>,
 }
 
 impl PlannedFinding {
@@ -817,6 +824,7 @@ impl PlannedFinding {
             severity: cause.severity(),
             rules: BTreeSet::new(),
             value: None,
+            identity: None,
         }
     }
 }
@@ -972,6 +980,7 @@ fn rule_finding(path: &Path, subject: &DocumentPath, finding: RuleFinding) -> Pl
         severity: finding.severity(),
         rules: finding.rules().iter().cloned().collect(),
         value: finding.value().and_then(stored_spelling),
+        identity: Some(finding.identity().clone()),
     }
 }
 

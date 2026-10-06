@@ -149,6 +149,67 @@ pub struct RuleFinding {
     value: Option<AuthoredValue>,
     rules: Vec<String>,
     severity: Severity,
+    identity: FindingIdentity,
+}
+
+/// What tells one violation from another, as the write gate compares a
+/// plan's result with what stood before it ([ADR 0037]): the constraint kind,
+/// the field, the offending value by its equality key, and the combined
+/// constraint breached, **compared by value, never by the rules stating it**.
+///
+/// **The offending value is an element's.** A closed set, a length limit and
+/// a type judge each element, so each offending element is its own identity,
+/// told apart as one finding is from another. A forbidden field, a shape
+/// mismatch and a conflict over a field are one finding per field whatever
+/// it holds — the forbidden field is breached by its key, null included —
+/// so the whole value they name is their payload and no part of their
+/// identity: a write changing what such a field holds leaves the violation
+/// it held standing.
+///
+/// The combined constraint is the one the finding's kind breaches on its
+/// field: for a closed set, the intersection's members by equality key; for a
+/// length limit, the smallest limit; for a missing or a forbidden field, that
+/// the field is required or forbidden; for a conflict over a field, which of
+/// its constraints leave it nothing to hold; for a placement, the allowed
+/// paths of each rule stating them, each rule's globs as a set; and for a
+/// type or shape mismatch, the field's declaration, which no rule states.
+/// So a second rule stating a constraint the document already breaches
+/// leaves the finding one identity though it now cites both rules, and a
+/// value outside `[todo]` and outside `[done]` breaches two constraints.
+///
+/// [ADR 0037]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0037-a-plan-refuses-exactly-the-violations-it-introduces.md
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindingIdentity {
+    breach: Breach,
+    field: Option<String>,
+    value: Option<Identity>,
+    constraint: Constraint,
+}
+
+/// The combined constraint a finding breaches, by value. See
+/// [`FindingIdentity`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Constraint {
+    /// The field's declared type or shape, which states no rule.
+    Declaration,
+    /// Some rule requires the field.
+    Required,
+    /// Some rule forbids the field.
+    Forbidden,
+    /// The values every closed set over the field admits, by equality key.
+    OneOf(BTreeSet<TypedValue>),
+    /// The smallest length limit stated on the field.
+    MaxLength(u64),
+    /// Which of the field's constraints leave it nothing to hold: required
+    /// and forbidden at once, and closed sets sharing no member, with
+    /// whether a rule requires the field beside them.
+    Conflict {
+        required_and_forbidden: bool,
+        empty_closed_set: bool,
+        required: bool,
+    },
+    /// Each placement rule's allowed paths, as a set of globs.
+    Placement(BTreeSet<BTreeSet<String>>),
 }
 
 impl RuleFinding {
@@ -183,6 +244,13 @@ impl RuleFinding {
     /// The highest severity of the rules cited, or a warning where none is.
     pub fn severity(&self) -> Severity {
         self.severity
+    }
+
+    /// What tells this violation from another: its kind, field, offending
+    /// value and combined constraint, the last by value. See
+    /// [`FindingIdentity`].
+    pub fn identity(&self) -> &FindingIdentity {
+        &self.identity
     }
 }
 
@@ -469,7 +537,7 @@ struct Held<'v> {
 /// are one, and a list or a map by its structure, map entries in key order,
 /// so two spellings of one map are one. One finding stands per field, kind
 /// and identity.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Identity {
     Key(TypedValue),
     Text(String),
@@ -567,7 +635,7 @@ impl VaultSchema {
         }
         let elements = match read_shape(shape, value) {
             ShapeReading::WrongShape => {
-                findings.push(mismatch(Breach::ShapeMismatch, field, value.clone()));
+                findings.push(mismatch(Breach::ShapeMismatch, field, value.clone(), None));
                 return Vec::new();
             }
             ShapeReading::Elements(elements) => elements,
@@ -585,8 +653,13 @@ impl VaultSchema {
                 work.constraints_judged += 1;
                 if !element.reads_as_type() {
                     if !mismatched.contains(&identity) {
-                        mismatched.push(identity);
-                        findings.push(mismatch(Breach::TypeMismatch, field, value.clone()));
+                        mismatched.push(identity.clone());
+                        findings.push(mismatch(
+                            Breach::TypeMismatch,
+                            field,
+                            value.clone(),
+                            Some(identity),
+                        ));
                     }
                     continue;
                 }
@@ -627,7 +700,24 @@ impl VaultSchema {
         } else {
             Breach::DocumentRulesConflict
         };
-        findings.push(cited(breach, None, None, placed));
+        let allowed = placed
+            .iter()
+            .filter_map(|rule| rule.allowed_paths.as_ref())
+            .map(|allowed| {
+                allowed
+                    .paths
+                    .iter()
+                    .map(|glob| glob.as_str().to_string())
+                    .collect()
+            })
+            .collect();
+        findings.push(cited(
+            breach,
+            None,
+            None,
+            Constraint::Placement(allowed),
+            placed,
+        ));
     }
 }
 
@@ -715,10 +805,23 @@ fn judge_conflict(
         .chain(constraint.one_of().into_iter().flat_map(|set| set.rules()))
         .filter(|rule| conflicting.contains(rule.name()))
         .collect();
+    let in_conflict = |rule: &Rule| conflicting.contains(rule.name());
+    let required = constraint.required_by().any(in_conflict);
+    let forbidden = constraint.forbidden_by().any(in_conflict);
+    let closed = constraint
+        .one_of()
+        .into_iter()
+        .flat_map(|set| set.rules())
+        .any(in_conflict);
     findings.push(cited(
         Breach::FieldRulesConflict,
         Some(field.name),
-        field.value.cloned(),
+        field.value.map(|value| (value.clone(), None)),
+        Constraint::Conflict {
+            required_and_forbidden: required && forbidden,
+            empty_closed_set: closed,
+            required,
+        },
         rules,
     ));
 }
@@ -737,6 +840,7 @@ fn judge_presence(
                 Breach::RequiredMissing,
                 Some(field.name),
                 None,
+                Constraint::Required,
                 constraint.required_by().collect(),
             ));
         }
@@ -747,7 +851,8 @@ fn judge_presence(
             findings.push(cited(
                 Breach::Forbidden,
                 Some(field.name),
-                Some(value.clone()),
+                Some((value.clone(), None)),
+                Constraint::Forbidden,
                 constraint.forbidden_by().collect(),
             ));
         }
@@ -772,7 +877,8 @@ fn judge_closed_set(
             findings.push(cited(
                 Breach::NotOneOf,
                 Some(field.name),
-                Some(held.value.clone()),
+                Some((held.value.clone(), Some(held.identity.clone()))),
+                Constraint::OneOf(set.keys()),
                 set.rules().collect(),
             ));
         }
@@ -802,42 +908,67 @@ fn judge_length(
             findings.push(cited(
                 Breach::TooLong,
                 Some(field.name),
-                Some(held.value.clone()),
+                Some((held.value.clone(), Some(held.identity.clone()))),
+                Constraint::MaxLength(limit),
                 field.constraint.max_length_by().collect(),
             ));
         }
     }
 }
 
-/// A finding citing `rules`, at the highest of their severities, naming
-/// `value` unless it is null: a null is no value to name.
+/// A finding breaching `constraint`, citing `rules`, at the highest of their
+/// severities, naming `value` — with the identity of the element it is, where
+/// it is one — unless it is null: a null is no value to name.
 fn cited(
     breach: Breach,
     field: Option<&str>,
-    value: Option<AuthoredValue>,
+    value: Option<(AuthoredValue, Option<Identity>)>,
+    constraint: Constraint,
     rules: Vec<&Rule>,
 ) -> RuleFinding {
     let names: BTreeSet<&str> = rules.iter().map(|rule| rule.name()).collect();
+    let (value, identity) = match value {
+        Some((value, identity)) if value != AuthoredValue::Null => (Some(value), identity),
+        _ => (None, None),
+    };
     RuleFinding {
         breach,
         field: field.map(str::to_string),
-        value: value.filter(|value| *value != AuthoredValue::Null),
+        value,
         severity: rules.iter().fold(Severity::Warning, |severity, rule| {
             higher(severity, rule.severity())
         }),
         rules: names.into_iter().map(str::to_string).collect(),
+        identity: FindingIdentity {
+            breach,
+            field: field.map(str::to_string),
+            value: identity,
+            constraint,
+        },
     }
 }
 
-/// A type or shape mismatch: judged against the field declarations, which
-/// state no rule and no severity.
-fn mismatch(breach: Breach, field: &str, value: AuthoredValue) -> RuleFinding {
+/// A type or shape mismatch of `value`, told apart by `identity` where it is
+/// an element's: judged against the field declarations, which state no rule
+/// and no severity.
+fn mismatch(
+    breach: Breach,
+    field: &str,
+    value: AuthoredValue,
+    identity: Option<Identity>,
+) -> RuleFinding {
     RuleFinding {
         breach,
         field: Some(field.to_string()),
         value: Some(value),
         rules: Vec::new(),
         severity: Severity::Warning,
+        identity: FindingIdentity {
+            breach,
+            field: Some(field.to_string()),
+            value: identity,
+            constraint: Constraint::Declaration,
+        },
     }
 }
 
