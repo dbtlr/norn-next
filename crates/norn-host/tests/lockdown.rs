@@ -820,6 +820,119 @@ fn a_flush_commits_its_findings_with_its_changeset() {
     vault.assert_converged_from_zero("a flush whose act committed whole");
 }
 
+/// **A rule finding commits with the changeset that writes its document's
+/// row.**
+///
+/// Rule judgment concludes what a document breaches from the bytes the act
+/// derived and the schema pinned, so its findings are that act's, as an
+/// unread block's finding is: the process killed the instant the changeset is
+/// at rest leaves the row the edit wrote and the rule finding about it
+/// together. A build that recorded the rule findings in a transaction of
+/// their own after the changeset would leave the row bare here, and a row
+/// whose bytes did not move is one no later heal derives again.
+///
+/// **No file is edited between the kill and the heal after it**, and that heal
+/// writes nothing.
+#[test]
+fn a_flush_commits_its_rule_findings_with_its_changeset() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("rule-findings-tear");
+    vault.write(
+        ".norn/schema.yaml",
+        "version: 1\nrules:\n  tidy: { severity: error, forbidden: { scratch: } }\n",
+    );
+    vault.write("steady.md", &readable(0));
+    vault.write("judged.md", &readable(1));
+
+    {
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        let lease = attach_and_wait(&serving, vault.name());
+        drop(lease);
+    }
+    let mut store = vault.store();
+    assert!(
+        findings_at(&mut store, "judged.md").is_empty(),
+        "the vault opened with findings, so this case cannot tell the act's own from them"
+    );
+    drop(store);
+
+    // The one document that changes takes the field the rule forbids, so the
+    // act that derives it is the first changeset to commit, and the one
+    // `after-commit` stops the process at.
+    let breaching = "---\ntitle: Note 1\nscratch: left over\n---\n\n# Note 1\n";
+    vault.write("judged.md", breaching);
+
+    let torn = vault.run_child(Some("after-commit"));
+    assert_eq!(
+        torn.status,
+        RunStatus::Signaled(SIGABRT),
+        "the process did not end at the changeset it committed\n{}",
+        torn.stderr
+    );
+    torn.attestation.assert_reached(
+        "a process ended the instant a flush's act was at rest",
+        &[
+            (SEAM, INCREMENT_SEAM),
+            ("boundary", "after-commit"),
+            ("changesets", "1"),
+        ],
+    );
+    torn.attestation
+        .assert_count("a process ended the instant a flush's act was at rest", 1);
+
+    // What the act left: the row the edit wrote, and the rule finding about it.
+    let mut store = vault.store();
+    let judged = store
+        .begin_request()
+        .stored_document(&document_path("judged.md"))
+        .expect("reading the judged path")
+        .expect("the row the increment wrote");
+    assert_eq!(
+        judged.content_hash,
+        norn_fs::ContentHash::of(breaching.as_bytes()).to_string(),
+        "the kill did not reach the act that derived the edit"
+    );
+    let standing = findings_at(&mut store, "judged.md");
+    assert_eq!(
+        standing
+            .iter()
+            .map(|finding| (finding.kind.as_str(), finding.rules.clone()))
+            .collect::<Vec<_>>(),
+        [(
+            "field/forbidden",
+            std::collections::BTreeSet::from(["tidy".to_string()])
+        )],
+        "the rule finding did not commit with the row it is about"
+    );
+    let generation_before = judged.generation;
+    drop(store);
+
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let healed = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_healed_only("a flush whose rule findings committed whole", healed, 0, 0);
+
+    let mut store = vault.store();
+    assert_eq!(
+        findings_at(&mut store, "judged.md").len(),
+        1,
+        "the heal left the rule finding filed twice, or not at all"
+    );
+    let judged = store
+        .begin_request()
+        .stored_document(&document_path("judged.md"))
+        .expect("reading the judged path")
+        .expect("the judged row");
+    assert_eq!(
+        judged.generation, generation_before,
+        "the heal re-derived a document whose row and rule finding both stood"
+    );
+    assert_operationally_valid(&mut store, "the store a whole flush left");
+    drop(store);
+
+    vault.assert_converged_from_zero("a flush whose rule findings committed whole");
+}
+
 /// Bytes no derivation reads facts out of, which is what quarantines a place.
 const UNDECODABLE: &[u8] = &[0xff, 0xfe, 0x00, 0x9f, 0x92, 0x96];
 
