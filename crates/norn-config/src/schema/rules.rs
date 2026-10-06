@@ -45,10 +45,18 @@
 //! a whole-segment `*` does; `exclude.path` lists globs none of which may
 //! match. A rule that selects by neither — or whose selectors normalize to
 //! none: an empty `frontmatter`, a `match.path` of `**`, an empty `exclude`
-//! list — is **selectorless** and selects every document. `<` and `>` spell a
-//! capture and nothing else, so no other schema glob holds them; neither does
-//! a document path, since neither is portable in a file name. No rule glob
-//! holds an empty segment, which no document path holds either.
+//! list — is **selectorless** and selects every document.
+//!
+//! **`<` and `>` stand in no other rule glob.** A document path may hold
+//! them, but in a rule glob a `<name>` segment reads as a capture, and only
+//! `match.path` binds one: an `exclude.path` or `allowed_paths` glob holding
+//! `<x>` would read as a capture the grammar binds nowhere there, so it is
+//! refused rather than read literally, and so is a stray `<` or `>`, as
+//! `match.path` refuses one that spells no whole-segment capture. A rule
+//! glob matches a literal `<x>` segment through wildcards — `?x?`, or `*` —
+//! which take any character. The tag patterns and the ambiguity-ignore set
+//! read no capture, so `<name>` there is the literal text it spells. No rule
+//! glob holds an empty segment, which no document path holds either.
 //!
 //! **Constraints and their fixes** ([ADR 0036]). `required` maps a field to
 //! its default, or to nothing; a field is missing where it is absent or null,
@@ -62,8 +70,8 @@
 //!
 //! **Templates.** A default and a route read the template grammar restricted
 //! to `{{now}}`, `{{date}}`, `{{time}}` and `{{path.<name>}}` for a capture
-//! the rule's own `match.path` defines; a route holds no `:`, so the clock
-//! tokens stand in one only slugged.
+//! the rule's own `match.path` defines; a route holds no `:`, as a creation
+//! rule's target holds none, so the clock tokens stand in one only slugged.
 //!
 //! # Rules judge themselves at schema read
 //!
@@ -82,7 +90,9 @@
 //!   members;
 //! - a route no document directly inside it could stand at under the rule's
 //!   own `allowed_paths`: the route's text, each token standing as a `*` and
-//!   a file name `*.md` after it, is a glob sharing no path with them;
+//!   a file name `*.md` after it, is a glob sharing no document path with
+//!   them under the route's own spelling, [`CaseFold::Exact`]; and a route
+//!   whose glob weighs past [`PLACEMENT_CEILING`] with those paths;
 //! - a template token a default or route does not admit, or a capture its
 //!   own `match.path` does not define;
 //! - a `rename_to` onto a field the same rule forbids, or onto a field
@@ -94,13 +104,15 @@
 //!   are read as sets, capture names erased and a `match.path` of `**` read
 //!   as absent: a field required and forbidden, a closed-set intersection
 //!   with no member on a field one of them requires, or allowed paths with no
-//!   path in common, naming every contributing rule in name order.
+//!   document path in common, naming every contributing rule in name order.
 //!
 //! Two rules may select one document together unless both select on a key
 //! declared `shape: single` with value sets sharing no member, and the
 //! ceiling weighs each rule's allowed paths with those of every rule that
-//! may select beside it. Path judgments at read hold on every root, so they
-//! are made under the wider fold, [`CaseFold::Ascii`].
+//! may select beside it. A conflict between rules holds on every root, so it
+//! is judged under the wider fold, [`CaseFold::Ascii`]; a route is one
+//! author's spelling against their own globs, judged exactly. Only a path a
+//! document could stand at counts as a path two sets share.
 //!
 //! Every other conflict — one that depends on a value or a path — and every
 //! templated default are judged where a document is.
@@ -111,13 +123,14 @@
 //! ([`VaultSchema::combined`]) and the defaults fixpoint
 //! ([`VaultSchema::fill_rule_defaults`]) are pure functions of a path, a
 //! frontmatter and the schema. **Dormant carriers:** the schema read's own
-//! checks are their only caller today. The rule findings and the write gate
-//! that judges a plan's documents by them land with NORN-358, `describe`'s
-//! rule facet with NORN-357, the fixpoint's wiring into `new` and inbox
-//! capture with NORN-359, and repair's declared fixes at Layer 5B (NORN-351);
-//! none is built, so nothing outside this crate reaches a rule yet. A rule is
-//! not yet a term of [`VaultSchema::rederives_documents`] for the same
-//! reason: no per-document derived state reads one until NORN-358.
+//! checks are their only caller today. The rule findings that judge a stored
+//! document by them land with NORN-358, the write gate that judges a plan's
+//! documents by them with NORN-359, `describe`'s rule facet with NORN-357,
+//! the fixpoint's wiring into `new` and inbox capture with NORN-359, and
+//! repair's declared fixes at Layer 5B (NORN-351); none is built, so nothing
+//! outside this crate reaches a rule yet. A rule is not yet a term of
+//! [`VaultSchema::rederives_documents`] for the same reason: no per-document
+//! derived state reads one until NORN-358.
 //!
 //! **A path selector makes a carried move's judgment necessary.** A rule's
 //! `match.path`, `exclude.path` and `allowed_paths` conclude about a document
@@ -156,8 +169,9 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 ///
 /// **A dormant carrier.** Schema read's own checks read it today. Its
 /// accessors are for `describe`'s rule facet (NORN-357), the rule findings
-/// and the write gate (NORN-358) and repair's declared fixes (NORN-351),
-/// none of which is built, so nothing outside this crate reads a rule yet.
+/// (NORN-358), the write gate (NORN-359) and repair's declared fixes
+/// (NORN-351), none of which is built, so nothing outside this crate reads a
+/// rule yet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -230,8 +244,15 @@ impl Rule {
     /// glob's length in characters plus one, which bounds the states of the
     /// automaton the globs make together. Zero for a rule that states none.
     /// See [`PLACEMENT_CEILING`].
+    ///
+    /// Schema read weighs every neighbourhood by it. Its consumer outside
+    /// this crate is the rule findings' logical counters (NORN-358), which
+    /// report the weight of the placement walk each document takes; they are
+    /// not built.
     pub fn placement_weight(&self) -> u64 {
-        placement::weight(self)
+        self.allowed_paths
+            .as_ref()
+            .map_or(0, |allowed| placement::weight(&allowed.paths))
     }
 }
 
@@ -272,6 +293,11 @@ impl Selector {
     }
 
     /// Whether the selector selects every document.
+    ///
+    /// Schema read groups the rules that always select together by it. Its
+    /// consumer outside this crate is `describe`'s rule facet (NORN-357),
+    /// which reports a rule that selects every document as such; it is not
+    /// built.
     pub fn is_selectorless(&self) -> bool {
         self.normal_form() == NormalSelector::default()
     }
@@ -511,8 +537,13 @@ pub enum RuleProblem {
     /// A route names no folder path, judged on its literal text with each
     /// token standing as a plain value.
     RoutePath(norn_wire::PathProblem),
-    /// A route's literal text holds `:`, `*` or `?`, none of which is
-    /// portable in a folder name.
+    /// A route's literal text holds `:`, `*` or `?`.
+    ///
+    /// `:` is not portable in a folder name, and a route is refused it as a
+    /// creation rule's target is. `*` and `?` are refused because a route is
+    /// judged as a glob against its rule's allowed paths, and the glob
+    /// grammar has no escape: a literal `*` there would read as a wildcard,
+    /// judging some other folder than the one the route names.
     RouteCharacter {
         /// The character.
         character: char,
@@ -524,8 +555,15 @@ pub enum RuleProblem {
         token: String,
     },
     /// No document directly inside the route's folder could stand at any of
-    /// the rule's own allowed paths.
+    /// the rule's own allowed paths, under the route's own spelling.
     RouteOutsideAllowedPaths,
+    /// The route's glob and the rule's allowed paths weigh more together than
+    /// [`PLACEMENT_CEILING`], the bound on the walk that judges one against
+    /// the other.
+    RouteWeight {
+        /// What they weigh: the route glob's weight times the rule's.
+        weight: u64,
+    },
     /// A `rename_to` onto a field the same rule forbids.
     RenameOntoForbidden {
         /// The rename's target.
@@ -619,6 +657,10 @@ impl fmt::Display for RuleProblem {
             RuleProblem::RouteOutsideAllowedPaths => formatter.write_str(
                 "routes to a folder no document could stand directly inside under the rule's own `allowed_paths`",
             ),
+            RuleProblem::RouteWeight { weight } => write!(
+                formatter,
+                "routes through a folder that weighs {weight} with the rule's own `allowed_paths`, past the ceiling of {PLACEMENT_CEILING} on judging one against the other"
+            ),
             RuleProblem::RenameOntoForbidden { target } => write!(
                 formatter,
                 "renames onto `{target}`, which the same rule forbids"
@@ -638,6 +680,10 @@ impl VaultSchema {
     }
 
     /// The rule called `name`, if the schema declares one.
+    ///
+    /// Its consumers are not built: `describe`'s rule facet (NORN-357),
+    /// which answers a request naming one rule, and the rule findings
+    /// (NORN-358), which read back the rule a stored finding names.
     pub fn rule(&self, name: &str) -> Option<&Rule> {
         self.rules.get(name)
     }
@@ -654,8 +700,8 @@ impl VaultSchema {
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
     ///
     /// The defaults fixpoint selects by the same reading. The rule findings
-    /// and the write gate (NORN-358), which select a stored or planned
-    /// document's rules through it, are not built.
+    /// (NORN-358) and the write gate (NORN-359), which select a stored or
+    /// planned document's rules through it, are not built.
     ///
     /// `case` says how the path globs' literal letters compare with the
     /// path's: the store's recorded path order names it

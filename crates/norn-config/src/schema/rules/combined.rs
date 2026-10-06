@@ -47,8 +47,8 @@ impl VaultSchema {
     /// What `rules` require together of a document they all select.
     ///
     /// Read at schema read by the statically unavoidable conflict check, and
-    /// by the rule findings and the write gate, which are not built
-    /// (NORN-358).
+    /// by the rule findings (NORN-358) and the write gate (NORN-359), which
+    /// are not built.
     pub fn combined<'s>(&'s self, rules: &[&'s Rule]) -> CombinedConstraint<'s> {
         let mut rules = rules.to_vec();
         rules.sort_by(|left, right| left.name.cmp(&right.name));
@@ -137,7 +137,7 @@ impl<'s> CombinedConstraint<'s> {
     /// Every way the combined constraint is empty — no document could meet
     /// it — whatever the document holds: a field required and forbidden, a
     /// closed-set intersection with no member, and allowed paths sharing no
-    /// path under `case`. Each names every contributing rule in name order.
+    /// document path under `case`. Each names every contributing rule in name order.
     ///
     /// An empty intersection is reported whether or not the field is
     /// required, carrying which: schema read refuses one on a required field
@@ -269,7 +269,7 @@ pub enum RulesConflict {
         /// Every rule closing or requiring it, in name order.
         rules: Vec<String>,
     },
-    /// Allowed paths that share no path.
+    /// Allowed paths that share no document path.
     DisjointPlacement {
         /// Every rule stating allowed paths, in name order.
         rules: Vec<String>,
@@ -311,7 +311,7 @@ impl fmt::Display for RulesConflict {
             ),
             RulesConflict::DisjointPlacement { rules } => write!(
                 formatter,
-                "the allowed paths of the rules {} share no path",
+                "the allowed paths of the rules {} share no document path",
                 named(rules)
             ),
         }

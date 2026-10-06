@@ -591,8 +591,10 @@ pub enum VaultSchemaError {
 /// What is wrong with a glob the schema states.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GlobProblem {
-    /// It holds `<` or `>`, which spell a path capture, and only a rule's
-    /// `match.path` binds one.
+    /// A rule's `exclude.path` or `allowed_paths` glob holds `<` or `>`. In
+    /// a rule glob they spell a path capture, which only `match.path` binds,
+    /// so one elsewhere is refused rather than read as literal text; a
+    /// wildcard matches a literal `<x>` segment there: `?x?`.
     CaptureOutsideMatch,
     /// A `<NAME>` capture whose name is not an identifier.
     CaptureName {
@@ -620,7 +622,7 @@ impl fmt::Display for GlobProblem {
         const IDENTIFIER: &str = "an ASCII letter or `_` followed by letters, digits, `_` or `-`";
         match self {
             GlobProblem::CaptureOutsideMatch => formatter.write_str(
-                "holds `<` or `>`, which spell a path capture, and only a rule's `match.path` binds one",
+                "holds `<` or `>`, which spell a path capture in a rule glob, and only a rule's `match.path` binds one; a wildcard such as `?x?` matches a literal `<x>`",
             ),
             GlobProblem::CaptureName { name } => write!(
                 formatter,
@@ -957,13 +959,6 @@ fn read_patterns(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSche
             let source = item
                 .as_str()
                 .ok_or_else(|| section_error(at_path, "a sequence of patterns", item))?;
-            if source.contains(['<', '>']) {
-                return Err(VaultSchemaError::Glob {
-                    at: at_path.to_string(),
-                    glob: source.to_string(),
-                    problem: GlobProblem::CaptureOutsideMatch,
-                });
-            }
             Pattern::parse(source).map_err(|error| VaultSchemaError::Section {
                 at: at_path.to_string(),
                 wanted: "a pattern",

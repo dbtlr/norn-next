@@ -18,9 +18,21 @@
 //! inside.** The route's text, with each token standing as a `*` — a capture
 //! takes one segment and a clock token fills text holding no `/` — and a file
 //! name `*.md` appended, is a glob; the route stands outside its rule's
-//! allowed paths where that glob shares no path with them. An untemplated
-//! route is so judged exactly; a templated one is refused only where no fill
-//! could be admitted, and a fill that is outside is judged where a document is.
+//! allowed paths where that glob shares no document path with them. An
+//! untemplated route is so judged exactly.
+//!
+//! **A templated route is refused only where no independent filling of its
+//! tokens is admitted — a declared limit.** Each token stands as its own `*`,
+//! so two tokens reading one capture are filled apart: the route
+//! `{{path.p}}/{{path.p}}/` passes against `red/blue/*.md`, though no real
+//! fill writes `red` and `blue` from one capture. The exact judgment is of a
+//! filled route, which repair makes per document when it moves one (Layer
+//! 5B, NORN-351); schema read refuses only what no document could escape.
+//!
+//! **A route is judged under [`CaseFold::Exact`].** It is the author's own
+//! spelling against the author's own globs, so `Notes/` against `notes/**`
+//! is a route that disagrees with itself, refused whether or not the root
+//! folds case.
 //!
 //! # Across rules
 //!
@@ -47,14 +59,32 @@
 //! refused, except an empty closed-set intersection on a field none of the
 //! group requires, which a document holding no value meets.
 //!
-//! **Every path judgment here holds on every root.** A refusal at read must
-//! hold whichever root the schema is pinned for, so a route and a group's
-//! allowed paths are judged under [`CaseFold::Ascii`]: a path the wider fold
-//! cannot admit no root admits.
+//! **A conflict between rules holds on every root.** A refusal at read must
+//! hold whichever root the schema is pinned for, so a group's allowed paths
+//! are judged under [`CaseFold::Ascii`]: a document path the wider fold
+//! cannot admit no root admits. Two rules spelling one folder in two cases
+//! are two authors' spellings, which a folding root reads as one, so neither
+//! is refused for the other's.
+//!
+//! # What judging costs
+//!
+//! **Every walk schema read takes is bounded by [`PLACEMENT_CEILING`] before
+//! it starts.** The ceiling is judged first, before any rule is judged
+//! against itself, so no walk runs over a schema past it. A route's walk is
+//! the route's glob against its rule's allowed paths, so its weight is the
+//! route glob's weight times the rule's, and a route weighing past the
+//! ceiling is refused, naming the rule, before its walk. A group's walk is
+//! over rules that may each select beside every other, so it weighs no more
+//! than the neighbourhood of any of them, which the ceiling holds. Each walk
+//! visits at most a constant times its weight in states
+//! ([`norn_wire::sets_share_a_document_path`]), so a schema read costs at most
+//! one walk per route and one per group, each under that constant times
+//! `2^18`, beside the ceiling's own comparisons: the square of the rule count
+//! times the selector keys compared.
 
 use std::collections::BTreeMap;
 
-use norn_wire::{CaseFold, DOCUMENT_EXTENSION, Pattern, sets_share_a_subject};
+use norn_wire::{CaseFold, DOCUMENT_EXTENSION, Pattern, sets_share_a_document_path};
 
 use super::super::creation::DefaultValue;
 use super::super::template::Part;
@@ -64,11 +94,14 @@ use super::placement::{self, PLACEMENT_CEILING};
 use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem, scalar_text};
 
 /// Every judgment schema read makes of its rules once each is read.
+///
+/// The ceiling is judged first, so no walk runs over a schema past it; see
+/// the [module](self) for what judging costs.
 pub(in crate::schema) fn check_rules(schema: &VaultSchema) -> Result<(), VaultSchemaError> {
+    check_ceiling(schema)?;
     for rule in schema.rules.values() {
         check_rule(schema, rule)?;
     }
-    check_ceiling(schema)?;
     check_unavoidable(schema)
 }
 
@@ -144,12 +177,9 @@ fn check_rule(schema: &VaultSchema, rule: &Rule) -> Result<(), VaultSchemaError>
     }
     if let Some(allowed) = &rule.allowed_paths
         && let Some(route) = &allowed.route
-        && !sets_share_a_subject(&[&[route_glob(route)], &allowed.paths], CaseFold::Ascii)
     {
-        return Err(refusal(
-            format!("{section}.allowed_paths.route"),
-            RuleProblem::RouteOutsideAllowedPaths,
-        ));
+        check_route(rule, route, &allowed.paths)
+            .map_err(|problem| refusal(format!("{section}.allowed_paths.route"), problem))?;
     }
     let mut renamed: BTreeMap<&str, &str> = BTreeMap::new();
     for (field, fix) in &rule.forbidden {
@@ -217,6 +247,23 @@ fn untemplated_text(element: &DefaultValue) -> Option<String> {
             Some(template.as_str().to_string())
         }
         DefaultValue::Text(_) | DefaultValue::List(_) | DefaultValue::Map(_) => None,
+    }
+}
+
+/// A route against its own rule's allowed paths: weighed first, so its walk
+/// stays under the ceiling, then judged under [`CaseFold::Exact`]. See the
+/// [module](self).
+fn check_route(rule: &Rule, route: &Route, paths: &[Pattern]) -> Result<(), RuleProblem> {
+    let glob = route_glob(route);
+    let weight =
+        placement::weight(std::slice::from_ref(&glob)).saturating_mul(rule.placement_weight());
+    if weight > PLACEMENT_CEILING {
+        return Err(RuleProblem::RouteWeight { weight });
+    }
+    if sets_share_a_document_path(&[std::slice::from_ref(&glob), paths], CaseFold::Exact) {
+        Ok(())
+    } else {
+        Err(RuleProblem::RouteOutsideAllowedPaths)
     }
 }
 

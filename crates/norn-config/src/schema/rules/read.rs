@@ -602,8 +602,9 @@ fn read_globs(at_path: &str, value: &Value) -> Result<Vec<Pattern>, VaultSchemaE
 
 /// One rule glob. Where `capturing`, a whole segment `<name>` is a capture,
 /// named by an identifier and written once; elsewhere `<` and `>` are
-/// refused, since they spell a capture and nothing else. No rule glob holds
-/// an empty segment.
+/// refused, since in a rule glob they would read as a capture the grammar
+/// binds only in `match.path` (see the [rules module](super)). No rule glob
+/// holds an empty segment.
 fn read_glob(at_path: &str, value: &Value, capturing: bool) -> Result<Pattern, VaultSchemaError> {
     let source = value
         .as_str()

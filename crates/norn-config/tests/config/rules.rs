@@ -460,10 +460,9 @@ fn a_capture_is_written_once_in_one_match_path() {
     );
 }
 
-/// **Only `match.path` binds a capture.** `<` and `>` spell a capture and
-/// nothing else, so every other glob the schema states refuses them — the
-/// rule's excluded and allowed paths, the tag patterns and the
-/// ambiguity-ignore set alike.
+/// **Only `match.path` binds a capture.** In a rule glob `<` and `>` spell a
+/// capture, so the rule's excluded and allowed paths refuse them rather than
+/// read them literally.
 #[test]
 fn a_capture_binds_only_in_match_path() {
     let cases: &[(&[u8], &str)] = &[
@@ -476,12 +475,8 @@ fn a_capture_binds_only_in_match_path() {
             "rules.t.allowed_paths.paths",
         ),
         (
-            b"version: 1\ntags:\n  patterns: ['<a>/**']\n",
-            "tags.patterns",
-        ),
-        (
-            b"version: 1\npaths:\n  ambiguity_ignore: ['<a>/**']\n",
-            "paths.ambiguity_ignore",
+            b"version: 1\nrules:\n  t: { allowed_paths: { paths: ['a/b>/*.md'] } }\n",
+            "rules.t.allowed_paths.paths",
         ),
     ];
     for (bytes, node) in cases {
@@ -491,6 +486,27 @@ fn a_capture_binds_only_in_match_path() {
             (*node, GlobProblem::CaptureOutsideMatch)
         );
     }
+    // A wildcard matches a literal `<x>` segment where no capture binds.
+    let schema =
+        VaultSchema::parse(b"version: 1\nrules:\n  t: { exclude: { path: ['?x?/**'] } }\n")
+            .expect("a wildcard in place of `<` and `>`");
+    let rule = schema.rule("t").expect("the rule");
+    assert!(!schema.selects(rule, "<x>/a.md", &frontmatter(&[]), CaseFold::Exact));
+}
+
+/// **The tag patterns and the ambiguity-ignore set read no capture**, so
+/// `<name>` there is the literal text it spells, as it was before rules.
+#[test]
+fn a_glob_outside_the_rules_reads_angle_brackets_literally() {
+    let schema = VaultSchema::parse(
+        b"version: 1\ntags:\n  patterns: ['<a>/**']\npaths:\n  ambiguity_ignore: ['<a>/**']\n",
+    )
+    .expect("angle brackets in the tag patterns and the ambiguity-ignore set");
+    let ignored = schema.ambiguity_ignore();
+    assert_eq!(ignored.len(), 1);
+    assert!(ignored[0].matches("<a>/x.md", CaseFold::Exact));
+    assert!(!ignored[0].matches("b/x.md", CaseFold::Exact));
+    assert_eq!(ignored[0].captures().count(), 0);
 }
 
 #[test]
@@ -804,16 +820,81 @@ fn a_route_outside_its_own_allowed_paths_is_refused() {
             "{route}"
         );
     }
-    for route in [
-        "projects/norn/tasks/",
-        "projects/{{path.p}}/tasks/",
-        "Projects/norn/tasks/",
-    ] {
+    for route in ["projects/norn/tasks/", "projects/{{path.p}}/tasks/"] {
         let bytes = format!(
             "version: 1\nrules:\n  t:\n    match: {{ path: 'projects/<p>/**' }}\n    allowed_paths: {{ paths: ['projects/*/tasks/*.md'], route: '{route}' }}\n"
         );
         VaultSchema::parse(bytes.as_bytes()).unwrap_or_else(|error| panic!("{route}: {error}"));
     }
+}
+
+/// **A route is judged in its own spelling.** `Notes/` against `notes/**`
+/// is one author disagreeing with themselves, refused whether or not the
+/// vault's root folds case.
+#[test]
+fn a_route_spelled_in_another_case_than_its_allowed_paths_is_refused() {
+    assert_eq!(
+        rule_problem(
+            b"version: 1\nrules:\n  r: { allowed_paths: { paths: ['notes/**'], route: 'Notes/' } }\n"
+        ),
+        (
+            "rules.r.allowed_paths.route".to_string(),
+            RuleProblem::RouteOutsideAllowedPaths
+        )
+    );
+    VaultSchema::parse(
+        b"version: 1\nrules:\n  r: { allowed_paths: { paths: ['notes/**'], route: 'notes/' } }\n",
+    )
+    .expect("a route in its allowed paths' own spelling");
+}
+
+/// **A route's tokens are judged as if filled apart — a declared limit.** Two
+/// tokens reading one capture each stand as their own `*`, so this route
+/// loads though no document's capture writes both `red` and `blue`: the
+/// filled route is judged per document when repair moves one. An exact
+/// judgment at read would refuse it, and changing this test is that
+/// decision.
+#[test]
+fn a_route_reading_one_capture_twice_is_judged_as_two_independent_fills() {
+    VaultSchema::parse(
+        b"version: 1\nrules:\n  r:\n    match: { path: '<p>/**' }\n    allowed_paths: { paths: ['red/blue/*.md'], route: '{{path.p}}/{{path.p}}/' }\n",
+    )
+    .expect("a route some independent filling of its tokens admits");
+}
+
+/// **A route's judgment is weighed before it is walked.** A long route
+/// against heavy allowed paths weighs past the ceiling and is refused,
+/// naming the rule, without its walk; the same route against light paths
+/// loads, at once.
+#[test]
+fn a_route_weighing_past_the_ceiling_with_its_allowed_paths_is_refused() {
+    let route = "a/".repeat(50);
+    let heavy = format!("{}b/*.md", "**/".repeat(20_000));
+    let bytes = format!(
+        "version: 1\nrules:\n  r: {{ allowed_paths: {{ paths: ['{heavy}'], route: '{route}' }} }}\n"
+    );
+    let started = std::time::Instant::now();
+    let (at, problem) = rule_problem(bytes.as_bytes());
+    assert_eq!(at, "rules.r.allowed_paths.route");
+    let route_weight = u64::try_from(route.len() + "*.md".len() + 1).expect("a u64");
+    let paths_weight = u64::try_from(heavy.len() + 1).expect("a u64");
+    assert_eq!(
+        problem,
+        RuleProblem::RouteWeight {
+            weight: route_weight * paths_weight
+        }
+    );
+    assert!(route_weight * paths_weight > PLACEMENT_CEILING);
+    let light = format!("{}*.md", "**/".repeat(100));
+    let bytes = format!(
+        "version: 1\nrules:\n  r: {{ allowed_paths: {{ paths: ['{light}'], route: '{route}' }} }}\n"
+    );
+    VaultSchema::parse(bytes.as_bytes()).expect("a route under the ceiling");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -1085,6 +1166,30 @@ fn disjoint_allowed_paths_of_rules_selecting_together_are_refused() {
         b"version: 1\nrules:\n  b: { match: { frontmatter: { type: task } }, allowed_paths: { paths: ['Tasks/*.md'] } }\n  a: { allowed_paths: { paths: ['tasks/**', 'notes/**'] } }\n",
     )
     .expect("allowed paths sharing a path");
+}
+
+/// **Allowed paths share a path only where a document could stand at it.**
+/// Two selectorless rules meeting only at `shared` — no document's file
+/// name — or only at a path holding a `..` segment leave every document
+/// unplaceable, and are refused as disjoint.
+#[test]
+fn allowed_paths_sharing_only_a_path_no_document_stands_at_are_refused() {
+    for (left, right) in [
+        ("['a/*.md', 'shared']", "['b/*.md', 'shared']"),
+        ("['area/../*.md']", "['area/**']"),
+        ("['a/.?/x.md']", "['a/?./x.md']"),
+    ] {
+        let bytes = format!(
+            "version: 1\nrules:\n  left: {{ allowed_paths: {{ paths: {left} }} }}\n  right: {{ allowed_paths: {{ paths: {right} }} }}\n"
+        );
+        assert_eq!(
+            conflict(bytes.as_bytes()),
+            RulesConflict::DisjointPlacement {
+                rules: vec!["left".to_string(), "right".to_string()],
+            },
+            "{left} / {right}"
+        );
+    }
 }
 
 /// **An empty intersection refuses only where some contributing rule requires

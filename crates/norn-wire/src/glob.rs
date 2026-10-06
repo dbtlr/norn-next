@@ -65,9 +65,11 @@
 //!   builders run the glob inside a statement, under the order the snapshot
 //!   reads;
 //! - a vault schema rule's path selectors and allowed paths, which the
-//!   schema's selection is handed the fold for. A schema read judges a rule's
-//!   globs on every root at once, under the wider [`CaseFold::Ascii`], so a
-//!   refusal holds wherever the schema is pinned.
+//!   schema's selection is handed the fold for. A schema read judges a
+//!   conflict between rules' globs on every root at once, under the wider
+//!   [`CaseFold::Ascii`], so a refusal holds wherever the schema is pinned;
+//!   a rule's route against its own allowed paths is one author's spelling
+//!   against itself, judged under [`CaseFold::Exact`] on every root.
 //!
 //! A tag facet's patterns name tags, not paths, and no root's fold reaches
 //! them: the facet folds the pattern and the tag by the tag fold
@@ -496,27 +498,43 @@ fn ordered(pattern: &[Segment], mut bound: Vec<(usize, String)>) -> Vec<(String,
         .collect()
 }
 
-/// Whether one subject is matched, for every set in `sets`, by some pattern of
-/// that set: whether the sets' unions share a member.
+/// Whether one document path is matched, for every set in `sets`, by some
+/// pattern of that set: whether the sets' unions share a document.
 ///
-/// A subject here is what a vault path is: one or more segments, none of
-/// them empty. A capture matches as a whole-segment `*`. The answer is exact
-/// — it neither misses a shared subject nor reports one where there is none
-/// — under `case`, which says how literal letters compare, between the
-/// patterns and with the subject alike.
+/// **Only a document path is a witness.** A path the sets share counts where
+/// the store could hold a document at it: one or more segments, none empty,
+/// `.` or `..`, none holding a backslash or a control character, and a last
+/// segment that is a document's file name — a stem that is not empty, `.` or
+/// `..`, then `.md` in any ASCII case ([`crate::PathProblem::of_document`] and
+/// [`crate::DOCUMENT_EXTENSION`]). Sets meeting only at `shared`, at
+/// `area/../x.md` or at `a/../x.md` share no document. The grammar's last
+/// refusal, a path starting at `/`, needs an empty first segment, which no
+/// witness holds; so the walk encodes every refusal [`crate::PathProblem`]
+/// makes and none is a declared gap. The `.md` extension compares in any
+/// ASCII case whatever `case` says, as the vault reads a file as a document.
 ///
-/// **The walk is the product of the patterns' automata.** Each set is read as
-/// one automaton whose states are the positions between its patterns'
-/// segments, and the walk explores tuples of one state per set, consuming one
-/// subject segment at a time; whether one segment can stand where several
-/// in-segment shapes each match it is the same product one level down, over
-/// characters, asked once per tuple of shapes. Write a set's weight as the
-/// sum over its patterns of each pattern's length in characters plus one.
-/// For patterns holding no empty segment, the segment-level walk visits at
-/// most twice the product of the sets' weights in states, and the
-/// character-level walks together visit at most as many, each state taking a
-/// step per set. The product is what a caller bounds before asking.
-pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
+/// A capture matches as a whole-segment `*`. The answer is exact — it neither
+/// misses a shared document nor reports one where there is none — under
+/// `case`, which says how literal letters compare, between the patterns and
+/// with the path alike.
+///
+/// **The walk is the product of the patterns' automata and the document
+/// grammar's.** Each set is read as one automaton whose states are the
+/// positions between its patterns' segments, and the walk explores tuples of
+/// one state per set, consuming one path segment at a time as a folder name
+/// or, once, as the file name that ends the path. Whether one segment can
+/// stand where several in-segment shapes each match it is the same product
+/// one level down, over characters and the document grammar's states for one
+/// segment — four for a folder name, fourteen for a file name — asked once
+/// per tuple of shapes and kind of segment. Write a set's weight as the sum
+/// over its patterns of each pattern's length in characters plus one. For
+/// patterns holding no empty segment, the segment-level walk visits at most
+/// twice the product of the sets' weights in states, and the character-level
+/// walks together at most eighteen times that product, each state taking a
+/// step per set: the document grammar adds a constant factor and nothing
+/// that grows with the patterns. The product is what a caller bounds before
+/// asking.
+pub fn sets_share_a_document_path(sets: &[&[Pattern]], case: CaseFold) -> bool {
     if sets.iter().any(|set| set.is_empty()) {
         return false;
     }
@@ -558,8 +576,10 @@ pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
             .collect();
     }
 
+    // A state is a position per set and whether the file name ending the
+    // path is already taken: after it no segment is consumed.
     let mut seen: std::collections::HashSet<(Vec<usize>, bool)> = std::collections::HashSet::new();
-    let mut feasible: std::collections::HashMap<Vec<(usize, usize)>, bool> =
+    let mut feasible: std::collections::HashMap<(Vec<(usize, usize)>, SegmentKind), bool> =
         std::collections::HashMap::new();
     let mut pending: Vec<(Vec<usize>, bool)> = Vec::new();
     for start in starts {
@@ -567,8 +587,8 @@ pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
             pending.push((start, false));
         }
     }
-    while let Some((state, consumed)) = pending.pop() {
-        if consumed
+    while let Some((state, ended)) = pending.pop() {
+        if ended
             && state
                 .iter()
                 .enumerate()
@@ -582,20 +602,21 @@ pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
             if matches!(segment(set, *held), Some(Segment::AnyDepth)) {
                 let mut next = state.clone();
                 next[set] = held + 1;
-                next_states.push((next, consumed));
+                next_states.push((next, ended));
             }
         }
-        // Consume one segment: a `**` keeps its place, every other segment
-        // shape must match the segment taken, and a spent pattern takes none.
+        // Consume one segment, a folder name or the file name: a `**` keeps
+        // its place, every other segment shape must match the segment taken,
+        // and a spent pattern takes none.
         let mut next = state.clone();
         let mut shapes = Vec::new();
-        let mut live = true;
+        let mut live = !ended;
         for (set, held) in state.iter().enumerate() {
+            if !live {
+                break;
+            }
             match segment(set, *held) {
-                None => {
-                    live = false;
-                    break;
-                }
+                None => live = false,
                 Some(Segment::AnyDepth) => {}
                 Some(_) => {
                     shapes.push((set, *held));
@@ -604,19 +625,21 @@ pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
             }
         }
         if live {
-            let fits = *feasible.entry(shapes.clone()).or_insert_with(|| {
-                let shapes: Vec<&str> = shapes
-                    .iter()
-                    .map(|(set, held)| {
-                        segment(*set, *held)
-                            .and_then(Segment::shape)
-                            .expect("a shape is recorded only where one stands")
-                    })
-                    .collect();
-                shapes_share_a_segment(&shapes, case)
-            });
-            if fits {
-                next_states.push((next, true));
+            for kind in [SegmentKind::Folder, SegmentKind::FileName] {
+                let fits = *feasible.entry((shapes.clone(), kind)).or_insert_with(|| {
+                    let shapes: Vec<&str> = shapes
+                        .iter()
+                        .map(|(set, held)| {
+                            segment(*set, *held)
+                                .and_then(Segment::shape)
+                                .expect("a shape is recorded only where one stands")
+                        })
+                        .collect();
+                    shapes_share_a_segment(&shapes, kind, case)
+                });
+                if fits {
+                    next_states.push((next.clone(), kind == SegmentKind::FileName));
+                }
             }
         }
         for next in next_states {
@@ -628,16 +651,132 @@ pub fn sets_share_a_subject(sets: &[&[Pattern]], case: CaseFold) -> bool {
     false
 }
 
-/// Whether one non-empty segment matches every shape in `shapes`, each read
-/// by the in-segment grammar: the product of their automata over characters.
-fn shapes_share_a_segment(shapes: &[&str], case: CaseFold) -> bool {
+/// Which segment of a document path one segment is: a folder name, or the
+/// file name that ends the path.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SegmentKind {
+    Folder,
+    FileName,
+}
+
+/// What the document grammar reads one character as. A backslash and a
+/// control character have no class: no document path holds one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CharClass {
+    Dot,
+    /// `m` or `M`, the extension's first letter.
+    M,
+    /// `d` or `D`, the extension's second letter.
+    D,
+    Other,
+}
+
+impl CharClass {
+    /// Every class some character a wildcard takes may have.
+    const ALL: [CharClass; 4] = [CharClass::Dot, CharClass::M, CharClass::D, CharClass::Other];
+
+    /// The class of `character`, or nothing where no document path holds it.
+    /// Every class is closed under ASCII case, so a literal and any character
+    /// its case compares equal with share one.
+    fn of(character: char) -> Option<Self> {
+        if crate::is_refused_character(character) {
+            return None;
+        }
+        Some(match character {
+            '.' => CharClass::Dot,
+            'm' | 'M' => CharClass::M,
+            'd' | 'D' => CharClass::D,
+            _ => CharClass::Other,
+        })
+    }
+}
+
+/// The document grammar's automaton over one segment's characters.
+///
+/// A folder name is any text but empty, `.` and `..`: its states are the
+/// text so far being empty, `.`, `..` or anything else. A file name ends in
+/// `.md`, in any ASCII case, after a stem that is not empty, `.` or `..` —
+/// which are exactly the names `.md`, `..md` and `...md` — so its state is how
+/// much of `.md` the text so far ends with, and, while the text is still a
+/// prefix of one of those three names, how many dots it opened with. Fourteen
+/// of those states are reachable.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SegmentState {
+    /// A folder name: 0 empty, 1 `.`, 2 `..`, 3 anything else.
+    Folder(u8),
+    /// A file name: how much of `.md` the text ends with, and how it opens.
+    FileName { tail: u8, opening: Opening },
+}
+
+/// How a file name opens while it may still be one of `.md`, `..md` and
+/// `...md`, whose stems are no document's.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Opening {
+    /// Only dots so far, this many.
+    Dots(u8),
+    /// That many dots, then `m`.
+    DotsM(u8),
+    /// That many dots, then `md`: a name with no document stem.
+    DotsMd(u8),
+    /// Anything else: no longer one of those names.
+    Other,
+}
+
+impl SegmentState {
+    fn start(kind: SegmentKind) -> Self {
+        match kind {
+            SegmentKind::Folder => SegmentState::Folder(0),
+            SegmentKind::FileName => SegmentState::FileName {
+                tail: 0,
+                opening: Opening::Dots(0),
+            },
+        }
+    }
+
+    fn step(self, class: CharClass) -> Self {
+        match self {
+            SegmentState::Folder(held) => SegmentState::Folder(match (held, class) {
+                (0..=1, CharClass::Dot) => held + 1,
+                _ => 3,
+            }),
+            SegmentState::FileName { tail, opening } => SegmentState::FileName {
+                tail: match (tail, class) {
+                    (_, CharClass::Dot) => 1,
+                    (1, CharClass::M) => 2,
+                    (2, CharClass::D) => 3,
+                    _ => 0,
+                },
+                opening: match (opening, class) {
+                    (Opening::Dots(dots), CharClass::Dot) if dots < 3 => Opening::Dots(dots + 1),
+                    (Opening::Dots(dots), CharClass::M) if dots > 0 => Opening::DotsM(dots),
+                    (Opening::DotsM(dots), CharClass::D) => Opening::DotsMd(dots),
+                    _ => Opening::Other,
+                },
+            },
+        }
+    }
+
+    fn accepts(self) -> bool {
+        match self {
+            SegmentState::Folder(held) => held == 3,
+            SegmentState::FileName { tail, opening } => {
+                tail == 3 && !matches!(opening, Opening::DotsMd(_))
+            }
+        }
+    }
+}
+
+/// Whether one segment of `kind` matches every shape in `shapes`, each read
+/// by the in-segment grammar: the product of their automata over characters
+/// with the document grammar's for the segment.
+fn shapes_share_a_segment(shapes: &[&str], kind: SegmentKind, case: CaseFold) -> bool {
     let shapes: Vec<Vec<char>> = shapes.iter().map(|shape| shape.chars().collect()).collect();
-    let start = vec![0usize; shapes.len()];
+    let start = (vec![0usize; shapes.len()], SegmentState::start(kind));
     let mut seen = std::collections::HashSet::new();
-    seen.insert((start.clone(), false));
-    let mut pending = vec![(start, false)];
-    while let Some((state, consumed)) = pending.pop() {
-        if consumed
+    seen.insert(start.clone());
+    let mut pending = vec![start];
+    while let Some((state, grammar)) = pending.pop() {
+        if grammar.accepts()
             && state
                 .iter()
                 .zip(&shapes)
@@ -651,14 +790,15 @@ fn shapes_share_a_segment(shapes: &[&str], case: CaseFold) -> bool {
             if shapes[at].get(*held) == Some(&'*') {
                 let mut next = state.clone();
                 next[at] = held + 1;
-                next_states.push((next, consumed));
+                next_states.push((next, grammar));
             }
         }
         // Consume one character: a `*` keeps its place, a `?` takes any, a
         // literal takes one its case compares equal with, and a spent shape
         // takes none. One character fits every literal at once only where the
         // literals compare equal with one another, which the case keeps an
-        // equivalence.
+        // equivalence; where no literal stands, the character is free, and
+        // each class of the document grammar is tried.
         let mut next = state.clone();
         let mut literal: Option<char> = None;
         let mut live = true;
@@ -684,7 +824,13 @@ fn shapes_share_a_segment(shapes: &[&str], case: CaseFold) -> bool {
             }
         }
         if live {
-            next_states.push((next, true));
+            let classes: Vec<CharClass> = match literal {
+                Some(character) => CharClass::of(character).into_iter().collect(),
+                None => CharClass::ALL.to_vec(),
+            };
+            for class in classes {
+                next_states.push((next.clone(), grammar.step(class)));
+            }
         }
         for next in next_states {
             if seen.insert(next.clone()) {
@@ -950,43 +1096,295 @@ mod tests {
             })
             .collect();
         let borrowed: Vec<&[Pattern]> = sets.iter().map(Vec::as_slice).collect();
-        sets_share_a_subject(&borrowed, case)
+        sets_share_a_document_path(&borrowed, case)
     }
 
-    /// **Sets share a subject exactly where some path every set admits
-    /// exists**: over `**`, `*`, `?` and literals, alone and together, with
-    /// each set read as the union of its patterns.
+    /// **Sets share a document exactly where some document path every set
+    /// admits exists**: over `**`, `*`, `?` and literals, alone and together,
+    /// with each set read as the union of its patterns.
     #[test]
-    fn sets_share_a_subject_exactly_where_one_path_meets_them_all() {
+    fn sets_share_a_document_exactly_where_one_document_path_meets_them_all() {
         let cases: &[(&[&[&str]], bool)] = &[
-            (&[&["a/*"], &["*/b"]], true),
+            (&[&["a/*"], &["*/b.md"]], true),
             (&[&["a/**"], &["b/**"]], false),
-            (&[&["**"], &["x"]], true),
+            (&[&["**"], &["x.md"]], true),
             (&[&["**"]], true),
             (&[&["**/x/**"], &["**/y/**"]], true),
-            (&[&["a/b"], &["a/b/c"]], false),
-            (&[&["?"], &["ab"]], false),
-            (&[&["?b"], &["a?"]], true),
-            (&[&["a*"], &["*z"]], true),
-            (&[&["a*"], &["*z"], &["?"]], false),
-            (&[&["*.md"], &["notes"]], false),
+            (&[&["a/b.md"], &["a/b.md/c.md"]], false),
+            (&[&["?.md"], &["ab.md"]], false),
+            (&[&["?b.md"], &["a?.md"]], true),
+            (&[&["a*"], &["*z.md"]], true),
+            (&[&["a*"], &["*z.md"], &["?.md"]], false),
             (&[&["projects/*/tasks/**"], &["projects/norn/**"]], true),
             (&[&["projects/*/tasks/**"], &["archive/**"]], false),
-            (&[&["a/**", "b/**"], &["b/x"]], true),
-            (&[&["a/**", "b/**"], &["c/x", "d/**"]], false),
-            (&[&["a"], &[]], false),
-            // A subject's segments are not empty, so `*` alone needs one
+            (&[&["a/**", "b/**"], &["b/x.md"]], true),
+            (&[&["a/**", "b/**"], &["c/x.md", "d/**"]], false),
+            (&[&["a.md"], &[]], false),
+            // A path's segments are not empty, so `*` alone needs one
             // character and `**` one segment where a path stands.
             (&[&["*"], &["**"]], true),
-            (&[&["x/**"], &["x"]], true),
-            (&[&["x/*/y"], &["x/y"]], false),
+            (&[&["x/**"], &["x/a.md"]], true),
+            (&[&["x/*/y.md"], &["x/y.md"]], false),
         ];
         for (sets, shared) in cases {
             assert_eq!(share(sets, CaseFold::Exact), *shared, "{sets:?}");
         }
-        assert!(!share(&[&["A"], &["a"]], CaseFold::Exact));
-        assert!(share(&[&["A"], &["a"]], CaseFold::Ascii));
-        assert!(!share(&[&["É"], &["é"]], CaseFold::Ascii));
+        assert!(!share(&[&["A.md"], &["a.md"]], CaseFold::Exact));
+        assert!(share(&[&["A.md"], &["a.md"]], CaseFold::Ascii));
+        assert!(!share(&[&["É.md"], &["é.md"]], CaseFold::Ascii));
+    }
+
+    /// **A path no document could stand at is no witness.** Sets meeting only
+    /// at a path the document grammar refuses — no `.md` file name, a `.` or
+    /// `..` segment, a stem of nothing, `.` or `..`, a backslash or a control
+    /// character — share no document, under either fold; the extension
+    /// compares in any ASCII case under both, as the vault reads a document.
+    #[test]
+    fn sets_meeting_only_where_no_document_stands_share_none() {
+        let disjoint: &[&[&[&str]]] = &[
+            // No document file name: only `shared`, a folder or a non-`.md` leaf.
+            &[&["a/*.md", "shared"], &["b/*.md", "shared"]],
+            &[&["notes"], &["*"]],
+            &[&["*.md"], &["notes"]],
+            &[&["a/*.txt"], &["a/**"]],
+            // A `.` or `..` segment, spelled or forced by wildcards.
+            &[&["area/../*.md"], &["area/**"]],
+            &[&["a/.?/x.md"], &["a/?./x.md"]],
+            &[&["a/./x.md"], &["**"]],
+            &[&["?/x.md"], &[".*/x.md"], &["*./x.md"]],
+            // A file name whose stem is nothing, `.` or `..`.
+            &[&["*"], &[".md"]],
+            &[&["*"], &["..md"]],
+            &[&["*"], &["...md"]],
+            &[&["**/?.md"], &["**/..md"]],
+            &[&["*.md"], &["?"], &["??"], &["???"]],
+            // A refused character.
+            &[&["a\\b.md"], &["**"]],
+            &[&["a\u{1}.md"], &["*"]],
+        ];
+        for sets in disjoint {
+            for case in [CaseFold::Exact, CaseFold::Ascii] {
+                assert!(!share(sets, case), "{sets:?} {case:?}");
+            }
+        }
+        let shared: &[&[&[&str]]] = &[
+            &[&["*"], &["....md"]],
+            &[&["*"], &[".a.md"]],
+            &[&["**/*"], &["notes/a.MD", "x"]],
+            &[&["*.Md"], &["?.*"]],
+            &[&["**/.*/*"], &["**/*./*.md"]],
+        ];
+        for sets in shared {
+            for case in [CaseFold::Exact, CaseFold::Ascii] {
+                assert!(share(sets, case), "{sets:?} {case:?}");
+            }
+        }
+    }
+
+    /// A small deterministic generator for the differential cases.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(bound).expect("a small bound"))
+                .expect("below a usize bound")
+        }
+
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len())]
+        }
+    }
+
+    /// Whether `path` is a document path: the grammar's own judgment and the
+    /// vault's document extension.
+    fn is_document(path: &str) -> bool {
+        crate::PathProblem::of_document(path).is_none()
+            && path
+                .rsplit('/')
+                .next()
+                .and_then(|leaf| {
+                    leaf.rfind('.')
+                        .filter(|dot| *dot > 0)
+                        .map(|dot| &leaf[dot + 1..])
+                })
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(crate::DOCUMENT_EXTENSION))
+    }
+
+    /// Every string of `alphabet` from one character to `longest`.
+    fn words(alphabet: &[char], longest: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut layer = vec![String::new()];
+        for _ in 0..longest {
+            layer = layer
+                .iter()
+                .flat_map(|prefix| alphabet.iter().map(move |c| format!("{prefix}{c}")))
+                .collect();
+            out.extend(layer.iter().cloned());
+        }
+        out
+    }
+
+    /// **The walk agrees with brute force over document paths**: random sets
+    /// of globs over the shapes the document grammar turns on, against every
+    /// path of up to three segments over a small alphabet, under both folds.
+    #[test]
+    fn sets_share_a_document_path_agrees_with_brute_force() {
+        const SHAPES: &[&str] = &[
+            "**", "**", "*", "?", "a", "A", ".", "..", ".?", "?.", "a*", "*a", "*.md", "?.md",
+            "*.MD", "a.md", "..md", "*.*", "??",
+        ];
+        let leaves: Vec<String> = words(&['a', 'A', '.'], 2)
+            .into_iter()
+            .flat_map(|stem| [format!("{stem}.md"), format!("{stem}.MD")])
+            .collect();
+        let mut folders = words(&['a', '.', 'm'], 2);
+        folders.extend(leaves.iter().cloned());
+        let mut paths: Vec<String> = leaves.clone();
+        for folder in &folders {
+            for leaf in &leaves {
+                paths.push(format!("{folder}/{leaf}"));
+                for inner in &folders {
+                    paths.push(format!("{folder}/{inner}/{leaf}"));
+                }
+            }
+        }
+        // The universe holds non-documents too, so the filter is what is
+        // under test, not the universe.
+        let documents: Vec<&String> = paths.iter().filter(|path| is_document(path)).collect();
+        assert!(documents.len() < paths.len());
+
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut disagreements = Vec::new();
+        for case in [CaseFold::Exact, CaseFold::Ascii] {
+            for _ in 0..150 {
+                let sets: Vec<Vec<Pattern>> = (0..2 + rng.below(2))
+                    .map(|_| {
+                        (0..1 + rng.below(2))
+                            .map(|_| {
+                                let glob: Vec<&str> =
+                                    (0..1 + rng.below(3)).map(|_| rng.pick(SHAPES)).collect();
+                                Pattern::parse(&glob.join("/")).expect("a pattern")
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let borrowed: Vec<&[Pattern]> = sets.iter().map(Vec::as_slice).collect();
+                let fast = sets_share_a_document_path(&borrowed, case);
+                let brute = documents.iter().find(|path| {
+                    sets.iter()
+                        .all(|set| set.iter().any(|p| p.matches(path, case)))
+                });
+                if fast != brute.is_some() {
+                    disagreements.push(format!(
+                        "{case:?} {:?} fast={fast} brute={brute:?}",
+                        sets.iter()
+                            .map(|set| set.iter().map(Pattern::as_str).collect::<Vec<_>>())
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{:#?}",
+            &disagreements[..disagreements.len().min(10)]
+        );
+    }
+
+    /// Every capture tuple some whole match binds, by brute force.
+    fn all_bindings(
+        pattern: &[&str],
+        subject: &[&str],
+        bound: &mut Vec<String>,
+        out: &mut std::collections::BTreeSet<Vec<String>>,
+    ) {
+        match pattern.first() {
+            None => {
+                if subject.is_empty() {
+                    out.insert(bound.clone());
+                }
+            }
+            Some(&"**") => {
+                for take in 0..=subject.len() {
+                    all_bindings(&pattern[1..], &subject[take..], bound, out);
+                }
+            }
+            Some(segment) => {
+                let Some(first) = subject.first() else {
+                    return;
+                };
+                if segment.starts_with('<') {
+                    bound.push((*first).to_string());
+                    all_bindings(&pattern[1..], &subject[1..], bound, out);
+                    bound.pop();
+                } else if matches_within(segment, first, CaseFold::Exact) {
+                    all_bindings(&pattern[1..], &subject[1..], bound, out);
+                }
+            }
+        }
+    }
+
+    /// **Binding agrees with brute force**: unmatched where no match exists,
+    /// unique where every match binds alike, and otherwise two different
+    /// bindings some match makes.
+    #[test]
+    fn bind_agrees_with_brute_force() {
+        const PIECES: &[&str] = &["**", "**", "<x>", "<y>", "<z>", "a", "*", "b*", "?"];
+        const NAMES: &[&str] = &["a", "b", "ab", "ba", "c"];
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        let mut problems = Vec::new();
+        for _ in 0..5_000 {
+            let mut used = std::collections::BTreeSet::new();
+            let mut pattern: Vec<&str> = Vec::new();
+            while pattern.len() < 1 + rng.below(5) {
+                let piece = rng.pick(PIECES);
+                if piece.starts_with('<') && !used.insert(piece) {
+                    continue;
+                }
+                pattern.push(piece);
+            }
+            let subject: Vec<&str> = (0..1 + rng.below(5)).map(|_| rng.pick(NAMES)).collect();
+            let mut brute = std::collections::BTreeSet::new();
+            all_bindings(&pattern, &subject, &mut Vec::new(), &mut brute);
+            let parsed = capturing(&pattern.join("/"));
+            let names: Vec<&str> = parsed.captures().collect();
+            let tuple = |captures: &Captures| -> Vec<String> {
+                names
+                    .iter()
+                    .map(|name| captures.get(name).expect("every capture bound").to_string())
+                    .collect()
+            };
+            let got = parsed.bind(&subject.join("/"), CaseFold::Exact);
+            let agrees = match &got {
+                Binding::Unmatched => brute.is_empty(),
+                Binding::Unique(captures) => brute.len() == 1 && brute.contains(&tuple(captures)),
+                Binding::Several(two) => {
+                    brute.len() >= 2
+                        && brute.contains(&tuple(&two[0]))
+                        && brute.contains(&tuple(&two[1]))
+                        && tuple(&two[0]) != tuple(&two[1])
+                }
+            };
+            if !agrees {
+                problems.push(format!(
+                    "{} / {}: {got:?}, brute {brute:?}",
+                    pattern.join("/"),
+                    subject.join("/")
+                ));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{:#?}",
+            &problems[..problems.len().min(10)]
+        );
     }
 
     /// **The fold keeps the matching bound.** A pattern whose stars would each

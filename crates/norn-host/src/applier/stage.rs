@@ -764,7 +764,7 @@ impl Judging<'_> {
     /// stood, and the violations it introduces are none by construction. The
     /// schema rules' path selectors and allowed paths make this judgment
     /// necessary again — the same bytes can violate a rule at one path and not
-    /// another — and the write gate that judges rules (NORN-358) judges a
+    /// another — and the write gate that judges rules (NORN-359) judges a
     /// carried move at its destination.
     fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
