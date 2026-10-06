@@ -754,7 +754,8 @@ impl VaultSchema {
         keys: &BTreeSet<TypedValue>,
     ) -> bool {
         let equals = |value: &AuthoredValue| {
-            scalar_text(value)
+            value
+                .scalar_text()
                 .and_then(|raw| self.equality_key(key, &raw))
                 .is_some_and(|value| keys.contains(&value))
         };
@@ -783,29 +784,6 @@ fn equality_key(declared: FieldType, raw: &str) -> Option<TypedValue> {
         FieldType::Tags => Some(TypedValue::Text(fold_tag(raw))),
         declared => declared.read(raw).ok(),
     }
-}
-
-/// A scalar's text as a field's value is read, or nothing for a null, a list
-/// or a map: a boolean as `true` or `false`, an integer in decimal, and a
-/// float with its fraction kept, as the field pillar writes a value's raw
-/// text.
-pub(crate) fn scalar_text(value: &AuthoredValue) -> Option<String> {
-    match value {
-        AuthoredValue::Bool(flag) => Some(flag.to_string()),
-        AuthoredValue::Integer(number) => Some(number.to_string()),
-        AuthoredValue::Float(number) => Some(float_text(number.get())),
-        AuthoredValue::String(text) => Some(text.clone()),
-        AuthoredValue::Null | AuthoredValue::List(_) | AuthoredValue::Map(_) => None,
-    }
-}
-
-/// A finite float's text with its fraction kept: `1.0`, not `1`.
-fn float_text(number: f64) -> String {
-    let mut written = number.to_string();
-    if !written.contains('.') {
-        written.push_str(".0");
-    }
-    written
 }
 
 /// Whether `value` leaves a required field unmet: absent or null.

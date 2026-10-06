@@ -681,8 +681,8 @@ fn yaml_scalar_text(value: &Value) -> Option<String> {
             } else {
                 number
                     .as_f64()
-                    .filter(|float| float.is_finite())
-                    .map(super::float_text)
+                    .and_then(|float| FiniteFloat::new(float).ok())
+                    .map(FiniteFloat::canonical_text)
             }
         }
         Value::Null | Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => None,

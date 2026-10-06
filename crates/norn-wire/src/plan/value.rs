@@ -54,6 +54,22 @@ impl FiniteFloat {
     pub const fn get(self) -> f64 {
         self.0
     }
+
+    /// **The one spelling of a float as text**: plain decimal digits, no
+    /// exponent whatever the magnitude, the shortest that reads back to the
+    /// same double, and a fraction always kept — `1.0`, never `1`, which
+    /// would read as an integer.
+    ///
+    /// The store's canonical projection and its field rows' raw text write a
+    /// float by it, and a schema's rule reads a float's text by it, so a value
+    /// compared in either place says the same digits.
+    pub fn canonical_text(self) -> String {
+        let mut written = self.0.to_string();
+        if !written.contains('.') {
+            written.push_str(".0");
+        }
+        written
+    }
 }
 
 // A finite float's equality is reflexive — the one value that breaks `f64`'s,
@@ -251,6 +267,21 @@ impl AuthoredValue {
     /// The finite float `number`, or the reason it is none.
     pub fn float(number: f64) -> Result<Self, NonFiniteFloat> {
         FiniteFloat::new(number).map(AuthoredValue::Float)
+    }
+
+    /// A scalar's text as a field value's raw text reads, or nothing for a
+    /// null, a list or a map: a boolean as `true` or `false`, an integer in
+    /// decimal, a float by [`FiniteFloat::canonical_text`] and a string as
+    /// itself. It is the text the store's field rows hold for the same
+    /// scalar.
+    pub fn scalar_text(&self) -> Option<String> {
+        match self {
+            AuthoredValue::Bool(flag) => Some(flag.to_string()),
+            AuthoredValue::Integer(number) => Some(number.to_string()),
+            AuthoredValue::Float(number) => Some(number.canonical_text()),
+            AuthoredValue::String(text) => Some(text.clone()),
+            AuthoredValue::Null | AuthoredValue::List(_) | AuthoredValue::Map(_) => None,
+        }
     }
 
     /// The list of `items`.

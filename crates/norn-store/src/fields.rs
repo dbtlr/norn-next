@@ -736,3 +736,45 @@ impl fmt::Debug for TypedOrder {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use norn_wire::AuthoredValue;
+
+    use super::*;
+
+    /// **A scalar's raw text is the wire's spelling of it**, so a schema
+    /// rule reading a document's value through the wire compares the same
+    /// text a find reads off the field rows: a float keeps its fraction and
+    /// writes no exponent whatever its magnitude.
+    #[test]
+    fn a_scalar_raw_text_is_the_wire_spelling_of_the_scalar() {
+        let floats = [1.0, -0.0, 0.1, 2.5e-7, 1e21, f64::MAX];
+        let mut pairs: Vec<(FrontmatterValue, AuthoredValue)> = vec![
+            (FrontmatterValue::Bool(true), AuthoredValue::Bool(true)),
+            (FrontmatterValue::Int(-3), AuthoredValue::Integer(-3)),
+            (
+                FrontmatterValue::String("done".to_string()),
+                AuthoredValue::string("done"),
+            ),
+        ];
+        for number in floats {
+            pairs.push((
+                FrontmatterValue::Float(number),
+                AuthoredValue::float(number).expect("finite"),
+            ));
+        }
+        for (stored, authored) in pairs {
+            assert_eq!(
+                scalar_text(&stored),
+                Some(authored.scalar_text()),
+                "{stored:?}"
+            );
+        }
+        assert_eq!(
+            scalar_text(&FrontmatterValue::Float(1.0)),
+            Some(Some("1.0".to_string()))
+        );
+        assert_eq!(scalar_text(&FrontmatterValue::Float(f64::NAN)), Some(None));
+    }
+}

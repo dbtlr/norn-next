@@ -91,7 +91,7 @@ use super::super::template::Part;
 use super::super::{Shape, VaultSchema, VaultSchemaError};
 use super::combined::{CombinedConstraint, RulesConflict};
 use super::placement::{self, PLACEMENT_CEILING};
-use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem, scalar_text};
+use super::{ElementProblem, ForbiddenFix, NormalSelector, Route, Rule, RuleProblem};
 
 /// Every judgment schema read makes of its rules once each is read.
 ///
@@ -242,7 +242,7 @@ fn element_problem(
 /// templated: a templated element is judged where a document is.
 fn untemplated_text(element: &DefaultValue) -> Option<String> {
     match element {
-        DefaultValue::Plain(value) => scalar_text(value),
+        DefaultValue::Plain(value) => value.scalar_text(),
         DefaultValue::Text(template) if !template.is_templated() => {
             Some(template.as_str().to_string())
         }
