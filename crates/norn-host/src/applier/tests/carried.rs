@@ -1148,3 +1148,296 @@ fn carried_in(composition: &crate::planner::compose::Composition) -> Vec<(String
         })
         .collect()
 }
+
+/// A vault schema whose rules read where a document stands: a task belongs
+/// under `tasks/`, a document under `open/` takes `status: todo` and one
+/// under `shut/` `status: done`, and one under `kept/` — its drafts excluded
+/// — needs an owner.
+const PLACED: &str = "version: 1
+rules:
+  placed: { match: { frontmatter: { kind: task } }, allowed_paths: { paths: ['tasks/**'] } }
+  open: { match: { path: 'open/**' }, one_of: { status: { values: [todo] } } }
+  shut: { match: { path: 'shut/**' }, one_of: { status: { values: [done] } } }
+  kept: { match: { path: 'kept/**' }, exclude: { path: ['kept/drafts/**'] }, required: { owner: } }
+";
+
+/// The documents [`PLACED`] judges where they stand, each holding exactly
+/// what a move to the next place would activate.
+fn placed_fixture() -> Fixture {
+    Fixture::with_schema(
+        PLACED,
+        &[
+            ("tasks/a.md", "---\nkind: task\n---\n# A\n"),
+            ("open/b.md", "---\nstatus: unknown\n---\n# B\n"),
+            ("kept/drafts/c.md", "# C\n"),
+            ("open/d.md", "---\nstatus: unknown\n---\n# D\n"),
+        ],
+    )
+}
+
+/// Each schema violation among `checks`, as its path, kind and field.
+fn schema_checks(checks: &[RefusedCheck]) -> Vec<(String, norn_wire::FindingKind, Option<String>)> {
+    checks
+        .iter()
+        .map(|check| match check {
+            RefusedCheck::SchemaViolation { violation, .. } => (
+                violation.path.as_str().to_string(),
+                violation.kind,
+                violation.target.clone(),
+            ),
+            other => panic!("a schema check: {other:?}"),
+        })
+        .collect()
+}
+
+/// **A carried move is judged again where it lands**: the same bytes breach
+/// `allowed_paths` at one place and not another, a `match.path` changes the
+/// combined constraint a held value is outside of, and an `exclude.path`
+/// that no longer excludes activates a requirement — each refuses, though no
+/// byte changed. A move keeping every identity it held applies, carried, and
+/// a forced plan lets each violation through and lists it.
+#[test]
+fn a_carried_move_refuses_each_violation_its_destination_activates() {
+    let mut fixture = placed_fixture();
+    let activating = fixture.plan(vec![
+        moving("tasks/a.md", "notes/a.md"),
+        moving("open/b.md", "shut/b.md"),
+        moving("kept/drafts/c.md", "kept/c.md"),
+    ]);
+    let checks = refused(fixture.apply(activating.clone())).checks;
+    assert_eq!(
+        schema_checks(&checks),
+        [
+            (
+                "kept/c.md".to_string(),
+                norn_wire::FindingKind::RequiredMissing,
+                Some("owner".to_string())
+            ),
+            (
+                "notes/a.md".to_string(),
+                norn_wire::FindingKind::Misplaced,
+                None
+            ),
+            (
+                "shut/b.md".to_string(),
+                norn_wire::FindingKind::NotOneOf,
+                Some("status".to_string())
+            ),
+        ]
+    );
+    assert_eq!(
+        fixture.read("tasks/a.md").as_deref(),
+        Some("---\nkind: task\n---\n# A\n")
+    );
+
+    let kept = applied(fixture.apply(fixture.plan(vec![moving("open/d.md", "open/sub/d.md")])));
+    assert!(kept.forced.is_empty());
+
+    let mut forced = activating;
+    forced.force = true;
+    let landed = applied(fixture.apply(forced));
+    assert_eq!(landed.forced.len(), 3, "{:?}", landed.forced);
+    assert_eq!(
+        fixture.read("shut/b.md").as_deref(),
+        Some("---\nstatus: unknown\n---\n# B\n")
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **Where the index vouches for a carried document, it is judged from the
+/// store's projection, holding no copy of it**: the applier streams the
+/// moved file once and never reads it whole, and still refuses the
+/// violation its destination activates.
+#[test]
+fn a_carried_move_the_index_vouches_for_is_judged_from_its_projection() {
+    let mut fixture = placed_fixture();
+    let plan = fixture.plan(vec![moving("open/b.md", "shut/b.md")]);
+    let tree =
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+    let counted = Counted::over(&tree);
+    let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a pin");
+    let links = fixture.links();
+    let Err(crate::applier::stage::Unfit::Refused(checks)) = check(
+        &plan,
+        &counted,
+        &declared,
+        &links.index(),
+        &mut Citations::default(),
+    ) else {
+        panic!("the carried move refuses on its destination's constraint");
+    };
+    assert_eq!(
+        schema_checks(&checks),
+        [(
+            "shut/b.md".to_string(),
+            norn_wire::FindingKind::NotOneOf,
+            Some("status".to_string())
+        )]
+    );
+    assert_eq!(
+        counted.reads("open/b.md"),
+        Reads {
+            whole: 0,
+            streamed: 1
+        },
+        "the applier holds no copy of the carried document"
+    );
+}
+
+/// **Where the index lags a carried document, it is judged from its bytes,
+/// read whole once** — the one copy the move already reads for its links: a
+/// draft rewritten behind the index to hold `status: unknown` is judged by
+/// what its bytes say, so a move under `open/`, which the stale projection
+/// would pass, refuses; a move keeping it a draft checks, holding one copy.
+#[test]
+fn a_carried_move_the_index_lags_is_judged_from_its_bytes_once() {
+    let mut fixture = placed_fixture();
+    fixture.write(
+        "kept/drafts/c.md",
+        "---\nstatus: unknown\n---\n# C, changed\n",
+    );
+    let kept = fixture.plan(vec![moving("kept/drafts/c.md", "kept/drafts/sub/c.md")]);
+    let tree =
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
+    let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a pin");
+    let links = fixture.links();
+    let counted = Counted::over(&tree);
+    check(
+        &kept,
+        &counted,
+        &declared,
+        &links.index(),
+        &mut Citations::default(),
+    )
+    .unwrap_or_else(|_| panic!("a move keeping the draft a draft checks"));
+    assert_eq!(
+        counted.reads("kept/drafts/c.md"),
+        Reads {
+            whole: 1,
+            streamed: 1
+        },
+        "one copy, read for its links and its frontmatter alike"
+    );
+    drop(links);
+    let checks =
+        refused(fixture.apply(fixture.plan(vec![moving("kept/drafts/c.md", "open/c.md")]))).checks;
+    assert_eq!(
+        schema_checks(&checks),
+        [(
+            "open/c.md".to_string(),
+            norn_wire::FindingKind::NotOneOf,
+            Some("status".to_string())
+        )]
+    );
+}
+
+/// **Judgment on the indexed projection equals judgment on the bytes, under
+/// churn**: documents rewritten through every shape of frontmatter the rules
+/// read — typed scalars, strings of digits, nested containers, nulls, an
+/// absent block, a block that does not read — each indexed by the store
+/// after each rewrite, judge to the same findings, identities included, from
+/// the store's projection as from their bytes, at every place the rules
+/// tell apart.
+#[test]
+fn judgment_on_the_indexed_projection_equals_judgment_on_bytes_under_churn() {
+    const SCHEMA: &str = "version: 1
+fields:
+  rank: { type: number }
+  due: { type: date }
+  tags: { type: tags, shape: list }
+rules:
+  open: { match: { path: 'open/**' }, one_of: { status: { values: [todo, '7'] } }, required: { owner: }, max_length: { title: 5 } }
+  shut: { match: { path: 'shut/**' }, forbidden: { scratch: }, one_of: { tags: { values: [work] } } }
+  placed: { match: { frontmatter: { kind: task } }, allowed_paths: { paths: ['open/**'] } }
+";
+    let shapes = [
+        "---\nstatus: todo\nowner: me\n---\nbody\n",
+        "---\nstatus: 7\nrank: high\ndue: soon\ntitle: a long title\n---\nbody\n",
+        "---\nstatus: '7'\nrank: 2.0\ntags: [Work, '#play', work]\nscratch: null\n---\nbody\n",
+        "---\nkind: task\nnested: [[1, '1'], {b: 2, a: [x]}]\nowner: ~\n---\nbody\n",
+        "no block at all\n",
+        "---\nstatus: [unclosed\n---\nbody\n",
+        "---\ntags: single\ntitle: 12345\nstatus: [todo, bogus, BOGUS]\n---\nbody\n",
+    ];
+    let mut fixture = Fixture::with_schema(SCHEMA, &[("open/x.md", shapes[0])]);
+    let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a pin");
+    let case = crate::stored_path_order(
+        TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema)
+            .expect("a vault")
+            .normalizer()
+            .case_sensitivity(),
+    )
+    .glob_case();
+    let summary = |findings: Vec<crate::derivation::PlannedFinding>| -> Vec<String> {
+        findings
+            .into_iter()
+            .map(|finding| {
+                format!(
+                    "{:?} {:?} {:?} {:?} {:?}",
+                    finding.cause, finding.target, finding.value, finding.rules, finding.identity
+                )
+            })
+            .collect()
+    };
+    for round in 0..3 {
+        for (at, shape) in shapes.iter().enumerate() {
+            let shape = if round % 2 == 1 {
+                shapes[shapes.len() - 1 - at]
+            } else {
+                shape
+            };
+            fixture.foreign("open/x.md", shape);
+            let links = fixture.links();
+            let index = links.index();
+            let held =
+                crate::planner::links::LinkIndex::held_frontmatter(&index, &path("open/x.md"))
+                    .expect("the index reads")
+                    .expect("the index holds the document");
+            assert_eq!(held.content_hash, content_hash(shape.as_bytes()).hex());
+            let bytes =
+                crate::derivation::frontmatter_block(shape.as_bytes()).expect("the bytes decode");
+            let canonical = |block: &norn_store::HeldBlock| match block {
+                norn_store::HeldBlock::Read(value) => {
+                    norn_store::canonical_json(value).expect("a projection")
+                }
+                other => format!("{other:?}"),
+            };
+            assert_eq!(canonical(&held.block), canonical(&bytes), "{shape:?}");
+            for place in ["open/x.md", "shut/x.md", "elsewhere/x.md"] {
+                let subject = norn_store::DocumentPath::from(&path(place));
+                let (projected, _) =
+                    crate::derivation::judge_block(&subject, &held.block, &declared, case);
+                let (read, _) = crate::derivation::judge_block(&subject, &bytes, &declared, case);
+                assert_eq!(summary(projected), summary(read), "{shape:?} at {place}");
+            }
+        }
+    }
+}
+
+/// **A folder move judges each document it carries where it lands**: moving
+/// `open/` to `shut/` carries both documents holding `status: unknown` under
+/// `[done]`, and refuses on each.
+#[test]
+fn a_folder_move_judges_each_document_it_carries_where_it_lands() {
+    let mut fixture = placed_fixture();
+    let folder = Operation::new(norn_wire::OperationKind::move_folder(
+        norn_wire::FolderPath::new("open").expect("a folder path"),
+        norn_wire::FolderPath::new("shut").expect("a folder path"),
+    ));
+    let checks = refused(fixture.apply(fixture.expanded(vec![folder]).plan)).checks;
+    assert_eq!(
+        schema_checks(&checks),
+        [
+            (
+                "shut/b.md".to_string(),
+                norn_wire::FindingKind::NotOneOf,
+                Some("status".to_string())
+            ),
+            (
+                "shut/d.md".to_string(),
+                norn_wire::FindingKind::NotOneOf,
+                Some("status".to_string())
+            ),
+        ]
+    );
+}

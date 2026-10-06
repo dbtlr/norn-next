@@ -738,6 +738,104 @@ fn judged_work(_: &attach::ServingHost) -> CounterSnapshot {
     unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
 }
 
+/// How many documents the carried-move bar moves in one folder move.
+const CARRIED_MOVED: u64 = 3;
+
+/// **A carried move's re-judgment reads no other document, and follows the
+/// documents it moves.** Under [`RULE_SCHEMA`], whose `gated` rule reads
+/// where a document stands, a folder move carrying [`CARRIED_MOVED`] planted
+/// documents byte for byte is judged again at each destination from the
+/// store's projection: two judgments per moved document — where it stands
+/// and where it lands — beside the one the commit's derivation makes of each
+/// landed document, each evaluating the schema's three rules. The apply
+/// costs the same rule work, documents derived and every other logical rule
+/// count at `ambiguous` (300 documents) as at `realistic` (2000).
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_carried_moves_rejudgment_follows_the_documents_it_moves_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_carried_move("counter-gate-carried-ambiguous", &small);
+    let large_counters = one_carried_move("counter-gate-carried-realistic", &large);
+    for counters in [&small_counters, &large_counters] {
+        for (count, expected) in [
+            ("documents_derived", CARRIED_MOVED),
+            ("rule_rules_evaluated", 3 * 3 * CARRIED_MOVED),
+        ] {
+            assert_eq!(
+                counters.get(count),
+                expected,
+                "the carried move counted `{count}` as {}: {counters:?}",
+                counters.get(count)
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "judging a carried folder move again where its documents land",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` under [`RULE_SCHEMA`] with [`CARRIED_MOVED`] documents
+/// planted under `counter-gate/carried/`, then count what the host spends
+/// applying the folder's move to `counter-gate/landed/`: each document is
+/// misplaced by `gated` where it stands and where it lands alike, so the
+/// move introduces nothing and applies.
+fn one_carried_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), RULE_SCHEMA)
+        .expect("write the rule schema");
+    let folder = vault.path().join("counter-gate/carried");
+    std::fs::create_dir_all(&folder).expect("creating the carried folder");
+    for at in 0..CARRIED_MOVED {
+        std::fs::write(
+            folder.join(format!("moved-{at}.md")),
+            format!("# Moved {at}\n"),
+        )
+        .expect("planting a carried document");
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = judged_work(&host);
+    host.move_path(norn_wire::MoveParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Apply,
+        norn_wire::MoveSubject::folder(
+            norn_wire::FolderPath::new("counter-gate/carried").expect("a folder path"),
+            norn_wire::FolderPath::new("counter-gate/landed").expect("a folder path"),
+        ),
+    ))
+    .expect("the move is admitted")
+    .wait()
+    .expect("the carried move applies");
+    let spent = wait_until(
+        "the host to fold the carried move's rule work in",
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = before
+                .delta(&judged_work(&host))
+                .expect("two readings of one account");
+            if spent.get("documents_derived") >= CARRIED_MOVED {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!("the host's account reads {spent:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    record_the_counters(
+        &format!("a carried folder move judged again over `{}`", profile.name),
+        &spent,
+    );
+    spent
+}
+
 /// The probe every rule-parameter variant judges: its kind, eight keys a
 /// selector may name, a status the closed-set variants admit and a title, at
 /// `probe.md`.

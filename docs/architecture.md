@@ -2493,8 +2493,15 @@ length and hash: a scalar or one list element as its field row holds it, at the 
 written first, and a list or a map as its canonical JSON; a null is no value and names none. A document whose frontmatter block nothing read is judged
 against nothing, since its fields are unknown rather than absent; its unread block's
 finding stands instead. Judgment reads no other document, so no change elsewhere moves a
-rule finding. The write gate does not yet judge a plan by these findings: it leaves the
-rule breaches out until it compares them by identity (NORN-359).
+rule finding. The write gate judges a plan's results by the same judgment, comparing each
+finding by its identity: its kind, field, offending value and the combined constraint it
+breaches, that constraint compared by value — a closed set's intersection by equality key,
+the smallest length limit, that the field is required or forbidden, the constraints in
+conflict, each placement rule's allowed paths as a set — and never by the rules stating
+it, so a second rule stating a constraint a document already breaches leaves the finding
+one identity though it cites both. A forbidden field, a shape mismatch and a conflict over
+a field are one finding per field whatever it holds, so the whole value each names is its
+payload and no part of its identity.
 
 **A tag is compared under the tag fold.** Two tag names are one tag when their folds are
 equal. The fold lowercases each character alone, with no locale, where its lowercase is exactly
@@ -2676,9 +2683,14 @@ wrote there, as a re-sent plan does. The write kernel
 stages every target holding it — a create, or a replace where a chain of moves refills a
 name — as a streamed copy of its source, held to the hash the plan carries. The links a
 carried document holds are the store index's, taken where the index derived them from those
-very bytes. **A carried move holds no copy of its document once the vault has indexed it;
-where the index does not vouch for it, planning and the applier each read the file whole at
-the plan's hash, one copy, and take its links from its bytes** — a declared limit, kept
+very bytes, and so is the frontmatter the applier judges it by again at its destination
+where a schema rule reads where a document stands: the store's canonical projection
+(`documents.frontmatter`), taken where the index derived it from those very bytes, never the
+field pillar's rows. **A carried move holds no copy of its document once the vault has
+indexed it, only its frontmatter's projection while it is judged; where the index does not
+vouch for it, planning and the applier each read the file whole at the plan's hash, one
+copy, and take its links, and the applier its frontmatter, from its bytes** — a declared
+limit, kept
 because a plan and its re-send must finish over a vault whose index lags its files (ADR
 0037), as a move did before it carried anything. A move an edit, a link rewrite or its own
 cascade lands on is not carried: it reads the moved document whole, once, and composes from
@@ -2846,9 +2858,10 @@ any other file it travels as a condition on the file's content, which the applie
 as any condition. An expected value on another file is therefore a whole-file content-hash
 condition: any change to that file refuses the apply, one that leaves the field as
 observed included, and the refusal's fresh plan judges the field again. A schema violation
-that stood before the plan still refuses where it stands on a field a frontmatter kind
-writes: an undeclared tag the rewritten `tags` field keeps, which a body tag is not. A
-plan's `force` lets through the schema violations its results introduce and lists each, in
+that stood before the plan, its identity unchanged, does not refuse, even on a field a
+frontmatter kind writes or for a tag the plan writes a different number of times (ADR
+0037): a repair rewriting `[complete, bogus]` to `[done, bogus]` writes `status`, and
+`bogus` keeps its identity. A plan's `force` lets through the schema violations its results introduce and lists each, in
 the shape a refusal carries, on the preview's forecast, the applied report, and an
 interruption for the targets that landed; it bypasses no other check, and a refusal's
 fresh plan carries it, with a forecast listing what a preview of that fresh plan would.
@@ -3214,11 +3227,18 @@ Four contracts inside that flow carry weight:
 - **Check and stage everything, then publish.** No target is published until every
   target's state and every condition holds, every composed result passes the vault schema,
   and every written target, a create included, is staged as a shadow. A refusal in that
-  phase publishes nothing. A plan refuses a violation on a field it writes or one that did
-  not stand before it. A carried result is not judged again: its bytes are the document's
-  own, and the schema judgment a write makes today reads no document's path. Schema rules'
-  path selectors and allowed paths do read it, and the write gate does not judge schema
-  rules yet; the gate that judges them must judge a carried result at its destination.
+  phase publishes nothing. A plan refuses exactly the schema violations it introduces: each
+  composed result is judged by the derivation's own judgment and refuses each violation
+  whose identity — kind, field, offending value and combined constraint — no document it was
+  composed from held, every schema finding whatever its severity, a link's health never. A
+  carried result is judged again at its destination by its schema rules alone, where some
+  rule's `match.path`, `exclude.path` or `allowed_paths` reads where a document stands: its
+  bytes are the document's own, so every other finding is the same wherever they stand, but
+  the same bytes can breach a rule at one place and not another, and a combined constraint
+  that changes under a held value is a violation the move introduces. It is judged from the
+  store's projection of its frontmatter where the index vouches for it and from its bytes,
+  read whole once, where it does not; a folder move's re-judgment costs the documents it
+  moves times their projections' size, its rule work on the logical rule counters.
   Publication is still a window: a crash, an I/O failure, a create
   whose name another writer took after staging, or a foreign edit reaching a target after
   its staging can stop it part-way, and the apply report names every target that landed. A

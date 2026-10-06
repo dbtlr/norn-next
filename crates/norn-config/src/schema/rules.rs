@@ -156,9 +156,10 @@
 //! **A path selector makes a carried move's judgment necessary.** A rule's
 //! `match.path`, `exclude.path` and `allowed_paths` conclude about a document
 //! from where it stands, so the same bytes can be valid at one path and in
-//! breach at another; the host applier's skip of a document a move carries
-//! byte for byte (`norn-host`'s `applier::stage`) is sound only while no write
-//! judges a rule.
+//! breach at another; the host applier judges a document a move carries byte
+//! for byte again at its destination wherever the schema states such a rule
+//! ([`VaultSchema::reads_document_paths`]), from the store's projection of its
+//! frontmatter.
 //!
 //! [ADR 0035]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md
 //! [ADR 0036]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0036-a-repair-fix-is-declared-on-the-constraint-it-serves.md
@@ -706,6 +707,19 @@ impl VaultSchema {
     /// The schema rules, in the byte order of their names.
     pub fn rules(&self) -> impl Iterator<Item = &Rule> {
         self.rules.values()
+    }
+
+    /// Whether some rule reads where a document stands: a `match.path`, an
+    /// `exclude.path` or `allowed_paths`. Where none does, one frontmatter is
+    /// judged alike at every path ([`VaultSchema::judge`]), so the write gate
+    /// judges a document a move carries byte for byte again only where this
+    /// holds.
+    pub fn reads_document_paths(&self) -> bool {
+        self.rules.values().any(|rule| {
+            rule.selector.path.is_some()
+                || !rule.selector.exclude.is_empty()
+                || rule.allowed_paths.is_some()
+        })
     }
 
     /// The rule called `name`, if the schema declares one.

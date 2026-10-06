@@ -48,8 +48,9 @@ use norn_config::schema::{
 };
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
-    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkAnchor,
-    LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
+    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, HeldBlock,
+    LinkAnchor, LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource,
+    TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{
@@ -968,6 +969,56 @@ fn plan_rule_judgment(
         .map(|finding| rule_finding(path, subject, finding))
         .collect();
     (findings, work)
+}
+
+/// Judge the document at `subject` whose frontmatter block came to `block`
+/// against the vault schema's field declarations and rules, as
+/// [`plan_document`] judges one from its bytes: the rule findings it files,
+/// and the work that cost. A block nothing read is judged against nothing,
+/// as there.
+///
+/// **What the write gate judges a carried document by.** A document a move
+/// carries byte for byte is judged again at its destination, since a rule's
+/// path selectors and allowed paths read where it stands, and the gate reads
+/// its block from the store's projection where the index vouches for it
+/// ([`norn_store::Snapshot::held_frontmatter`]) and from its bytes
+/// ([`frontmatter_block`]) where it does not, so this is the one judgment
+/// either reading meets. Every other finding a document's bytes conclude is
+/// a function of its bytes alone, the same wherever it stands.
+pub(crate) fn judge_block(
+    subject: &DocumentPath,
+    block: &HeldBlock,
+    declared: &Declared,
+    case: CaseFold,
+) -> (Vec<PlannedFinding>, RuleWork) {
+    let frontmatter = match block {
+        HeldBlock::Read(value) => Some(value),
+        HeldBlock::None => None,
+        HeldBlock::Unread => return (Vec::new(), RuleWork::default()),
+    };
+    plan_rule_judgment(
+        Path::new(subject.as_str()),
+        subject,
+        frontmatter,
+        declared.schema(),
+        case,
+    )
+}
+
+/// What the frontmatter block of the document `bytes` spell came to, read as
+/// a derivation reads it ([`map_document`]); `None` where the bytes decode as
+/// no document.
+pub(crate) fn frontmatter_block(bytes: &[u8]) -> Option<HeldBlock> {
+    let source = document_source(bytes).ok()?;
+    let document = parsed(source);
+    Some(if document.frontmatter_refusal().is_some() {
+        HeldBlock::Unread
+    } else {
+        match document.frontmatter() {
+            Some(value) => HeldBlock::Read(map_value(value)),
+            None => HeldBlock::None,
+        }
+    })
 }
 
 /// The planned finding a rule judgment's `finding` is filed as.

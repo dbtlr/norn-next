@@ -1354,3 +1354,31 @@ rules:
     };
     assert_eq!(conflicted("ana"), conflicted("bo"));
 }
+
+/// **A schema reads where a document stands only through a rule's
+/// `match.path`, `exclude.path` or `allowed_paths`**: a schema whose rules
+/// select and constrain by frontmatter alone does not.
+#[test]
+fn a_schema_reads_document_paths_only_through_a_rules_path_parts() {
+    for (bytes, reads) in [
+        ("version: 1\n", false),
+        (
+            "version: 1\nrules:\n  r: { match: { frontmatter: { kind: x } }, required: { owner: } }\n",
+            false,
+        ),
+        (
+            "version: 1\nrules:\n  r: { match: { path: 'a/**' } }\n",
+            true,
+        ),
+        (
+            "version: 1\nrules:\n  r: { exclude: { path: ['a/**'] } }\n",
+            true,
+        ),
+        (
+            "version: 1\nrules:\n  r: { allowed_paths: { paths: ['a/**'] } }\n",
+            true,
+        ),
+    ] {
+        assert_eq!(schema(bytes).reads_document_paths(), reads, "{bytes}");
+    }
+}

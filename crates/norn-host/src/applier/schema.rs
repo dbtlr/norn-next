@@ -41,6 +41,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use norn_config::schema::FindingIdentity;
+use norn_store::HeldBlock;
 use norn_wire::{
     CaseFold, DocumentPath, FindingKind, RefusedCheck, RuleSet, SchemaViolation, ValueHead,
 };
@@ -123,6 +124,24 @@ pub(super) fn judge(
     count_rule_work(plan.rule_work);
     Judged {
         violations: plan.findings.into_iter().map(Violation::of).collect(),
+    }
+}
+
+/// Judge the frontmatter block `block` as the document at `path`'s, by the
+/// schema rules alone ([`judge_block`](crate::derivation::judge_block)): what
+/// a document a move carries byte for byte is judged by at the place it
+/// leaves and the place it lands. What the judgment paid is tallied as the
+/// derivation's is.
+pub(super) fn judge_block(
+    path: &DocumentPath,
+    block: &HeldBlock,
+    declared: &Declared,
+    case: CaseFold,
+) -> Judged {
+    let (findings, work) = crate::derivation::judge_block(&path.into(), block, declared, case);
+    count_rule_work(work);
+    Judged {
+        violations: findings.into_iter().map(Violation::of).collect(),
     }
 }
 

@@ -464,6 +464,17 @@ impl LinkIndex for PlanSnapshot<'_> {
             .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
     }
 
+    /// The frontmatter the snapshot holds for `holder`, read by its path
+    /// without its body. What the read costs is the snapshot's own
+    /// counters', as every read on it is.
+    fn held_frontmatter(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldFrontmatter>, PageRefused> {
+        self.reading(|snapshot| snapshot.held_frontmatter(&holder.into()))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
     /// its read hold's, and stays.
     fn release(&self) {

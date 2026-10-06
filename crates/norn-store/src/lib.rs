@@ -121,6 +121,7 @@ mod find;
 mod get;
 mod hash;
 mod health;
+mod held_frontmatter;
 mod held_links;
 mod increment;
 mod json;
@@ -163,9 +164,15 @@ pub use health::resolution::{
 };
 pub use health::run::ResolutionStatement;
 pub use health::{KeySummaries, LinkSelection};
+pub use held_frontmatter::{
+    HELD_FRONTMATTER_STATEMENTS, HeldBlock, HeldFrontmatter, HeldFrontmatterPlan,
+    HeldFrontmatterStatement,
+};
 pub use held_links::{HELD_LINKS_STATEMENTS, HeldLinks, HeldLinksPlan, HeldLinksStatement};
 pub use increment::{Change, DerivedFinding, IncrementOutcome, IncrementProvenance};
-pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
+pub use json::{
+    FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json, frontmatter_of_projection,
+};
 pub use link::{named_paths, relative_spelling, rooted_spelling, spelled_place};
 pub use read::{
     DEFAULT_PAGE, FieldMatch, FieldOrder, IN_VALUES_CEILING, MatchedColumn, PageRefusal,
