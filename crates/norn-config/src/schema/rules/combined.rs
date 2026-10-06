@@ -140,13 +140,17 @@ impl<'s> CombinedConstraint<'s> {
 
     /// Every way the combined constraint is empty — no document could meet
     /// it — whatever the document holds: a field required and forbidden, a
-    /// closed-set intersection with no member, and allowed paths sharing no
-    /// document path under `case`. Each names every contributing rule in name order.
+    /// closed-set intersection with no member, and the allowed paths of two
+    /// or more rules sharing no document path under `case`. Each names every
+    /// contributing rule in name order.
     ///
     /// An empty intersection is reported whether or not the field is
     /// required, carrying which: schema read refuses one on a required field
     /// alone, and a finding reports one on an unrequired field only where the
-    /// document holds a value.
+    /// document holds an element the closed sets judge. Schema read asks this
+    /// of groups of rules that always select together; rule judgment decides
+    /// placement itself, where one rule's allowed paths admitting no document
+    /// path is a conflict too ([`VaultSchema::judge`]).
     pub fn conflicts(&self, case: CaseFold) -> Vec<RulesConflict> {
         let mut conflicts = self.field_conflicts();
         let placed: Vec<&Rule> = self.placement_rules().collect();
