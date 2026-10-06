@@ -2200,6 +2200,54 @@ rules:
         }
     }
 
+    /// **A block nothing read is judged against no rule.** Its fields are
+    /// unknown rather than absent, so a rule requiring a field it may hold
+    /// would report it missing from a block that holds it: the unread
+    /// block's own finding is the one the plan carries. The same rule
+    /// judges a block that reads.
+    #[test]
+    fn an_unread_block_is_judged_against_no_rule() {
+        let requiring = Declared::pinned(
+            VaultSchema::parse(b"version: 1\nrules:\n  owned: { required: { owner: } }\n")
+                .expect("a schema stating a selectorless rule"),
+            "requiring",
+        );
+        let plan = |source: &str| {
+            let bytes = source.as_bytes();
+            plan_document(
+                Path::new("note.md"),
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+                None,
+                &requiring,
+                CaseFold::Exact,
+            )
+        };
+        let unread = plan("---\ntitle: never closes\n# heading\n");
+        assert_eq!(
+            unread
+                .findings
+                .iter()
+                .map(|finding| finding.cause)
+                .collect::<Vec<_>>(),
+            [Cause::UnreadBlock(UnreadBlock::Unclosed)]
+        );
+        assert_eq!(
+            unread.rule_work,
+            RuleWork::default(),
+            "the rules were asked"
+        );
+        let read = plan("---\ntitle: closes\n---\n# heading\n");
+        assert_eq!(
+            read.findings
+                .iter()
+                .map(|finding| finding.cause)
+                .collect::<Vec<_>>(),
+            [Cause::RuleBreach(Breach::RequiredMissing)]
+        );
+    }
+
     /// **A document that derives is planned from its own bytes alone.** The
     /// upsert carries exactly the facts the act derived, and the finding beside
     /// it — where the block went unread — stands at those facts' own identity.
@@ -2843,45 +2891,20 @@ rules:
         }
     }
 
-    /// **Find's field equality reads a value as a rule's selector reads it**
-    /// ([`VaultSchema::selects`], the reference): a value not of its key's
-    /// declared shape reads as no value — a list under a key declared
-    /// single, one value under a key declared a list, a map anywhere — and a
-    /// tag key, the `tags` carrier declared or not or a key declared `tags`,
-    /// compares under the tag fold with its `#` marker optional, while any
-    /// other key compares exactly as written. Equality and a one-value
-    /// membership find the documents a selector on the value selects, and
-    /// inequality every other document.
-    #[test]
-    fn find_equality_reads_a_value_as_the_rule_selectors_do() {
+    /// Hold that find's equality, one-value membership and inequality on each
+    /// key and value of `parts` answer what a rule's selector on that value
+    /// ([`VaultSchema::selects`], the reference) answers over `documents`,
+    /// derived under `fields`: equality and membership find the documents
+    /// the selector selects, and inequality every other document.
+    fn assert_find_equality_reads_as_the_selectors_do(
+        label: &str,
+        fields: &str,
+        documents: &[(&str, String)],
+        parts: &[(&str, &str)],
+    ) {
         use norn_wire::Predicate;
 
-        const FIELDS: &str = "version: 1
-fields:
-  kind: { type: text, shape: single }
-  items: { type: text, shape: list }
-  labels: { type: tags }
-  code: { type: text }
-";
-        let documents: Vec<(&str, String)> = vec![
-            (
-                "single.md",
-                "---\nkind: a\nitems: [x]\nlabels: [Work]\ntags: [Work, '#Play']\ncode: A\n---\n"
-                    .to_string(),
-            ),
-            (
-                "listed.md",
-                "---\nkind: [a, b]\nitems: x\nlabels: '#work'\ntags: play\ncode: a\n---\n"
-                    .to_string(),
-            ),
-            (
-                "nulls.md",
-                "---\nkind: null\nitems: []\ntags: [2024]\n---\n".to_string(),
-            ),
-            ("mapped.md", "---\nkind: { a: 1 }\n---\n".to_string()),
-            ("none.md", "# none\n".to_string()),
-        ];
-        let vault = DerivedVault::new("norn-host-equality-reading", FIELDS.as_bytes(), &documents);
+        let vault = DerivedVault::new(label, fields.as_bytes(), documents);
         let find = |part: Predicate| vault.find(DerivedVault::request().with_predicates([part]));
         let every: Vec<&str> = {
             let mut paths: Vec<&str> = documents.iter().map(|(path, _)| *path).collect();
@@ -2889,20 +2912,9 @@ fields:
             paths
         };
 
-        for (key, value) in [
-            ("kind", "a"),
-            ("items", "x"),
-            ("labels", "work"),
-            ("labels", "#WORK"),
-            ("tags", "work"),
-            ("tags", "#play"),
-            ("tags", "PLAY"),
-            ("tags", "2024"),
-            ("code", "a"),
-            ("code", "A"),
-        ] {
+        for (key, value) in parts.iter().copied() {
             let schema = VaultSchema::parse(
-                format!("{FIELDS}rules:\n  probe: {{ match: {{ frontmatter: {{ {key}: '{value}' }} }} }}\n")
+                format!("{fields}rules:\n  probe: {{ match: {{ frontmatter: {{ {key}: '{value}' }} }} }}\n")
                     .as_bytes(),
             )
             .expect("a schema selecting on the value");
@@ -2946,6 +2958,83 @@ fields:
                 "`{key}` not equal to `{value}`"
             );
         }
+    }
+
+    /// **Find's field equality reads a value as a rule's selector reads it**:
+    /// a value not of its key's declared shape reads as no value — a list
+    /// under a key declared single, one value under a key declared a list, a
+    /// map anywhere — and a tag key, the `tags` carrier declared or not or a
+    /// key declared `tags`, compares under the tag fold with its `#` marker
+    /// optional, while any other key compares exactly as written.
+    #[test]
+    fn find_equality_reads_a_value_as_the_rule_selectors_do() {
+        let documents: Vec<(&str, String)> = vec![
+            (
+                "single.md",
+                "---\nkind: a\nitems: [x]\nlabels: [Work]\ntags: [Work, '#Play']\ncode: A\n---\n"
+                    .to_string(),
+            ),
+            (
+                "listed.md",
+                "---\nkind: [a, b]\nitems: x\nlabels: '#work'\ntags: play\ncode: a\n---\n"
+                    .to_string(),
+            ),
+            (
+                "nulls.md",
+                "---\nkind: null\nitems: []\ntags: [2024]\n---\n".to_string(),
+            ),
+            ("mapped.md", "---\nkind: { a: 1 }\n---\n".to_string()),
+            ("none.md", "# none\n".to_string()),
+        ];
+        assert_find_equality_reads_as_the_selectors_do(
+            "norn-host-equality-reading",
+            "version: 1
+fields:
+  kind: { type: text, shape: single }
+  items: { type: text, shape: list }
+  labels: { type: tags }
+  code: { type: text }
+",
+            &documents,
+            &[
+                ("kind", "a"),
+                ("items", "x"),
+                ("labels", "work"),
+                ("labels", "#WORK"),
+                ("tags", "work"),
+                ("tags", "#play"),
+                ("tags", "PLAY"),
+                ("tags", "2024"),
+                ("code", "a"),
+                ("code", "A"),
+            ],
+        );
+    }
+
+    /// **The `tags` carrier declared with a typed order compares under the
+    /// tag fold, and only where its value reads as that type**, as its
+    /// equality key does: under `type: number`, `5` and `5.0` are one tag and
+    /// `05` another, since the fold compares the tag a value names rather
+    /// than its number, and `#5` — marked, so no number — and `abc` equal
+    /// nothing.
+    #[test]
+    fn find_equality_on_a_typed_tag_carrier_reads_as_the_selectors_do() {
+        let documents: Vec<(&str, String)> = vec![
+            ("marked.md", "---\ntags: ['#5']\n---\n".to_string()),
+            ("five.md", "---\ntags: [5]\n---\n".to_string()),
+            ("padded.md", "---\ntags: ['05']\n---\n".to_string()),
+            ("float.md", "---\ntags: [5.0]\n---\n".to_string()),
+            ("word.md", "---\ntags: [abc]\n---\n".to_string()),
+            ("marked-one.md", "---\ntags: '#1'\n---\n".to_string()),
+            ("one.md", "---\ntags: 1\n---\n".to_string()),
+            ("none.md", "# none\n".to_string()),
+        ];
+        assert_find_equality_reads_as_the_selectors_do(
+            "norn-host-typed-tag-carrier",
+            "version: 1\nfields:\n  tags: { type: number }\n",
+            &documents,
+            &[("tags", "5"), ("tags", "05"), ("tags", "1")],
+        );
     }
 
     /// One compared document: its path, then the raw text it writes under
