@@ -82,8 +82,8 @@
 //!
 //! Every section is optional. A schema that declares nothing — which is what
 //! `version: 1` alone is — is a valid schema that judges no document, and
-//! [`VaultSchema::rederives_documents`] is how a caller asks whether it is
-//! worth re-deriving any document under it.
+//! [`VaultSchema::rederives_documents`] answers whether it is worth
+//! re-deriving any document under it.
 //!
 //! **A key this grammar does not hold is a refusal.** `tagz:` or
 //! `undecalred: report` would otherwise read as a valid schema that quietly
@@ -301,8 +301,9 @@ impl VaultSchema {
     /// Whether a pin of this schema obliges a re-derivation of the documents
     /// standing under it.
     ///
-    /// The re-derivation a schema change implies costs the vault, so the
-    /// question is asked before it is paid. The answer is the disjunction over
+    /// The re-derivation a schema change implies costs the vault, so this is
+    /// the question to ask before paying it; no caller asks it yet (see the
+    /// dormant carrier below). The answer is the disjunction over
     /// the declarations some per-document derived state reads — state a
     /// document's own re-derivation derives again — and that set holds three:
     ///
