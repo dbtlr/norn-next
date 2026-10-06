@@ -1249,10 +1249,15 @@ fn a_summary_is_not_paged_so_it_refuses_a_cursor_and_ignores_the_bound() {
 
 /// The plan the store reported for one statement, in the harness's shape.
 fn plan(emitted: &ValidatePlan) -> QueryPlan {
+    emitted_plan(&emitted.plan)
+}
+
+/// The plan the store reported for one statement any verb ran, in the
+/// harness's shape.
+fn emitted_plan(emitted: &norn_store::EmittedPlan) -> QueryPlan {
     QueryPlan::new(
-        emitted.plan.sql.clone(),
+        emitted.sql.clone(),
         emitted
-            .plan
             .steps
             .iter()
             .map(|step| PlanRow::new(step.id, step.parent, step.detail.clone()))
@@ -2657,7 +2662,11 @@ fn a_rule_summary_aggregates_over_the_rule_kind_and_severity_index() {
 /// **The rule sets a page cites are read by their key**: one seek of
 /// `rule_sets`' row id per set the page's rows cite, each set's names walked
 /// out of its spelling, reading nothing end to end and sorting nothing, and a
-/// page citing no set reads none.
+/// page citing no set reads none. The statement is the one every response
+/// carrying finding rows resolves its sets by, so it is judged as each of
+/// them runs it: a validate page, a find's and a search's findings column,
+/// and a get's record and page of findings — each plan inspection naming it
+/// among the statements its verb ran.
 ///
 /// Control: a plan scanning the table fails the bar.
 #[test]
@@ -2677,6 +2686,73 @@ fn the_rule_sets_a_page_cites_are_read_by_their_key() {
         );
         assert_eq!(read.len(), 1, "{params:?}");
         judge(&read[0]);
+    }
+
+    // Each verb on one snapshot, released before the validates below take theirs.
+    {
+        let snapshot = validating_store.snapshot();
+        let declared = declared();
+        let findings = || [norn_wire::Column::findings()];
+        let rule_sets_read = |verb: &str, plans: Vec<(ReadStatement, &norn_store::EmittedPlan)>| {
+            let read: Vec<QueryPlan> = plans
+                .into_iter()
+                .filter(|(statement, _)| {
+                    *statement == ReadStatement::Validate(ValidateStatement::RuleSets)
+                })
+                .map(|(_, emitted)| emitted_plan(emitted))
+                .collect();
+            assert_eq!(read.len(), 1, "{verb} read the rule sets other than once");
+            judge(&read[0]);
+        };
+        let found = snapshot
+            .find_plans(
+                &norn_wire::FindParams::new(vault()).with_columns(findings()),
+                &declared,
+            )
+            .expect("a find's plans");
+        rule_sets_read(
+            "a find",
+            found
+                .iter()
+                .map(|plan| (plan.statement, &plan.plan))
+                .collect(),
+        );
+        let searched = snapshot
+            .search_plans(
+                &norn_store::LexicalQuery::new("body").with_columns(findings()),
+                &declared,
+            )
+            .expect("a search's plans");
+        rule_sets_read(
+            "a search",
+            searched
+                .iter()
+                .map(|plan| (plan.statement, &plan.plan))
+                .collect(),
+        );
+        let got = |params: norn_wire::GetParams| {
+            snapshot
+                .get_plans(&params, &declared, &NoText)
+                .expect("a get's plans")
+        };
+        let target = || {
+            norn_wire::GetParams::new(vault(), ResolutionTarget::new("notes/c").expect("a target"))
+        };
+        for (verb, plans) in [
+            ("a get's record", got(target().with_columns(findings()))),
+            (
+                "a get's findings",
+                got(target().with_collection(norn_wire::CollectionSelector::Findings)),
+            ),
+        ] {
+            rule_sets_read(
+                verb,
+                plans
+                    .iter()
+                    .map(|plan| (plan.statement, &plan.plan))
+                    .collect(),
+            );
+        }
     }
     let none = validating_store.plans(&validating().with_kinds([FindingKind::UndeclaredTag]));
     assert!(

@@ -2005,7 +2005,7 @@ fn no_statement_a_count_runs_reads_a_documents_payload() {
         .expect("the plans of a find");
     let rows = hydrated
         .iter()
-        .find(|emitted| emitted.statement == FindStatement::HydrateDocuments)
+        .find(|emitted| emitted.statement == ReadStatement::Find(FindStatement::HydrateDocuments))
         .expect("a find hydrates its rows");
     let rows = reads_of(&rows.plan);
     assert!(

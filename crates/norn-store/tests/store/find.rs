@@ -20,8 +20,8 @@ use norn_store::{
     BlockFact, ContentModel, DEFAULT_PAGE, FIND_STATEMENTS, FieldDeclaration, FieldOrder, FindPlan,
     FindStatement, Found, FrontmatterValue, HeadingFact, IN_VALUES_CEILING, LinkFact, LinkFamily,
     MAX_PAGE, NESTED_ROW_CEILING, Nested, PageDirection, PageRefusal, READ_FILTERS, ReadBound,
-    ReadFilter, Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder, SuffixKey,
-    TagFact, TagSource, TypedOrder, induced_failure,
+    ReadFilter, ReadStatement, Snapshot, SnapshotReader, Span, Store, StoreError, StoredPathOrder,
+    SuffixKey, TagFact, TagSource, TypedOrder, induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -333,7 +333,7 @@ fn plan(emitted: &FindPlan) -> QueryPlan {
 pub(crate) fn plan_of(plans: &[FindPlan], statement: FindStatement) -> QueryPlan {
     let matching: Vec<&FindPlan> = plans
         .iter()
-        .filter(|plan| plan.statement == statement)
+        .filter(|plan| plan.statement == ReadStatement::Find(statement))
         .collect();
     assert_eq!(
         matching.len(),
@@ -877,9 +877,9 @@ fn a_known_key_and_the_field_universe_read_the_presence_rows_alone() {
             .with_sort(Sort::new(SortKey::field("count"), Direction::Ascending)),
     );
     assert!(
-        declared_only
-            .iter()
-            .all(|plan| !KEY_PROBES.contains(&plan.statement)),
+        declared_only.iter().all(|plan| !KEY_PROBES
+            .map(ReadStatement::Find)
+            .contains(&plan.statement)),
         "a declared key asked the snapshot whether it is known: {declared_only:?}"
     );
 
@@ -931,7 +931,7 @@ fn a_bare_directory_probe_is_two_seeks_of_the_path_index() {
             seeded
                 .plans(&request().with_predicates([Predicate::path("notes/*")]))
                 .iter()
-                .all(|plan| plan.statement != FindStatement::BareDirectory)
+                .all(|plan| plan.statement != ReadStatement::Find(FindStatement::BareDirectory))
         );
 
         seeded.drop_index(index);
@@ -979,7 +979,7 @@ fn an_existence_check_is_one_select_exists_statement() {
         let plans = seeded.plans_under(&request().with_predicates([part.clone()]), &undeclared);
         let steps: Vec<u64> = plans
             .iter()
-            .filter(|plan| plan.statement == statement)
+            .filter(|plan| plan.statement == ReadStatement::Find(statement))
             .map(|plan| plan.vm_steps)
             .collect();
         assert_eq!(steps.len(), 1, "{part:?} ran {statement:?} {steps:?}");
@@ -1033,7 +1033,7 @@ fn a_match_probe_reads_the_full_text_index_through_its_selection() {
         seeded
             .plans(&request().with_predicates([Predicate::tag("draft")]))
             .iter()
-            .all(|plan| plan.statement != FindStatement::MatchProbe)
+            .all(|plan| plan.statement != ReadStatement::Find(FindStatement::MatchProbe))
     );
 
     let unselected = QueryPlan::new(
@@ -1655,7 +1655,7 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
                 let plans = roots[on(*shape)].plans(&params.with_predicates([part.clone()]));
                 let page = plans
                     .iter()
-                    .find(|plan| plan.statement == statement)
+                    .find(|plan| plan.statement == ReadStatement::Find(statement))
                     .expect("the page statement");
                 assert_eq!(
                     page.filters,
@@ -1707,12 +1707,14 @@ fn every_filter_seeks_the_index_its_values_are_bounds_for() {
 // ---- the work bar ----
 
 /// Whether `statement` is a page section rather than a probe or a hydration.
-fn is_page(statement: FindStatement) -> bool {
+fn is_page(statement: ReadStatement) -> bool {
     matches!(
         statement,
-        FindStatement::PathPage(_)
-            | FindStatement::FieldValuePage(..)
-            | FindStatement::FieldMissingPage(..)
+        ReadStatement::Find(
+            FindStatement::PathPage(_)
+                | FindStatement::FieldValuePage(..)
+                | FindStatement::FieldMissingPage(..)
+        )
     )
 }
 
@@ -1851,9 +1853,9 @@ fn an_ascending_field_page_walks_the_documents_carrying_its_key_before_its_first
 
 /// The alias a page statement reads its own rows under: `f` for a field
 /// sort's valued section, which reads the marker rows, and `d` otherwise.
-fn page_alias(statement: FindStatement) -> &'static str {
+fn page_alias(statement: ReadStatement) -> &'static str {
     match statement {
-        FindStatement::FieldValuePage(..) => "f",
+        ReadStatement::Find(FindStatement::FieldValuePage(..)) => "f",
         _ => "d",
     }
 }
@@ -2400,14 +2402,14 @@ fn a_find_resolves_a_links_to_parts_target_once() {
             links_to("glossary").with_columns([Column::links()]),
         ),
     ] {
-        let ran: Vec<FindStatement> = seeded
+        let ran: Vec<ReadStatement> = seeded
             .plans(&params)
             .into_iter()
             .map(|plan| plan.statement)
             .collect();
         let resolved = ran
             .iter()
-            .filter(|statement| **statement == FindStatement::ClassHead)
+            .filter(|statement| **statement == ReadStatement::Find(FindStatement::ClassHead))
             .count();
         assert_eq!(
             resolved, 1,
@@ -2619,9 +2621,10 @@ fn a_malformed_full_text_query_is_reported_and_empties_the_page() {
         let plans = seeded.plans(&bounded().with_predicates([Predicate::matches(query)]));
         plan_of(&plans, FindStatement::MatchProbe);
         assert!(
-            plans
-                .iter()
-                .all(|plan| !matches!(plan.statement, FindStatement::PathPage(_))),
+            plans.iter().all(|plan| !matches!(
+                plan.statement,
+                ReadStatement::Find(FindStatement::PathPage(_))
+            )),
             "an empty page still ran a page statement: {plans:?}"
         );
     }

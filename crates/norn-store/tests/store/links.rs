@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use norn_store::{
     CANDIDATE_HEAD, ContentModel, DocumentFacts, FindStatement, LinkFact, LinkFamily, ReadFilter,
-    Snapshot, SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation, induced_failure,
+    ReadStatement, Snapshot, SnapshotReader, Store, StoredPathOrder, SuffixKey, Validation,
+    induced_failure,
 };
 use norn_testkit::explain::{Access, PlanRow, QueryPlan};
 use norn_wire::{
@@ -1031,7 +1032,7 @@ fn plan(emitted: &norn_store::FindPlan) -> QueryPlan {
 fn plans_of(plans: &[norn_store::FindPlan], statement: FindStatement) -> Vec<QueryPlan> {
     let matching: Vec<QueryPlan> = plans
         .iter()
-        .filter(|plan| plan.statement == statement)
+        .filter(|plan| plan.statement == ReadStatement::Find(statement))
         .map(plan)
         .collect();
     assert!(
@@ -1498,7 +1499,7 @@ fn no_link_read_reads_a_documents_payload() {
         assert!(
             plans
                 .iter()
-                .any(|plan| plan.statement == FindStatement::LinkTargets)
+                .any(|plan| plan.statement == ReadStatement::Find(FindStatement::LinkTargets))
         );
         for emitted in &plans {
             reads_of(&emitted.plan).assert_reads_none_of(DOCUMENT_PAYLOAD);
@@ -1507,7 +1508,7 @@ fn no_link_read_reads_a_documents_payload() {
         let body = linked.plans(&request().with_columns([Column::body()]));
         let hydrate = body
             .iter()
-            .find(|plan| plan.statement == FindStatement::HydrateDocuments)
+            .find(|plan| plan.statement == ReadStatement::Find(FindStatement::HydrateDocuments))
             .expect("a hydration");
         failure_of("a body read", || {
             reads_of(&hydrate.plan).assert_reads_none_of(DOCUMENT_PAYLOAD)
