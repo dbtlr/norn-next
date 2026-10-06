@@ -10,7 +10,8 @@
 //! **`validate` emits no plan.** What to do about a finding is a repair's
 //! question, and this verb answers only that the finding stands.
 //!
-//! **A finding cites its rules by set, and a page resolves each set once.**
+//! **A finding cites its rules by set, and a page resolves each set once**,
+//! as every response carrying finding rows does.
 //! A finding judged against the schema rules names the set of rules it cites
 //! by one number ([`FindingRow::rule_set`]), and a page of findings carries
 //! each set its rows cite once, as the names of its rules

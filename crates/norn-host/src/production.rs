@@ -17158,6 +17158,7 @@ mod tests {
             let paths = answered
                 .answer
                 .report
+                .page
                 .rows
                 .iter()
                 .map(|row| row.path.as_str().to_string())

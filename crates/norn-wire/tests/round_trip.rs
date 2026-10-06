@@ -23,11 +23,11 @@ use norn_wire::{
     DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
     EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
     ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
-    FilePath, FileState, FindParams, FindingKind, FindingRow, FindingScope, Fingerprints,
-    FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit,
-    IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead, InitParams,
-    InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress, LinkAdvisory,
-    LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
+    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
+    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
+    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
+    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
+    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
     MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
     ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
     NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
@@ -925,7 +925,10 @@ fn collection_pages() -> Vec<CollectionPage> {
             None,
             vec![],
         )),
-        CollectionPage::findings(Page::new(vec![finding_row()], None, vec![])),
+        CollectionPage::findings(
+            Page::new(vec![finding_row(), rule_finding_row()], None, vec![]),
+            [rule_set_three()],
+        ),
     ]
 }
 
@@ -947,10 +950,15 @@ fn whole_document_row() -> DocumentRow {
         .with_findings(collection(vec![finding_row()], 1))
 }
 
+/// The rule set [`rule_finding_row`] cites.
+fn rule_set_three() -> RuleSet {
+    RuleSet::new(3, ["tasks".to_string(), "open-tasks".to_string()]).expect("a rule set")
+}
+
 /// Every shape a `get` answers with.
 fn get_reports() -> Vec<GetReport> {
     let mut reports = vec![
-        GetReport::record(whole_document_row()),
+        GetReport::record(whole_document_row(), []),
         GetReport::section(
             path("notes/a.md"),
             heading_row(),
@@ -3528,16 +3536,22 @@ fn a_search_report_declares_its_ladder_beside_its_page() {
     let report = SearchReport::new(
         LadderDeclaration::lexical(),
         Page::new(vec![Hit::new(path("notes/a.md"), score(0.5))], None, vec![]),
+        [],
     );
     assert_eq!(
         wire(&report),
         concat!(
             r#"{"ladder":{"rungs":[{"rung":"lexical"}],"repeatable":true},"#,
-            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]}}"#
+            r#""page":{"rows":[{"path":"notes/a.md","score":0.5}],"next":null,"moved":[]},"#,
+            r#""rule_sets":[]}"#
         )
     );
     for ladder in ladder_declarations() {
-        round_trip(&SearchReport::new(ladder, Page::new(vec![], None, vec![])));
+        round_trip(&SearchReport::new(
+            ladder,
+            Page::new(vec![], None, vec![]),
+            [],
+        ));
     }
     assert!(
         serde_json::from_str::<SearchReport>(r#"{"page":{"rows":[],"next":null,"moved":[]}}"#)
@@ -5095,6 +5109,68 @@ fn a_rule_set_names_its_rules_in_byte_order_each_once() {
         assert!(error.to_string().contains(refusal), "{json}: {error}");
     }
     round_trip(&set);
+}
+
+/// **Every response carrying finding rows carries the rule sets they cite**,
+/// beside its page or its record, as the names of each set's rules: a find
+/// page and a search page beside their pages, a get record beside its
+/// document, and a get page of findings beside its page — each `[]` where no
+/// row cites a set.
+#[test]
+fn every_response_carrying_finding_rows_carries_the_rule_sets_they_cite() {
+    let row =
+        DocumentRow::new(path("tasks/a.md")).with_findings(collection(vec![rule_finding_row()], 1));
+    let sets = serde_json::json!([{"id": 3, "rules": ["open-tasks", "tasks"]}]);
+
+    let find = serde_json::to_value(FindReport::new(
+        Page::new(vec![row.clone()], None, vec![]),
+        [rule_set_three()],
+    ))
+    .expect("a find report as JSON");
+    assert_eq!(find["rule_sets"], sets);
+    assert_eq!(
+        find["page"]["rows"][0]["findings"]["items"][0]["rule_set"],
+        3
+    );
+
+    let search = serde_json::to_value(SearchReport::new(
+        LadderDeclaration::lexical(),
+        Page::new(
+            vec![Hit::new(path("tasks/a.md"), score(0.5)).with_document(row.clone())],
+            None,
+            vec![],
+        ),
+        [rule_set_three()],
+    ))
+    .expect("a search report as JSON");
+    assert_eq!(search["rule_sets"], sets);
+
+    let record = serde_json::to_value(GetReport::record(row.clone(), [rule_set_three()]))
+        .expect("a get record as JSON");
+    assert_eq!(record["shape"], "record");
+    assert_eq!(record["rule_sets"], sets);
+
+    let page = serde_json::to_value(GetReport::collection(
+        path("tasks/a.md"),
+        CollectionPage::findings(
+            Page::new(vec![rule_finding_row()], None, vec![]),
+            [rule_set_three()],
+        ),
+    ))
+    .expect("a get page as JSON");
+    assert_eq!(page["page"]["of"], "findings");
+    assert_eq!(page["page"]["rule_sets"], sets);
+
+    let none = serde_json::to_value(FindReport::new(
+        Page::new(vec![DocumentRow::new(path("tasks/a.md"))], None, vec![]),
+        [],
+    ))
+    .expect("a find report as JSON");
+    assert_eq!(none["rule_sets"], serde_json::json!([]));
+    round_trip(&FindReport::new(
+        Page::new(vec![row], None, vec![]),
+        [rule_set_three()],
+    ));
 }
 
 /// The refusal a target that names more than one document earns carries the

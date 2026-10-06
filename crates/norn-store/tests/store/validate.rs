@@ -2800,3 +2800,192 @@ fn a_page_of_a_rules_broad_range_costs_the_page_not_the_range() {
         );
     }
 }
+
+// ---- the rule sets every response carrying finding rows carries ----
+
+/// A get's document reader, which a record and a findings page never read.
+struct NoText;
+
+impl norn_store::DocumentText for NoText {
+    fn section(
+        &self,
+        _: &[norn_store::HeadingFact],
+        _: &str,
+        _: &str,
+    ) -> Option<norn_store::SectionAt> {
+        None
+    }
+
+    fn block(&self, _: &str, _: usize) -> std::ops::Range<usize> {
+        0..0
+    }
+}
+
+/// The names of each set in `sets`, after asserting the sets are exactly the
+/// ones `rows` cite: each cited set once, in the order of its identity, and no
+/// set no row cites.
+fn exactly_cited<'r>(
+    rows: impl IntoIterator<Item = &'r FindingRow>,
+    sets: &[RuleSet],
+) -> Vec<Vec<String>> {
+    let cited: std::collections::BTreeSet<u64> =
+        rows.into_iter().filter_map(|row| row.rule_set).collect();
+    let carried: Vec<u64> = sets.iter().map(|set| set.id).collect();
+    assert_eq!(
+        carried,
+        cited.into_iter().collect::<Vec<u64>>(),
+        "the response carries other sets than its rows cite: {sets:?}"
+    );
+    let mut names: Vec<Vec<String>> = sets.iter().map(|set| set.rules.clone()).collect();
+    names.sort();
+    names
+}
+
+/// The finding rows a page of document rows carries in its findings column.
+fn projected<'r>(
+    documents: impl IntoIterator<Item = &'r norn_wire::DocumentRow>,
+) -> Vec<&'r FindingRow> {
+    documents
+        .into_iter()
+        .filter_map(|document| document.findings.as_ref())
+        .flat_map(|findings| findings.items.iter())
+        .collect()
+}
+
+fn set_names(rules: &[&[&str]]) -> Vec<Vec<String>> {
+    let mut names: Vec<Vec<String>> = rules
+        .iter()
+        .map(|set| set.iter().map(|rule| (*rule).to_string()).collect())
+        .collect();
+    names.sort();
+    names
+}
+
+/// **Every response carrying finding rows carries exactly the rule sets they
+/// cite**, resolved the one way a validate page resolves them: a find's page
+/// and a search's page beside the findings column their rows project, a
+/// get's record beside its document, and a get's page of findings beside its
+/// rows. A response whose rows cite no set — or that projects no findings —
+/// carries none.
+#[test]
+fn every_response_carrying_finding_rows_carries_exactly_the_rule_sets_they_cite() {
+    let validating_store = ruling("rule-sets-every-verb");
+    let snapshot = validating_store.snapshot();
+    let declared = declared();
+    let both: &[&str] = &["open", "tasks"];
+    let find = |predicates: Vec<Predicate>, columns: Vec<norn_wire::Column>| {
+        snapshot
+            .find(
+                &norn_wire::FindParams::new(vault())
+                    .with_predicates(predicates)
+                    .with_columns(columns),
+                &declared,
+            )
+            .expect("a find")
+    };
+    let findings = || vec![norn_wire::Column::findings()];
+
+    let found = find(vec![Predicate::path("a.md")], findings());
+    assert_eq!(
+        exactly_cited(projected(&found.rows), &found.rule_sets),
+        set_names(&[both])
+    );
+    let found = find(Vec::new(), findings());
+    assert_eq!(
+        exactly_cited(projected(&found.rows), &found.rule_sets),
+        set_names(&[both, &["tasks"], &["open"]])
+    );
+    assert_eq!(
+        find(vec![Predicate::path("notes/d.md")], findings()).rule_sets,
+        Vec::new()
+    );
+    assert_eq!(find(Vec::new(), Vec::new()).rule_sets, Vec::new());
+
+    let get = |at: &str, params: fn(norn_wire::GetParams) -> norn_wire::GetParams| {
+        snapshot
+            .get(
+                &params(norn_wire::GetParams::new(
+                    vault(),
+                    ResolutionTarget::new(at).expect("a target"),
+                )),
+                &declared,
+                &NoText,
+            )
+            .expect("a get")
+            .report
+    };
+    let record = |at: &str| match get(at, |params| {
+        params.with_columns([norn_wire::Column::findings()])
+    }) {
+        norn_wire::GetReport::Record {
+            document,
+            rule_sets,
+            ..
+        } => exactly_cited(projected([&document]), &rule_sets),
+        other => panic!("a get of {at}'s record answered {other:?}"),
+    };
+    assert_eq!(record("b"), set_names(&[&["tasks"]]));
+    assert_eq!(record("notes/d"), set_names(&[]));
+    let page = |at: &str| match get(at, |params| {
+        params.with_collection(norn_wire::CollectionSelector::Findings)
+    }) {
+        norn_wire::GetReport::Collection {
+            page:
+                norn_wire::CollectionPage::Findings {
+                    page, rule_sets, ..
+                },
+            ..
+        } => exactly_cited(&page.rows, &rule_sets),
+        other => panic!("a get of {at}'s findings answered {other:?}"),
+    };
+    assert_eq!(page("notes/c"), set_names(&[&["open"], &["tasks"]]));
+    assert_eq!(page("notes/d"), set_names(&[]));
+
+    let searched = snapshot
+        .search(
+            &norn_store::LexicalQuery::new("body").with_columns(findings()),
+            &declared,
+        )
+        .expect("a search");
+    let documents: Vec<&norn_wire::DocumentRow> = searched
+        .hits
+        .iter()
+        .filter_map(|hit| hit.document.as_ref())
+        .collect();
+    assert_eq!(
+        exactly_cited(projected(documents), &searched.rule_sets),
+        set_names(&[both, &["tasks"], &["open"]])
+    );
+    let bare = snapshot
+        .search(&norn_store::LexicalQuery::new("body"), &declared)
+        .expect("a search");
+    assert_eq!(bare.rule_sets, Vec::new());
+
+    let candidates = snapshot
+        .search_candidates(&norn_wire::FindParams::new(vault()), &declared)
+        .expect("the search's candidates");
+    let ranked: Vec<(norn_store::Candidate, norn_wire::Score)> = candidates
+        .candidates
+        .into_iter()
+        .map(|candidate| (candidate, norn_wire::Score::new(1.0).expect("a score")))
+        .collect();
+    let hydrated = snapshot
+        .hydrate_hits(&ranked, &findings(), &declared)
+        .expect("hits naming the findings column");
+    let documents: Vec<&norn_wire::DocumentRow> = hydrated
+        .hits
+        .iter()
+        .filter_map(|hit| hit.document.as_ref())
+        .collect();
+    assert_eq!(
+        exactly_cited(projected(documents), &hydrated.rule_sets),
+        set_names(&[both, &["tasks"], &["open"]])
+    );
+    assert_eq!(
+        snapshot
+            .hydrate_hits(&ranked, &[], &declared)
+            .expect("hits naming no column")
+            .rule_sets,
+        Vec::new()
+    );
+}

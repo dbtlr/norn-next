@@ -60,6 +60,7 @@ use crate::address::VaultAddress;
 use crate::cursor::{Cursor, Page, Score};
 use crate::document::{Column, DocumentPath, DocumentRow};
 use crate::predicate::Predicate;
+use crate::read::validate::RuleSet;
 use crate::reading::{LadderDeclaration, Rung, retrieval_rungs};
 
 /// The most candidates one rung hands the ranking an answer is fused from:
@@ -405,12 +406,25 @@ pub struct SearchReport {
     pub ladder: LadderDeclaration,
     /// The hits, most relevant first, and where the next page begins.
     pub page: Page<Hit>,
+    /// Every rule set the findings column of the hits' document rows cites,
+    /// each once, in the order of its identity; empty where no row projects a
+    /// finding citing one.
+    pub rule_sets: Vec<RuleSet>,
 }
 
 impl SearchReport {
-    /// The page `page`, ranked by `ladder`.
-    pub const fn new(ladder: LadderDeclaration, page: Page<Hit>) -> Self {
-        SearchReport { ladder, page }
+    /// The page `page`, ranked by `ladder`, with the rule sets its rows'
+    /// findings cite.
+    pub fn new(
+        ladder: LadderDeclaration,
+        page: Page<Hit>,
+        rule_sets: impl IntoIterator<Item = RuleSet>,
+    ) -> Self {
+        SearchReport {
+            ladder,
+            page,
+            rule_sets: rule_sets.into_iter().collect(),
+        }
     }
 }
 

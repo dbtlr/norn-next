@@ -825,7 +825,7 @@ parse is met before the page runs; and the hydration of the rows a page returns 
 document rows by id, each projected nested collection's head and total by its
 `(document, ordinal)` index, and the findings column's head and total by `findings_path` at
 each row's path and the active fingerprint, the head in `(position, kind, id)` order, with the candidate heads and classes of the
-findings it kept by their primary keys; and the reads that resolve targets — a class's head
+findings it kept by their primary keys and the rule sets they cite by the sets' row ids; and the reads that resolve targets — a class's head
 and, where the head filled, its total, each a seek of the suffix key the root probes, run
 for a get's target and a links-to part's target; what every link a page carries names, one
 statement over the link index's keys, each distinct key read once, a suffix key's class a
@@ -929,9 +929,15 @@ that path, which a finding with no row beside it never satisfies. A finding row 
 candidate head and total the pillar stores, and an ambiguous link's finding a hint naming the
 `find` that enumerates its class, read through the one accessor a find's findings column reads through, so a finding
 is the same row on either verb. A finding judged against the schema rules also carries the
-identity of the rule set it cites and the bounded head of the value it judged, and a page
-carries each rule set its rows cite exactly once, as the names of its rules, so a row's
-bytes grow with neither. **A validate may select the findings citing one rule**: the rule
+identity of the rule set it cites and the bounded head of the value it judged, and every
+response carrying finding rows — a validate page, a get's record and page of findings, a
+find's and a search's page — carries each rule set its rows cite exactly once, beside them,
+as the names of its rules, resolved by the one statement a validate page resolves them by, so
+a row's bytes grow with neither. A set's identity resolves only against the sets of the
+response carrying it: it is where the store filed the set, stable across neither responses
+nor schema pins. No finding cites a rule until rule judgment in derivation files one
+(NORN-358), so today a validate selecting by rule answers from rows derivation does not yet
+write, and every response's rule sets are empty outside the store's own suite. **A validate may select the findings citing one rule**: the rule
 composes with the kinds, a severity floor, a path part, a document part and paging, a
 summary tallies only the findings citing it, and a rule the pinned declaration does not
 declare is refused as `vault/unknown-rule` naming it rather than answered with an empty page.
@@ -1066,7 +1072,8 @@ seek of its `(document, ordinal)` index from the cursor's ordinal; and the findi
 seek of `findings_path` at the document's path and the active fingerprint past the cursor's
 position, kind and id, in the `(position, kind, id)` order a find's findings column reads a
 document's findings in, under a cursor key of its own, since a validate's finding cursor is a
-place in the validate's kind-first order. Resolving a target costs its class: the head sorts every document the class's ranges
+place in the validate's kind-first order. A record's findings column and a findings page each
+carry the rule sets their rows cite, read as a validate page reads them. Resolving a target costs its class: the head sorts every document the class's ranges
 reach, so the class grows with the vault only where the vault adds documents the target
 names. A work bar reads the SQLite counters of every statement a get ran over two vault
 sizes whose classes did not grow: every shape costs the same at both, an ambiguous target's

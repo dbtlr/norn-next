@@ -11,8 +11,9 @@
 //!
 //! **A rule finding's citation and value are read off the row too.** The row
 //! carries the identity of the rule set it cites and the head of the value it
-//! judged, both as the pillar stores them; resolving a set to its rules is a
-//! validate page's, once per set it holds rather than once per row.
+//! judged, both as the pillar stores them. Resolving a set to its rules is
+//! the response's, once per set it holds rather than once per row, and every
+//! verb answering finding rows resolves through [`Snapshot::rule_sets`].
 //!
 //! **The head and the hint are read off what the pillar stores.** The head is
 //! the finding's candidate rows, which were bounded at
@@ -32,8 +33,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use norn_db::rusqlite::Row;
 use norn_wire::{
-    Candidate, CandidateHead, CursorKey, FindingKind, FindingRow, Hint, ResolutionTarget, RuleSet,
-    Severity,
+    Candidate, CandidateHead, CursorKey, DocumentRow, FindingKind, FindingRow, Hint,
+    ResolutionTarget, RuleSet, Severity,
 };
 
 use super::Ran;
@@ -163,22 +164,40 @@ pub(crate) fn finding_base(row: &Row<'_>) -> Reading<FindingBase> {
     }))
 }
 
+/// The finding rows the findings column of `documents` carries, in their
+/// order: what a page of document rows hands [`Snapshot::rule_sets`].
+pub(crate) fn projected_findings<'r>(
+    documents: impl IntoIterator<Item = &'r DocumentRow>,
+) -> impl Iterator<Item = &'r FindingRow> {
+    documents
+        .into_iter()
+        .filter_map(|document| document.findings.as_ref())
+        .flat_map(|findings| findings.items.iter())
+}
+
 impl Snapshot {
-    /// The rule sets `bases` cite, each once, in the order of its identity,
+    /// The rule sets `rows` cite, each once, in the order of its identity,
     /// each with its names in byte order: one
     /// [`ValidateStatement::RuleSets`] over all of them, recorded in
     /// `record`. No set cited, no statement.
     ///
     /// **Every verb answering finding rows resolves the sets they cite
-    /// here**, so a response carrying a row carries the names of the set it
-    /// cites, read one way. A set that is no set this crate wrote is
-    /// [`StoreError::Damaged`].
-    pub(crate) fn rule_sets(
+    /// here** — a validate page, a get's record and page of findings, and the
+    /// findings column a find's and a search's rows carry — so a response
+    /// carrying a row carries the names of the set it cites, read one way. A
+    /// set that is no set this crate wrote is [`StoreError::Damaged`].
+    pub(crate) fn rule_sets<'r>(
         &self,
         record: &mut Vec<Ran>,
-        bases: &[FindingBase],
+        rows: impl IntoIterator<Item = &'r FindingRow>,
     ) -> Result<Vec<RuleSet>, StoreError> {
-        let mut ids: Vec<i64> = bases.iter().filter_map(|base| base.rule_set).collect();
+        let mut ids: Vec<i64> = rows
+            .into_iter()
+            .filter_map(|row| row.rule_set)
+            .map(|id| {
+                i64::try_from(id).map_err(|_| unreadable("findings.rule_set", &id.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
         ids.sort_unstable();
         ids.dedup();
         if ids.is_empty() {

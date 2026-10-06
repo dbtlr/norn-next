@@ -35,9 +35,9 @@
 //!
 //! **What a finding judged against the schema rules carries is bounded too.**
 //! A rule finding cites the set of rules contributing to the constraint it
-//! breaches by one number, [`FindingRow::rule_set`], which a validate page
-//! resolves once per set rather than once per row, so a row's bytes do not
-//! grow with the rules it cites. The value it judged travels as a
+//! breaches by one number, [`FindingRow::rule_set`], which the response
+//! carrying the row resolves once per set rather than once per row, so a
+//! row's bytes do not grow with the rules it cites. The value it judged travels as a
 //! [`ValueHead`]: the first [`VALUE_HEAD_BYTES`] of its text, its whole length
 //! and its hash, so a row's bytes do not grow with the value either. The
 //! combined expectation — the closed set, the limit, the paths — never rides
@@ -534,10 +534,15 @@ pub struct FindingRow {
     pub message: String,
     /// The write generation the finding was derived at.
     pub generation: u64,
-    /// The set of schema rules the finding cites, by the identity a validate
-    /// page resolves it by, and `null` for a finding that cites no rule. A
-    /// finding judged against the rules selecting its document cites every
-    /// rule contributing to the constraint it breaches.
+    /// The set of schema rules the finding cites, by identity, and `null` for
+    /// a finding that cites no rule. A finding judged against the rules
+    /// selecting its document cites every rule contributing to the constraint
+    /// it breaches. Every response carrying finding rows — a validate page, a
+    /// get's record or page of findings, a find's or a search's page — carries
+    /// the sets its rows cite beside them, as the names of each set's rules,
+    /// and the identity resolves only against those: it is where the store
+    /// filed the set, so it is not stable across responses, and a schema pin
+    /// files the sets again under new ones.
     pub rule_set: Option<u64>,
     /// The offending value the finding judged, as its bounded head, and `null`
     /// for a finding about no value — a missing field, a misplaced document, a

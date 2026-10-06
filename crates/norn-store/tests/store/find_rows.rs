@@ -1463,7 +1463,7 @@ fn a_find_is_the_report_a_handler_wraps() {
         [Unsatisfied::unknown_sort_key("nope", Vec::new())]
     );
     assert!(advisories.is_empty(), "{advisories:?}");
-    assert_eq!(report.rows, rows);
-    assert_eq!(report.next, next);
-    assert!(report.moved.is_empty());
+    assert_eq!(report.page.rows, rows);
+    assert_eq!(report.page.next, next);
+    assert!(report.page.moved.is_empty());
 }

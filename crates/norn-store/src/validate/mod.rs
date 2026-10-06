@@ -368,8 +368,8 @@ impl Snapshot {
             let next = next
                 .map(|last| Ok::<_, StoreError>(Cursor::new(snapshot.clone(), last.finding_key()?)))
                 .transpose()?;
-            let rule_sets = self.rule_sets(&mut lookups.ran, &bases)?;
             let rows = self.finding_rows(&mut lookups.ran, bases)?;
+            let rule_sets = self.rule_sets(&mut lookups.ran, &rows)?;
             Validation::Findings {
                 rows,
                 rule_sets,

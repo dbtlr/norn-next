@@ -814,7 +814,8 @@ fn a_target(text: &str) -> ResolutionTarget {
 
 /// The paths a find page answered.
 fn paths_of(page: &FindReport) -> Vec<String> {
-    page.rows
+    page.page
+        .rows
         .iter()
         .map(|row| row.path.as_str().to_string())
         .collect()
@@ -836,7 +837,7 @@ fn a_find_pages_exactly_and_refuses_a_cursor_under_another_order() {
     assert_read_from_its_snapshot(&whole.answer.reading, &vault);
     assert!(whole.answer.is_complete());
     assert!(
-        whole.answer.report.next.is_none(),
+        whole.answer.report.page.next.is_none(),
         "the whole listing paged"
     );
     assert_eq!(
@@ -858,12 +859,12 @@ fn a_find_pages_exactly_and_refuses_a_cursor_under_another_order() {
         assert_read_from_its_snapshot(&answered.answer.reading, &vault);
         let page = answered.answer.report;
         assert!(
-            page.moved.is_empty(),
+            page.page.moved.is_empty(),
             "a continuation moved: {:?}",
-            page.moved
+            page.page.moved
         );
         listed.extend(paths_of(&page));
-        match page.next {
+        match page.page.next {
             Some(next) => {
                 first_cursor.get_or_insert_with(|| next.clone());
                 after = Some(next);
@@ -1416,9 +1417,9 @@ fn a_part_a_verb_could_not_apply_is_answered_unsatisfied() {
         .expect("a find over an unknown key answers");
     assert_read_from_its_snapshot(&found.answer.reading, &vault);
     assert!(
-        found.answer.report.rows.is_empty(),
+        found.answer.report.page.rows.is_empty(),
         "a find over an unknown key answered {} rows",
-        found.answer.report.rows.len()
+        found.answer.report.page.rows.len()
     );
     assert!(
         matches!(
@@ -1491,6 +1492,7 @@ fn a_row_judged_without_its_frontmatter_carries_the_finding_that_says_why() {
             let row = found
                 .answer
                 .report
+                .page
                 .rows
                 .iter()
                 .find(|row| row.path.as_str() == path)
@@ -1641,7 +1643,7 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
     }
     let read = window.finish();
 
-    assert!(found.answer.report.next.is_none(), "the find paged");
+    assert!(found.answer.report.page.next.is_none(), "the find paged");
     let mut listed = paths_of(&found.answer.report);
     listed.sort();
     assert_eq!(
@@ -1649,7 +1651,7 @@ fn a_read_answers_the_body_its_snapshot_holds_and_reads_no_file() {
         bodies.keys().cloned().collect::<Vec<_>>(),
         "the find answered other documents than the attachment derived"
     );
-    for row in &found.answer.report.rows {
+    for row in &found.answer.report.page.rows {
         let path = row.path.as_str();
         let body = row.body.as_ref().expect("the find projected the body");
         assert_body(body, &bodies[path], path);
@@ -1699,7 +1701,7 @@ fn every_read_verb_answers_with_no_file_read_on_its_thread() {
                 let found = host
                     .find(&FindParams::new(at()).with_columns([Column::body()]))
                     .expect("an attached vault answers a find");
-                found.answer.report.rows.len()
+                found.answer.report.page.rows.len()
             }),
         ),
         (

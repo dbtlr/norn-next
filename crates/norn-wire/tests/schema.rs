@@ -1413,15 +1413,15 @@ fn a_reading_advertises_the_parts_an_answer_is_judged_by() {
     );
 }
 
-/// A search report advertises the ladder that ranked it and the page of hits,
-/// both required, so a surface validating a search answer refuses one that
-/// declares no ladder.
+/// A search report advertises the ladder that ranked it, the page of hits and
+/// the rule sets their rows' findings cite, all required, so a surface
+/// validating a search answer refuses one that declares no ladder.
 #[test]
 fn a_search_report_advertises_its_ladder_and_its_page() {
     let schema = schema_of::<SearchReport>();
     assert_eq!(
         property_names(&schema),
-        ["ladder", "page"].into_iter().collect()
+        ["ladder", "page", "rule_sets"].into_iter().collect()
     );
     let required: BTreeSet<&str> = schema["required"]
         .as_array()
@@ -1429,7 +1429,10 @@ fn a_search_report_advertises_its_ladder_and_its_page() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    assert_eq!(required, ["ladder", "page"].into_iter().collect());
+    assert_eq!(
+        required,
+        ["ladder", "page", "rule_sets"].into_iter().collect()
+    );
     assert_eq!(
         schema["properties"]["ladder"]["$ref"].as_str(),
         Some("#/$defs/LadderDeclaration")
@@ -2619,13 +2622,28 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
     );
 }
 
-/// Every paged read report but search's is a page of its own row type, so a
-/// surface publishing a verb publishes the continuation with the rows. A
-/// search report holds its page beside the ladder that ranked it.
+/// Every paged read report but find's and search's is a page of its own row
+/// type, so a surface publishing a verb publishes the continuation with the
+/// rows. A search report holds its page beside the ladder that ranked it, and
+/// a find report and a search report each hold theirs beside the rule sets
+/// their rows' findings cite.
 #[test]
 fn every_paged_read_report_is_a_page_of_its_row() {
+    let find = schema_of::<FindReport>();
+    assert_eq!(
+        property_names(&find),
+        ["page", "rule_sets"].into_iter().collect()
+    );
+    assert_eq!(
+        find["properties"]["rule_sets"]["items"]["$ref"].as_str(),
+        Some("#/$defs/RuleSet"),
+        "a find report restates a rule set rather than referring to it: {find}"
+    );
+    assert!(
+        find["$defs"]["DocumentRow"].is_object(),
+        "the page carries no definition of a document row: {find}"
+    );
     for (report, row) in [
-        (schema_of::<FindReport>(), "DocumentRow"),
         (schema_of::<CountReport>(), "Tally"),
         (schema_of::<DescribeReport>(), "Facet"),
     ] {
