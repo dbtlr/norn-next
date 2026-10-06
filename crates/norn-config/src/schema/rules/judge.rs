@@ -37,44 +37,58 @@
 //!   ([`Breach::RequiredMissing`]), naming no value and citing every rule
 //!   requiring it;
 //! - a field some rule forbids is breached by its key, null included
-//!   ([`Breach::Forbidden`]), naming its whole value and citing every rule
-//!   forbidding it;
-//! - each distinct element outside the intersection of the closed sets is one
+//!   ([`Breach::Forbidden`]), naming its whole value — none where it holds
+//!   null, which is no value — and citing every rule forbidding it;
+//! - each value outside the intersection of the closed sets is one
 //!   [`Breach::NotOneOf`], citing every rule closing the field;
-//! - each distinct element longer than the smallest limit, in Unicode scalar
-//!   values, is one [`Breach::TooLong`], citing every rule limiting the field.
+//! - each value a spelling of which is longer than the smallest limit, in
+//!   Unicode scalar values, is one [`Breach::TooLong`], citing every rule
+//!   limiting the field.
 //!
-//! An element repeated in one list is one finding: elements are told apart as
-//! their values are spelled, a scalar by the text its field row holds and a
-//! list or a map by its structure, map entries in key order.
+//! **An offending value is its equality key**, as a closed set compares it
+//! ([`VaultSchema::equality_key`]): a tag key's tag under the tag fold, a
+//! typed key's typed value, any other key's text. So one value written
+//! several ways in one list — `play`, `#play` and `PLAY` under a tag key, `2`
+//! and `2.0` under a number — is one finding, naming the spelling written
+//! first: for a length, the first spelling past the limit. A value with no
+//! equality key — an element not reading as its declared type, a list, a map
+//! — is told apart by its spelling: a scalar by the text its field row holds,
+//! so `1` and `"1"` are one, and a list or a map by its structure, map
+//! entries in key order.
 //!
 //! **An empty combined constraint is one conflict per field, in place of the
 //! findings it makes unanswerable.** A field one rule requires and another
 //! forbids, or whose closed sets share no member where some rule requires it,
 //! is one [`Breach::FieldRulesConflict`] whatever it holds, citing every rule
 //! contributing to the conflict, instead of its required, forbidden and
-//! closed-set findings; it names the field's whole value where the key is
-//! present and none where it is absent. An empty intersection on a field no
-//! contributing rule requires is a conflict only where the field holds a
-//! value. The length limit still judges a conflicted field.
+//! closed-set findings. Closed sets sharing no member on a field no rule
+//! requires are one conflict, citing the rules closing the field, instead of
+//! its closed-set findings alone, and only where the field holds an element
+//! the closed sets judge — one reading as its declared type and shape — so a
+//! rule forbidding the field still breaches beside it. A conflict names the
+//! field's whole value where it holds one and none where it is absent or
+//! null. The length limit still judges a conflicted field.
 //!
 //! **Placement is judged where it fails.** A document standing where some
 //! contributing rule's allowed paths do not admit it is
 //! [`Breach::Misplaced`], citing every rule stating allowed paths — unless
-//! those rules' allowed paths share no document path at all, which makes it
-//! [`Breach::DocumentRulesConflict`] instead, citing the same rules. Neither
-//! names a field or a value.
+//! those rules' allowed paths share no document path at all, one rule's
+//! alone included, which makes it [`Breach::DocumentRulesConflict`] instead,
+//! citing the same rules. Neither names a field or a value.
 //!
 //! A finding citing rules is reported at the highest of their severities.
 //!
 //! # What judging costs
 //!
-//! **Judging reads one document and the schema.** Its work is tallied as
-//! [`RuleWork`], whose every count is a function of the document and the
-//! schema alone — never of another document — and grows with the parameters
-//! the schema declares: the rule count, the terms a selector holds, the
+//! **Judging reads one document and the schema.** Its findings are a pure
+//! function of the two. Its work is tallied as [`RuleWork`], and every count
+//! but the placement counts is a function of the document and the schema
+//! alone — never of another document — and grows with the parameters the
+//! schema declares: the rule count, the terms a selector holds, the
 //! constraints and closed-set members the selecting rules state, and the
-//! characters of the globs a path is matched against.
+//! characters of the globs a path is matched against. The placement counts
+//! depend on the verdicts the parsed schema has already reached, which the
+//! next paragraph states.
 //!
 //! **The placement walk is paid once per set of placement rules.** Whether
 //! the allowed paths of a set of rules share a document path depends on the
@@ -145,10 +159,12 @@ impl RuleFinding {
     }
 
     /// The offending value: one element — or the value itself where it is no
-    /// list — for a closed set, a length limit and a type; the field's whole
-    /// value for a forbidden field, a shape and a conflict over a field the
-    /// document holds; `None` for a missing field, a placement, a conflict
-    /// over an absent field and a null.
+    /// list — for a closed set, a length limit and a type, at the spelling
+    /// written first among those of its equality key; the field's whole value
+    /// for a forbidden field, a shape and a conflict over a field the
+    /// document holds; `None` for a missing field, a placement and a conflict
+    /// over an absent field. **A null is no value throughout**: a forbidden
+    /// field or a conflicted field holding null names none either.
     pub fn value(&self) -> Option<&AuthoredValue> {
         self.value.as_ref()
     }
@@ -240,8 +256,11 @@ impl Breach {
 /// What judging one document paid: the logical counts of rule work, which no
 /// statement counter sees.
 ///
-/// Every count is a function of the one document judged and the schema, so a
-/// judgment's work is the same however many documents the vault holds.
+/// Every count but the placement counts is a function of the one document
+/// judged and the schema, so a judgment's work is the same however many
+/// documents the vault holds. The placement counts depend on the verdicts the
+/// parsed schema had memoized before the judgment: a set of placement rules
+/// is walked once per parsed schema, by the first judgment that asks.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuleWork {
     /// Rules whose selector was evaluated: every rule, once per judgment.
@@ -256,8 +275,8 @@ pub struct RuleWork {
     pub constraint_entries: u64,
     /// Constraints judged: a field's presence against `required` or
     /// `forbidden`, one element against its type, a closed set or a limit, a
-    /// value against its declared shape, and a path against the allowed
-    /// paths.
+    /// value against its declared shape, a field's combined constraint found
+    /// empty, and a path against the allowed paths.
     pub constraints_judged: u64,
     /// Characters of every glob a path was matched against, selectors' and
     /// allowed paths' alike.
@@ -351,24 +370,41 @@ pub(super) fn read_shape(shape: Option<Shape>, value: &AuthoredValue) -> ShapeRe
     }
 }
 
-/// One element value read against a field: its text, and the value it is
-/// compared by — `None` where it does not read as the field's declared type.
+/// One element value read against a field: its text where it is a scalar,
+/// and the value it is compared by — `None` where it does not read as the
+/// field's declared type, as a list or a map never does.
 ///
 /// **The one element reading.** Schema read judges a rule's own defaults,
 /// members and synonym targets through it, and rule judgment each element a
 /// document holds, so a type, a length and a closed set are read one way
 /// whether the element is the schema's or a document's.
-pub(super) struct Element<'a> {
-    raw: &'a str,
+pub(super) struct Element {
+    text: Option<String>,
     key: Option<TypedValue>,
 }
 
-impl<'a> Element<'a> {
-    /// `raw` read as an element of `field` under `schema`.
-    pub(super) fn read(schema: &VaultSchema, field: &str, raw: &'a str) -> Self {
+impl Element {
+    /// `raw`, a scalar's text, read as an element of `field` under `schema`.
+    pub(super) fn read(schema: &VaultSchema, field: &str, raw: &str) -> Self {
         Element {
-            raw,
             key: schema.equality_key(field, raw),
+            text: Some(raw.to_string()),
+        }
+    }
+
+    /// `value`, one element a document holds, read as an element of `field`:
+    /// a scalar by the text its field row holds, and a list or a map as a
+    /// value with no text, which reads as no type.
+    fn of(schema: &VaultSchema, field: &str, value: &AuthoredValue) -> Self {
+        match value.scalar_text() {
+            Some(raw) => Element {
+                key: schema.equality_key(field, &raw),
+                text: Some(raw),
+            },
+            None => Element {
+                text: None,
+                key: None,
+            },
         }
     }
 
@@ -377,9 +413,18 @@ impl<'a> Element<'a> {
         self.key.is_some()
     }
 
-    /// Whether the element is longer than `limit` in Unicode scalar values.
+    /// Whether the element is a scalar, which has a length to judge.
+    fn is_scalar(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Whether the element is longer than `limit` in Unicode scalar values:
+    /// the unit a length limit counts. A list or a map has no length, so it
+    /// is longer than none.
     pub(super) fn longer_than(&self, limit: u64) -> bool {
-        longer_than(self.raw, limit)
+        self.text
+            .as_deref()
+            .is_some_and(|raw| u64::try_from(raw.chars().count()).unwrap_or(u64::MAX) > limit)
     }
 
     /// Whether the element is one of a closed set, by the value it is
@@ -390,38 +435,39 @@ impl<'a> Element<'a> {
     }
 }
 
-/// Whether `raw` is longer than `limit` in Unicode scalar values: the unit a
-/// length limit counts.
-fn longer_than(raw: &str, limit: u64) -> bool {
-    u64::try_from(raw.chars().count()).unwrap_or(u64::MAX) > limit
-}
-
-/// One element of a field as the judge holds it: the value itself, its text
-/// where it is a scalar, the value a closed set compares it by where it reads
-/// as its field's type, and what tells it from the field's other elements.
+/// One element of a field as the judge holds it: the value as written, its
+/// reading against the field, and what tells it from the field's other
+/// elements.
 struct Held<'v> {
     value: &'v AuthoredValue,
-    text: Option<String>,
-    key: Option<TypedValue>,
+    element: Element,
     identity: Identity,
 }
 
-/// What tells one offending element from another: a scalar by the text its
-/// field row holds, so `1` and `"1"` are one element, and a list or a map by
-/// its structure, map entries in key order, so two spellings of one map are
-/// one element. One finding stands per field, kind and identity.
+/// What tells one offending value from another. **A value is its equality
+/// key**, as a closed set compares it ([`VaultSchema::equality_key`]): a tag
+/// key's tag under the tag fold, a typed key's typed value, any other key's
+/// text, so `play`, `#play` and `PLAY` under a tag key are one value, and so
+/// are `2` and `2.0` under a number. A value with no equality key — an
+/// element not reading as its declared type, a list, a map — is told apart by
+/// its spelling: a scalar by the text its field row holds, so `1` and `"1"`
+/// are one, and a list or a map by its structure, map entries in key order,
+/// so two spellings of one map are one. One finding stands per field, kind
+/// and identity.
 #[derive(Debug, Eq, PartialEq)]
 enum Identity {
+    Key(TypedValue),
     Text(String),
     Structure(AuthoredValue),
 }
 
 impl Identity {
-    /// The identity of `element`, whose scalar text is `text`.
-    fn of(element: &AuthoredValue, text: Option<&str>) -> Self {
-        match text {
-            Some(text) => Identity::Text(text.to_string()),
-            None => Identity::Structure(normal_form(element)),
+    /// The identity of `value`, read as `element`.
+    fn of(value: &AuthoredValue, element: &Element) -> Self {
+        match (&element.key, &element.text) {
+            (Some(key), _) => Identity::Key(key.clone()),
+            (None, Some(text)) => Identity::Text(text.clone()),
+            (None, None) => Identity::Structure(normal_form(value)),
         }
     }
 }
@@ -432,11 +478,13 @@ impl VaultSchema {
     /// it conclude — one per field, constraint kind and offending value, a
     /// list judged element by element — and the work that cost.
     ///
-    /// A pure function of the path, the frontmatter and the schema — the
-    /// placement memo it reads and fills is the schema's own and changes no
-    /// answer — so derivation files its findings in the document's own
-    /// changeset. `case` is how the path globs' literal letters compare with
-    /// the path's, as for [`VaultSchema::selects`].
+    /// The findings are a pure function of the path, the frontmatter and the
+    /// schema — the placement memo it reads and fills is the schema's own and
+    /// changes no answer — so derivation files them in the document's own
+    /// changeset. The work is likewise, except the placement counts, which
+    /// the memo makes paid once per set of placement rules per parsed schema
+    /// ([`RuleWork`]). `case` is how the path globs' literal letters compare
+    /// with the path's, as for [`VaultSchema::selects`].
     pub fn judge(&self, path: &str, frontmatter: &ValueMap, case: CaseFold) -> Judgment {
         let mut work = RuleWork::default();
         let entries = frontmatter.entries();
@@ -487,7 +535,8 @@ impl VaultSchema {
 
     /// Judge `value` against `field`'s declaration, filing its type and shape
     /// findings, and answer the elements of it the rules may judge: every
-    /// element that reads as the declared type and shape, each once.
+    /// element that reads as the declared type and shape, in the order
+    /// written.
     fn judge_declaration<'v>(
         &self,
         field: &str,
@@ -510,40 +559,35 @@ impl VaultSchema {
         let mut held: Vec<Held<'v>> = Vec::new();
         let mut mismatched: Vec<Identity> = Vec::new();
         // A null element is no value, as a null field is: nothing judges it.
-        for element in elements
+        for value in elements
             .into_iter()
             .filter(|element| **element != AuthoredValue::Null)
         {
-            let text = element.scalar_text();
-            let key = text
-                .as_deref()
-                .and_then(|raw| Element::read(self, field, raw).key);
-            let identity = Identity::of(element, text.as_deref());
+            let element = Element::of(self, field, value);
+            let identity = Identity::of(value, &element);
             if declaration.is_some() {
                 work.constraints_judged += 1;
-                if key.is_none() {
+                if !element.reads_as_type() {
                     if !mismatched.contains(&identity) {
                         mismatched.push(identity);
-                        findings.push(mismatch(Breach::TypeMismatch, field, element.clone()));
+                        findings.push(mismatch(Breach::TypeMismatch, field, value.clone()));
                     }
                     continue;
                 }
             }
-            if !held.iter().any(|seen| seen.identity == identity) {
-                held.push(Held {
-                    value: element,
-                    text,
-                    key,
-                    identity,
-                });
-            }
+            held.push(Held {
+                value,
+                element,
+                identity,
+            });
         }
         held
     }
 
     /// Judge where the document stands against the placement rules of
-    /// `combined`, reading the memoized verdict on whether they share a path
-    /// where one was reached.
+    /// `combined` and, where they do not admit it, whether they admit any
+    /// document path at all — one rule's alone included — reading the
+    /// memoized verdict where one was reached.
     fn judge_placement(
         &self,
         combined: &CombinedConstraint<'_>,
@@ -560,10 +604,10 @@ impl VaultSchema {
         if combined.admits_path_counted(path, case, work) {
             return;
         }
-        let breach = if placed.len() > 1 && !self.placement_shared(&placed, case, work) {
-            Breach::DocumentRulesConflict
-        } else {
+        let breach = if self.placement_shared(&placed, case, work) {
             Breach::Misplaced
+        } else {
+            Breach::DocumentRulesConflict
         };
         findings.push(cited(breach, None, None, placed));
     }
@@ -576,105 +620,179 @@ struct JudgedField<'a, 's, 'v> {
     /// The value the document holds under the field, null included.
     value: Option<&'v AuthoredValue>,
     /// The elements of that value that read as the field's declared type and
-    /// shape, each once.
+    /// shape, in the order written.
     elements: &'a [Held<'v>],
     /// Every way the combined constraint is empty on some field.
     conflicts: &'a [RulesConflict],
 }
 
 /// Judge one constrained field against the combined constraint.
+///
+/// An empty combined constraint stands in place of the findings it makes
+/// unanswerable. A field required and forbidden, or required with closed
+/// sets sharing no member, is one conflict instead of its required,
+/// forbidden and closed-set findings. Closed sets sharing no member on a
+/// field no rule requires are one conflict instead of its closed-set findings
+/// alone, and only where the field holds an element they judge; its
+/// forbidden finding still stands. The length limit judges the field either
+/// way.
 fn judge_field(
     field: &JudgedField<'_, '_, '_>,
     work: &mut RuleWork,
     findings: &mut Vec<RuleFinding>,
 ) {
-    let constraint = field.constraint;
-    let missing = is_missing(field.value);
-    let conflicting: BTreeSet<&str> = field
-        .conflicts
-        .iter()
-        .filter(|conflict| match conflict {
-            RulesConflict::RequiredAndForbidden { field: named, .. } => named == field.name,
+    // The rules in conflict over whether the field may stand at all, and
+    // those in conflict over its closed set alone.
+    let mut over_presence: BTreeSet<&str> = BTreeSet::new();
+    let mut over_closed_set: BTreeSet<&str> = BTreeSet::new();
+    for conflict in field.conflicts {
+        match conflict {
+            RulesConflict::RequiredAndForbidden {
+                field: named,
+                rules,
+            }
+            | RulesConflict::EmptyOneOf {
+                field: named,
+                required: true,
+                rules,
+            } if named == field.name => {
+                over_presence.extend(rules.iter().map(String::as_str));
+            }
             RulesConflict::EmptyOneOf {
                 field: named,
-                required,
-                ..
-            } => named == field.name && (*required || !missing),
-            RulesConflict::DisjointPlacement { .. } => false,
-        })
-        .flat_map(|conflict| conflict.rules().iter().map(String::as_str))
-        .collect();
-    if !conflicting.is_empty() {
-        work.constraints_judged += 1;
-        let rules: Vec<&Rule> = constraint
-            .required_by()
-            .chain(constraint.forbidden_by())
-            .chain(constraint.one_of().into_iter().flat_map(|set| set.rules()))
-            .filter(|rule| conflicting.contains(rule.name()))
-            .collect();
-        findings.push(cited(
-            Breach::FieldRulesConflict,
-            Some(field.name),
-            field.value.cloned(),
-            rules,
-        ));
-    } else {
-        if constraint.is_required() {
-            work.constraints_judged += 1;
-            if missing {
-                findings.push(cited(
-                    Breach::RequiredMissing,
-                    Some(field.name),
-                    None,
-                    constraint.required_by().collect(),
-                ));
+                required: false,
+                rules,
+            } if named == field.name && !field.elements.is_empty() => {
+                over_closed_set.extend(rules.iter().map(String::as_str));
             }
-        }
-        if constraint.is_forbidden() {
-            work.constraints_judged += 1;
-            if let Some(value) = field.value {
-                findings.push(cited(
-                    Breach::Forbidden,
-                    Some(field.name),
-                    Some(value.clone()),
-                    constraint.forbidden_by().collect(),
-                ));
-            }
-        }
-        if let Some(set) = constraint.one_of() {
-            for element in field.elements {
-                work.constraints_judged += 1;
-                let admitted = element.key.as_ref().is_some_and(|key| set.admits(key));
-                if !admitted {
-                    findings.push(cited(
-                        Breach::NotOneOf,
-                        Some(field.name),
-                        Some(element.value.clone()),
-                        set.rules().collect(),
-                    ));
-                }
-            }
+            _ => {}
         }
     }
-    if let Some(limit) = constraint.max_length() {
-        for element in field.elements {
-            let Some(raw) = element.text.as_deref() else {
-                continue;
-            };
-            work.constraints_judged += 1;
-            if longer_than(raw, limit) {
-                findings.push(cited(
-                    Breach::TooLong,
-                    Some(field.name),
-                    Some(element.value.clone()),
-                    constraint.max_length_by().collect(),
-                ));
-            }
+    if over_presence.is_empty() {
+        judge_presence(field, work, findings);
+        if over_closed_set.is_empty() {
+            judge_closed_set(field, work, findings);
+        } else {
+            judge_conflict(field, &over_closed_set, work, findings);
+        }
+    } else {
+        judge_conflict(field, &over_presence, work, findings);
+    }
+    judge_length(field, work, findings);
+}
+
+/// File the conflict among `conflicting`, the rules whose constraints on the
+/// field leave it nothing to hold, citing them and no other rule.
+fn judge_conflict(
+    field: &JudgedField<'_, '_, '_>,
+    conflicting: &BTreeSet<&str>,
+    work: &mut RuleWork,
+    findings: &mut Vec<RuleFinding>,
+) {
+    work.constraints_judged += 1;
+    let constraint = field.constraint;
+    let rules: Vec<&Rule> = constraint
+        .required_by()
+        .chain(constraint.forbidden_by())
+        .chain(constraint.one_of().into_iter().flat_map(|set| set.rules()))
+        .filter(|rule| conflicting.contains(rule.name()))
+        .collect();
+    findings.push(cited(
+        Breach::FieldRulesConflict,
+        Some(field.name),
+        field.value.cloned(),
+        rules,
+    ));
+}
+
+/// Judge whether the field is present against `required` and `forbidden`.
+fn judge_presence(
+    field: &JudgedField<'_, '_, '_>,
+    work: &mut RuleWork,
+    findings: &mut Vec<RuleFinding>,
+) {
+    let constraint = field.constraint;
+    if constraint.is_required() {
+        work.constraints_judged += 1;
+        if is_missing(field.value) {
+            findings.push(cited(
+                Breach::RequiredMissing,
+                Some(field.name),
+                None,
+                constraint.required_by().collect(),
+            ));
+        }
+    }
+    if constraint.is_forbidden() {
+        work.constraints_judged += 1;
+        if let Some(value) = field.value {
+            findings.push(cited(
+                Breach::Forbidden,
+                Some(field.name),
+                Some(value.clone()),
+                constraint.forbidden_by().collect(),
+            ));
         }
     }
 }
 
-/// A finding citing `rules`, at the highest of their severities.
+/// Judge each element against the intersection of the closed sets: one
+/// finding per value outside it, carrying the value's first spelling.
+fn judge_closed_set(
+    field: &JudgedField<'_, '_, '_>,
+    work: &mut RuleWork,
+    findings: &mut Vec<RuleFinding>,
+) {
+    let Some(set) = field.constraint.one_of() else {
+        return;
+    };
+    let mut offending: Vec<&Identity> = Vec::new();
+    for held in field.elements {
+        work.constraints_judged += 1;
+        if !held.element.is_in(|key| set.admits(key)) && !offending.contains(&&held.identity) {
+            offending.push(&held.identity);
+            findings.push(cited(
+                Breach::NotOneOf,
+                Some(field.name),
+                Some(held.value.clone()),
+                set.rules().collect(),
+            ));
+        }
+    }
+}
+
+/// Judge each scalar element's spelling against the smallest length limit:
+/// one finding per value some spelling of which is past it, carrying the
+/// first such spelling.
+fn judge_length(
+    field: &JudgedField<'_, '_, '_>,
+    work: &mut RuleWork,
+    findings: &mut Vec<RuleFinding>,
+) {
+    let Some(limit) = field.constraint.max_length() else {
+        return;
+    };
+    let mut offending: Vec<&Identity> = Vec::new();
+    for held in field
+        .elements
+        .iter()
+        .filter(|held| held.element.is_scalar())
+    {
+        work.constraints_judged += 1;
+        if held.element.longer_than(limit) && !offending.contains(&&held.identity) {
+            offending.push(&held.identity);
+            findings.push(cited(
+                Breach::TooLong,
+                Some(field.name),
+                Some(held.value.clone()),
+                field.constraint.max_length_by().collect(),
+            ));
+        }
+    }
+}
+
+/// A finding citing `rules`, at the highest of their severities, naming
+/// `value` unless it is null: a null is no value to name.
 fn cited(
     breach: Breach,
     field: Option<&str>,

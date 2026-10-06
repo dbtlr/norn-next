@@ -630,7 +630,7 @@ rules:
 
 /// **The placement walk is paid once per set of rules**: the verdict a first
 /// misplaced document's set walked is read by every later one, and a set of
-/// one rule is never walked.
+/// one rule is a set like any other.
 #[test]
 fn a_placement_verdict_is_walked_once_per_set_of_rules() {
     let schema = schema(
@@ -662,7 +662,13 @@ rules:
     let alone = schema.judge("a.md", &one, CaseFold::Exact).work();
     assert_eq!(
         (alone.placement_walks, alone.placement_verdicts_reused),
-        (0, 0)
+        (1, 0),
+        "a set of one rule is walked once"
+    );
+    let again = schema.judge("b.md", &one, CaseFold::Exact).work();
+    assert_eq!(
+        (again.placement_walks, again.placement_verdicts_reused),
+        (0, 1)
     );
 }
 
@@ -704,4 +710,386 @@ rules:
     );
     assert_eq!(shared, schema(bytes));
     assert_eq!(shared.clone(), shared);
+}
+
+/// **An offending value is told apart by its equality key**, as a closed set
+/// compares it: one value written several ways is one finding, carrying the
+/// spelling written first. A tag key compares under the tag fold, `#` marker
+/// optional, and a typed key by its typed value.
+#[test]
+fn one_value_written_several_ways_is_one_finding_carrying_its_first_spelling() {
+    let schema = schema(
+        "version: 1
+fields:
+  n: { type: number }
+rules:
+  r: { one_of: { tags: { values: [work] }, n: { values: [1] } } }
+",
+    );
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[
+            ("n", list(&["2", "2.0", "02"])),
+            ("tags", list(&["play", "#play", "PLAY"])),
+        ],
+    );
+    assert_eq!(
+        summaries(&findings),
+        [
+            (
+                Breach::NotOneOf,
+                Some("n".to_string()),
+                Some("2".to_string()),
+                names(&["r"])
+            ),
+            (
+                Breach::NotOneOf,
+                Some("tags".to_string()),
+                Some("play".to_string()),
+                names(&["r"])
+            ),
+        ]
+    );
+}
+
+/// **A length is judged on each spelling**, and the spellings of one value
+/// past the limit are one finding, carrying the first of them.
+#[test]
+fn the_spellings_of_one_value_past_a_limit_are_one_finding_at_the_first_past_it() {
+    let schema = schema(
+        "version: 1
+rules:
+  r: { max_length: { tags: 4 } }
+",
+    );
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[("tags", list(&["play", "#play", "#PLAY"]))],
+    );
+    assert_eq!(
+        summaries(&findings),
+        [(
+            Breach::TooLong,
+            Some("tags".to_string()),
+            Some("#play".to_string()),
+            names(&["r"])
+        )]
+    );
+}
+
+/// **An integer and the string spelling it are one offending element**: the
+/// field row holds one text for both, and an undeclared field compares by it.
+#[test]
+fn an_integer_and_its_string_are_one_offending_element() {
+    let schema = schema(
+        "version: 1
+rules:
+  r: { one_of: { f: { values: [z] } } }
+",
+    );
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[(
+            "f",
+            AuthoredValue::list([AuthoredValue::Integer(1), text("1")]),
+        )],
+    );
+    assert_eq!(
+        summaries(&findings),
+        [(
+            Breach::NotOneOf,
+            Some("f".to_string()),
+            Some("1".to_string()),
+            names(&["r"])
+        )]
+    );
+}
+
+/// **Two key orders of one map are one offending value**: a map with no
+/// equality key is told apart by its structure, entries in key order.
+#[test]
+fn two_key_orders_of_one_map_are_one_offending_value() {
+    let schema = schema(
+        "version: 1
+rules:
+  r: { one_of: { f: { values: [z] } } }
+",
+    );
+    let written = AuthoredValue::map([("b".to_string(), text("2")), ("a".to_string(), text("1"))])
+        .expect("a map");
+    let reordered =
+        AuthoredValue::map([("a".to_string(), text("1")), ("b".to_string(), text("2"))])
+            .expect("a map");
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[("f", AuthoredValue::list([written.clone(), reordered]))],
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .map(|finding| (finding.breach(), finding.value().cloned()))
+            .collect::<Vec<_>>(),
+        [(Breach::NotOneOf, Some(written))]
+    );
+}
+
+/// **A mistyped element repeated in a list is one type mismatch.**
+#[test]
+fn a_mistyped_element_repeated_in_a_list_is_one_type_mismatch() {
+    let schema = schema(
+        "version: 1
+fields:
+  n: { type: number, shape: list }
+",
+    );
+    let findings = judged(&schema, "a.md", &[("n", list(&["four", "1", "four"]))]);
+    assert_eq!(
+        summaries(&findings),
+        [(
+            Breach::TypeMismatch,
+            Some("n".to_string()),
+            Some("four".to_string()),
+            Vec::new()
+        )]
+    );
+}
+
+/// **A map is no value of either shape**: under a field declared a list it
+/// is the one element that does not read as the type, not a value of the
+/// other shape.
+#[test]
+fn a_map_under_a_list_shaped_field_is_a_type_mismatch_not_a_shape_mismatch() {
+    let schema = schema(
+        "version: 1
+fields:
+  f: { type: text, shape: list }
+",
+    );
+    let map = AuthoredValue::map([("a".to_string(), text("b"))]).expect("a map");
+    let findings = judged(&schema, "a.md", &[("f", map.clone())]);
+    assert_eq!(
+        findings
+            .iter()
+            .map(|finding| (finding.breach(), finding.value().cloned()))
+            .collect::<Vec<_>>(),
+        [(Breach::TypeMismatch, Some(map))]
+    );
+}
+
+/// **The length limit still judges a conflicted field**: a conflict stands
+/// in place of the required, forbidden and closed-set findings alone.
+#[test]
+fn the_length_limit_still_judges_a_conflicted_field() {
+    let schema = schema(
+        "version: 1
+rules:
+  needs: { match: { frontmatter: { kind: x } }, required: { f: }, max_length: { f: 2 } }
+  bans: { match: { path: 'n/**' }, forbidden: { f: } }
+",
+    );
+    let findings = judged(
+        &schema,
+        "n/a.md",
+        &[("kind", text("x")), ("f", text("abc"))],
+    );
+    assert_eq!(
+        summaries(&findings),
+        [
+            (
+                Breach::FieldRulesConflict,
+                Some("f".to_string()),
+                Some("abc".to_string()),
+                names(&["bans", "needs"])
+            ),
+            (
+                Breach::TooLong,
+                Some("f".to_string()),
+                Some("abc".to_string()),
+                names(&["needs"])
+            ),
+        ]
+    );
+}
+
+/// **A conflict cites the rules in conflict and no other**: a rule closing
+/// the field over a set the others leave a member does not contribute to a
+/// required-and-forbidden conflict.
+#[test]
+fn a_rules_conflict_cites_only_the_rules_in_conflict() {
+    let schema = schema(
+        "version: 1
+rules:
+  a: { match: { frontmatter: { k: x } }, required: { f: } }
+  b: { match: { path: 'n/**' }, forbidden: { f: } }
+  c: { severity: error, one_of: { f: { values: [z] } } }
+",
+    );
+    let findings = judged(&schema, "n/a.md", &[("k", text("x")), ("f", text("q"))]);
+    assert_eq!(
+        summaries(&findings),
+        [(
+            Breach::FieldRulesConflict,
+            Some("f".to_string()),
+            Some("q".to_string()),
+            names(&["a", "b"])
+        )]
+    );
+    assert_eq!(findings[0].severity(), Severity::Warning);
+}
+
+/// **An empty closed set on a field no rule requires replaces only its
+/// closed-set findings**: a rule forbidding the field still breaches, citing
+/// its own rules at their severity, beside the conflict citing the rules
+/// closing the field.
+#[test]
+fn a_forbidden_field_still_breaches_beside_an_unrequired_empty_closed_set() {
+    let schema = schema(
+        "version: 1
+rules:
+  a: { match: { frontmatter: { k: x } }, one_of: { f: { values: [a] } } }
+  b: { match: { path: 'n/**' }, one_of: { f: { values: [b] } } }
+  c: { severity: error, forbidden: { f: } }
+",
+    );
+    let findings = judged(&schema, "n/a.md", &[("k", text("x")), ("f", text("a"))]);
+    assert_eq!(
+        findings
+            .iter()
+            .map(|finding| (
+                finding.breach(),
+                finding.rules().to_vec(),
+                finding.severity()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (Breach::Forbidden, names(&["c"]), Severity::Error),
+            (
+                Breach::FieldRulesConflict,
+                names(&["a", "b"]),
+                Severity::Warning
+            ),
+        ]
+    );
+}
+
+/// **A value the closed sets do not judge mints no conflict over them**: a
+/// value not of its declared type or shape is judged by that alone, so an
+/// empty intersection on a field no rule requires conflicts only where the
+/// field holds a value that reads as its type and shape.
+#[test]
+fn a_mistyped_or_misshaped_value_alone_mints_no_unrequired_closed_set_conflict() {
+    let schema = schema(
+        "version: 1
+fields:
+  n: { type: number }
+  s: { type: text, shape: single }
+rules:
+  a: { match: { frontmatter: { k: x } }, one_of: { n: { values: [1] }, s: { values: [a] } } }
+  b: { match: { path: 'n/**' }, one_of: { n: { values: [2] }, s: { values: [b] } } }
+",
+    );
+    let breaches = |entries: &[(&str, AuthoredValue)]| -> Vec<(Breach, Option<String>)> {
+        judged(&schema, "n/a.md", entries)
+            .iter()
+            .map(|finding| (finding.breach(), finding.field().map(str::to_string)))
+            .collect()
+    };
+    let selected = ("k", text("x"));
+    assert_eq!(
+        breaches(&[selected.clone(), ("n", text("abc")), ("s", list(&["a"]))]),
+        [
+            (Breach::TypeMismatch, Some("n".to_string())),
+            (Breach::ShapeMismatch, Some("s".to_string())),
+        ]
+    );
+    assert_eq!(
+        breaches(&[selected, ("n", list(&["abc", "3"]))]),
+        [
+            (Breach::TypeMismatch, Some("n".to_string())),
+            (Breach::FieldRulesConflict, Some("n".to_string())),
+        ]
+    );
+}
+
+/// **One rule whose allowed paths admit no document path is a document
+/// conflict**, as rules sharing none are: no place satisfies it. Its verdict
+/// is walked once and read by every later document it selects.
+#[test]
+fn one_rule_admitting_no_document_path_is_a_document_conflict() {
+    for allowed in ["'*.txt'", "shared"] {
+        let schema = schema(&format!(
+            "version: 1
+rules:
+  r: {{ match: {{ frontmatter: {{ kind: x }} }}, allowed_paths: {{ paths: [{allowed}] }} }}
+"
+        ));
+        let selected = frontmatter(&[("kind", text("x"))]);
+        let first = schema.judge("a.md", &selected, CaseFold::Exact);
+        assert_eq!(
+            summaries(first.findings()),
+            [(Breach::DocumentRulesConflict, None, None, names(&["r"]))],
+            "allowed {allowed}"
+        );
+        assert_eq!(
+            (
+                first.work().placement_walks,
+                first.work().placement_verdicts_reused
+            ),
+            (1, 0)
+        );
+        let second = schema.judge("b.md", &selected, CaseFold::Exact).work();
+        assert_eq!(
+            (second.placement_walks, second.placement_verdicts_reused),
+            (0, 1)
+        );
+    }
+}
+
+/// **Each constraint judged is counted once**: a value against its declared
+/// shape, each element against its type, a field's presence against
+/// `required`, and a path against the allowed paths.
+#[test]
+fn each_constraint_judged_is_counted_once() {
+    let judged_count = |bytes: &str, entries: &[(&str, AuthoredValue)]| {
+        schema(bytes)
+            .judge("tasks/a.md", &frontmatter(entries), CaseFold::Exact)
+            .work()
+            .constraints_judged
+    };
+    assert_eq!(
+        judged_count(
+            "version: 1\nfields:\n  kind: { type: text, shape: single }\n",
+            &[("kind", text("a"))]
+        ),
+        2,
+        "the shape and the one element's type"
+    );
+    assert_eq!(
+        judged_count(
+            "version: 1\nfields:\n  kind: { type: text }\n",
+            &[("kind", text("a"))]
+        ),
+        1,
+        "the one element's type, and no shape where none is declared"
+    );
+    assert_eq!(
+        judged_count(
+            "version: 1\nrules:\n  r: { allowed_paths: { paths: ['tasks/**'] } }\n",
+            &[]
+        ),
+        1,
+        "the path against the allowed paths"
+    );
+    assert_eq!(
+        judged_count(
+            "version: 1\nrules:\n  r: { required: { owner: } }\n",
+            &[("owner", text("me"))]
+        ),
+        1,
+        "the field's presence against `required`"
+    );
 }

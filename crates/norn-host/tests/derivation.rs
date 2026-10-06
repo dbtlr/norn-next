@@ -64,14 +64,15 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(9),
-    "7ba89c06c19ae0a3ddd445ae5925a60c924f8b0f8709e1d91e089df10c21cdf2",
+    "5295ea73fc4301a45587c552562ef9987b327c901d0d069ef049e1aa894d8f4d",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
 /// declared type and of each declared shape, a tag facet that reports what it
 /// does not declare, and schema rules that select the documents under
 /// `rules/` by their `kind` — two selecting each document, so a finding cites
-/// a set of rules, and one pair whose allowed paths share none.
+/// a set of rules, one pair whose allowed paths share none, and one rule
+/// whose allowed paths admit no document path at all.
 const SCHEMA: &str = "\
 version: 1
 fields:
@@ -108,6 +109,7 @@ rules:
     forbidden: { scratch: remove }
     one_of:
       status: { values: [todo, doing, done] }
+      topics: { values: [project] }
     max_length: { summary: 8 }
     allowed_paths:
       paths: [\"rules/tasks/**\"]
@@ -132,6 +134,24 @@ rules:
     required: { owner: }
     allowed_paths:
       paths: [\"rules/shelf/**\"]
+  red:
+    match:
+      frontmatter: { kind: box }
+    one_of:
+      colour: { values: [red] }
+  blue:
+    match:
+      frontmatter: { kind: box }
+      path: \"rules/**\"
+    one_of:
+      colour: { values: [blue] }
+  bare:
+    severity: error
+    match:
+      frontmatter: { kind: box }
+    forbidden: { colour: }
+    allowed_paths:
+      paths: [\"rules/*.txt\"]
 ";
 
 /// The schema of the second vault: the other stance a tag facet can take on
@@ -247,8 +267,8 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
         // A task both `task` and `filed` select: a missing owner, a
         // forbidden list, a list holding two values outside their closed
-        // sets, one of them twice, and a summary past its limit and past the
-        // value head.
+        // sets, one of them twice, a tag outside its closed set written
+        // three ways, and a summary past its limit and past the value head.
         ("rules/tasks/a.md", rule_task()),
         // A task standing where `filed` allows it and `task` does not, holding
         // a status `task` allows and `filed` does not.
@@ -261,6 +281,13 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         (
             "rules/chores/c.md",
             b"---\nkind: chore\nowner: me\n---\n# A chore\n".to_vec(),
+        ),
+        // A box `red` and `blue` close `colour` over sets sharing no member,
+        // which no rule requires, and `bare` forbids, standing where no
+        // document could stand under `bare`'s allowed paths.
+        (
+            "rules/box.md",
+            b"---\nkind: box\ncolour: red\n---\n# A box\n".to_vec(),
         ),
         // A list under a single-shaped key, a scalar under a list-shaped one,
         // and a map under a text field.
@@ -276,7 +303,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
 /// limit and the value head a finding keeps.
 fn rule_task() -> Vec<u8> {
     format!(
-        "---\nkind: task\nstatus: [todo, bogus, stalled, bogus]\nscratch: [left, over]\nsummary: {}\n---\n# A task\n",
+        "---\nkind: task\nstatus: [todo, bogus, stalled, bogus]\ntopics: [play, \"#play\", PLAY]\nscratch: [left, over]\nsummary: {}\n---\n# A task\n",
         "a summary that runs on ".repeat(14)
     )
     .into_bytes()
@@ -1238,6 +1265,44 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             "no value spelled `{spelled}` is exercised"
         );
     }
+    // A value written three ways is one finding, at its first spelling; an
+    // empty closed set on a field no rule requires stands beside the field's
+    // forbidden finding; and one rule admitting no document path is a
+    // document conflict.
+    let at = |path: &str, kind: FindingKind| -> Vec<(Option<&str>, Vec<&str>)> {
+        findings
+            .iter()
+            .filter(|finding| finding.path == path && finding.kind == kind.as_str())
+            .map(|finding| {
+                (
+                    finding.value.as_ref().map(|(head, _, _)| head.as_str()),
+                    finding.rules.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        at("rules/tasks/a.md", FindingKind::NotOneOf)
+            .into_iter()
+            .filter(|(value, _)| value
+                .is_some_and(|value| value.eq_ignore_ascii_case("play") || value == "#play"))
+            .collect::<Vec<_>>(),
+        [(Some("play"), vec!["task"])],
+        "one tag written three ways is not one finding at its first spelling"
+    );
+    assert_eq!(
+        (
+            at("rules/box.md", FindingKind::Forbidden),
+            at("rules/box.md", FindingKind::FieldRulesConflict),
+            at("rules/box.md", FindingKind::DocumentRulesConflict),
+        ),
+        (
+            vec![(Some("red"), vec!["bare"])],
+            vec![(Some("red"), vec!["blue", "red"])],
+            vec![(None, vec!["bare"])],
+        ),
+        "the box's conflicts are not exercised as judged"
+    );
     assert!(
         !projection.indexed_terms().is_empty(),
         "the full-text index holds no term"

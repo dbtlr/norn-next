@@ -800,7 +800,8 @@ pub struct FindingFacts {
     /// for a list or a map, its canonical JSON. `None` for a finding about no
     /// value. A conflict between rules over a field the document holds carries
     /// that whole value; one over an absent field, or over where a document
-    /// may stand, carries none.
+    /// may stand, carries none. **A null is no value**: a forbidden or
+    /// conflicted field holding null carries none either.
     ///
     /// The write keeps its head, its length and its hash
     /// ([`norn_wire::ValueHead`]), never the whole, so a finding's bytes at
