@@ -1004,7 +1004,9 @@ impl Store {
     /// of order, named twice or spelled other than canonically — a set held
     /// under another fingerprint than a finding citing it, and a finding whose
     /// rule rows are not exactly the names of its set, which includes rule rows
-    /// for a finding citing no set and a set's name with no row.
+    /// for a finding citing no set and a set's name with no row. And a set no
+    /// finding cites, which `findings_collect_rule_set` deletes with its last
+    /// citer, so only a write out of band leaves one standing.
     fn verify_rule_sets(&self) -> Result<(), StoreError> {
         let count = |sql: &str, operation: &'static str| -> Result<i64, StoreError> {
             self.connection()
@@ -1071,18 +1073,32 @@ impl Store {
                 ),
             });
         }
+
+        let uncited = count(
+            "SELECT count(*) FROM rule_sets AS rs
+             WHERE NOT EXISTS (SELECT 1 FROM findings AS f WHERE f.rule_set = rs.id)",
+            "checking every rule set is cited",
+        )?;
+        if uncited != 0 {
+            return Err(StoreError::Damaged {
+                what: format!("{uncited} rule sets stand that no finding cites"),
+            });
+        }
         Ok(())
     }
 
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Eight checks, because a store has eight kinds of consistency to lose:
+    /// Nine checks, because a store has nine kinds of consistency to lose:
     /// the pages themselves, the foreign keys that carry cascade deletion, the
     /// full-text index against the column it is an index of, the frontmatter
     /// projection against being JSON at all, the closed vocabularies against
     /// the values a reader will accept, the rule rows against the findings
-    /// whose key they copy, the document and tombstone pillars against each
+    /// whose key they copy, the rule sets against the findings citing them
+    /// (`verify_rule_sets`: each set's spelling, the fingerprint it
+    /// is held under, its names against its citers' rule rows, and a set no
+    /// finding cites), the document and tombstone pillars against each
     /// other, and each document's sub-fingerprints against the columns they
     /// are hashes of. The third is what an external-content FTS5
     /// table can lose without anything else noticing, which is exactly why the
@@ -1095,12 +1111,14 @@ impl Store {
     /// to see it too. The sixth is the copy of a finding's key each rule row
     /// carries, which the write takes from the finding's own row and nothing
     /// structural keeps equal after it; a rule row that disagrees would page
-    /// its finding under another kind or place. The seventh is the
-    /// disjointness the `tombstones_clear_on_derive` trigger maintains —
-    /// nothing structural holds it, so it is checked at rest rather than
-    /// trusted, the same ruling the vocabularies get.
+    /// its finding under another kind or place. The seventh holds the names
+    /// a finding reports, read off its set, equal to the rule rows a validate
+    /// selects it by. The eighth is the disjointness the
+    /// `tombstones_clear_on_derive` trigger maintains — nothing structural
+    /// holds it, so it is checked at rest rather than trusted, the same
+    /// ruling the vocabularies get.
     ///
-    /// The eighth is a **recompute at rest**, for the reason the stored suffix
+    /// The ninth is a **recompute at rest**, for the reason the stored suffix
     /// key gets one: a sub-fingerprint is a derived column, and every read that
     /// would notice one drifting from the column it hashes is a read that has
     /// already trusted it. A change-feed consumer triages on these values and

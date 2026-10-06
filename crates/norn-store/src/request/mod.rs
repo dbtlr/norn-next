@@ -3486,7 +3486,7 @@ mod tests {
     /// whole; a longer value cut shorter than the longest cut a character
     /// boundary allows, which is within three bytes of the bound; a hash
     /// outside the SHA-256 spelling; and a head without its length or its
-    /// hash. So a payload the wire refuses cannot be written either, and a
+    /// hash. Every length is the head's bytes, never its characters. So a payload the wire refuses cannot be written either, and a
     /// store that verifies healthy reads every head it holds.
     #[test]
     fn the_findings_table_refuses_a_value_head_no_value_has() {
@@ -3515,6 +3515,18 @@ mod tests {
             (Some("x".repeat(bound)), Some(wide), hash),
             (Some("done".to_string()), Some(4), hash),
             (Some("x".repeat(bound - 3)), Some(1_000), hash),
+            // Bytes, not characters: a head of two-byte characters filling
+            // the bound, whole and cut; one a character short of it carried
+            // whole; and a cut of three-byte characters stopping a byte
+            // short.
+            (Some("é".repeat(bound / 2)), Some(wide), hash),
+            (Some("é".repeat(bound / 2)), Some(1_000), hash),
+            (
+                Some(format!("{}a", "é".repeat(bound / 2 - 1))),
+                Some(wide - 1),
+                hash,
+            ),
+            (Some("€".repeat(bound / 3)), Some(1_000), hash),
             (None, None, None),
         ];
         for (head, bytes, hash) in accepted {
@@ -3530,6 +3542,13 @@ mod tests {
             (Some("done".to_string()), Some(5), hash),
             (Some("x".repeat(bound - 3)), Some(wide), hash),
             (Some("x".repeat(bound - 4)), Some(1_000), hash),
+            // Bytes, not characters: a head of fewer characters than the
+            // bound holding more bytes than it, one of as many characters as
+            // a cut leaves holding twice the bytes, and a cut of three-byte
+            // characters stopping four bytes short.
+            (Some("é".repeat(bound / 2 + 1)), Some(1_000), hash),
+            (Some("é".repeat(bound - 3)), Some(1_000), hash),
+            (Some("€".repeat(bound / 3 - 1)), Some(1_000), hash),
             (Some("x".to_string()), Some(400), hash),
             (Some("someday".to_string()), Some(100_000), hash),
             (Some("done".to_string()), Some(4), Some("sha256:x")),

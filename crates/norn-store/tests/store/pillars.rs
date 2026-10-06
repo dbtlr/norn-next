@@ -274,11 +274,13 @@ fn citing(at: &str, rules: &[&str]) -> norn_store::FindingFacts {
 /// citation moved to another set, a set held under another fingerprint than
 /// its finding, emptied, or spelled as no set this crate writes — is damage
 /// the verification sees, so a store whose selection and report disagree
-/// does not verify healthy.
+/// does not verify healthy. So is a set no finding cites, which the
+/// collection takes with its last citer and only a write out of band leaves.
 #[test]
 fn a_findings_rules_that_disagree_with_its_rule_set_are_damage() {
     const DISAGREE: &str = "rule rows name a rule";
     const RULE_SET: &str = "the rule set";
+    const UNCITED: &str = "no finding cites";
     for (arrange, reported) in [
         (
             "UPDATE finding_rules SET rule = 'closed' WHERE rule = 'tasks'",
@@ -339,6 +341,16 @@ fn a_findings_rules_that_disagree_with_its_rule_set_are_damage() {
             "UPDATE rule_sets SET rules = 'other' WHERE rules = '[\"other\"]'",
             "other than JSON",
         ),
+        (
+            "UPDATE findings SET rule_set = NULL WHERE path = 'b.md';
+             DELETE FROM finding_rules WHERE rule = 'other'",
+            UNCITED,
+        ),
+        (
+            "INSERT INTO rule_sets (vault_schema_fingerprint, rules)
+             SELECT vault_schema_fingerprint, '[\"idle\"]' FROM findings WHERE path = 'a.md'",
+            UNCITED,
+        ),
     ] {
         let scratch = Scratch::new("rule-set");
         let mut store = scratch.open();
@@ -365,8 +377,9 @@ fn a_findings_rules_that_disagree_with_its_rule_set_are_damage() {
 }
 
 /// **A value head no value has cannot stand at rest.** A head whose hash is
-/// not a SHA-256, one shorter than the value it claims to carry whole, and one
-/// cut far short of the bound for a long value would each verify healthy and
+/// not a SHA-256, one shorter than the value it claims to carry whole, one
+/// cut far short of the bound for a long value, and one within the bound in
+/// characters but past it in bytes would each verify healthy and
 /// then fail every read of the finding as damage; the table refuses each where
 /// it is written, so the store stays one whose heads every reader reads.
 #[test]
@@ -376,6 +389,13 @@ fn a_value_head_no_value_has_is_refused_at_rest() {
         "UPDATE findings SET value_head = 's', value_bytes = 400",
         "UPDATE findings SET value_bytes = 100000",
         "UPDATE findings SET value_bytes = 8",
+        // Bytes, not characters: 129 two-byte characters are within the
+        // bound as characters and past it as bytes; 253 are as many
+        // characters as the shortest cut and twice its bytes.
+        "UPDATE findings SET value_head = replace(printf('%129s', ''), ' ', 'é'),
+             value_bytes = 1000",
+        "UPDATE findings SET value_head = replace(printf('%253s', ''), ' ', 'é'),
+             value_bytes = 1000",
     ] {
         let scratch = Scratch::new("value-head");
         let mut store = scratch.open();

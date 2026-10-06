@@ -345,11 +345,6 @@ pub(crate) fn statements() -> Vec<String> {
 /// at.
 pub(crate) const DOCUMENT_POSITION: i64 = -1;
 
-/// The most bytes one UTF-8 character takes, so a head cut at the character
-/// boundary at or below the bound falls at most this many bytes less one short
-/// of it.
-const MAX_UTF8_CHAR_BYTES: usize = 4;
-
 /// The hexadecimal digits a SHA-256 is spelled in, after its `sha256:` prefix.
 const SHA256_HEX_DIGITS: usize = 64;
 
@@ -388,10 +383,11 @@ END",
 /// as a byte length can state it: a head within the bound and the value; a
 /// value within the bound carried whole; a longer one cut no shorter than a
 /// character boundary forces, which is within the longest UTF-8 character's
-/// bytes less one of the bound; and the hash spelled as a SHA-256.
+/// bytes ([`char::MAX_LEN_UTF8`]) less one of the bound; and the hash spelled
+/// as a SHA-256.
 fn findings() -> String {
     let value_head_bytes = norn_wire::VALUE_HEAD_BYTES;
-    let shortest_cut = value_head_bytes - (MAX_UTF8_CHAR_BYTES - 1);
+    let shortest_cut = value_head_bytes - (char::MAX_LEN_UTF8 - 1);
     let hash_spelling = format!("sha256:{}", "[0-9a-f]".repeat(SHA256_HEX_DIGITS));
     format!(
         "CREATE TABLE findings (

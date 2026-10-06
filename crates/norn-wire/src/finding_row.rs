@@ -356,10 +356,6 @@ pub enum IllegalValueHead {
 }
 
 impl IllegalValueHead {
-    /// The longest a character is in UTF-8, which is how far short of the
-    /// bound a cut at the last character boundary below it can stop.
-    const WIDEST_CHARACTER: usize = 4;
-
     /// Whether `text` can be the head of a value of `byte_length` bytes.
     fn check(text: &str, byte_length: u64) -> Result<(), Self> {
         let length = text.len();
@@ -381,7 +377,9 @@ impl IllegalValueHead {
                 byte_length,
             });
         }
-        if length + Self::WIDEST_CHARACTER <= VALUE_HEAD_BYTES {
+        // A cut at the last character boundary below the bound stops short
+        // of it by less than the widest UTF-8 character.
+        if length + char::MAX_LEN_UTF8 <= VALUE_HEAD_BYTES {
             return Err(IllegalValueHead::CutShort {
                 text: length,
                 byte_length,
