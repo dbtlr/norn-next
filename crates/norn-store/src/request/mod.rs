@@ -3480,12 +3480,16 @@ mod tests {
             .expect("a store after its discards");
     }
 
-    /// **The value head's bound holds at rest structurally**: the table
-    /// refuses a head past [`norn_wire::VALUE_HEAD_BYTES`], one longer than
-    /// the value it heads, and a head without its length or its hash, so a
-    /// payload the wire refuses cannot be written either.
+    /// **A value head at rest is the head of some value, structurally.** The
+    /// table refuses a head past [`norn_wire::VALUE_HEAD_BYTES`] or longer
+    /// than the value it heads; a value within the bound carried other than
+    /// whole; a longer value cut shorter than the longest cut a character
+    /// boundary allows, which is within three bytes of the bound; a hash
+    /// outside the SHA-256 spelling; and a head without its length or its
+    /// hash. So a payload the wire refuses cannot be written either, and a
+    /// store that verifies healthy reads every head it holds.
     #[test]
-    fn the_findings_table_refuses_a_value_head_past_its_bound() {
+    fn the_findings_table_refuses_a_value_head_no_value_has() {
         let root = norn_testkit::scratch::Scratch::new("norn-store-value-bound");
         let store = Store::open_throwaway(
             root.join("store.sqlite3"),
@@ -3502,12 +3506,48 @@ mod tests {
                 params![head, bytes, hash],
             )
         };
+        let hash = norn_wire::ContentHash::from_sha256([7; 32]);
+        let hash = Some(hash.as_str());
         let bound = norn_wire::VALUE_HEAD_BYTES;
-        assert!(insert(Some("x".repeat(bound)), Some(1_000), Some("sha256:x")).is_ok());
-        assert!(insert(Some("x".repeat(bound + 1)), Some(1_000), Some("sha256:x")).is_err());
-        assert!(insert(Some("done".to_string()), Some(3), Some("sha256:x")).is_err());
-        assert!(insert(Some("done".to_string()), None, Some("sha256:x")).is_err());
-        assert!(insert(Some("done".to_string()), Some(4), None).is_err());
-        assert!(insert(None, None, None).is_ok());
+        let wide = bound as i64;
+        let accepted = [
+            (Some("x".repeat(bound)), Some(1_000), hash),
+            (Some("x".repeat(bound)), Some(wide), hash),
+            (Some("done".to_string()), Some(4), hash),
+            (Some("x".repeat(bound - 3)), Some(1_000), hash),
+            (None, None, None),
+        ];
+        for (head, bytes, hash) in accepted {
+            assert!(
+                insert(head.clone(), bytes, hash).is_ok(),
+                "a head of {:?} bytes heading {bytes:?} was refused",
+                head.map(|head| head.len())
+            );
+        }
+        let refused = [
+            (Some("x".repeat(bound + 1)), Some(1_000), hash),
+            (Some("done".to_string()), Some(3), hash),
+            (Some("done".to_string()), Some(5), hash),
+            (Some("x".repeat(bound - 3)), Some(wide), hash),
+            (Some("x".repeat(bound - 4)), Some(1_000), hash),
+            (Some("x".to_string()), Some(400), hash),
+            (Some("someday".to_string()), Some(100_000), hash),
+            (Some("done".to_string()), Some(4), Some("sha256:x")),
+            (Some("done".to_string()), Some(4), Some("not-a-hash")),
+            (
+                Some("done".to_string()),
+                Some(4),
+                Some(&*format!("sha256:{}", "A".repeat(64))),
+            ),
+            (Some("done".to_string()), None, hash),
+            (Some("done".to_string()), Some(4), None),
+        ];
+        for (head, bytes, written) in refused {
+            assert!(
+                insert(head.clone(), bytes, written).is_err(),
+                "a head of {:?} bytes heading {bytes:?} hashed {written:?} was written",
+                head.map(|head| head.len())
+            );
+        }
     }
 }

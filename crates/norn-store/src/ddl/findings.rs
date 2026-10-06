@@ -141,10 +141,12 @@
 //! A finding about a value carries it as `value_head`, `value_bytes` and
 //! `value_hash`: the value's first [`norn_wire::VALUE_HEAD_BYTES`] cut at a
 //! character boundary, its whole length, and the SHA-256 of the whole of it,
-//! taken where the finding is written. A `CHECK` built from the wire's
-//! constant holds the head to the bound, and another holds the three present
-//! together or absent together, so a value of any length costs a finding the
-//! same bytes. The combined expectation a value breached — a closed set, a
+//! taken where the finding is written. `CHECK`s built from the wire's
+//! constant hold the head to the bound and to the value, a value within the
+//! bound whole, a longer one cut within three bytes of the bound, the hash to
+//! the SHA-256 spelling, and the three present together or absent together,
+//! so a value of any length costs a finding the same bytes and every head at
+//! rest is one the wire reads. The combined expectation a value breached — a closed set, a
 //! limit, the allowed paths — is never stored with it: it is a function of
 //! the rules the finding cites.
 //!
@@ -343,6 +345,14 @@ pub(crate) fn statements() -> Vec<String> {
 /// at.
 pub(crate) const DOCUMENT_POSITION: i64 = -1;
 
+/// The most bytes one UTF-8 character takes, so a head cut at the character
+/// boundary at or below the bound falls at most this many bytes less one short
+/// of it.
+const MAX_UTF8_CHAR_BYTES: usize = 4;
+
+/// The hexadecimal digits a SHA-256 is spelled in, after its `sha256:` prefix.
+const SHA256_HEX_DIGITS: usize = 64;
+
 /// The rule sets a finding cites, ahead of the findings that reference them.
 const RULE_SET_STATEMENTS: &[&str] = &[
     "CREATE TABLE rule_sets (
@@ -373,8 +383,16 @@ END",
 /// The findings table, with the position of a finding about the document
 /// taken from [`DOCUMENT_POSITION`] and the value head's bound from
 /// [`norn_wire::VALUE_HEAD_BYTES`] rather than spelled a second time.
+///
+/// The value checks are the wire's [`norn_wire::ValueHead`] grammar as far
+/// as a byte length can state it: a head within the bound and the value; a
+/// value within the bound carried whole; a longer one cut no shorter than a
+/// character boundary forces, which is within the longest UTF-8 character's
+/// bytes less one of the bound; and the hash spelled as a SHA-256.
 fn findings() -> String {
     let value_head_bytes = norn_wire::VALUE_HEAD_BYTES;
+    let shortest_cut = value_head_bytes - (MAX_UTF8_CHAR_BYTES - 1);
+    let hash_spelling = format!("sha256:{}", "[0-9a-f]".repeat(SHA256_HEX_DIGITS));
     format!(
         "CREATE TABLE findings (
     id                       INTEGER PRIMARY KEY,
@@ -395,11 +413,15 @@ fn findings() -> String {
     rule_set                 INTEGER REFERENCES rule_sets(id),
     value_head               TEXT    CHECK (length(CAST(value_head AS BLOB)) <= {value_head_bytes}),
     value_bytes              INTEGER CHECK (value_bytes >= length(CAST(value_head AS BLOB))),
-    value_hash               TEXT,
+    value_hash               TEXT    CHECK (value_hash GLOB '{hash_spelling}'),
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL)),
     CHECK ((value_head IS NULL) = (value_bytes IS NULL)
-       AND (value_head IS NULL) = (value_hash IS NULL))
+       AND (value_head IS NULL) = (value_hash IS NULL)),
+    CHECK (value_bytes > {value_head_bytes}
+        OR length(CAST(value_head AS BLOB)) = value_bytes),
+    CHECK (value_bytes <= {value_head_bytes}
+        OR length(CAST(value_head AS BLOB)) >= {shortest_cut})
 )"
     )
 }

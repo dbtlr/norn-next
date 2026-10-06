@@ -364,6 +364,35 @@ fn a_findings_rules_that_disagree_with_its_rule_set_are_damage() {
     }
 }
 
+/// **A value head no value has cannot stand at rest.** A head whose hash is
+/// not a SHA-256, one shorter than the value it claims to carry whole, and one
+/// cut far short of the bound for a long value would each verify healthy and
+/// then fail every read of the finding as damage; the table refuses each where
+/// it is written, so the store stays one whose heads every reader reads.
+#[test]
+fn a_value_head_no_value_has_is_refused_at_rest() {
+    for arrange in [
+        "UPDATE findings SET value_hash = 'not-a-hash'",
+        "UPDATE findings SET value_head = 's', value_bytes = 400",
+        "UPDATE findings SET value_bytes = 100000",
+        "UPDATE findings SET value_bytes = 8",
+    ] {
+        let scratch = Scratch::new("value-head");
+        let mut store = scratch.open();
+        store
+            .begin_request()
+            .record_finding(&citing("a.md", &["tasks"]))
+            .expect("recording a rule finding");
+        assert!(
+            induced_failure::execute_out_of_band(&mut store, arrange).is_err(),
+            "`{arrange}` was written"
+        );
+        store
+            .verify_integrity()
+            .expect("a store whose value heads were refused");
+    }
+}
+
 /// **A document row's stored position below zero is damage.** A document's
 /// body offset and byte length are read through the one position reader, so
 /// a value this crate never writes is refused as damage rather than failing
