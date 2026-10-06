@@ -1809,9 +1809,9 @@ pub(crate) fn check_finding_paths(
 /// names — the one standing, or one made here — and one `finding_rules` row
 /// per name copies the finding's key beside it. **The offending value is kept
 /// as its head**: its first [`norn_wire::VALUE_HEAD_BYTES`], its length and
-/// its hash, which is taken here over the whole value being written. Both are
-/// dormant carriers until rule judgment in derivation files a finding citing a
-/// rule or judging a value (NORN-358); no caller does yet.
+/// its hash, which is taken here over the whole value being written. Rule
+/// judgment in derivation files the findings that cite rules and judge
+/// values; every other producer's carry neither.
 pub(crate) fn write_finding(
     transaction: &rusqlite::Transaction<'_>,
     finding: &FindingFacts,
@@ -1910,10 +1910,6 @@ pub(crate) fn write_finding(
 /// A set is found by its canonical spelling ([`crate::rule_set::spelling`]),
 /// which tells every two sets apart however their names are spelled, and is
 /// held as that spelling alone: its names are read back off it.
-///
-/// A dormant carrier: no caller files a finding citing a rule until rule
-/// judgment in derivation does (NORN-358), so today only the store's own suite
-/// reaches past the empty set.
 fn cited_rule_set(
     transaction: &rusqlite::Transaction<'_>,
     fingerprint: &str,

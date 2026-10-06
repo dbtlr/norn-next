@@ -124,20 +124,20 @@
 //! # Where rules are consumed
 //!
 //! Selection ([`VaultSchema::selecting_rules`]), the combined constraint
-//! ([`VaultSchema::combined`]) and the defaults fixpoint
-//! ([`VaultSchema::fill_rule_defaults`]) are pure functions of a path, a
-//! frontmatter and the schema. **Dormant carriers:** the schema read's own
-//! checks are their only caller today. The rule findings that judge a stored
-//! document by them land with NORN-358, the write gate that judges a plan's
-//! documents by them with NORN-359, the fixpoint's wiring into `new` and inbox
-//! capture with NORN-359, and repair's declared fixes at Layer 5B
-//! (NORN-351); none is built, so nothing outside this crate selects by a rule
-//! or combines rules yet. What reaches a rule from outside today is its
-//! declaration: `norn-host` reads each rule's accessors into the content model
-//! the store holds, which `describe`'s rule facet reports as the schema writes
-//! it and a `validate` naming a rule is checked against. A rule is not yet a
-//! term of [`VaultSchema::rederives_documents`] because no per-document
-//! derived state reads one until NORN-358.
+//! ([`VaultSchema::combined`]), rule judgment ([`VaultSchema::judge`]) and
+//! the defaults fixpoint ([`VaultSchema::fill_rule_defaults`]) are pure
+//! functions of a path, a frontmatter and the schema. **Derivation judges
+//! every document by them**: `norn-host` files each finding the judgment
+//! concludes in the document's own changeset, citing its rules and naming its
+//! offending value, so a rule is a term of
+//! [`VaultSchema::rederives_documents`]. **Dormant carriers beyond that:**
+//! the write gate that judges a plan's documents by the same judgment lands
+//! with NORN-359, and so does the fixpoint's wiring into `new` and inbox
+//! capture; repair's declared fixes land at Layer 5B (NORN-351). Until the
+//! gate lands, a plan's schema check leaves the rule breaches out. A rule's
+//! declaration reaches `norn-host` too: it reads each rule's accessors into
+//! the content model the store holds, which `describe`'s rule facet reports
+//! as the schema writes it and a `validate` naming a rule is checked against.
 //!
 //! **A path selector makes a carried move's judgment necessary.** A rule's
 //! `match.path`, `exclude.path` and `allowed_paths` conclude about a document
@@ -177,11 +177,11 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// One named schema rule: what it selects, what it requires of what it
 /// selects, and the fixes it declares.
 ///
-/// Schema read's own checks read it, and `norn-host` reads its accessors into
-/// the declaration `describe`'s rule facet reports. **A dormant carrier**
-/// beyond that: the rule findings (NORN-358), the write gate (NORN-359) and
-/// repair's declared fixes (NORN-351) read it as a constraint, and none of
-/// them is built.
+/// Schema read's own checks read it, rule judgment reads it as a constraint
+/// ([`VaultSchema::judge`]), and `norn-host` reads its accessors into the
+/// declaration `describe`'s rule facet reports. **A dormant carrier** beyond
+/// that: the write gate (NORN-359) and repair's declared fixes (NORN-351) read
+/// it as a constraint, and neither is built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -255,10 +255,9 @@ impl Rule {
     /// automaton the globs make together. Zero for a rule that states none.
     /// See [`PLACEMENT_CEILING`].
     ///
-    /// Schema read weighs every neighbourhood by it. Its consumer outside
-    /// this crate is the rule findings' logical counters (NORN-358), which
-    /// report the weight of the placement walk each document takes; they are
-    /// not built.
+    /// Schema read weighs every neighbourhood by it, and rule judgment
+    /// reports the weight of each placement walk it pays by it
+    /// ([`RuleWork::placement_weight`]), a logical count derivation tallies.
     pub fn placement_weight(&self) -> u64 {
         self.allowed_paths
             .as_ref()
@@ -697,10 +696,12 @@ impl VaultSchema {
 
     /// The rule called `name`, if the schema declares one.
     ///
-    /// Its consumer is not built: the rule findings (NORN-358), which read
-    /// back the rule a stored finding names. `describe` reports every rule,
-    /// in name order, and takes no rule name; a `validate` naming a rule is
-    /// checked against the declaration the store holds rather than here.
+    /// Its consumer is not built: repair (Layer 5B, NORN-351), which reads
+    /// back each rule a stored finding cites for the fixes it declares. Rule
+    /// judgment reads the rules selecting a document rather than one by name,
+    /// `describe` reports every rule, in name order, and takes no rule name,
+    /// and a `validate` naming a rule is checked against the declaration the
+    /// store holds rather than here.
     pub fn rule(&self, name: &str) -> Option<&Rule> {
         self.rules.get(name)
     }
@@ -722,9 +723,9 @@ impl VaultSchema {
 
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
     ///
-    /// The defaults fixpoint selects by the same reading. The rule findings
-    /// (NORN-358) and the write gate (NORN-359), which select a stored or
-    /// planned document's rules through it, are not built.
+    /// The defaults fixpoint and rule judgment select by the same reading
+    /// ([`VaultSchema::judge`]). The write gate (NORN-359), which selects a
+    /// planned document's rules through it, is not built.
     ///
     /// `case` says how the path globs' literal letters compare with the
     /// path's: the store's recorded path order names it
@@ -813,8 +814,8 @@ impl VaultSchema {
     /// [`Shape::Single`]; a scalar matches unless the key is declared
     /// [`Shape::List`]. A value of the other shape, like a map anywhere, is
     /// not a value of the key's shape, so it has nothing to compare. The shape
-    /// is read as rule judgment reads it ([`judge::read_shape`]), and find's
-    /// field equality reads it the same way.
+    /// is read as rule judgment reads it ([`judge::read_shape`]). Find's field
+    /// equality is owed the same shape reading (NORN-358).
     fn matches_value(
         &self,
         key: &str,

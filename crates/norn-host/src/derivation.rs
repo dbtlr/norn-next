@@ -43,7 +43,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_config::schema::{
-    FieldType, ForbiddenFix, Offset, Rule, Shape, TypedValue, UndeclaredTags, VaultSchema,
+    Breach, FieldType, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape, TypedValue,
+    UndeclaredTags, VaultSchema,
 };
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
@@ -52,8 +53,9 @@ use norn_store::{
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{
-    FieldShape, FindingKind, FindingScope, RuleAllowedPaths, RuleClosedSet, RuleExclude,
-    RuleForbiddenFix, RuleMatch, SchemaRule, Severity, TagStance, fold_tag,
+    AuthoredValue, CaseFold, FieldShape, FindingKind, FindingScope, RuleAllowedPaths,
+    RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, SchemaRule, Severity, TagStance,
+    ValueMap, fold_tag,
 };
 
 /// The derivation this build writes a store's rows by, recorded in every store
@@ -71,7 +73,7 @@ use norn_wire::{
 /// pinned corpus from zero and digests every derived row, pinned beside the
 /// version it was taken under, and it fails when the digest moves while this
 /// does not.
-pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(8);
+pub const DERIVATION_VERSION: DerivationVersion = DerivationVersion::new(9);
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -231,6 +233,10 @@ pub(crate) enum Cause {
     /// The document derives whole and disagrees with the vault's declared tag
     /// facet.
     TagBreach(TagBreach),
+    /// The document derives whole and disagrees with a field declaration or
+    /// with the combined constraint of the schema rules selecting it
+    /// ([`VaultSchema::judge`]).
+    RuleBreach(Breach),
 }
 
 impl Cause {
@@ -240,20 +246,26 @@ impl Cause {
             Cause::Undecodable(cause) => cause.kind(),
             Cause::UnreadBlock(cause) => cause.kind(),
             Cause::TagBreach(cause) => cause.kind(),
+            Cause::RuleBreach(breach) => breach.kind(),
         }
     }
 
-    /// How urgently a finding of this cause is reported.
+    /// How urgently a finding of this cause is reported, where the cause
+    /// alone decides it.
     ///
     /// The two derivation defects are errors: derived state is missing
     /// something the vault holds, and a reader of that state gets a wrong
     /// answer until it is fixed. A facet breach is a warning: the document
     /// derived whole, every fact it holds is on its row, and what stands is a
-    /// disagreement between the vault's own declaration and its contents.
+    /// disagreement between the vault's own declaration and its contents. A
+    /// rule breach is the same disagreement, reported at the highest
+    /// severity of the rules it cites, which its judgment states and its
+    /// planned finding carries; this is the floor a rule stating none is
+    /// reported at.
     pub(crate) const fn severity(self) -> Severity {
         match self {
             Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
-            Cause::TagBreach(_) => Severity::Warning,
+            Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
         }
     }
 
@@ -263,8 +275,10 @@ impl Cause {
             Cause::Undecodable(cause) => cause.decided(),
             // A block is read out of the document's own bytes, so concluding
             // that nothing read it means having opened them. So is a tag: the
-            // facts a facet judges are read from the document itself.
-            Cause::UnreadBlock(_) | Cause::TagBreach(_) => Decided::ByBytes,
+            // facts a facet judges are read from the document itself. So is a
+            // rule breach: it judges the frontmatter those bytes hold, at the
+            // path they stand at, and the act that re-reads them re-judges it.
+            Cause::UnreadBlock(_) | Cause::TagBreach(_) | Cause::RuleBreach(_) => Decided::ByBytes,
         }
     }
 
@@ -288,6 +302,15 @@ impl Cause {
                 "`{}` carries a tag the vault's schema does not admit: {}",
                 subject.as_str(),
                 cause.statement()
+            ),
+            // The field, the value and the rules cited are the finding's
+            // target, value and rule set rather than part of its message, so
+            // a reader filters by them without parsing prose and the message's
+            // bytes grow with none of them.
+            Cause::RuleBreach(breach) => format!(
+                "`{}` disagrees with the vault's schema: {}",
+                subject.as_str(),
+                breach.statement()
             ),
         }
     }
@@ -353,7 +376,7 @@ impl Decided {
 /// leaves none. A cause minted under a kind an older cause already carries is
 /// reached by neither side, and the ADR that closes both cause sets is what
 /// stands in front of one.
-const CAUSES: [Cause; 7] = [
+const CAUSES: [Cause; 16] = [
     Cause::Undecodable(Undecodable::PathBytes),
     Cause::Undecodable(Undecodable::PathSpelling),
     Cause::Undecodable(Undecodable::BodyBytes),
@@ -361,41 +384,33 @@ const CAUSES: [Cause; 7] = [
     Cause::UnreadBlock(UnreadBlock::Unreadable),
     Cause::UnreadBlock(UnreadBlock::TooLarge),
     Cause::TagBreach(TagBreach::Undeclared),
+    Cause::RuleBreach(Breach::RequiredMissing),
+    Cause::RuleBreach(Breach::Forbidden),
+    Cause::RuleBreach(Breach::NotOneOf),
+    Cause::RuleBreach(Breach::TooLong),
+    Cause::RuleBreach(Breach::TypeMismatch),
+    Cause::RuleBreach(Breach::ShapeMismatch),
+    Cause::RuleBreach(Breach::Misplaced),
+    Cause::RuleBreach(Breach::FieldRulesConflict),
+    Cause::RuleBreach(Breach::DocumentRulesConflict),
 ];
 
 /// The finding kinds no cause above carries.
 ///
-/// Quarantine, the unread block and the tag facet are the producers recording
-/// findings today. Link health's three kinds — broken, ambiguous, missing
-/// anchor — are named here because they have no cause in this crate: ADR 0027
-/// rules the store to judge link health in SQL and file those findings itself,
-/// inside the changeset, over per-document facts this crate's derivation
-/// already writes, so no per-document act here ever concludes one. A kind
-/// minted for another producer is named here too, which is the one line that
-/// keeps the classification below a reading of the registry rather than a
-/// claim that every kind the registry holds is this crate's.
-///
-/// **The nine schema kinds are a dormant carrier.** ADR 0035's rule judgment
-/// — a document's fields against their declared type and shape, and the
-/// document against the combined constraint of the rules selecting it — is
-/// what files them, and its consuming step is NORN-358, which derives them in
-/// the document's own changeset. No cause reaches them yet because no act in
-/// this crate judges a rule: the store holds their rows, their rule sets and
-/// their values, and `validate` reads them back, but nothing here records
-/// one. NORN-358 gives each a cause, which moves it out of this list.
-const KINDS_NO_CAUSE_CARRIES: [FindingKind; 12] = [
+/// Quarantine, the unread block, the tag facet and rule judgment are the
+/// producers recording findings today. Link health's three kinds — broken,
+/// ambiguous, missing anchor — are named here because they have no cause in
+/// this crate: ADR 0027 rules the store to judge link health in SQL and file
+/// those findings itself, inside the changeset, over per-document facts this
+/// crate's derivation already writes, so no per-document act here ever
+/// concludes one. A kind minted for another producer is named here too, which
+/// is the one line that keeps the classification below a reading of the
+/// registry rather than a claim that every kind the registry holds is this
+/// crate's.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 3] = [
     FindingKind::Broken,
     FindingKind::Ambiguous,
     FindingKind::MissingAnchor,
-    FindingKind::Misplaced,
-    FindingKind::DocumentRulesConflict,
-    FindingKind::RequiredMissing,
-    FindingKind::Forbidden,
-    FindingKind::NotOneOf,
-    FindingKind::TooLong,
-    FindingKind::TypeMismatch,
-    FindingKind::ShapeMismatch,
-    FindingKind::FieldRulesConflict,
 ];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
@@ -439,6 +454,7 @@ const fn scope_agrees(cause: Cause) -> bool {
         (Cause::Undecodable(_), FindingScope::Place)
             | (Cause::UnreadBlock(_), FindingScope::Document)
             | (Cause::TagBreach(_), FindingScope::Document)
+            | (Cause::RuleBreach(_), FindingScope::Document)
     )
 }
 
@@ -752,8 +768,10 @@ pub(crate) fn map_document(
 }
 
 /// One finding a plan asks a job to file: the subject it stands at, the cause
-/// it states, and the formatted detail — the spelling this finding was read
-/// from, and the reader's own account of the refusal where there is one.
+/// it states, the severity it is reported at, and the formatted detail — the
+/// spelling this finding was read from, and the reader's own account of the
+/// refusal where there is one — with the rules it cites and the value it
+/// judged where a rule breach names them.
 ///
 /// The cause rides with it because it is what decides how much of the subject
 /// recording the finding replaces, and whether a document row at the subject
@@ -771,8 +789,36 @@ pub(crate) struct PlannedFinding {
     /// What the finding is about inside its subject, where the cause is about
     /// one named thing on the document rather than the document itself. A tag
     /// breach carries the tag; a derivation defect carries nothing, because the
-    /// subject is the whole of what it is about.
+    /// subject is the whole of what it is about. A rule breach about a field
+    /// carries the field.
     pub(crate) target: Option<String>,
+    /// How urgently it is reported: the cause's own severity, or, for a rule
+    /// breach, the highest of the rules it cites.
+    pub(crate) severity: Severity,
+    /// The rules a rule breach cites, by name; empty for every other cause and
+    /// for a type or shape mismatch, which no rule states.
+    pub(crate) rules: BTreeSet<String>,
+    /// The offending value a rule breach names, spelled as the store keeps a
+    /// field value: a scalar as its field row's text, a list or a map as its
+    /// canonical JSON. `None` for every other cause and for a breach naming
+    /// no value.
+    pub(crate) value: Option<String>,
+}
+
+impl PlannedFinding {
+    /// A finding about `subject` whose cause alone decides it: no rule cited,
+    /// no value named, at the cause's own severity.
+    fn of(subject: DocumentPath, cause: Cause, detail: String, target: Option<String>) -> Self {
+        PlannedFinding {
+            subject,
+            cause,
+            detail,
+            target,
+            severity: cause.severity(),
+            rules: BTreeSet::new(),
+            value: None,
+        }
+    }
 }
 
 /// One document's planned outcome: a change and a finding, each present when
@@ -788,6 +834,10 @@ pub(crate) struct Plan {
     /// declaration judges. A document can break a facet once per tag, so this
     /// is a list rather than the single answer a derivation defect is.
     pub(crate) findings: Vec<PlannedFinding>,
+    /// What judging the document against the schema's field declarations and
+    /// rules cost, which no statement counter sees; zero where nothing was
+    /// judged.
+    pub(crate) rule_work: RuleWork,
 }
 
 /// Plan what one document's bytes write, taking with them the row they can no
@@ -810,9 +860,14 @@ pub(crate) struct Plan {
 /// subject is rendered from where the grammar admits no document path.
 ///
 /// `declared` is the pinned vault schema's declaration. It decides the facet
-/// findings and the typed half of the field rows: a document that does not
-/// decode is judged against nothing, because a vault declaration says what a
-/// document's facts must be and there are no facts.
+/// findings, the rule findings and the typed half of the field rows: a
+/// document that does not decode is judged against nothing, because a vault
+/// declaration says what a document's facts must be and there are no facts.
+///
+/// `case` is how a rule's path globs compare their literal letters with the
+/// document's path: the store's recorded path order names it
+/// (`norn_store::StoredPathOrder::glob_case`), as for every glob over a vault
+/// path.
 pub(crate) fn plan_document(
     path: &Path,
     spelling: &str,
@@ -820,27 +875,47 @@ pub(crate) fn plan_document(
     hash: String,
     stored: Option<&DocumentPath>,
     declared: &Declared,
+    case: CaseFold,
 ) -> Plan {
     match map_document(spelling, bytes, hash, declared.content_model()) {
         Ok(derived) => {
             let subject = derived.facts.path.clone();
             let mut findings = Vec::new();
-            if let Some(unread) = derived.unread_frontmatter {
-                let detail = match unread.problem {
-                    Some(problem) => format!("{path:?}: {problem}"),
-                    None => format!("{path:?}"),
-                };
-                findings.push(PlannedFinding {
-                    subject: subject.clone(),
-                    cause: Cause::UnreadBlock(unread.cause),
-                    detail,
-                    target: None,
-                });
+            let mut rule_work = RuleWork::default();
+            match derived.unread_frontmatter {
+                Some(unread) => {
+                    let detail = match unread.problem {
+                        Some(problem) => format!("{path:?}: {problem}"),
+                        None => format!("{path:?}"),
+                    };
+                    findings.push(PlannedFinding::of(
+                        subject.clone(),
+                        Cause::UnreadBlock(unread.cause),
+                        detail,
+                        None,
+                    ));
+                }
+                // A block nothing read leaves the fields unknown rather than
+                // absent, so no rule is judged against them: a required field
+                // would be reported missing from a block that may hold it.
+                // The unread block's own finding is what stands instead.
+                None => {
+                    let (judged, work) = plan_rule_judgment(
+                        path,
+                        &subject,
+                        derived.facts.frontmatter(),
+                        declared.schema(),
+                        case,
+                    );
+                    findings.extend(judged);
+                    rule_work = work;
+                }
             }
             findings.extend(plan_tag_facet(&subject, &derived.facts, declared.schema()));
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
                 findings,
+                rule_work,
             }
         }
         Err(quarantine) => Plan {
@@ -849,7 +924,120 @@ pub(crate) fn plan_document(
                 provenance: Provenance::Quarantine,
             }),
             findings: vec![plan_quarantine(path, quarantine)],
+            rule_work: RuleWork::default(),
         },
+    }
+}
+
+/// Judge a document's frontmatter and path against the vault schema's field
+/// declarations and rules ([`VaultSchema::judge`]): one finding per field,
+/// constraint kind and offending value, and the work the judgment paid.
+///
+/// **The judgment reads this document alone.** Its inputs are the path, the
+/// frontmatter the facts were derived from and the schema, so its findings
+/// are filed in the document's own changeset under the fingerprint the
+/// schema is pinned by, as the tag facet's are, and a re-derivation of the
+/// document re-judges them. A frontmatter whose top level is no map holds no
+/// field, as it derives no field row.
+///
+/// A schema declaring no field and stating no rule judges nothing, and pays
+/// nothing to say so.
+fn plan_rule_judgment(
+    path: &Path,
+    subject: &DocumentPath,
+    frontmatter: Option<&FrontmatterValue>,
+    schema: &VaultSchema,
+    case: CaseFold,
+) -> (Vec<PlannedFinding>, RuleWork) {
+    if schema.fields().next().is_none() && schema.rules().next().is_none() {
+        return (Vec::new(), RuleWork::default());
+    }
+    let judgment = schema.judge(subject.as_str(), &authored_fields(frontmatter), case);
+    let work = judgment.work();
+    let findings = judgment
+        .into_findings()
+        .into_iter()
+        .map(|finding| rule_finding(path, subject, finding))
+        .collect();
+    (findings, work)
+}
+
+/// The planned finding a rule judgment's `finding` is filed as.
+fn rule_finding(path: &Path, subject: &DocumentPath, finding: RuleFinding) -> PlannedFinding {
+    PlannedFinding {
+        subject: subject.clone(),
+        cause: Cause::RuleBreach(finding.breach()),
+        detail: format!("{path:?}"),
+        target: finding.field().map(str::to_string),
+        severity: finding.severity(),
+        rules: finding.rules().iter().cloned().collect(),
+        value: finding.value().and_then(stored_spelling),
+    }
+}
+
+/// A frontmatter's fields as a written value holds them, the last write of a
+/// repeated key standing as the canonical projection keeps it, and none where
+/// the frontmatter is absent or its top level is no map.
+fn authored_fields(frontmatter: Option<&FrontmatterValue>) -> ValueMap {
+    let Some(FrontmatterValue::Map(entries)) = frontmatter else {
+        return ValueMap::default();
+    };
+    let mut fields: Vec<(String, AuthoredValue)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        fields.retain(|(held, _)| held != key);
+        fields.push((key.clone(), authored(value)));
+    }
+    ValueMap::new(fields).expect("each key is held once, its last write standing")
+}
+
+/// One frontmatter value as a written value holds it. A float no written value
+/// can hold — `NaN` or an infinity — is null, as the canonical projection and
+/// the field rows read it.
+fn authored(value: &FrontmatterValue) -> AuthoredValue {
+    match value {
+        FrontmatterValue::Null => AuthoredValue::Null,
+        FrontmatterValue::Bool(flag) => AuthoredValue::Bool(*flag),
+        FrontmatterValue::Int(number) => AuthoredValue::Integer(*number),
+        FrontmatterValue::Float(number) => {
+            AuthoredValue::float(*number).unwrap_or(AuthoredValue::Null)
+        }
+        FrontmatterValue::String(text) => AuthoredValue::String(text.clone()),
+        FrontmatterValue::Sequence(items) => {
+            AuthoredValue::List(items.iter().map(authored).collect())
+        }
+        FrontmatterValue::Map(_) => AuthoredValue::Map(authored_fields(Some(value))),
+    }
+}
+
+/// An offending value spelled as the store keeps a field value: a scalar as
+/// its field row's raw text, a list or a map as its canonical JSON. A null has
+/// no spelling, and names no value.
+fn stored_spelling(value: &AuthoredValue) -> Option<String> {
+    match value {
+        AuthoredValue::List(_) | AuthoredValue::Map(_) => {
+            norn_store::canonical_json(&projected(value)).ok()
+        }
+        scalar => scalar.scalar_text(),
+    }
+}
+
+/// A written value as the store's projection takes it.
+fn projected(value: &AuthoredValue) -> FrontmatterValue {
+    match value {
+        AuthoredValue::Null => FrontmatterValue::Null,
+        AuthoredValue::Bool(flag) => FrontmatterValue::Bool(*flag),
+        AuthoredValue::Integer(number) => FrontmatterValue::Int(*number),
+        AuthoredValue::Float(number) => FrontmatterValue::Float(number.get()),
+        AuthoredValue::String(text) => FrontmatterValue::String(text.clone()),
+        AuthoredValue::List(items) => {
+            FrontmatterValue::Sequence(items.iter().map(projected).collect())
+        }
+        AuthoredValue::Map(map) => FrontmatterValue::Map(
+            map.entries()
+                .iter()
+                .map(|(key, value)| (key.clone(), projected(value)))
+                .collect(),
+        ),
     }
 }
 
@@ -1093,11 +1281,13 @@ fn plan_tag_facet(
         .iter()
         .filter(|tag| !facet.admits(&tag.name))
         .filter(|tag| seen.insert(fold_tag(&tag.name)))
-        .map(|tag| PlannedFinding {
-            subject: subject.clone(),
-            cause: Cause::TagBreach(TagBreach::Undeclared),
-            detail: format!("`#{}`, written in the {}", tag.name, source(tag.source)),
-            target: Some(tag.name.clone()),
+        .map(|tag| {
+            PlannedFinding::of(
+                subject.clone(),
+                Cause::TagBreach(TagBreach::Undeclared),
+                format!("`#{}`, written in the {}", tag.name, source(tag.source)),
+                Some(tag.name.clone()),
+            )
         })
         .collect()
 }
@@ -1115,12 +1305,12 @@ const fn source(source: TagSource) -> &'static str {
 /// The subject is the place the path occupies — its own spelling where the
 /// grammar admits one, and a rendering of it where the grammar does not.
 pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFinding {
-    PlannedFinding {
-        subject: DocumentPath::rendered(path),
-        cause: Cause::Undecodable(quarantine.cause),
-        detail: format!("{path:?}: {}", quarantine.problem),
-        target: None,
-    }
+    PlannedFinding::of(
+        DocumentPath::rendered(path),
+        Cause::Undecodable(quarantine.cause),
+        format!("{path:?}: {}", quarantine.problem),
+        None,
+    )
 }
 
 /// The text a file's `bytes` spell as a vault document, or why they spell
@@ -1843,7 +2033,9 @@ rules:
         for cause in CAUSES {
             let expected = match cause {
                 Cause::Undecodable(_) => FindingScope::Place,
-                Cause::UnreadBlock(_) | Cause::TagBreach(_) => FindingScope::Document,
+                Cause::UnreadBlock(_) | Cause::TagBreach(_) | Cause::RuleBreach(_) => {
+                    FindingScope::Document
+                }
             };
             assert_eq!(
                 cause.kind().scope(),
@@ -1878,7 +2070,15 @@ rules:
             let path = Path::new(spelling);
             let hash = || norn_fs::ContentHash::of(bytes).to_string();
 
-            let unheld = plan_document(path, spelling, bytes, hash(), None, &undeclaring());
+            let unheld = plan_document(
+                path,
+                spelling,
+                bytes,
+                hash(),
+                None,
+                &undeclaring(),
+                CaseFold::Exact,
+            );
             let [finding] = &unheld.findings[..] else {
                 panic!("a refused document states why it contributes no facts");
             };
@@ -1894,7 +2094,15 @@ rules:
             );
 
             let stored = DocumentPath::new("note.md").expect("a document path");
-            let held = plan_document(path, spelling, bytes, hash(), Some(&stored), &undeclaring());
+            let held = plan_document(
+                path,
+                spelling,
+                bytes,
+                hash(),
+                Some(&stored),
+                &undeclaring(),
+                CaseFold::Exact,
+            );
             assert_eq!(
                 held.change,
                 Some(Change::Death {
@@ -1971,6 +2179,7 @@ rules:
                 hash(),
                 None,
                 &undeclaring(),
+                CaseFold::Exact,
             );
             assert!(
                 matches!(plan.change, Some(Change::Upsert(_))),
@@ -2011,6 +2220,7 @@ rules:
             hash.clone(),
             Some(&stored),
             &undeclaring(),
+            CaseFold::Exact,
         );
         assert_eq!(
             plan.change,
@@ -2029,7 +2239,8 @@ rules:
                 whole,
                 hash,
                 None,
-                &undeclaring()
+                &undeclaring(),
+                CaseFold::Exact
             ),
             "the row the observation replaces changed a plan that still derives"
         );
@@ -2045,6 +2256,7 @@ rules:
             hash.clone(),
             Some(&stored),
             &undeclaring(),
+            CaseFold::Exact,
         );
         assert!(
             matches!(plan.change, Some(Change::Upsert(_))),
@@ -2065,7 +2277,8 @@ rules:
                 unread,
                 hash,
                 None,
-                &undeclaring()
+                &undeclaring(),
+                CaseFold::Exact
             ),
             "the row the observation replaces changed a plan that still derives"
         );
@@ -2075,8 +2288,9 @@ rules:
     /// An act that opened nothing concludes what the grammar says about the
     /// names it read, so filing one of those verdicts replaces the path kinds
     /// and nothing else. An act that opened a document's bytes concludes what
-    /// those bytes say — the body verdict and every unread block — and says
-    /// nothing about the other spellings rendering onto the same place.
+    /// those bytes say — the body verdict, every unread block, the tag facet
+    /// and every rule breach — and says nothing about the other spellings
+    /// rendering onto the same place.
     #[test]
     fn a_side_rederives_the_kinds_of_the_causes_it_decides() {
         let rederived = |side: Decided| {
@@ -2101,7 +2315,16 @@ rules:
                 "document/frontmatter-too-large",
                 "document/frontmatter-unclosed",
                 "document/frontmatter-unreadable",
-                "document/undeclared-tag"
+                "document/misplaced",
+                "document/rules-conflict",
+                "document/undeclared-tag",
+                "field/forbidden",
+                "field/not-one-of",
+                "field/required-missing",
+                "field/rules-conflict",
+                "field/shape-mismatch",
+                "field/too-long",
+                "field/type-mismatch"
             ]
         );
     }
@@ -2128,6 +2351,7 @@ rules:
                     norn_fs::ContentHash::of(source).to_string(),
                     Some(&stored),
                     &reporting(),
+                    CaseFold::Exact,
                 )
             };
             assert_eq!(
@@ -2420,6 +2644,7 @@ rules:
             hash,
             None,
             &reporting(),
+            CaseFold::Exact,
         );
 
         assert!(
@@ -2465,6 +2690,7 @@ rules:
             hash,
             None,
             &undeclaring(),
+            CaseFold::Exact,
         );
 
         assert!(matches!(plan.change, Some(Change::Upsert(_))));
@@ -2487,6 +2713,7 @@ rules:
             hash,
             None,
             &reporting(),
+            CaseFold::Exact,
         );
 
         let [finding] = &plan.findings[..] else {
@@ -2499,14 +2726,15 @@ rules:
         );
     }
 
-    /// A facet breach leaves the document whole, so it is reported as a warning
-    /// rather than as the error a derivation defect is.
+    /// A facet or rule breach leaves the document whole, so it is reported as
+    /// a warning — a rule breach at the floor its rules may raise — rather than
+    /// as the error a derivation defect is.
     #[test]
     fn the_two_finding_families_carry_the_severity_their_effect_on_derived_state_has() {
         for cause in CAUSES {
             let expected = match cause {
                 Cause::Undecodable(_) | Cause::UnreadBlock(_) => Severity::Error,
-                Cause::TagBreach(_) => Severity::Warning,
+                Cause::TagBreach(_) | Cause::RuleBreach(_) => Severity::Warning,
             };
             assert_eq!(cause.severity(), expected, "`{}`", cause.kind());
         }
@@ -2552,6 +2780,7 @@ rules:
                         hash,
                         None,
                         &declared,
+                        CaseFold::Exact,
                     )
                     .change
                     .expect("a document that derives")

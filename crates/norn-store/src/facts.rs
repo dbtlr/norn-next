@@ -785,10 +785,8 @@ pub struct FindingFacts {
     /// contributing to the constraint it breaches, and empty for a finding
     /// that cites none.
     ///
-    /// A dormant carrier, as [`FindingFacts::value`] is: rule judgment in
-    /// derivation fills both (NORN-358), and until it lands every producer
-    /// files them empty, so only the store's own suite reaches the write
-    /// they drive.
+    /// Rule judgment in derivation fills both this and
+    /// [`FindingFacts::value`]; every other producer files them empty.
     ///
     /// **Held as a set, once per schema fingerprint.** The write files the
     /// names under the one rule set of that fingerprint holding exactly them,

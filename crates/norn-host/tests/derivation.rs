@@ -16,6 +16,7 @@
 //! folded suffix keys and their admitting counts, the links and the keys the link index holds them
 //! under, the headings, blocks and tags, the field rows
 //! with their typed halves and the offset spelling beside a typed date, every finding with its candidates, classes and path keys, the
+//! rules it cites and the head of the value it names, the
 //! terms the full-text index holds, and the pinned vault schema. Row
 //! identifiers, write generations and timestamps are left out, because none of
 //! them is a function of the vault: they say where a row landed, how many
@@ -62,12 +63,15 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// The digest the corpus derives to, and the derivation version it was taken
 /// under.
 const PINNED: (DerivationVersion, &str) = (
-    DerivationVersion::new(8),
-    "e37d616275edbbb922d89ae3ae039a6a75d423ce045180180971c53db938f13d",
+    DerivationVersion::new(9),
+    "3f00b6205dee2a475777fa74923e03c4ea7050b7d8d45b7004044a06570690d3",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
-/// declared type, and a tag facet that reports what it does not declare.
+/// declared type and of each declared shape, a tag facet that reports what it
+/// does not declare, and schema rules that select the documents under
+/// `rules/` by their `kind` — two selecting each document, so a finding cites
+/// a set of rules, and one pair whose allowed paths share none.
 const SCHEMA: &str = "\
 version: 1
 fields:
@@ -83,11 +87,51 @@ fields:
     type: date
   topics:
     type: tags
+  status:
+    type: text
+    shape: list
+  kind:
+    type: text
+    shape: single
 tags:
   declared: [project, area/norn, solo]
   undeclared: report
 paths:
   ambiguity_ignore: [\"archive/**\"]
+rules:
+  task:
+    description: A tracked task
+    severity: error
+    match:
+      frontmatter: { kind: task }
+    required: { owner: }
+    forbidden: { scratch: remove }
+    one_of:
+      status: { values: [todo, doing, done] }
+    max_length: { summary: 8 }
+    allowed_paths:
+      paths: [\"rules/tasks/**\"]
+  filed:
+    match:
+      frontmatter: { kind: task }
+      path: \"rules/**\"
+    one_of:
+      status: { values: [todo, done] }
+    allowed_paths:
+      paths: [\"rules/tasks/**\", \"rules/filed/**\"]
+  chore:
+    match:
+      frontmatter: { kind: chore }
+    forbidden: { owner: }
+    allowed_paths:
+      paths: [\"rules/chores/**\"]
+  shelved:
+    match:
+      frontmatter: { kind: chore }
+      path: \"rules/**\"
+    required: { owner: }
+    allowed_paths:
+      paths: [\"rules/shelf/**\"]
 ";
 
 /// The schema of the second vault: the other stance a tag facet can take on
@@ -201,7 +245,41 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         // `archive/old/twin`, and its row stores that count.
         ("archive/old/twin.md", b"# The archived twin\n".to_vec()),
         ("health/anchored.md", b"# Anchored\n\nA held paragraph. ^held\n".to_vec()),
+        // A task both `task` and `filed` select: a missing owner, a
+        // forbidden list, a list holding two values outside their closed
+        // sets, one of them twice, and a summary past its limit and past the
+        // value head.
+        ("rules/tasks/a.md", rule_task()),
+        // A task standing where `filed` allows it and `task` does not, holding
+        // a status `task` allows and `filed` does not.
+        (
+            "rules/filed/b.md",
+            b"---\nkind: task\nowner: me\nstatus: [doing]\n---\n# Filed\n".to_vec(),
+        ),
+        // A chore `chore` forbids an owner to and `shelved` requires one of,
+        // whose two rules allow no path in common.
+        (
+            "rules/chores/c.md",
+            b"---\nkind: chore\nowner: me\n---\n# A chore\n".to_vec(),
+        ),
+        // A list under a single-shaped key, a scalar under a list-shaped one,
+        // and a map under a text field.
+        (
+            "rules/shapes.md",
+            b"---\nkind: [task, chore]\nstatus: todo\ntitle: { a: 1, b: [x] }\n---\n# Shapes\n"
+                .to_vec(),
+        ),
     ]
+}
+
+/// The task under `rules/tasks/`, whose summary runs past both its rule's
+/// limit and the value head a finding keeps.
+fn rule_task() -> Vec<u8> {
+    format!(
+        "---\nkind: task\nstatus: [todo, bogus, stalled, bogus]\nscratch: [left, over]\nsummary: {}\n---\n# A task\n",
+        "a summary that runs on ".repeat(14)
+    )
+    .into_bytes()
 }
 
 /// Constructs the text layer masks, skips or records nothing for: HTML
@@ -366,6 +444,74 @@ fn the_derivation_digest_moves_only_with_the_derivation_version() {
                  {pinned_version}: pin ({DERIVATION_VERSION}, \"{digest}\") here."
             )
         }
+    );
+}
+
+/// **A list value is judged element by element against the combined
+/// constraint.** Two rules selecting one document close `status` over sets
+/// whose intersection is `todo` and `done`; the document's list holds both,
+/// two values outside them, and one of those twice. Derivation files one
+/// `field/not-one-of` per distinct offending element — two, not three, and
+/// not one per rule — each naming its element as its value, citing both
+/// rules, at the higher of their severities, in the document's own
+/// changeset beside its row.
+#[test]
+fn a_list_value_is_judged_element_by_element_against_the_combined_constraint() {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "element-judgment")
+        .expect("a sandbox");
+    let rows = derive(
+        &sandbox.work_dir().join("vault"),
+        vec![(
+            "tasks/a.md",
+            b"---\ntype: task\nstatus: [todo, bogus, done, bogus, stalled]\n---\n# A task\n"
+                .to_vec(),
+        )],
+        "\
+version: 1
+fields:
+  status: { type: text, shape: list }
+rules:
+  wide: { one_of: { status: { values: [todo, doing, done] } } }
+  task: { severity: error, match: { frontmatter: { type: task } }, one_of: { status: { values: [todo, done, open] } } }
+",
+    );
+    let projection = rows.projection();
+    assert!(
+        projection.document("tasks/a.md").is_some(),
+        "the judged document derived no row"
+    );
+    let findings: Vec<_> = projection
+        .findings()
+        .iter()
+        .map(|finding| {
+            (
+                finding.kind.as_str(),
+                finding.target.as_deref(),
+                finding.value.as_ref().map(|(head, _, _)| head.as_str()),
+                finding.rules.iter().map(String::as_str).collect(),
+                finding.severity.as_str(),
+            )
+        })
+        .collect();
+    let not_one_of = FindingKind::NotOneOf.as_str();
+    assert_eq!(
+        findings,
+        [
+            (
+                not_one_of,
+                Some("status"),
+                Some("bogus"),
+                vec!["task", "wide"],
+                "error"
+            ),
+            (
+                not_one_of,
+                Some("status"),
+                Some("stalled"),
+                vec!["task", "wide"],
+                "error"
+            ),
+        ]
     );
 }
 
@@ -910,6 +1056,15 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         FindingKind::Broken,
         FindingKind::Ambiguous,
         FindingKind::MissingAnchor,
+        FindingKind::Misplaced,
+        FindingKind::DocumentRulesConflict,
+        FindingKind::RequiredMissing,
+        FindingKind::Forbidden,
+        FindingKind::NotOneOf,
+        FindingKind::TooLong,
+        FindingKind::TypeMismatch,
+        FindingKind::ShapeMismatch,
+        FindingKind::FieldRulesConflict,
     ] {
         assert!(
             kinds.contains(kind.as_str()),
@@ -930,6 +1085,30 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
         BTreeSet::from(["anchored#No Such Heading", "anchored#^no-such-block"]),
         "a missing heading and a missing block are not both exercised"
     );
+    // What a rule finding carries: a set of rules cited, a value head cut
+    // short of its value, and a value spelled as canonical JSON — a list's
+    // and a map's.
+    let findings = projection.findings();
+    assert!(
+        findings.iter().any(|finding| finding.rules.len() > 1),
+        "no finding citing a set of rules is exercised"
+    );
+    assert!(
+        findings.iter().any(|finding| finding
+            .value
+            .as_ref()
+            .is_some_and(|(head, bytes, _)| (head.len() as u64) < *bytes)),
+        "no value past its head is exercised"
+    );
+    for spelled in [r#"["left","over"]"#, r#"{"a":1,"b":["x"]}"#] {
+        assert!(
+            findings.iter().any(|finding| finding
+                .value
+                .as_ref()
+                .is_some_and(|(head, _, _)| head == spelled)),
+            "no value spelled `{spelled}` is exercised"
+        );
+    }
     assert!(
         !projection.indexed_terms().is_empty(),
         "the full-text index holds no term"

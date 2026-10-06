@@ -130,8 +130,10 @@
 //! applies them wherever a target's class is read, and `describe` reports the
 //! same set as path rules. `describe` reports each creation rule and the
 //! inbox as facets, templates as their source text; no derivation reads
-//! either. The schema rules and the fields' shapes are read at schema read
-//! alone, where the rules judge themselves; what consumes them beyond that is
+//! either. Derivation judges every document against the declared fields'
+//! types and shapes and the schema rules selecting it, and files what the
+//! judgment concludes as findings ([`VaultSchema::judge`]); the rules also
+//! judge themselves at schema read, and what consumes them beyond that is
 //! stated in [`rules`].
 
 pub mod creation;
@@ -384,8 +386,7 @@ impl DeclaredField {
     /// it — a selector on a key declared [`Shape::Single`] reads a scalar
     /// value alone, and a value of the other shape is a shape mismatch
     /// ([`VaultSchema::judge`]); and by `norn-host`, which carries it into
-    /// the declaration `describe` reports it with and the store's find reads
-    /// a field's equality under.
+    /// the declaration `describe` reports it with.
     pub fn shape(&self) -> Option<Shape> {
         self.shape
     }

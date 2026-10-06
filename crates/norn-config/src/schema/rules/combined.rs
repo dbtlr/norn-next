@@ -47,8 +47,9 @@ impl VaultSchema {
     /// What `rules` require together of a document they all select.
     ///
     /// Read at schema read by the statically unavoidable conflict check, and
-    /// by the rule findings (NORN-358) and the write gate (NORN-359), which
-    /// are not built.
+    /// by rule judgment ([`VaultSchema::judge`]) for the rules selecting each
+    /// document. The write gate (NORN-359) reads it through that judgment,
+    /// and is not built.
     pub fn combined<'s>(&'s self, rules: &[&'s Rule]) -> CombinedConstraint<'s> {
         let mut rules = rules.to_vec();
         rules.sort_by(|left, right| left.name.cmp(&right.name));

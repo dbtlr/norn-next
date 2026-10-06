@@ -3772,8 +3772,19 @@ impl<'s> Pending<'s> {
         stored: Option<&DocumentPath>,
     ) {
         count_document_derived();
-        let Plan { change, findings } =
-            plan_document(path, spelling, bytes, hash, stored, &self.declared.model);
+        let Plan {
+            change,
+            findings,
+            rule_work: _,
+        } = plan_document(
+            path,
+            spelling,
+            bytes,
+            hash,
+            stored,
+            &self.declared.model,
+            self.store.path_order().glob_case(),
+        );
         if let Some(change) = change {
             self.push(change);
         }
@@ -3809,6 +3820,9 @@ impl<'s> Pending<'s> {
             cause,
             detail,
             target,
+            severity,
+            rules,
+            value,
         } = planned;
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());
@@ -3816,15 +3830,16 @@ impl<'s> Pending<'s> {
         self.queued.push(Queued {
             finding: FindingFacts {
                 kind: cause.kind(),
-                severity: cause.severity(),
+                severity,
                 message: cause.message(&subject),
                 path: subject,
                 // No cause here is a reading of a resolution target, so the
                 // finding belongs to no ambiguity class and no class-scoped
-                // maintenance owns it. A tag breach names a tag rather than a
-                // link target, and a tag is not a path anything resolves. For
-                // the same reason no cause is about a path-addressed link, so
-                // the finding is keyed by no path either.
+                // maintenance owns it. A tag breach names a tag and a rule
+                // breach a field rather than a link target, and neither is a
+                // path anything resolves. For the same reason no cause is
+                // about a path-addressed link, so the finding is keyed by no
+                // path either.
                 class_keys: BTreeSet::new(),
                 path_keys: BTreeSet::new(),
                 target,
@@ -3834,10 +3849,10 @@ impl<'s> Pending<'s> {
                 candidates: Vec::new(),
                 candidates_total: 0,
                 detail: Some(detail),
-                // No cause here is judged against a schema rule or names an
-                // offending value: rule judgment files those (NORN-358).
-                rules: BTreeSet::new(),
-                value: None,
+                // A rule breach cites its rules and names its offending value;
+                // every other cause cites none and names none.
+                rules,
+                value,
             },
             cause,
         });

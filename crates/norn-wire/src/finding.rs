@@ -21,12 +21,10 @@
 //! broken, ambiguous, or missing the heading or block its target names — per
 //! ADR 0027; the document it stands in still derives whole.
 //!
-//! **No producer files a schema-judged kind yet.** The nine kinds a schema
-//! judgment files — the seven `field/…` kinds, `document/misplaced` and
-//! `document/rules-conflict` — are dormant carriers: rule judgment in
-//! derivation files them (NORN-358), and until it lands the store's own suite
-//! is all that writes one, so every surface naming them answers from rows
-//! nothing derives yet.
+//! **Rule judgment in derivation files the schema-judged kinds.** The nine
+//! kinds — the seven `field/…` kinds, `document/misplaced` and
+//! `document/rules-conflict` — are concluded per document, in the document's
+//! own changeset, from its path and frontmatter and the vault schema.
 //!
 //! **A rule kind's severity is its rules'.** A finding judged against the
 //! schema rules cites every rule contributing to the constraint it breaches
