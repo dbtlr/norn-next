@@ -563,6 +563,37 @@ rules:
     }
 }
 
+/// **A null is no value**: a field holding null, or a list holding one among
+/// its elements, breaches no type, no closed set and no length limit with it,
+/// while `required` still reads the field holding null as missing.
+#[test]
+fn a_null_is_no_value_to_a_type_a_closed_set_or_a_limit() {
+    let schema = schema(
+        "version: 1
+fields:
+  rating: { type: number }
+rules:
+  r: { one_of: { status: { values: [todo] }, rating: { values: [1] } }, max_length: { status: 4 } }
+",
+    );
+    let findings = judged(
+        &schema,
+        "a.md",
+        &[
+            (
+                "status",
+                AuthoredValue::list([text("todo"), AuthoredValue::Null]),
+            ),
+            (
+                "rating",
+                AuthoredValue::list([AuthoredValue::Null, AuthoredValue::Integer(1)]),
+            ),
+        ],
+    );
+    assert!(findings.is_empty(), "{findings:?}");
+    assert!(judged(&schema, "a.md", &[("rating", AuthoredValue::Null)]).is_empty());
+}
+
 /// **A closed set on the tag carrier compares under the tag fold**, `#`
 /// marker optional, as its selectors do.
 #[test]

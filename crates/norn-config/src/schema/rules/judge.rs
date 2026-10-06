@@ -397,12 +397,33 @@ fn longer_than(raw: &str, limit: u64) -> bool {
 }
 
 /// One element of a field as the judge holds it: the value itself, its text
-/// where it is a scalar, and the value a closed set compares it by where it
-/// reads as its field's type.
+/// where it is a scalar, the value a closed set compares it by where it reads
+/// as its field's type, and what tells it from the field's other elements.
 struct Held<'v> {
     value: &'v AuthoredValue,
     text: Option<String>,
     key: Option<TypedValue>,
+    identity: Identity,
+}
+
+/// What tells one offending element from another: a scalar by the text its
+/// field row holds, so `1` and `"1"` are one element, and a list or a map by
+/// its structure, map entries in key order, so two spellings of one map are
+/// one element. One finding stands per field, kind and identity.
+#[derive(Debug, Eq, PartialEq)]
+enum Identity {
+    Text(String),
+    Structure(AuthoredValue),
+}
+
+impl Identity {
+    /// The identity of `element`, whose scalar text is `text`.
+    fn of(element: &AuthoredValue, text: Option<&str>) -> Self {
+        match text {
+            Some(text) => Identity::Text(text.to_string()),
+            None => Identity::Structure(normal_form(element)),
+        }
+    }
 }
 
 impl VaultSchema {
@@ -421,8 +442,8 @@ impl VaultSchema {
         let entries = frontmatter.entries();
         let mut findings = Vec::new();
 
-        // A value of a declared field that does not read as its declared
-        // type or shape: the elements of it the rules may still judge.
+        // Every field's value read against its declaration: its type and
+        // shape findings filed, and the elements the rules may judge kept.
         let mut admissible: Vec<(&str, Vec<Held<'_>>)> = Vec::new();
         for (field, value) in entries {
             let held = self.judge_declaration(field, value, &mut work, &mut findings);
@@ -487,28 +508,33 @@ impl VaultSchema {
             ShapeReading::Elements(elements) => elements,
         };
         let mut held: Vec<Held<'v>> = Vec::new();
-        let mut mismatched: Vec<AuthoredValue> = Vec::new();
-        for element in elements {
+        let mut mismatched: Vec<Identity> = Vec::new();
+        // A null element is no value, as a null field is: nothing judges it.
+        for element in elements
+            .into_iter()
+            .filter(|element| **element != AuthoredValue::Null)
+        {
             let text = element.scalar_text();
             let key = text
                 .as_deref()
                 .and_then(|raw| Element::read(self, field, raw).key);
+            let identity = Identity::of(element, text.as_deref());
             if declaration.is_some() {
                 work.constraints_judged += 1;
                 if key.is_none() {
-                    let normal = normal_form(element);
-                    if !mismatched.contains(&normal) {
-                        mismatched.push(normal);
+                    if !mismatched.contains(&identity) {
+                        mismatched.push(identity);
                         findings.push(mismatch(Breach::TypeMismatch, field, element.clone()));
                     }
                     continue;
                 }
             }
-            if !held.iter().any(|seen| same_element(seen, element, &text)) {
+            if !held.iter().any(|seen| seen.identity == identity) {
                 held.push(Held {
                     value: element,
                     text,
                     key,
+                    identity,
                 });
             }
         }
@@ -676,16 +702,6 @@ fn mismatch(breach: Breach, field: &str, value: AuthoredValue) -> RuleFinding {
         value: Some(value),
         rules: Vec::new(),
         severity: Severity::Warning,
-    }
-}
-
-/// Whether `seen` is the element `element`, whose scalar text is `text`: one
-/// scalar spelling, or one structure.
-fn same_element(seen: &Held<'_>, element: &AuthoredValue, text: &Option<String>) -> bool {
-    match (&seen.text, text) {
-        (Some(left), Some(right)) => left == right,
-        (None, None) => normal_form(seen.value) == normal_form(element),
-        _ => false,
     }
 }
 
