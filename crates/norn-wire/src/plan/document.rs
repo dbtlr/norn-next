@@ -43,7 +43,7 @@
 //! unexpanded target is, by [`AuthoredPlan::misplaced_cascades`] and
 //! [`ResolvedPlan::misplaced_cascades`].
 //!
-//! **A control-file plan changes nothing else** (ADR 0032): a plan writing a
+//! **A control-file plan changes nothing else** (ADR 0037): a plan writing a
 //! vault control file beside an operation on documents is a fault in its
 //! shape, judged by [`AuthoredPlan::control_files_beside_documents`] and
 //! [`ResolvedPlan::control_files_beside_documents`].
@@ -562,7 +562,7 @@ impl AuthoredPlan {
     /// where the plan writes only control files or only documents.
     ///
     /// **A plan that changes a vault control file changes nothing else** (ADR
-    /// 0032). A control file is what every document is judged under, so a
+    /// 0037). A control file is what every document is judged under, so a
     /// plan changing both would judge its documents under one declaration
     /// and land them under another; it is split instead, one plan for each.
     pub fn control_files_beside_documents(&self) -> Option<PlanFault> {

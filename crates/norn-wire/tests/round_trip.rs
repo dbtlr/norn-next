@@ -10272,7 +10272,7 @@ fn a_cascade_where_planning_writes_none_is_a_fault() {
 }
 
 /// **A plan that changes a vault control file changes nothing else** (ADR
-/// 0032). An authored plan and a resolved plan alike name each control-file
+/// 0037). An authored plan and a resolved plan alike name each control-file
 /// write that stands beside an operation on documents; a plan of control-file
 /// writes alone, and a plan of document operations alone, carry no fault.
 #[test]

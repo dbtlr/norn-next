@@ -9,7 +9,7 @@
 //!
 //! Every transition runs in two phases, and **no handle is held between
 //! them**. A plan stages every one of its targets before it publishes any,
-//! so a refusal found while staging writes nothing (ADR 0032); the kernel
+//! so a refusal found while staging writes nothing (ADR 0037); the kernel
 //! offers the per-target phases and the applier composes them.
 //!
 //! **A target at its after-state has landed, whichever writer put it there.**
@@ -507,7 +507,7 @@ pub enum Publication {
     /// there — so this call wrote nothing, discarded its shadow and synced the
     /// folders. No event of this call's is coming, and nothing is recorded.
     Found(Confirmed),
-    /// A respell whose first step landed and whose rename did not: ADR 0032's
+    /// A respell whose first step landed and whose rename did not: ADR 0037's
     /// interrupted, for this one target.
     Interrupted(Interrupted),
 }
@@ -2554,7 +2554,7 @@ fn open_home(
 /// inside a publication, after the root is checked and before anything is read
 /// again, through the target's folder handle.
 ///
-/// What each act leads to is ADR 0032's reading of that writer, which the
+/// What each act leads to is ADR 0037's reading of that writer, which the
 /// publication then meets with no help from here: an edit or a removal of a
 /// replace's or a remove's target is drift — except that removing a remove's
 /// target lands it for the remove, which is found landed by another writer — and

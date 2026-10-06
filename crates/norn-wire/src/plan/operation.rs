@@ -47,7 +47,7 @@
 //! where it is absent and replacing it where it stands. It names no path:
 //! where each role lives is the planner's to say, so a plan cannot aim a
 //! control-file write at a document or a document kind at a control file.
-//! A plan carrying one changes no document (ADR 0032), which
+//! A plan carrying one changes no document (ADR 0037), which
 //! [`AuthoredPlan::control_files_beside_documents`] and
 //! [`ResolvedPlan::control_files_beside_documents`] judge.
 //!

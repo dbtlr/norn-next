@@ -609,7 +609,7 @@ fn an_ordinal_arm_fires_at_the_nth_publication_only() {
 // A foreign writer inside a publication
 // ---------------------------------------------------------------------------
 
-/// **A foreign writer inside a publication meets the outcome ADR 0032 names.**
+/// **A foreign writer inside a publication meets the outcome ADR 0037 names.**
 ///
 /// An edit or a removal of a replace's or a remove's target is drift, and an
 /// edit or a take at a create's name is a name taken. A removal of a remove's
@@ -617,7 +617,7 @@ fn an_ordinal_arm_fires_at_the_nth_publication_only() {
 /// is found landed by another writer. A removal against a create finds nothing
 /// and the create lands, and a take against a replace does nothing.
 #[test]
-fn a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0032_names() {
+fn a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0037_names() {
     for (scenario, act, path, outcome, left) in [
         ("replace", "edit", DOCUMENT, "drifted", Some(FOREIGN)),
         ("replace", "remove", DOCUMENT, "drifted", None),

@@ -5,7 +5,7 @@
 //! **What the applier owns.** Invariant 4 names one plan vocabulary and one
 //! applier; this is that applier, and every write — a verb's one operation, a
 //! caller's plan, a repair — reaches the vault through it once it is resolved
-//! ([ADR 0032]). The flow is four phases, one module each:
+//! ([ADR 0037]). The flow is four phases, one module each:
 //!
 //! - [`observe`] — what each target holds now, at the exact spelling the plan
 //!   writes: its before-state, its after-state (landed, whichever writer put
@@ -16,8 +16,8 @@
 //!   before-states through the planner's own ordering and composition
 //!   ([`recompose`]) — which must give back exactly the plan's transitions, so
 //!   a plan whose transitions say anything its operations do not is refused
-//!   before anything is staged — every composed result against the vault
-//!   schema ([`schema`]), which a forced plan lets through and lists on its
+//!   before anything is staged — every schema violation a composed result
+//!   introduces ([`schema`]), which a forced plan lets through and lists on its
 //!   forecast and applied report, judged against the document its content came from
 //!   (the planner's one [`lineage`](crate::planner::lineage), followed in the
 //!   plan's recorded order, which also refuses a content cycle), and a shadow
@@ -65,7 +65,7 @@
 //! them, the file standing at the plan's hash — the source, or a re-send's
 //! landed destination — is read whole once, one copy, as planning reads it
 //! where its index lags. A re-sent plan must finish over a vault whose index
-//! has not taken in what the vault holds (ADR 0032), so a check never
+//! has not taken in what the vault holds (ADR 0037), so a check never
 //! refuses a plan for what the index has not yet seen.
 //!
 //! **Who applies here.** The apply job, which takes the entry's claim,
@@ -77,7 +77,7 @@
 //! targets; no is a teardown, and the applier removes every shadow and
 //! publishes nothing.
 //!
-//! [ADR 0032]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0032-a-file-state-says-whether-its-bytes-are-a-document.md
+//! [ADR 0037]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0037-a-plan-refuses-exactly-the-violations-it-introduces.md
 
 mod observe;
 mod outcome;
