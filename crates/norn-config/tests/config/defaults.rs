@@ -5,9 +5,7 @@
 //! path, one clock reading and the schema, so a case hands each over and
 //! needs no directory and no clock.
 
-use norn_config::schema::{
-    CaseFold, DefaultCandidate, DefaultsConflict, LocalTimestamp, RuleDefaultsRefusal, VaultSchema,
-};
+use norn_config::schema::{CaseFold, LocalTimestamp, RuleDefaultsRefusal, VaultSchema};
 use norn_wire::{AuthoredValue, ValueMap};
 
 /// The one clock reading every case fills from.
@@ -45,11 +43,44 @@ fn filled(entries: &[(&str, AuthoredValue)]) -> Vec<(String, AuthoredValue)> {
         .collect()
 }
 
-fn candidate(value: &str, rules: &[&str]) -> DefaultCandidate {
-    DefaultCandidate {
-        value: text(value),
-        rules: rules.iter().map(|rule| rule.to_string()).collect(),
-    }
+/// Each conflicting field a refusal names, with each candidate value and
+/// the rules proposing it.
+type Conflicts = Vec<(String, Vec<(AuthoredValue, Vec<String>)>)>;
+
+/// The conflicts `refusal` names, or a panic where it names none.
+fn conflicts(refusal: &RuleDefaultsRefusal) -> Conflicts {
+    let RuleDefaultsRefusal::Conflict { fields } = refusal else {
+        panic!("a conflict: {refusal}");
+    };
+    fields
+        .iter()
+        .map(|conflict| {
+            (
+                conflict.field().to_string(),
+                conflict
+                    .candidates()
+                    .iter()
+                    .map(|candidate| (candidate.value().clone(), candidate.rules().to_vec()))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// One conflicting field, each candidate written as `(value, rules)`.
+fn conflict(field: &str, candidates: &[(AuthoredValue, &[&str])]) -> Conflicts {
+    vec![(
+        field.to_string(),
+        candidates
+            .iter()
+            .map(|(value, rules)| {
+                (
+                    value.clone(),
+                    rules.iter().map(|rule| rule.to_string()).collect(),
+                )
+            })
+            .collect(),
+    )]
 }
 
 /// **A default a filled default brings into scope is filled.** A vault-wide
@@ -89,13 +120,11 @@ rules:
 ";
     let refusal = fill(schema, "notes/a.md", &[]).expect_err("a late conflict");
     assert_eq!(
-        refusal,
-        RuleDefaultsRefusal::Conflict {
-            fields: vec![DefaultsConflict {
-                field: "status".to_string(),
-                candidates: vec![candidate("todo", &["every"]), candidate("done", &["task"])],
-            }],
-        }
+        conflicts(&refusal),
+        conflict(
+            "status",
+            &[(text("todo"), &["every"]), (text("done"), &["task"])]
+        )
     );
     let said = refusal.to_string();
     assert!(
@@ -112,18 +141,60 @@ rules:
   b: { match: { path: 'tasks/**' }, required: { status: { default: open }, owner: { default: drew } } }
 ";
     assert_eq!(
-        fill(schema, "tasks/a.md", &[]),
-        Err(RuleDefaultsRefusal::Conflict {
-            fields: vec![DefaultsConflict {
-                field: "status".to_string(),
-                candidates: vec![candidate("todo", &["a"]), candidate("open", &["b"])],
-            }],
-        })
+        conflicts(&fill(schema, "tasks/a.md", &[]).expect_err("a conflict in one round")),
+        conflict("status", &[(text("todo"), &["a"]), (text("open"), &["b"])])
     );
     // Where the rules agree, the one value is filled.
     assert_eq!(
         fill(schema, "notes/a.md", &[]),
         Ok(filled(&[("owner", text("drew")), ("status", text("todo"))]))
+    );
+}
+
+/// **A round's disagreement is refused in that round, not settled by a
+/// pick.** Two vault-wide rules default `kind` apart. Picking either would
+/// bring in the rules on `kind: task`, whose `owner` defaults disagree too —
+/// a conflict that exists only because of the pick. The refusal names `kind`
+/// alone.
+#[test]
+fn a_disagreement_in_a_round_refuses_before_a_pick_brings_in_more_rules() {
+    let schema = b"version: 1
+rules:
+  a: { required: { kind: { default: task } } }
+  b: { required: { kind: { default: note } } }
+  t1: { match: { frontmatter: { kind: task } }, required: { owner: { default: drew } } }
+  t2: { match: { frontmatter: { kind: task } }, required: { owner: { default: sam } } }
+";
+    assert_eq!(
+        conflicts(&fill(schema, "notes/a.md", &[]).expect_err("a conflict in round one")),
+        conflict("kind", &[(text("task"), &["a"]), (text("note"), &["b"])])
+    );
+}
+
+/// **Two defaults agree only where they write one value.** `1` and `1.0`
+/// equal as numbers, but one is an integer and the other a float, which
+/// write different bytes into the created document, so they conflict.
+#[test]
+fn an_integer_and_a_float_default_of_one_number_conflict() {
+    let schema = b"version: 1
+fields:
+  n: { type: number }
+rules:
+  a: { required: { n: { default: 1 } } }
+  b: { required: { n: { default: 1.0 } } }
+";
+    assert_eq!(
+        conflicts(&fill(schema, "a.md", &[]).expect_err("an integer and a float disagree")),
+        conflict(
+            "n",
+            &[
+                (AuthoredValue::Integer(1), &["a"]),
+                (
+                    AuthoredValue::Float(norn_wire::FiniteFloat::new(1.0).expect("finite")),
+                    &["b"]
+                ),
+            ]
+        )
     );
 }
 

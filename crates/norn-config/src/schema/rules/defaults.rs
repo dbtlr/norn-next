@@ -14,19 +14,39 @@ use super::{Rule, RuleDefault, is_missing, named, value_in};
 /// One value proposed for a field, and the rules proposing it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefaultCandidate {
+    value: AuthoredValue,
+    rules: Vec<String>,
+}
+
+impl DefaultCandidate {
     /// The value, filled.
-    pub value: AuthoredValue,
+    pub fn value(&self) -> &AuthoredValue {
+        &self.value
+    }
+
     /// Every rule proposing it, in name order.
-    pub rules: Vec<String>,
+    pub fn rules(&self) -> &[String] {
+        &self.rules
+    }
 }
 
 /// One field whose defaults disagree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DefaultsConflict {
+    field: String,
+    candidates: Vec<DefaultCandidate>,
+}
+
+impl DefaultsConflict {
     /// The field.
-    pub field: String,
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
     /// Every value proposed for it, in the order first proposed.
-    pub candidates: Vec<DefaultCandidate>,
+    pub fn candidates(&self) -> &[DefaultCandidate] {
+        &self.candidates
+    }
 }
 
 /// Why rule defaults do not settle on one frontmatter.
@@ -106,24 +126,30 @@ impl VaultSchema {
     ///
     /// Each **round** matches rules against the frontmatter composed so far
     /// and fills every required field still missing — absent or null — whose
-    /// selecting rules' defaults all agree as filled values. A default filled
-    /// may bring in a rule, which may default another field, so rounds repeat
-    /// until one fills nothing. They end: a round only fills missing fields
-    /// and selectors have no negation or presence test, so the rules matched
-    /// only grow, and every round but the last fills a field some default
-    /// names, which bounds the rounds at the defaulted fields plus one.
+    /// selecting rules' defaults all agree as filled values. **Two filled
+    /// values agree only where they are one written value**: `1` and `1.0`
+    /// are an integer and a float, which write different bytes into the
+    /// document, so they disagree though a `number` field compares them
+    /// equal. A default filled may bring in a rule, which may default another
+    /// field, so rounds repeat until one fills nothing. They end: a round only
+    /// fills missing fields and selectors have no negation or presence test,
+    /// so the rules matched only grow, and every round but the last fills a
+    /// field some default names, which bounds the rounds at the defaulted
+    /// fields plus one.
     ///
     /// **Fills are provisional.** A later round can bring in a rule
     /// defaulting a field an earlier round filled, so once settled every
     /// filled field is judged again against every rule matching the final
     /// frontmatter and path, and any default for it differing from the value
-    /// filled is a conflict. Disagreement in a round is one too. A conflict
-    /// names each conflicting field and every candidate value with the rules
-    /// proposing it. The caller's values and its creation rule's are never
-    /// judged again and never overwritten; a null is no value, so a field
-    /// either writes as null is missing and filled. A required field nothing
-    /// defaults stays missing, which is the write gate's to refuse, not
-    /// this.
+    /// filled is a conflict. Disagreement in a round is one too, refused in
+    /// that round rather than settled by a pick: a value picked from several
+    /// could bring in rules whose own defaults then disagree, a conflict the
+    /// document never had. A conflict names each conflicting field and every
+    /// candidate value with the rules proposing it. The caller's values and
+    /// its creation rule's are never judged again and never overwritten; a
+    /// null is no value, so a field either writes as null is missing and
+    /// filled. A required field nothing defaults stays missing, which is the
+    /// write gate's to refuse, not this.
     ///
     /// **One clock reading, `at`, fills every default**, and each
     /// `{{path.<name>}}` reads what its own rule's `match.path` bound in
