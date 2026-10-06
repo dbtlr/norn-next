@@ -18,36 +18,36 @@ use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
     AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
     CandidateHead, ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column,
-    ComparedBy, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor,
-    CursorKey, CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
-    EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
-    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
-    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
-    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
-    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths,
-    RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource, SchemaViolation, Score,
-    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap, Variables, VaultAddress,
-    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
-    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
-    is_refused_segment, leaf_stem,
+    ComparedBy, ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure,
+    CountParams, Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
+    IllegalRuleSet, IllegalValueHead, InitParams, InitReport, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite,
+    LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder, MigrateParams,
+    MigrateReport, MigrationRefusal, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
+    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
+    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
+    RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch,
+    RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap,
+    Variables, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
+    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    is_refused_character, is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -8516,7 +8516,62 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
             AmbiguousEnd::Target,
             CandidateHead::new([Candidate::new(path("notes/b.md"), "notes/b")], 3).expect("a head"),
         ),
+        UnresolvedReason::defaults_conflict(vec![ConflictingDefault::new(
+            "status",
+            vec![
+                DefaultCandidate::new(AuthoredValue::string("todo"), ["tasks".to_string()]),
+                DefaultCandidate::new(
+                    AuthoredValue::string("done"),
+                    ["done-tasks".to_string(), "closed".to_string()],
+                ),
+            ],
+        )]),
+        UnresolvedReason::ambiguous_capture(
+            "projects",
+            "project",
+            [
+                BTreeMap::from([("p".to_string(), "a".to_string())]),
+                BTreeMap::from([("p".to_string(), "b".to_string())]),
+            ],
+        ),
     ]
+}
+
+/// **A defaults refusal is spelled structurally**: a conflict names each
+/// field and every candidate with its value and the rules proposing it, in
+/// byte order, and an ambiguous capture names the rule, the field and two of
+/// the bindings.
+#[test]
+fn a_defaults_refusal_names_its_fields_candidates_and_bindings() {
+    assert_eq!(
+        wire(&UnresolvedReason::defaults_conflict(vec![
+            ConflictingDefault::new(
+                "status",
+                vec![
+                    DefaultCandidate::new(AuthoredValue::string("todo"), ["wide".to_string()]),
+                    DefaultCandidate::new(
+                        AuthoredValue::string("done"),
+                        ["tasks".to_string(), "closed".to_string()],
+                    ),
+                ],
+            )
+        ])),
+        concat!(
+            r#"{"kind":"defaults_conflict","fields":[{"field":"status","candidates":["#,
+            r#"{"value":"todo","rules":["wide"]},{"value":"done","rules":["closed","tasks"]}]}]}"#
+        )
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::ambiguous_capture(
+            "projects",
+            "project",
+            [
+                BTreeMap::from([("p".to_string(), "a".to_string())]),
+                BTreeMap::from([("p".to_string(), "b".to_string())]),
+            ],
+        )),
+        r#"{"kind":"ambiguous_capture","rule":"projects","field":"project","bindings":[{"p":"a"},{"p":"b"}]}"#
+    );
 }
 
 /// Every advice a forecast gives about one link.

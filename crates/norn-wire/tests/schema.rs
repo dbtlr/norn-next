@@ -3634,10 +3634,20 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "no_longer_resolves",
             "requires_unresolved",
             "has_backlinks",
-            "ambiguous_target"
+            "ambiguous_target",
+            "defaults_conflict",
+            "ambiguous_capture"
         ])
     );
     let reasons = schema_of::<UnresolvedReason>();
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "defaults_conflict")),
+        ["kind", "fields"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "ambiguous_capture")),
+        ["kind", "rule", "field", "bindings"].into_iter().collect()
+    );
     assert_eq!(
         branch(&reasons, "kind", "ambiguous_target")["properties"]["candidates"]["$ref"].as_str(),
         Some("#/$defs/CandidateHead"),

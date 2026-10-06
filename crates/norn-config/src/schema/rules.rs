@@ -146,9 +146,10 @@
 //! documents by the same judgment**: `norn-host`'s applier runs the
 //! derivation on each composed result and refuses each violation whose
 //! identity ([`FindingIdentity`]) no document it was composed from held.
-//! **Dormant carriers beyond that:** the fixpoint's wiring into `new` and
-//! inbox capture lands with NORN-359; repair's declared fixes land at Layer
-//! 5B (NORN-351). A rule's
+//! Every creation — `new` by a creation rule, inbox capture and `new` at a
+//! bare path — takes the defaults fixpoint at planning. **A dormant carrier
+//! beyond that:** repair's declared fixes land at Layer 5B (NORN-351). A
+//! rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.

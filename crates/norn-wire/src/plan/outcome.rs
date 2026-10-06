@@ -34,6 +34,8 @@
 //! beside them, each set once. The combined constraint that tells two
 //! violations apart is the gate's to compare, and stays off the wire.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +44,7 @@ use crate::finding::FindingKind;
 use crate::finding_row::{CandidateHead, ValueHead};
 use crate::plan::document::{FileState, PlanCondition};
 use crate::plan::operation::{Operation, OperationId};
+use crate::plan::value::AuthoredValue;
 
 /// One check that refused an apply before anything was published.
 ///
@@ -252,6 +255,73 @@ pub enum UnresolvedReason {
         /// order, and how many there were.
         candidates: CandidateHead,
     },
+    /// It creates a document, and the schema rules matching it default a
+    /// required field it is created without in ways that disagree: in one
+    /// round of the defaults, or once they settle, where a default a later
+    /// round brought into scope differs from a value filled earlier. Nothing
+    /// is picked, since a value picked from several could bring in rules of
+    /// its own.
+    #[non_exhaustive]
+    DefaultsConflict {
+        /// Each conflicting field, in key order.
+        fields: Vec<ConflictingDefault>,
+    },
+    /// It creates a document, and a rule default reads a capture the rule's
+    /// `match.path` binds several ways in the created document's path.
+    #[non_exhaustive]
+    AmbiguousCapture {
+        /// The rule whose default reads the capture.
+        rule: String,
+        /// The field the default is for.
+        field: String,
+        /// Two of the bindings, each a capture's name to the segment it took.
+        bindings: [BTreeMap<String, String>; 2],
+    },
+}
+
+/// One field rule defaults disagree on, and every value proposed for it.
+///
+/// On the wire a conflict is an object:
+/// `{"field":"status","candidates":[{"value":"todo","rules":["wide"]},…]}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ConflictingDefault {
+    /// The field.
+    pub field: String,
+    /// Every value proposed for it, in the order first proposed.
+    pub candidates: Vec<DefaultCandidate>,
+}
+
+impl ConflictingDefault {
+    /// The field `field`, proposed each of `candidates`.
+    pub fn new(field: impl Into<String>, candidates: Vec<DefaultCandidate>) -> Self {
+        ConflictingDefault {
+            field: field.into(),
+            candidates,
+        }
+    }
+}
+
+/// One value proposed for a field, and the rules proposing it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DefaultCandidate {
+    /// The value, filled.
+    pub value: AuthoredValue,
+    /// Every rule proposing it, in byte order, each once. A value already
+    /// filled that a later rule's default disagrees with names the rules that
+    /// proposed it when it was filled.
+    pub rules: Vec<String>,
+}
+
+impl DefaultCandidate {
+    /// `value`, proposed by `rules`, named in byte order, each once.
+    pub fn new(value: AuthoredValue, rules: impl IntoIterator<Item = String>) -> Self {
+        let mut rules: Vec<String> = rules.into_iter().collect();
+        rules.sort_unstable();
+        rules.dedup();
+        DefaultCandidate { value, rules }
+    }
 }
 
 /// Which end of an operation's link rewrite an ambiguous target is: what
@@ -297,6 +367,26 @@ impl UnresolvedReason {
     /// `candidates` heads.
     pub const fn ambiguous_target(end: AmbiguousEnd, candidates: CandidateHead) -> Self {
         UnresolvedReason::AmbiguousTarget { end, candidates }
+    }
+
+    /// The document the operation creates takes rule defaults that disagree
+    /// on each of `fields`.
+    pub const fn defaults_conflict(fields: Vec<ConflictingDefault>) -> Self {
+        UnresolvedReason::DefaultsConflict { fields }
+    }
+
+    /// A default the rule `rule` states for `field` reads a capture its
+    /// `match.path` binds several ways, two of which are `bindings`.
+    pub fn ambiguous_capture(
+        rule: impl Into<String>,
+        field: impl Into<String>,
+        bindings: [BTreeMap<String, String>; 2],
+    ) -> Self {
+        UnresolvedReason::AmbiguousCapture {
+            rule: rule.into(),
+            field: field.into(),
+            bindings,
+        }
     }
 }
 

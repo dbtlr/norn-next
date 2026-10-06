@@ -2454,7 +2454,11 @@ sees that work, so the judge tallies it as logical counts the host's account fol
 and the counter lane holds each to its parameter: one document costs the same at two vault
 sizes, and each parameter varied alone moves its counts in proportion and no other. The rule
 defaults' capture count and defaulted fields are parameters of the defaults fixpoint, which
-`new` and inbox capture run and derivation does not (NORN-359). Beside
+every creation runs at planning — `new` by a rule, inbox capture and `new` at a bare path —
+and derivation, so the walk, does not: one created document's fixpoint costs at most one more
+round than the fields the rules default, each round matching every rule once against the
+frontmatter composed so far, and binding each capture-reading rule's `match.path` once; it is
+not tallied on the logical rule counters, a declared limit. Beside
 that, a row whose own defect implies a **document-scoped** finding that is not standing
 beside it is read again: the row records the defect, the walk asks whether a finding of the
 kinds that defect implies stands, and restores it where none does. A finding of another kind
@@ -2748,12 +2752,29 @@ the preview, the resolved plan taking precedence over what allocating now would 
 writers landing identical bytes at one name land one document, the second reported found, not
 wrote. The rules are
 the pinned schema's, the declaration the plan ground carries and the applier's schema check
-judges the result under. The host's clock is read once per plan, only for a plan that creates
-by rule, and every template of the plan fills from that reading. The text is the rule's
+judges the result under. The host's clock is read once per plan, the first time a creation
+may fill from it — any creation by rule, and a document created at a path where the schema
+states a rule default — and every template and default of the plan fills from that reading.
+The text is the rule's
 frontmatter defaults, each string scalar filled and every type and order kept, with the
 caller's typed fields laid over them — an overriding field keeping the default's place, a new
 one following in the caller's order, none filled as a template — then the caller's body, else
-the rule's body template filled, else nothing; the inbox has no defaults and no body template.
+the rule's body template filled, else nothing; the inbox has no frontmatter defaults and no
+body template. **Then the rule defaults** ([ADR
+0035](decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md)): the schema
+rules matching the document so far fill each required field still missing, re-matched to a
+fixpoint, so a default that brings a rule into scope brings its defaults too; once settled,
+each filled field is judged again against every rule matching the final frontmatter and path.
+Any disagreement, in a round or at that re-check, leaves the creation unresolved naming each
+conflicting field and every candidate value with the rules proposing it, and a default read
+from a path capture its rule binds several ways leaves it unresolved naming two bindings. The
+caller's values and the creation rule's are never judged again or overwritten. A capture takes
+the same chain beneath the caller's fields, and so does a document created at a path: its own
+frontmatter is the caller's values, each filled field is set into it by the one composition a
+`set` writes a field by — at the end of its block, or in a new block where it carries none, a
+composition that would drop a comment refused — and every byte it sent otherwise stays; one
+whose frontmatter does not read fills nothing, and the write gate judges what was sent. A
+required field nothing defaults stays missing, for the write gate to refuse.
 It is written through `norn-text`'s one renderer, the frontmatter block with LF line endings
 and the body exactly as sent — its own breaks, CRLF included, and an unterminated last line
 kept. A document with no field is its body alone, unless the reader would take the body's
@@ -2776,7 +2797,9 @@ create's is, and the caller plans again. An unknown rule, a capture where no inb
 declared, a declared variable missing or an undeclared one supplied, a value that would break
 the target's path, a number past what the allocator counts, a clock outside the years
 `{{date}}` writes, and a document the renderer refuses leave the operation unresolved naming
-why. A resolved plan still carrying one is `request/plan-invalid` (`unexpanded_rule`).
+why; rule defaults that disagree and a default read from a capture bound several ways are
+named structurally (`defaults_conflict`, `ambiguous_capture`). A resolved plan still carrying
+one is `request/plan-invalid` (`unexpanded_rule`).
 A plan also writes the vault's control files, through one whole-file kind,
 `write_control_file`, which names its file by role — the schema or the config — and carries
 its whole content. The planner maps the role to the in-vault path a transition names it at,

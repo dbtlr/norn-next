@@ -230,8 +230,10 @@ impl JsonSchema for OperationId {
 )]
 #[schemars(transform = flattened_targets)]
 pub enum OperationKind {
-    /// Create a document that does not exist yet, holding exactly this
-    /// content.
+    /// Create a document that does not exist yet, holding this content: as
+    /// authored, the schema rules' defaults for each required field its own
+    /// frontmatter leaves missing set into it at planning, every other byte
+    /// kept; in a resolved plan, exactly this content.
     CreateDocument {
         /// Where the document is created. Nothing may stand there.
         path: DocumentPath,

@@ -850,6 +850,154 @@ fn a_capture_lands_in_the_inbox_as_exactly_its_fields_and_body() {
     assert_eq!(read(&vault, &at), content);
 }
 
+/// A schema whose creation rule and inbox lay their layers beneath schema
+/// rules stating defaults: `task` defaults `kind: task` and `priority: low`;
+/// a rule on `kind: task` requires `priority` (default `high`) and `owner`
+/// (default `nobody`); a vault-wide rule requires `kind` (default `note`) and
+/// `title`, with no default; and a rule on `kind: chore` defaults `status:
+/// done` where a rule on `flow: steps` defaults `status: todo`.
+const DEFAULTS_SCHEMA: &str = "version: 1
+creatable:
+  task:
+    target: \"tasks/{{seq}}.md\"
+    frontmatter_defaults:
+      kind: task
+      priority: low
+      title: A task
+inbox:
+  target: \"inbox/{{seq}}.md\"
+rules:
+  tasks: { match: { frontmatter: { kind: task } }, required: { priority: { default: high }, owner: { default: nobody } } }
+  every: { required: { kind: { default: note }, title: } }
+  chores: { match: { frontmatter: { kind: chore } }, required: { status: { default: done } } }
+  steps: { match: { frontmatter: { flow: steps } }, required: { kind: { default: chore }, status: { default: todo } } }
+";
+
+/// **Every layer of a created document's values, through the host**: `new
+/// --as` writes the caller's value over the creation rule's default, that
+/// default over a rule default, and the rule defaults for the required
+/// fields both left missing; a capture writes the caller's values over the
+/// rule defaults; and `new` at a bare path takes the rule defaults beneath
+/// its own frontmatter, its bytes otherwise as sent.
+#[test]
+fn new_and_capture_take_each_layer_of_values_in_precedence() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-defaults", DEFAULTS_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let by_rule = NewParams::for_subject(
+        address(&vault),
+        ApplyMode::Apply,
+        NewSubject::by_rule(
+            "task",
+            Variables::default(),
+            fields(vec![("title", AuthoredValue::string("Ship it"))]),
+            None,
+        ),
+    );
+    let (plan, _, _) = applied(host.new_document(by_rule));
+    let (_, content) = the_create(&plan);
+    assert_eq!(
+        content,
+        "---\nkind: task\npriority: low\ntitle: Ship it\nowner: nobody\n---\n"
+    );
+
+    let capture = NewParams::for_subject(
+        address(&vault),
+        ApplyMode::Apply,
+        NewSubject::inbox(
+            fields(vec![
+                ("title", AuthoredValue::string("Call Sam")),
+                ("owner", AuthoredValue::string("me")),
+                ("kind", AuthoredValue::string("task")),
+            ]),
+            Some("Body.\n".to_string()),
+        ),
+    );
+    let (plan, _, _) = applied(host.new_document(capture));
+    let (at, content) = the_create(&plan);
+    assert_eq!(
+        content,
+        "---\ntitle: Call Sam\nowner: me\nkind: task\npriority: high\n---\nBody.\n"
+    );
+    assert_eq!(read(&vault, &at), content);
+
+    let at_path = NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("notes/x.md"),
+        "---\ntitle: X  # mine\n---\nBody.\n",
+    );
+    applied(host.new_document(at_path));
+    assert_eq!(
+        read(&vault, "notes/x.md"),
+        "---\ntitle: X  # mine\nkind: note\n---\nBody.\n"
+    );
+}
+
+/// **`new` without a required field nothing defaults is refused**, preview
+/// and apply alike, by the write gate's finding naming the field and citing
+/// the rule; **defaults that disagree refuse `new` before any write**, the
+/// operation unresolved naming the field and both candidates with their
+/// rules.
+#[test]
+fn new_refuses_a_missing_required_field_and_disagreeing_defaults() {
+    let (_sandbox, vault, host) = a_schema_vault("host-verbs-new-refusals", DEFAULTS_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let untitled = |mode| NewParams::new(address(&vault), mode, path("notes/x.md"), "Body.\n");
+    let previewed = refused(host.new_document(untitled(ApplyMode::Preview)));
+    let applied_refusal = refused(host.new_document(untitled(ApplyMode::Apply)));
+    assert_eq!(previewed.detail(), applied_refusal.detail());
+    let ErrorDetail::PlanRefused {
+        checks, rule_sets, ..
+    } = previewed.detail()
+    else {
+        panic!("the refusal carries {:?}", previewed.detail());
+    };
+    let [RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+        panic!("the create refused for {checks:?}");
+    };
+    assert_eq!(violation.kind, FindingKind::RequiredMissing);
+    assert_eq!(violation.target.as_deref(), Some("title"));
+    assert!(
+        rule_sets
+            .iter()
+            .any(|set| Some(set.id) == violation.rule_set && set.rules == ["every"]),
+        "{rule_sets:?}"
+    );
+    assert!(!vault.path().join("notes/x.md").exists());
+
+    let conflicting = NewParams::new(
+        address(&vault),
+        ApplyMode::Apply,
+        path("notes/y.md"),
+        "---\ntitle: Y\nkind: chore\nflow: steps\n---\n",
+    );
+    let refusal = refused(host.new_document(conflicting));
+    let ErrorDetail::PlanRefused { unresolved, .. } = refusal.detail() else {
+        panic!("the refusal carries {:?}", refusal.detail());
+    };
+    let [left] = unresolved.as_slice() else {
+        panic!("one operation left: {unresolved:?}");
+    };
+    assert_eq!(
+        left.reason,
+        UnresolvedReason::defaults_conflict(vec![norn_wire::ConflictingDefault::new(
+            "status",
+            vec![
+                norn_wire::DefaultCandidate::new(
+                    AuthoredValue::string("done"),
+                    ["chores".to_string()]
+                ),
+                norn_wire::DefaultCandidate::new(
+                    AuthoredValue::string("todo"),
+                    ["steps".to_string()]
+                ),
+            ],
+        )])
+    );
+    assert!(!vault.path().join("notes/y.md").exists());
+}
+
 /// A capture of `body` with `fields`, applied over `vault`: where it landed
 /// and the bytes read back from there.
 fn captured(

@@ -1021,6 +1021,21 @@ pub(crate) fn frontmatter_block(bytes: &[u8]) -> Option<HeldBlock> {
     })
 }
 
+/// The fields the frontmatter of the document `bytes` spell writes, as a
+/// written value holds them and rule judgment reads them: none where it
+/// carries no block, and `None` where its fields cannot be read — the bytes
+/// decode as no document, its block is one nothing read, or the block's top
+/// level is no map. What `new` at a bare path takes as the caller's values
+/// beneath which the rule defaults fill.
+pub(crate) fn written_fields(bytes: &[u8]) -> Option<ValueMap> {
+    match frontmatter_block(bytes)? {
+        // An empty block reads as null: it holds no field.
+        HeldBlock::None | HeldBlock::Read(FrontmatterValue::Null) => Some(ValueMap::default()),
+        HeldBlock::Read(value @ FrontmatterValue::Map(_)) => Some(authored_fields(Some(&value))),
+        HeldBlock::Read(_) | HeldBlock::Unread => None,
+    }
+}
+
 /// The planned finding a rule judgment's `finding` is filed as.
 fn rule_finding(path: &Path, subject: &DocumentPath, finding: RuleFinding) -> PlannedFinding {
     PlannedFinding {

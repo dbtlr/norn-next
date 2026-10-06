@@ -46,7 +46,11 @@ use crate::plan::value::{ValueMap, Variables};
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum NewSubject {
-    /// The document at `path`, holding exactly `content`.
+    /// The document at `path`, holding `content`: its frontmatter the
+    /// caller's values, beneath which the schema rules' defaults fill each
+    /// required field it leaves missing, set into its block — or a new block
+    /// where it carries none — as a `set` writes a field, every other byte as
+    /// sent. A frontmatter that does not read fills nothing.
     #[non_exhaustive]
     Document {
         /// Where the document is created. Nothing may stand there.

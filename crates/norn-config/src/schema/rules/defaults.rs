@@ -156,9 +156,9 @@ impl VaultSchema {
     /// `path`. A default read from a capture the match binds several ways is
     /// refused, naming two of the bindings.
     ///
-    /// **A dormant carrier.** Its consumer is `new` and inbox capture, which
-    /// take the fixpoint with NORN-359; the current call graph reaches it
-    /// from no write, because no write fills rule defaults yet.
+    /// **Its consumer is every creation**: `new` by a creation rule, inbox
+    /// capture and `new` at a bare path, which `norn-host`'s planner fills
+    /// from it, its refusals answered as structured unresolved reasons.
     ///
     /// [ADR 0035]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md
     pub fn fill_rule_defaults(

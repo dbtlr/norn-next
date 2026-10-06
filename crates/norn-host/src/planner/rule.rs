@@ -29,11 +29,13 @@
 //! declare, and a creation naming no rule where the schema declares no inbox,
 //! do not resolve.
 //!
-//! **One clock reading per plan.** The clock is read the first time an
-//! operation of the plan creates by rule, and never for a plan that does not;
-//! every template of the plan fills from that one reading. A clock outside
-//! the years `{{date}}` can write leaves every creation by rule of the plan
-//! unresolved, saying so.
+//! **One clock reading per plan.** The clock is read the first time a
+//! creation of the plan may fill from it — any creation by rule, and a
+//! document created at a path where the schema states a rule default — and
+//! never for a plan whose creations cannot; every template and every default
+//! of the plan fills from that one reading. A clock outside the years
+//! `{{date}}` can write leaves every such creation of the plan unresolved,
+//! saying so.
 //!
 //! **What a caller supplies is judged against the rule.** Every variable the
 //! rule declares must be supplied, and none it does not declare may be: a
@@ -50,8 +52,19 @@
 //! caller's order. A caller's value is typed and written as it is, never
 //! filled as a template, converted one to one as a `set`'s value is. The body
 //! is the caller's where it sends one, else the rule's body template filled,
-//! else empty. The inbox has neither defaults nor a body template, so a
-//! capture is exactly the caller's fields and body. The document is written
+//! else empty. The inbox has neither frontmatter defaults nor a body
+//! template, so a capture is the caller's fields and body before the rule
+//! defaults.
+//!
+//! **Then the rule defaults** ([`defaulted`]): the schema rules matching the
+//! document fill each required field its caller and its creation rule left
+//! missing, to a fixpoint ([`VaultSchema::fill_rule_defaults`]), each set into
+//! the composed document as a `set` writes a field. A document created at a
+//! path takes the same chain, its own frontmatter its caller's values. A
+//! disagreement leaves the creation unresolved as
+//! [`UnresolvedReason::DefaultsConflict`], naming each field and every
+//! candidate with its rules, and a default read from a capture bound several
+//! ways as [`UnresolvedReason::AmbiguousCapture`]. The document is written
 //! through `norn-text`'s one renderer, its frontmatter block with LF line
 //! endings and its body exactly as sent — a body's own breaks, CRLF
 //! included, and an unterminated last line are kept, so a CRLF body sits
@@ -100,12 +113,16 @@ use std::ops::ControlFlow;
 use std::path::Path;
 
 use norn_config::schema::{
-    CreationRule, LocalTimestamp, NotALocalTimestamp, SeqSlot, Target, TemplateValues, VaultSchema,
+    CaseFold, CreationRule, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, SeqSlot,
+    Target, TemplateValues, VaultSchema,
 };
 use norn_text::{LineEnding, Mapping, opens_frontmatter, render_document};
-use norn_wire::{DocumentPath, Operation, OperationKind, UnresolvedReason, ValueMap, Variables};
+use norn_wire::{
+    ConflictingDefault, DefaultCandidate, DocumentPath, Operation, OperationKind, UnresolvedReason,
+    ValueMap, Variables, WriteTarget,
+};
 
-use super::edit::text_value;
+use super::edit::{edited, text_value};
 use super::view::VaultView;
 
 /// What a plan's creations by rule are made by: the creation rules and the
@@ -129,35 +146,148 @@ pub(crate) fn expand<V: VaultView>(
 ) -> Result<(), V::Error> {
     let mut numbering = None;
     let mut reading = None;
+    let case = crate::stored_path_order(view.normalizer().case_sensitivity()).glob_case();
+    let defaults = states_rule_defaults(rules.schema);
     for position in 0..operations.len() {
-        let OperationKind::CreateByRule {
-            rule,
-            variables,
-            fields,
-            body,
-        } = &operations[position].kind
-        else {
-            continue;
-        };
-        let at = *reading.get_or_insert_with(|| (rules.clock)());
-        let numbering = numbering.get_or_insert_with(|| Numbering::of(operations));
-        let asked = Asked {
-            rule: rule.as_deref(),
-            variables,
-            fields,
-            body: body.as_deref(),
-        };
-        match made(&asked, rules.schema, at, numbering, view)? {
-            Ok((path, content)) => {
-                numbering.arrivals.push(path.as_str().to_string());
-                operations[position].kind = OperationKind::create_document(path, content);
+        match &operations[position].kind {
+            OperationKind::CreateByRule {
+                rule,
+                variables,
+                fields,
+                body,
+            } => {
+                let at = *reading.get_or_insert_with(|| (rules.clock)());
+                let numbering = numbering.get_or_insert_with(|| Numbering::of(operations));
+                let asked = Asked {
+                    rule: rule.as_deref(),
+                    variables,
+                    fields,
+                    body: body.as_deref(),
+                };
+                match made(&asked, rules.schema, at, case, numbering, view)? {
+                    Ok((path, content)) => {
+                        numbering.arrivals.push(path.as_str().to_string());
+                        operations[position].kind = OperationKind::create_document(path, content);
+                    }
+                    Err(reason) => {
+                        left_out.insert(position, reason);
+                    }
+                }
             }
-            Err(detail) => {
-                left_out.insert(position, UnresolvedReason::no_longer_resolves(detail));
+            OperationKind::CreateDocument { path, content } if defaults => {
+                let at = *reading.get_or_insert_with(|| (rules.clock)());
+                match defaulted(path, content, rules.schema, at, case) {
+                    Ok(Some(filled)) => {
+                        operations[position].kind =
+                            OperationKind::create_document(path.clone(), filled);
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        left_out.insert(position, reason);
+                    }
+                }
             }
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// Whether some schema rule states a default, which a document created at a
+/// path may take.
+fn states_rule_defaults(schema: &VaultSchema) -> bool {
+    schema
+        .rules()
+        .any(|rule| rule.required().any(|(_, default)| default.is_some()))
+}
+
+/// The text `content` — a document a caller creates at `path` — takes once
+/// the rule defaults fill each required field its own frontmatter leaves
+/// missing ([`VaultSchema::fill_rule_defaults`]), read at `at`; `None` where
+/// none fills; or why it takes none.
+///
+/// **The caller's frontmatter is its values, and every byte it sent stays.**
+/// Each filled field is set into the document through the one composition a
+/// `set` writes a field by ([`edited`]): at the end of the block it carries,
+/// or in a new block where it carries none, its body and the block's own
+/// spelling kept, and a composition that would drop a comment refused as a
+/// `set` refuses it. A document whose fields cannot be read — bytes no
+/// document decodes from, a block nothing reads, a block whose top level is
+/// no map — fills nothing, and the write gate judges what was sent.
+fn defaulted(
+    path: &DocumentPath,
+    content: &str,
+    schema: &VaultSchema,
+    at: Result<LocalTimestamp, NotALocalTimestamp>,
+    case: CaseFold,
+) -> Result<Option<String>, UnresolvedReason> {
+    let Some(fields) = crate::derivation::written_fields(content.as_bytes()) else {
+        return Ok(None);
+    };
+    let at = at.map_err(|_| {
+        UnresolvedReason::no_longer_resolves(format!(
+            "the host's clock cannot be read as a local time the rule defaults can fill: \
+             {NotALocalTimestamp}"
+        ))
+    })?;
+    let filled = schema
+        .fill_rule_defaults(&fields, path.as_str(), at, case)
+        .map_err(refused_defaults)?;
+    if filled.is_empty() {
+        return Ok(None);
+    }
+    let mut bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(content.as_bytes());
+    for (field, value) in filled {
+        let set = OperationKind::set_frontmatter(WriteTarget::path(path.clone()), field, value);
+        bytes = edited(&set, &bytes).map_err(|detail| {
+            UnresolvedReason::no_longer_resolves(format!(
+                "a rule default cannot be set into the document: {detail}"
+            ))
+        })?;
+    }
+    Ok(Some(
+        String::from_utf8(bytes.to_vec()).expect("a composed document is UTF-8 text"),
+    ))
+}
+
+/// The unresolved reason a defaults refusal is answered as.
+fn refused_defaults(refusal: RuleDefaultsRefusal) -> UnresolvedReason {
+    match refusal {
+        RuleDefaultsRefusal::Conflict { fields } => UnresolvedReason::defaults_conflict(
+            fields
+                .iter()
+                .map(|conflict| {
+                    ConflictingDefault::new(
+                        conflict.field(),
+                        conflict
+                            .candidates()
+                            .iter()
+                            .map(|candidate| {
+                                DefaultCandidate::new(
+                                    candidate.value().clone(),
+                                    candidate.rules().iter().cloned(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+        RuleDefaultsRefusal::AmbiguousCapture {
+            rule,
+            field,
+            bindings,
+        } => {
+            let [first, second] = *bindings;
+            let named = |captures: norn_wire::Captures| {
+                captures
+                    .iter()
+                    .map(|(name, segment)| (name.to_string(), segment.to_string()))
+                    .collect()
+            };
+            UnresolvedReason::ambiguous_capture(rule, field, [named(first), named(second)])
+        }
+    }
 }
 
 /// What a plan's numbers are allocated past, gathered the first time one of
@@ -283,9 +413,34 @@ struct Asked<'a> {
 }
 
 /// The path and text of the document `asked` makes under `schema`, read at
-/// `at`, numbered by `numbering` past what `view` lists; or why it makes
-/// none, in words.
+/// `at`, numbered by `numbering` past what `view` lists, the rule defaults
+/// filled beneath the caller's values and its creation rule's
+/// ([`defaulted`]), its rules' path globs comparing letters as `case` says;
+/// or why it makes none.
 fn made<V: VaultView>(
+    asked: &Asked<'_>,
+    schema: &VaultSchema,
+    at: Result<LocalTimestamp, NotALocalTimestamp>,
+    case: CaseFold,
+    numbering: &mut Numbering,
+    view: &V,
+) -> Result<Result<(DocumentPath, String), UnresolvedReason>, V::Error> {
+    let (path, content) = match composed_by_rule(asked, schema, at, numbering, view)? {
+        Ok(made) => made,
+        Err(detail) => return Ok(Err(UnresolvedReason::no_longer_resolves(detail))),
+    };
+    Ok(match defaulted(&path, &content, schema, at, case) {
+        Ok(Some(filled)) => Ok((path, filled)),
+        Ok(None) => Ok((path, content)),
+        Err(reason) => Err(reason),
+    })
+}
+
+/// The path and text of the document `asked` makes under `schema` before
+/// any rule default fills it — the caller's values over its creation rule's
+/// defaults — read at `at`, numbered by `numbering` past what `view` lists;
+/// or why it makes none, in words.
+fn composed_by_rule<V: VaultView>(
     asked: &Asked<'_>,
     schema: &VaultSchema,
     at: Result<LocalTimestamp, NotALocalTimestamp>,
@@ -1106,10 +1261,12 @@ creatable:
         );
     }
 
-    /// **The clock is read once for a plan, and only for a plan creating by
-    /// rule**: every creation of the plan fills from that one reading.
+    /// **The clock is read once for a plan, and only for a plan whose
+    /// creations may fill from it**: every creation of the plan fills from
+    /// that one reading, and a document created at a path under a schema
+    /// stating no rule default reads none.
     #[test]
-    fn the_clock_is_read_once_per_plan_and_only_when_a_rule_creates() {
+    fn the_clock_is_read_once_per_plan_and_only_when_a_creation_may_fill_from_it() {
         let reads = Cell::new(0);
         let resolution = planned_reading(
             &MemoryVault::default(),
@@ -1161,11 +1318,11 @@ creatable:
         }
     }
 
-    /// **A capture is exactly the caller's fields and body**, in the inbox,
-    /// numbered; one with no field is its body alone, with no empty
-    /// frontmatter block.
+    /// **A capture under a schema stating no rule default is exactly the
+    /// caller's fields and body**, in the inbox, numbered; one with no field
+    /// is its body alone, with no empty frontmatter block.
     #[test]
-    fn a_capture_is_exactly_the_callers_fields_and_body() {
+    fn a_capture_under_no_rule_default_is_exactly_the_callers_fields_and_body() {
         let vault = MemoryVault::with(&[("inbox/2026-10-01-1.md", "earlier\n")]);
         let resolution = planned(
             &vault,
@@ -1380,6 +1537,290 @@ creatable:
                     )),
                 ),
             ]
+        );
+    }
+
+    /// A schema whose creation rule, inbox and schema rules each state a
+    /// layer of a created document's values: the `task` rule defaults
+    /// `kind: task` and `priority: low`; a rule on `kind: task` requires
+    /// `priority` (default `high`), `owner` (default `nobody`) and `created`
+    /// (default the clock); a vault-wide rule requires `kind` (default
+    /// `note`); and a rule on `kind: note` requires `area` (default
+    /// `general`).
+    const LAYERED: &[u8] = b"version: 1
+creatable:
+  task:
+    target: \"tasks/{{seq}}.md\"
+    frontmatter_defaults:
+      kind: task
+      priority: low
+inbox:
+  target: \"inbox/{{seq}}.md\"
+rules:
+  tasks: { match: { frontmatter: { kind: task } }, required: { priority: { default: high }, owner: { default: nobody }, created: { default: '{{now}}' } } }
+  every: { required: { kind: { default: note } } }
+  notes: { match: { frontmatter: { kind: note } }, required: { area: { default: general } } }
+";
+
+    /// The one create `operations` plan to under [`LAYERED`]: its path and
+    /// content.
+    fn layered(operations: Vec<Operation>) -> (String, String) {
+        the_create(&planned_reading(
+            &MemoryVault::default(),
+            &schema(LAYERED),
+            operations,
+            Ok(reading()),
+            &Cell::new(0),
+        ))
+    }
+
+    fn task_with(entries: Vec<(&str, AuthoredValue)>) -> Operation {
+        by_rule(Some("task"), &[], fields(entries), None)
+    }
+
+    fn capture_with(entries: Vec<(&str, AuthoredValue)>) -> Operation {
+        by_rule(None, &[], fields(entries), Some("Body.\n"))
+    }
+
+    /// **`new --as`: the caller's value stands over the creation rule's
+    /// default and the rule default.** `priority: urgent` sent by the caller
+    /// is written though the creation rule defaults `low` and a rule `high`.
+    #[test]
+    fn new_by_rule_takes_the_callers_value_over_every_default() {
+        let (_, content) = layered(vec![task_with(vec![(
+            "priority",
+            AuthoredValue::string("urgent"),
+        )])]);
+        assert!(content.contains("priority: urgent\n"), "{content}");
+        assert!(!content.contains("priority: low"), "{content}");
+    }
+
+    /// **`new --as`: the creation rule's default stands over the rule
+    /// default**, and the rule defaults fill each required field the caller
+    /// and the creation rule left missing, after them, from the one clock
+    /// reading.
+    #[test]
+    fn new_by_rule_takes_the_creation_default_over_a_rule_default_and_rule_defaults_last() {
+        let (path, content) = layered(vec![task_with(vec![])]);
+        assert_eq!(path, "tasks/1.md");
+        assert_eq!(
+            content,
+            "---\nkind: task\npriority: low\ncreated: 2026-10-01T09:30:15+02:00\nowner: nobody\n---\n"
+        );
+    }
+
+    /// **Inbox capture: the caller's value stands over a rule default, and
+    /// the rule defaults fill each required field it left missing.**
+    #[test]
+    fn a_capture_takes_the_callers_value_over_a_rule_default_and_rule_defaults_last() {
+        let (path, content) = layered(vec![capture_with(vec![
+            ("kind", AuthoredValue::string("task")),
+            ("owner", AuthoredValue::string("me")),
+        ])]);
+        assert_eq!(path, "inbox/1.md");
+        assert_eq!(
+            content,
+            "---\nkind: task\nowner: me\ncreated: 2026-10-01T09:30:15+02:00\npriority: high\n---\nBody.\n"
+        );
+    }
+
+    /// **The fixpoint fills a default a filled default brings into scope**:
+    /// a capture sending no field takes `kind: note` from the vault-wide
+    /// rule, which brings in the rule on `kind: note` and its `area`.
+    #[test]
+    fn a_filled_default_brings_in_a_rule_whose_default_fills_too() {
+        let (_, content) = layered(vec![capture_with(vec![])]);
+        assert_eq!(content, "---\nkind: note\narea: general\n---\nBody.\n");
+    }
+
+    /// **`new` at a bare path: its own frontmatter is the caller's values,
+    /// and each rule default is set into it as a `set` writes a field** — at
+    /// the end of the block it carries, or in a new block where it carries
+    /// none — every byte it sent otherwise kept: its body, and its block's
+    /// own spelling.
+    #[test]
+    fn new_at_a_path_takes_rule_defaults_beneath_its_own_frontmatter() {
+        let (_, fronted) = layered(vec![Operation::new(create(
+            "notes/x.md",
+            "---\nkind: task   # mine\nowner:   me\n---\nBody,\r\nkept.",
+        ))]);
+        assert_eq!(
+            fronted,
+            "---\nkind: task   # mine\nowner:   me\ncreated: 2026-10-01T09:30:15+02:00\npriority: high\n---\nBody,\r\nkept."
+        );
+        let (_, bare) = layered(vec![Operation::new(create("notes/y.md", "Body.\n"))]);
+        assert_eq!(bare, "---\nkind: note\narea: general\n---\nBody.\n");
+    }
+
+    /// **`new` at a bare path whose frontmatter does not read fills
+    /// nothing**: the document is created exactly as sent, for the write gate
+    /// to judge.
+    #[test]
+    fn new_at_a_path_whose_frontmatter_does_not_read_fills_nothing() {
+        let sent = "---\nkind: [unclosed\n---\nBody.\n";
+        let (_, content) = layered(vec![Operation::new(create("notes/x.md", sent))]);
+        assert_eq!(content, sent);
+    }
+
+    /// A schema whose vault-wide rule defaults `kind: task` and
+    /// `status: todo` while a rule on `kind: task` defaults `status: done`,
+    /// and whose two `area` rules default `area` apart in one round.
+    const CONFLICTED: &[u8] = b"version: 1
+creatable:
+  task:
+    target: \"tasks/{{seq}}.md\"
+inbox:
+  target: \"inbox/{{seq}}.md\"
+rules:
+  wide: { required: { kind: { default: task }, status: { default: todo } } }
+  tasks: { match: { frontmatter: { kind: task } }, required: { status: { default: done } } }
+  west: { match: { frontmatter: { side: both } }, required: { area: { default: west } } }
+  east: { match: { frontmatter: { side: both } }, required: { area: { default: east } } }
+";
+
+    /// The one reason `operation` is left unresolved for under
+    /// [`CONFLICTED`].
+    fn conflicted(operation: Operation) -> UnresolvedReason {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(CONFLICTED),
+            vec![operation],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        assert!(
+            resolution.plan.operations.is_empty(),
+            "{:?}",
+            resolution.plan
+        );
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("one operation left: {:?}", resolution.unresolved);
+        };
+        left.reason.clone()
+    }
+
+    fn conflict(field: &str, candidates: &[(&str, &[&str])]) -> UnresolvedReason {
+        UnresolvedReason::defaults_conflict(vec![norn_wire::ConflictingDefault::new(
+            field,
+            candidates
+                .iter()
+                .map(|(value, rules)| {
+                    norn_wire::DefaultCandidate::new(
+                        AuthoredValue::string(*value),
+                        rules.iter().map(|rule| (*rule).to_string()),
+                    )
+                })
+                .collect(),
+        )])
+    }
+
+    /// **The late conflict refuses naming the field and both candidates**,
+    /// for `new --as`, inbox capture and `new` at a bare path alike: the
+    /// vault-wide rule fills `kind: task` and `status: todo`, which brings in
+    /// the rule on `kind: task` defaulting `status: done`.
+    #[test]
+    fn a_default_a_later_round_disagrees_with_refuses_naming_both_candidates() {
+        let late = conflict("status", &[("todo", &["wide"]), ("done", &["tasks"])]);
+        assert_eq!(
+            conflicted(by_rule(Some("task"), &[], fields(vec![]), None)),
+            late
+        );
+        assert_eq!(conflicted(capture_with(vec![])), late);
+        assert_eq!(
+            conflicted(Operation::new(create("notes/x.md", "Body.\n"))),
+            late
+        );
+    }
+
+    /// **Defaults disagreeing in one round refuse alike**, naming the field
+    /// and each candidate with the rule proposing it.
+    #[test]
+    fn defaults_disagreeing_in_one_round_refuse_naming_each_candidate() {
+        let fields_sent = vec![
+            ("kind", AuthoredValue::string("note")),
+            ("status", AuthoredValue::string("open")),
+            ("side", AuthoredValue::string("both")),
+        ];
+        assert_eq!(
+            conflicted(capture_with(fields_sent)),
+            conflict("area", &[("east", &["east"]), ("west", &["west"])])
+        );
+    }
+
+    /// **A default read from a capture its rule's `match.path` binds several
+    /// ways refuses**, naming the rule, the field and two of the bindings.
+    #[test]
+    fn a_default_read_from_a_capture_bound_several_ways_refuses() {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(
+                b"version: 1
+rules:
+  areas: { match: { path: '**/<area>/**' }, required: { area: { default: '{{path.area}}' } } }
+",
+            ),
+            vec![Operation::new(create("a/b/c.md", "Body.\n"))],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("one operation left: {:?}", resolution.unresolved);
+        };
+        let UnresolvedReason::AmbiguousCapture {
+            rule,
+            field,
+            bindings,
+            ..
+        } = &left.reason
+        else {
+            panic!("an ambiguous capture: {:?}", left.reason);
+        };
+        assert_eq!((rule.as_str(), field.as_str()), ("areas", "area"));
+        assert_ne!(bindings[0], bindings[1]);
+    }
+
+    /// **Every default of a plan fills from one clock reading**: two
+    /// documents created at paths in one plan take one `created`, read once,
+    /// and a plan whose creations take no default reads no clock.
+    #[test]
+    fn every_default_of_a_plan_fills_from_one_clock_reading() {
+        let reads = Cell::new(0);
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(LAYERED),
+            vec![
+                Operation::new(create("a.md", "---\nkind: task\n---\n")),
+                Operation::new(create("b.md", "---\nkind: task\n---\n")),
+                task_with(vec![]),
+            ],
+            Ok(reading()),
+            &reads,
+        );
+        assert_eq!(reads.get(), 1);
+        for kind in kinds(&resolution) {
+            let OperationKind::CreateDocument { content, .. } = kind else {
+                panic!("a create: {kind:?}");
+            };
+            assert!(
+                content.contains("created: 2026-10-01T09:30:15+02:00\n"),
+                "{content}"
+            );
+        }
+        let reads = Cell::new(0);
+        planned_reading(
+            &MemoryVault::default(),
+            &schema(LAYERED),
+            vec![Operation::new(create(
+                "a.md",
+                "---\nkind: note\narea: home\n---\n",
+            ))],
+            Ok(reading()),
+            &reads,
+        );
+        assert_eq!(
+            reads.get(),
+            1,
+            "a creation reads the clock once the schema states defaults"
         );
     }
 }
