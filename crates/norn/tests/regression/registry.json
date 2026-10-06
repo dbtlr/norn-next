@@ -1853,7 +1853,13 @@
       "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
       "binding": {
         "status": "dormant",
-        "reason": "no validator, mutator or repair planner exists to agree; the repair planner's compare-and-swap precondition is the last engine this property needs, which is why it binds a layer above the one-verdict rule."
+        "reason": "the schema rules the clauses judge by are read: crates/norn-config/src/schema/rules.rs selects a document's schema rules and combines their constraints per field into one constraint; nothing judges a value against that combination yet, element or whole. The rule findings that read it land with NORN-358 and the write gate with NORN-359, and the validate and mutate clauses bind at the Layer 5A regression closure (NORN-360), pre-committed as crates/norn-host/tests/derivation.rs::a_list_value_is_judged_element_by_element_against_the_combined_constraint and crates/norn-host/tests/applies.rs::a_write_refuses_an_element_violation_it_introduces_and_not_one_standing. The repair clauses — a finding a repair targets is matchable by its compare-and-swap precondition, and an element fix compares against elements — bind at Layer 5B (NORN-351), with the repair planner, pre-committed as the module crates/norn-host/src/planner.rs::repair.",
+        "grounds": [
+          { "present": "crates/norn-config/src/schema/rules.rs" },
+          { "symbol-absent": "crates/norn-host/tests/derivation.rs::a_list_value_is_judged_element_by_element_against_the_combined_constraint" },
+          { "symbol-absent": "crates/norn-host/tests/applies.rs::a_write_refuses_an_element_violation_it_introduces_and_not_one_standing" },
+          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+        ]
       }
     },
     {
@@ -1864,7 +1870,10 @@
       "sources": ["norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no repair planner exists."
+        "reason": "no repair planner exists: the repair verb and the planner that compiles findings into one resolved plan land at Layer 5B (NORN-351), pre-committed as the module crates/norn-host/src/planner.rs::repair, which is where a link fix targeting unresolvable text and repair guidance outside the validation scope can first be asserted.",
+        "grounds": [
+          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+        ]
       }
     },
     {
@@ -1875,7 +1884,10 @@
       "sources": ["NORN-a1", "NRN-a60", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "no repair planner exists."
+        "reason": "no repair planner exists: the repair verb and the planner that reads its selected findings land at Layer 5B (NORN-351), pre-committed as the module crates/norn-host/src/planner.rs::repair, which is where the documents a narrowed repair evaluates can first be counted.",
+        "grounds": [
+          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+        ]
       }
     },
     {

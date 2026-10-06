@@ -18,7 +18,7 @@
 //!
 //! **A facet's cursor key is the facet's own key.** [`Facet::cursor_key`] is
 //! the one function that turns a facet into the position a page stops at, and
-//! it states that position for every shape, so the nine keys cannot drift
+//! it states that position for every shape, so the eight keys cannot drift
 //! into two orders sharing a kind. What each shape is keyed by is stated
 //! there rather than restated here.
 //!
@@ -175,11 +175,6 @@ pub enum Facet {
         key: String,
         /// The type the declaration gives it.
         field_type: FieldType,
-        /// Whether every document is declared to carry it.
-        required: bool,
-        /// The closed set of values it is declared to hold, and `null` where
-        /// it is not declared closed.
-        one_of: Option<Vec<String>>,
     },
     /// A field the vault's documents carry, declared or not.
     ///
@@ -205,14 +200,6 @@ pub enum Facet {
     TagPattern {
         /// The pattern, as the schema writes it.
         pattern: String,
-    },
-    /// A folder the vault's schema declares.
-    #[non_exhaustive]
-    Folder {
-        /// The vault-root-relative path the folder is at.
-        path: String,
-        /// What the schema says the folder is for.
-        description: Option<String>,
     },
     /// A path rule the vault's schema states.
     #[non_exhaustive]
@@ -254,17 +241,10 @@ pub enum Facet {
 
 impl Facet {
     /// The field `key`, declared as `field_type`.
-    pub fn declared_field(
-        key: impl Into<String>,
-        field_type: FieldType,
-        required: bool,
-        one_of: Option<Vec<String>>,
-    ) -> Self {
+    pub fn declared_field(key: impl Into<String>, field_type: FieldType) -> Self {
         Facet::DeclaredField {
             key: key.into(),
             field_type,
-            required,
-            one_of,
         }
     }
 
@@ -297,14 +277,6 @@ impl Facet {
     pub fn tag_pattern(pattern: impl Into<String>) -> Self {
         Facet::TagPattern {
             pattern: pattern.into(),
-        }
-    }
-
-    /// The folder at `path`.
-    pub fn folder(path: impl Into<String>, description: Option<String>) -> Self {
-        Facet::Folder {
-            path: path.into(),
-            description,
         }
     }
 
@@ -358,7 +330,6 @@ impl Facet {
             Facet::ObservedField { .. } => FacetKind::ObservedField,
             Facet::DeclaredTag { .. } => FacetKind::DeclaredTag,
             Facet::TagPattern { .. } => FacetKind::TagPattern,
-            Facet::Folder { .. } => FacetKind::Folder,
             Facet::PathRule { .. } => FacetKind::PathRule,
             Facet::UndeclaredTags { .. } => FacetKind::UndeclaredTags,
             Facet::CreationRule { .. } => FacetKind::CreationRule,
@@ -370,8 +341,8 @@ impl Facet {
     ///
     /// The key is the one text the facet itself spells: a declared field's
     /// and an observed field's frontmatter key, a declared tag's name, a tag
-    /// pattern's and a path rule's pattern, a folder's path, a creation rule's
-    /// name, the inbox's target, and, for the undeclared-tags facet, the
+    /// pattern's and a path rule's pattern, a creation rule's name, the
+    /// inbox's target, and, for the undeclared-tags facet, the
     /// stance spelling — `allow` or `report`.
     /// Beside the kind, that names one facet within its shape, which is what a
     /// continuation resumes after.
@@ -381,19 +352,10 @@ impl Facet {
     /// the order stops at.
     pub fn cursor_key(&self) -> CursorKey {
         let key = match self {
-            Facet::DeclaredField {
-                key,
-                field_type: _,
-                required: _,
-                one_of: _,
-            } => key.clone(),
+            Facet::DeclaredField { key, field_type: _ } => key.clone(),
             Facet::ObservedField { key, containers: _ } => key.clone(),
             Facet::DeclaredTag { name } => name.clone(),
             Facet::TagPattern { pattern } => pattern.clone(),
-            Facet::Folder {
-                path,
-                description: _,
-            } => path.clone(),
             Facet::PathRule { rule: _, pattern } => pattern.clone(),
             Facet::UndeclaredTags { stance } => stance.as_str().to_string(),
             Facet::CreationRule {

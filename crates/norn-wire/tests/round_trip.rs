@@ -988,14 +988,8 @@ fn path_rule_kinds() -> Vec<PathRuleKind> {
 fn facets() -> Vec<Facet> {
     let mut facets: Vec<Facet> = field_types()
         .into_iter()
-        .map(|field_type| Facet::declared_field("due", field_type, true, None))
+        .map(|field_type| Facet::declared_field("due", field_type))
         .collect();
-    facets.push(Facet::declared_field(
-        "status",
-        FieldType::Text,
-        false,
-        Some(vec!["draft".to_string(), "live".to_string()]),
-    ));
     facets.extend(
         container_kinds()
             .into_iter()
@@ -1004,8 +998,6 @@ fn facets() -> Vec<Facet> {
     facets.push(Facet::observed_field("aliases", container_kinds()));
     facets.push(Facet::declared_tag("area"));
     facets.push(Facet::tag_pattern("person/**"));
-    facets.push(Facet::folder("journal", Some("One per day".to_string())));
-    facets.push(Facet::folder("archive", None));
     facets.extend(
         path_rule_kinds()
             .into_iter()
@@ -1915,7 +1907,7 @@ fn a_cursor_key_names_the_rows_it_is_a_position_among() {
             PagedRows::DocumentFinding,
         ),
         (
-            CursorKey::facet(FacetKind::Folder, "notes"),
+            CursorKey::facet(FacetKind::PathRule, "notes/**"),
             PagedRows::Facet,
         ),
         (
@@ -5208,8 +5200,8 @@ fn every_facet_names_the_kind_a_cursor_orders_it_under() {
             .collect::<BTreeSet<_>>()
     );
     assert_eq!(
-        wire(&Facet::declared_field("due", FieldType::Date, true, None)),
-        r#"{"facet":"declared_field","key":"due","field_type":"date","required":true,"one_of":null}"#
+        wire(&Facet::declared_field("due", FieldType::Date)),
+        r#"{"facet":"declared_field","key":"due","field_type":"date"}"#
     );
     assert_eq!(
         wire(&Facet::undeclared_tags(TagStance::Report)),
@@ -5291,7 +5283,7 @@ fn every_facet_shape_maps_to_a_kind_of_its_own() {
 fn every_facet_says_where_a_page_of_facets_stops_at_it() {
     for (facet, kind, key) in [
         (
-            Facet::declared_field("due", FieldType::Date, true, None),
+            Facet::declared_field("due", FieldType::Date),
             FacetKind::DeclaredField,
             "due",
         ),
@@ -5305,11 +5297,6 @@ fn every_facet_says_where_a_page_of_facets_stops_at_it() {
             Facet::tag_pattern("person/**"),
             FacetKind::TagPattern,
             "person/**",
-        ),
-        (
-            Facet::folder("journal", Some("One per day".to_string())),
-            FacetKind::Folder,
-            "journal",
         ),
         (
             Facet::path_rule(PathRuleKind::AmbiguityIgnore, "archive/**"),
@@ -5538,7 +5525,7 @@ fn every_describe_setter_lands_in_the_bytes() {
         [
             r##"{"vault":"##,
             PINNED_VAULT,
-            r##","facets":["declared_field","observed_field","declared_tag","folder","path_rule","tag_pattern","undeclared_tags","creation_rule","inbox"],"limit":20,"after":""##,
+            r##","facets":["declared_field","observed_field","declared_tag","path_rule","tag_pattern","undeclared_tags","creation_rule","inbox"],"limit":20,"after":""##,
             PINNED_AFTER,
             r##""}"##,
         ]

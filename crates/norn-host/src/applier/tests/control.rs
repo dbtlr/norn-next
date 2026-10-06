@@ -172,7 +172,7 @@ fn a_resolved_control_file_write_whose_content_does_not_read_as_its_role_is_inva
 fn a_control_file_lands_under_a_schema_that_declares_what_it_does_not_carry() {
     let mut fixture = fixture(&[("a.md", "---\nstatus: x\n---\n#ok\n")]);
     fixture.pin(
-        "version: 1\nfields:\n  status:\n    required: true\n    type: text\ntags:\n  declared: [ok]\n  undeclared: report\n",
+        "version: 1\nfields:\n  status:\n    type: text\nrules:\n  every:\n    required:\n      status:\ntags:\n  declared: [ok]\n  undeclared: report\n",
     );
     let config = "# [[nowhere]] #nope\n";
     let schema = "version: 1\n# [[nowhere]] #nope\n";

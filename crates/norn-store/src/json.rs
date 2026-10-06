@@ -71,6 +71,8 @@
 //! reads. Reading a projection back ([`projected_fields`]) is a walk over text
 //! the writer already bounded, so it recurses and refuses past the same bound.
 
+use norn_wire::FiniteFloat;
+
 /// A frontmatter value, as the store takes it.
 ///
 /// The seven shapes of the frontmatter value model and no eighth. It is the
@@ -238,18 +240,12 @@ fn write_float(number: f64, out: &mut String) {
 ///
 /// The one spelling of a float in the store: the projection writes it, and the
 /// field pillar's raw text is it, so a value read off either says the same
-/// digits.
+/// digits. It is the wire's spelling, [`FiniteFloat::canonical_text`], which a
+/// schema rule reads a float's text by too.
 pub(crate) fn float_text(number: f64) -> Option<String> {
-    if !number.is_finite() {
-        return None;
-    }
-    let mut written = number.to_string();
-    // `1.0` writes as `1`, which every JSON reader calls an integer. The
-    // fractional marker is what keeps a float's shape in the projection.
-    if !written.contains('.') {
-        written.push_str(".0");
-    }
-    Some(written)
+    FiniteFloat::new(number)
+        .ok()
+        .map(FiniteFloat::canonical_text)
 }
 
 fn write_string(text: &str, out: &mut String) {

@@ -2,8 +2,8 @@
 //! spells it with its parameters.
 //!
 //! **A declared facet runs no statement.** The declared fields, tags, tag
-//! patterns, folders, path rules, the undeclared-tag stance, the creation
-//! rules and the inbox are read off the declaration the snapshot pins, held in
+//! patterns, path rules, the undeclared-tag stance, the creation rules and
+//! the inbox are read off the declaration the snapshot pins, held in
 //! memory; only the observed field keys are read from the store, and
 //! [`DescribeStatement`] names the one statement that reads them.
 

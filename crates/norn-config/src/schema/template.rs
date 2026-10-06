@@ -1,6 +1,6 @@
-//! The template grammar a creation rule is written in.
+//! The template grammar creation rules and schema rules are written in.
 //!
-//! A template is text with tokens in it, and a token is one of five values
+//! A template is text with tokens in it, and a token is one of six values
 //! written between `{{` and `}}`:
 //!
 //! - `{{seq}}` — the document's sequence number, a plain integer.
@@ -10,6 +10,8 @@
 //!   local offset: `2026-10-01T19:00:00+02:00`.
 //! - `{{date}}` — the local calendar day of that instant: `2026-10-01`.
 //! - `{{time}}` — the local hour and minute of that instant: `19:00`.
+//! - `{{path.NAME}}` — the path segment a schema rule's `match.path` capture
+//!   `<NAME>` took in the path of the document being filled.
 //!
 //! Any token may carry the one filter, `|slug`: `{{var.title|slug}}`.
 //!
@@ -22,14 +24,17 @@
 //!
 //! **Parsing is all this module does at schema read.** Where a token may stand
 //! — `{{seq}}` only in a target's file name, a variable only where the rule
-//! declares it — is the creation rule's to judge, because it depends on which
-//! part of a rule the template is.
+//! declares it, a path capture only in a schema rule's default or route and
+//! only where its own `match.path` captures it — is the creation rule's or the
+//! schema rule's to judge, because it depends on which part of which rule the
+//! template is.
 //!
 //! # Filling
 //!
 //! [`Template::fill`] turns a template into text from a [`TemplateValues`]:
-//! the variables a caller supplied, one [`LocalTimestamp`], and the sequence
-//! number where one is allocated. **A fill reads no clock.** The caller reads
+//! the variables a caller supplied, one [`LocalTimestamp`], the sequence
+//! number where one is allocated, and the path captures where a schema rule's
+//! match bound them. **A fill reads no clock.** The caller reads
 //! the clock once and hands the reading over, so every template one plan
 //! fills states the same instant, and the same values fill the same text on
 //! every machine. A fill here never refuses for what a value holds; what a
@@ -37,6 +42,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+
+use norn_wire::Captures;
 
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
@@ -75,6 +82,7 @@ pub(crate) enum Slot {
     Now,
     Date,
     Time,
+    Path(String),
 }
 
 impl Template {
@@ -118,6 +126,21 @@ impl Template {
             Slot::Var(name) => Some(name.as_str()),
             _ => None,
         })
+    }
+
+    /// Every path capture a token of this template reads, in the order
+    /// written, once for each token reading it.
+    pub fn path_captures(&self) -> impl Iterator<Item = &str> {
+        self.tokens().filter_map(|token| match &token.slot {
+            Slot::Path(name) => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Whether the template holds a token: one that does not is its own text
+    /// under every fill.
+    pub fn is_templated(&self) -> bool {
+        self.tokens().next().is_some()
     }
 
     /// How many `{{seq}}` tokens the template holds.
@@ -168,6 +191,11 @@ impl Token {
             Slot::Now => values.at.rfc3339(),
             Slot::Date => values.at.date(),
             Slot::Time => values.at.time(),
+            Slot::Path(name) => values
+                .captures
+                .get(name)
+                .map(str::to_string)
+                .ok_or_else(|| FillError::MissingCapture { name: name.clone() })?,
         };
         Ok(if self.slug { slug(&value) } else { value })
     }
@@ -189,14 +217,20 @@ impl Token {
             "now" => Slot::Now,
             "date" => Slot::Date,
             "time" => Slot::Time,
-            _ => match name.strip_prefix("var.") {
-                Some(variable) if is_identifier(variable) => Slot::Var(variable.to_string()),
-                Some(variable) => {
+            _ => match (name.strip_prefix("var."), name.strip_prefix("path.")) {
+                (Some(variable), _) if is_identifier(variable) => Slot::Var(variable.to_string()),
+                (Some(variable), _) => {
                     return Err(TemplateError::VariableName {
                         name: variable.to_string(),
                     });
                 }
-                None => {
+                (None, Some(capture)) if is_identifier(capture) => Slot::Path(capture.to_string()),
+                (None, Some(capture)) => {
+                    return Err(TemplateError::CaptureName {
+                        name: capture.to_string(),
+                    });
+                }
+                (None, None) => {
                     return Err(TemplateError::UnknownToken {
                         token: inner.to_string(),
                     });
@@ -216,6 +250,7 @@ impl fmt::Display for Token {
             Slot::Now => formatter.write_str("now")?,
             Slot::Date => formatter.write_str("date")?,
             Slot::Time => formatter.write_str("time")?,
+            Slot::Path(name) => write!(formatter, "path.{name}")?,
         }
         if self.slug {
             formatter.write_str("|slug")?;
@@ -364,12 +399,14 @@ impl fmt::Display for NotALocalTimestamp {
 impl std::error::Error for NotALocalTimestamp {}
 
 /// What a template is filled from: the variables a caller supplied, one
-/// clock reading, and the sequence number where one is allocated.
+/// clock reading, the sequence number where one is allocated, and the path
+/// captures where a schema rule's match bound them.
 #[derive(Clone, Debug)]
 pub struct TemplateValues {
     variables: BTreeMap<String, String>,
     at: LocalTimestamp,
     seq: Option<u64>,
+    captures: Captures,
 }
 
 impl TemplateValues {
@@ -379,7 +416,16 @@ impl TemplateValues {
             variables,
             at,
             seq: None,
+            captures: Captures::default(),
         }
+    }
+
+    /// The same values, with `captures` the path segments a rule's match
+    /// bound.
+    #[must_use]
+    pub fn with_captures(mut self, captures: Captures) -> Self {
+        self.captures = captures;
+        self
     }
 
     /// The same values, numbered `seq`.
@@ -406,6 +452,14 @@ pub enum FillError {
     },
     /// `{{seq}}` is filled with no sequence number supplied.
     NoSeq,
+    /// A token reads a path capture no value is supplied for. A schema read
+    /// already holds every capture a rule's template reads to one its own
+    /// `match.path` binds, so this is a caller that did not supply the
+    /// binding.
+    MissingCapture {
+        /// The capture, as the token names it.
+        name: String,
+    },
     /// A value would break the target's path.
     UnsafeValue {
         /// The token, as written between its braces: `var.title|slug`.
@@ -449,6 +503,12 @@ impl fmt::Display for FillError {
                 write!(formatter, "no value is supplied for the variable `{name}`")
             }
             FillError::NoSeq => formatter.write_str("`{{seq}}` is filled with no sequence number"),
+            FillError::MissingCapture { name } => {
+                write!(
+                    formatter,
+                    "no value is supplied for the path capture `{name}`"
+                )
+            }
             FillError::UnsafeValue {
                 token,
                 value,
@@ -504,6 +564,11 @@ pub enum TemplateError {
         /// The name, as written.
         name: String,
     },
+    /// `{{path.NAME}}` with a name that is not an identifier.
+    CaptureName {
+        /// The name, as written.
+        name: String,
+    },
 }
 
 impl fmt::Display for TemplateError {
@@ -515,7 +580,7 @@ impl fmt::Display for TemplateError {
             ),
             TemplateError::UnknownToken { token } => write!(
                 formatter,
-                "holds `{{{{{token}}}}}`, and a token is `{{{{seq}}}}`, `{{{{var.NAME}}}}`, `{{{{now}}}}`, `{{{{date}}}}` or `{{{{time}}}}`"
+                "holds `{{{{{token}}}}}`, and a token is `{{{{seq}}}}`, `{{{{var.NAME}}}}`, `{{{{now}}}}`, `{{{{date}}}}`, `{{{{time}}}}` or `{{{{path.NAME}}}}`"
             ),
             TemplateError::UnknownFilter { token, filter } => write!(
                 formatter,
@@ -524,6 +589,10 @@ impl fmt::Display for TemplateError {
             TemplateError::VariableName { name } => write!(
                 formatter,
                 "names the variable `{name}`, and a variable's name is an ASCII letter or `_` followed by letters, digits, `_` or `-`"
+            ),
+            TemplateError::CaptureName { name } => write!(
+                formatter,
+                "reads the path capture `{name}`, and a capture's name is an ASCII letter or `_` followed by letters, digits, `_` or `-`"
             ),
         }
     }

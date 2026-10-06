@@ -598,7 +598,7 @@ pub use error::{
 };
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use finding_row::{CANDIDATE_HEAD, Candidate, CandidateHead, FindingRow, Hint};
-pub use glob::{CaseFold, Pattern, PatternError};
+pub use glob::{Binding, Captures, CaseFold, Pattern, PatternError, sets_share_a_document_path};
 pub use name::{IllegalVaultName, VaultName};
 pub use plan::backlinks::Backlinks;
 pub use plan::document::{

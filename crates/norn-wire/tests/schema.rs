@@ -1284,7 +1284,6 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "declared_field",
             "observed_field",
             "declared_tag",
-            "folder",
             "path_rule",
             "tag_pattern",
             "undeclared_tags",
@@ -1307,7 +1306,6 @@ fn a_facet_kind_and_a_movement_advertise_their_bare_strings() {
             "creation_rule",
             "declared_field",
             "declared_tag",
-            "folder",
             "inbox",
             "observed_field",
             "path_rule",
@@ -2455,7 +2453,6 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
             "observed_field",
             "declared_tag",
             "tag_pattern",
-            "folder",
             "path_rule",
             "undeclared_tags",
             "creation_rule",
@@ -2468,9 +2465,7 @@ fn a_facet_advertises_its_facet_tag_and_the_types_behind_it() {
         .expect("the declared_field branch");
     assert_eq!(
         property_names(declared),
-        ["facet", "key", "field_type", "required", "one_of"]
-            .into_iter()
-            .collect()
+        ["facet", "key", "field_type"].into_iter().collect()
     );
     assert_eq!(
         declared["properties"]["field_type"]["$ref"].as_str(),

@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 
 use norn_config::schema::typed::{Comparison, ComparisonSignal, Offset};
 use norn_config::schema::{
-    CaseFold, FieldType, Pattern, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
+    CaseFold, FieldType, Pattern, Shape, TypedValue, UndeclaredTags, VaultSchema, VaultSchemaError,
 };
 
 /// A schema declaring one of everything the grammar has.
@@ -16,7 +16,6 @@ const WHOLE: &[u8] = b"version: 1
 fields:
   title:
     type: text
-    required: true
   created:
     type: date
   rating:
@@ -25,50 +24,38 @@ fields:
     type: boolean
   status:
     type: text
-    one_of: [draft, live, retired]
+    shape: single
 tags:
   declared: [area, project]
   patterns: [\"person/**\"]
   undeclared: report
-folders:
-  - path: journal
-    description: One document per day
-  - path: archive
 paths:
   ambiguity_ignore: [\"archive/**\", \"attachments/*\"]
+rules:
+  draft:
+    match:
+      frontmatter: { draft: true }
+    required:
+      title:
 ";
 
 #[test]
 fn a_whole_schema_reads_every_section_it_declares() {
     let schema = VaultSchema::parse(WHOLE).expect("a whole schema");
 
-    let fields: Vec<(&str, FieldType, bool)> = schema
+    let fields: Vec<(&str, FieldType)> = schema
         .fields()
-        .map(|(key, field)| (key, field.kind(), field.required()))
+        .map(|(key, field)| (key, field.kind()))
         .collect();
     assert_eq!(
         fields,
         vec![
-            ("created", FieldType::Date, false),
-            ("draft", FieldType::Boolean, false),
-            ("rating", FieldType::Number, false),
-            ("status", FieldType::Text, false),
-            ("title", FieldType::Text, true),
+            ("created", FieldType::Date),
+            ("draft", FieldType::Boolean),
+            ("rating", FieldType::Number),
+            ("status", FieldType::Text),
+            ("title", FieldType::Text),
         ]
-    );
-    let status: Vec<&str> = schema
-        .field("status")
-        .expect("the status field")
-        .one_of()
-        .expect("a closed set")
-        .collect();
-    assert_eq!(status, vec!["draft", "live", "retired"]);
-    assert!(
-        schema
-            .field("title")
-            .expect("the title field")
-            .one_of()
-            .is_none()
     );
 
     let facet = schema.tags();
@@ -86,16 +73,6 @@ fn a_whole_schema_reads_every_section_it_declares() {
     );
     assert_eq!(facet.undeclared(), UndeclaredTags::Report);
 
-    let folders: Vec<(&str, Option<&str>)> = schema
-        .folders()
-        .iter()
-        .map(|folder| (folder.path(), folder.description()))
-        .collect();
-    assert_eq!(
-        folders,
-        vec![("journal", Some("One document per day")), ("archive", None)]
-    );
-
     assert_eq!(
         schema
             .ambiguity_ignore()
@@ -103,6 +80,14 @@ fn a_whole_schema_reads_every_section_it_declares() {
             .map(Pattern::as_str)
             .collect::<Vec<_>>(),
         vec!["archive/**", "attachments/*"]
+    );
+    assert_eq!(
+        schema.field("status").and_then(|field| field.shape()),
+        Some(Shape::Single)
+    );
+    assert_eq!(
+        schema.rules().map(|rule| rule.name()).collect::<Vec<_>>(),
+        ["draft"]
     );
 }
 
@@ -112,8 +97,8 @@ fn a_schema_that_declares_only_its_version_judges_no_document() {
 
     assert_eq!(schema.fields().count(), 0);
     assert_eq!(schema.tags().declared().count(), 0);
-    assert!(schema.folders().is_empty());
     assert!(schema.ambiguity_ignore().is_empty());
+    assert_eq!(schema.rules().count(), 0);
     assert!(!schema.rederives_documents());
 }
 
@@ -343,79 +328,6 @@ fn a_section_of_the_wrong_shape_names_itself() {
     );
 }
 
-#[test]
-fn a_folder_that_declares_no_path_is_told_the_key_is_absent() {
-    let error = VaultSchema::parse(b"version: 1\nfolders:\n  - description: no path\n")
-        .expect_err("a folder with no path");
-
-    assert_eq!(
-        error,
-        VaultSchemaError::Section {
-            at: "folders.path".to_string(),
-            wanted: "a path",
-            found: "absent".to_string(),
-        }
-    );
-}
-
-/// **A present value of the wrong shape is not an absent one.** `path: 2026`
-/// reads as a YAML number, and an author told the key is absent would go
-/// looking for a key that is written right in front of them. The refusal names
-/// the shape that is there instead.
-#[test]
-fn a_folder_path_of_the_wrong_shape_names_the_shape_it_found() {
-    let error = VaultSchema::parse(b"version: 1\nfolders:\n  - path: 2026\n")
-        .expect_err("a folder path that is not a path");
-
-    assert_eq!(
-        error,
-        VaultSchemaError::Section {
-            at: "folders.path".to_string(),
-            wanted: "a path",
-            found: "a number".to_string(),
-        }
-    );
-    assert_eq!(
-        error.to_string(),
-        "`folders.path` is a number, and it must be a path"
-    );
-}
-
-/// **A folder is declared once.** A folder path written twice would leave
-/// which declaration stands — and so which description the vault reports — to
-/// the order the two were written in, so the schema is refused and the path
-/// named. A trailing `/` names the same folder: `journal` and `journal/` are
-/// one path written twice, and a folder written `journal/` alone reads as
-/// `journal`.
-#[test]
-fn a_folder_declared_twice_is_refused() {
-    for bytes in [
-        &b"version: 1\nfolders:\n  - path: journal\n    description: one\n  - path: journal\n    description: two\n"[..],
-        b"version: 1\nfolders:\n  - path: journal\n  - path: journal/\n",
-    ] {
-        let error = VaultSchema::parse(bytes).expect_err("a folder declared twice");
-        assert_eq!(
-            error,
-            VaultSchemaError::RepeatedFolder {
-                path: "journal".to_string()
-            }
-        );
-        assert_eq!(
-            error.to_string(),
-            "`folders` declares the folder `journal` twice"
-        );
-    }
-    let schema =
-        VaultSchema::parse(b"version: 1\nfolders:\n  - path: journal/\n  - path: archive\n")
-            .expect("two folders, one written with a trailing `/`");
-    let paths: Vec<&str> = schema
-        .folders()
-        .iter()
-        .map(|folder| folder.path())
-        .collect();
-    assert_eq!(paths, ["journal", "archive"]);
-}
-
 /// **An unknown key is a schema this build cannot act on.** A misspelled
 /// section or a misspelled key would otherwise read as a valid schema that
 /// declares nothing, so `undecalred: report` would turn a vault's reporting
@@ -436,10 +348,16 @@ fn a_key_this_grammar_does_not_hold_is_refused() {
             "fields.title",
             "typo",
         ),
+        (b"version: 1\nfolders:\n  - path: journal\n", "", "folders"),
         (
-            b"version: 1\nfolders:\n  - path: journal\n    purpose: notes\n",
-            "folders",
-            "purpose",
+            b"version: 1\nfields:\n  title:\n    required: true\n",
+            "fields.title",
+            "required",
+        ),
+        (
+            b"version: 1\nfields:\n  status:\n    one_of: [draft, live]\n",
+            "fields.status",
+            "one_of",
         ),
         (
             b"version: 1\npaths:\n  ambiguity_ignor: [\"archive/**\"]\n",
@@ -493,8 +411,6 @@ fn no_malformed_schema_panics() {
         b"version: 1\nfields: []\n",
         b"version: 1\ntags: 4\n",
         b"version: 1\ntags:\n  undeclared: maybe\n",
-        b"version: 1\nfolders: {}\n",
-        b"version: 1\nfolders:\n  - description: no path\n",
         b"version: 1\npaths: []\n",
         b"version: true\n",
         b"version: 1\nfields:\n  title: text\n",
