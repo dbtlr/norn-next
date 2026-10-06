@@ -29,16 +29,49 @@ use norn_testkit::churn::{self, Folding, Ground, SchemaGround, Script};
 
 use crate::attach;
 
+/// The declaration family 4's churn case attaches under: rules over the
+/// fields of the tasks the family writes under `churn/rules/`, which select
+/// nothing else the tree holds.
+///
+/// Under it the family's opening mints rule findings, and its changing phase
+/// changes some, clears others and mints new ones, each in the document's own
+/// changeset — what a store maintained through document edits holds of rule
+/// judgment, and what a build from zero is judged against.
+pub const RULED_SCHEMA: &[u8] = b"version: 1
+fields:
+  rule_status: { type: text, shape: list }
+rules:
+  task:
+    severity: error
+    match: { frontmatter: { rule_kind: task } }
+    required: { rule_owner: }
+    forbidden: { rule_scratch: }
+    one_of: { rule_status: { values: [todo, done] } }
+    max_length: { rule_title: 8 }
+";
+
 /// The bytes family 4's third phase replaces the vault's schema declaration
 /// with.
 ///
-/// **Both declarations judge no document**, so what makes this a schema
-/// *change* is the bytes differing from the ones the attachment pinned and
-/// nothing else: the pin discards every finding derived under the old
-/// fingerprint, and the heal that follows it derives them again from the same
-/// documents. That is what keeps this family a test of the pin-and-re-derive
-/// path rather than of any rule's own judgment.
-pub const REPLACEMENT_SCHEMA: &[u8] = b"version: 1\n# a second declaration\n";
+/// **It states rules of its own**, over the same tasks the family writes: a
+/// closed set the first task's values now meet and the second's do not, no
+/// requirement, no forbidden field and no length limit, and allowed paths no
+/// task stands at. So the pin it drives discards every finding derived under
+/// the old fingerprint, and the heal that follows derives findings the old
+/// rules never minted, clears ones they did, and leaves the documents'
+/// other findings as they were — a schema edit's whole effect on rule
+/// judgment, judged against a build from zero. A vault attached under a
+/// declaration stating no rule has its tasks judged here for the first time.
+pub const REPLACEMENT_SCHEMA: &[u8] = b"version: 1
+# a second declaration
+fields:
+  rule_status: { type: text, shape: list }
+rules:
+  task:
+    match: { frontmatter: { rule_kind: task } }
+    one_of: { rule_status: { values: [todo, other] } }
+    allowed_paths: { paths: ['churn/elsewhere/**'] }
+";
 
 /// Where a vault's own declaration sits, and what replaces it.
 const SCHEMA_GROUND: SchemaGround<'static> = SchemaGround {

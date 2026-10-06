@@ -982,6 +982,15 @@ pub struct SchemaGround<'a> {
 /// layer reads, which is a fact about the layer that reads it rather than one a
 /// script can spell.
 ///
+/// **Beside them, documents whose fields a declaration may judge**, under
+/// `churn/rules/`, each carrying `rule_kind: task` and a `rule_status`: one
+/// whose fields change from one set of values to another, one whose fields
+/// are brought to an ordinary shape, and one that arrives in the changing
+/// phase. Whether any of that crosses a boundary is the declaration's to say
+/// — a script cannot spell a schema — so a suite that attaches under one
+/// holding rules over these fields has the crossings judged, and one that
+/// does not has three more ordinary documents.
+///
 /// The opening phase establishes each of the four states and is settled over,
 /// so every transition in the changing phase is a crossing the host has to
 /// *unmake* something for: a row it holds goes, a finding it filed clears, a
@@ -1023,6 +1032,20 @@ pub fn validity_transitions(seed: u64, oversized: &[u8]) -> Phased {
                     bytes: oversized.to_vec(),
                 },
             ),
+            Step::new(
+                "write a task with a scratch field and a status list holding one value twice",
+                Act::Write {
+                    at: "churn/rules/changing.md".to_string(),
+                    bytes: b"---\nrule_kind: task\nrule_status: [todo, bogus, bogus]\nrule_scratch: x\n---\n# Changing\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write a task with no owner and one status where a list may stand",
+                Act::Write {
+                    at: "churn/rules/clearing.md".to_string(),
+                    bytes: b"---\nrule_kind: task\nrule_status: stalled\n---\n# Clearing\n".to_vec(),
+                },
+            ),
         ],
     )
     .without_rows_at("churn/states/recovering.md");
@@ -1056,6 +1079,28 @@ pub fn validity_transitions(seed: u64, oversized: &[u8]) -> Phased {
                 Act::Write {
                     at: "churn/states/steady.md".to_string(),
                     bytes: oversized.to_vec(),
+                },
+            ),
+            Step::new(
+                "change the first task's status values, give it an owner and a long title, and \
+                 drop its scratch field",
+                Act::Write {
+                    at: "churn/rules/changing.md".to_string(),
+                    bytes: b"---\nrule_kind: task\nrule_owner: me\nrule_status: [todo, other]\nrule_title: a title past eight\n---\n# Changing\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "give the second task an owner and its status as a list",
+                Act::Write {
+                    at: "churn/rules/clearing.md".to_string(),
+                    bytes: b"---\nrule_kind: task\nrule_owner: me\nrule_status: [done]\n---\n# Clearing\n".to_vec(),
+                },
+            ),
+            Step::new(
+                "write a third task with no owner",
+                Act::Write {
+                    at: "churn/rules/arriving.md".to_string(),
+                    bytes: b"---\nrule_kind: task\nrule_status: [bogus]\n---\n# Arriving\n".to_vec(),
                 },
             ),
         ],

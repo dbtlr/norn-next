@@ -515,6 +515,112 @@ rules:
     );
 }
 
+/// **A rule finding's bytes at rest grow with none of what it judged.** One
+/// document is derived by a real host under schemas varying one parameter at
+/// a time, and each `field/not-one-of` row's own bytes — kind, severity,
+/// path, target, message, detail, rule-set identity, value head and value
+/// hash — are read off the store's `findings` table:
+///
+/// - **offending elements**, 1 or 32 values outside the closed set, every
+///   one its own finding;
+/// - **expectation size**, a closed set of 1 or 128 members;
+/// - **rules cited**, 1 or 24 rules closing the field, every one cited.
+///
+/// Each finding's row holds the bytes the first variant's does. What grows
+/// with the elements is the number of findings, and with the rules the one
+/// set they share, which its findings cite by one identity.
+#[test]
+fn a_rule_findings_bytes_at_rest_grow_with_none_of_its_elements_expectation_or_rules() {
+    let sandbox =
+        Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "finding-bytes").expect("a sandbox");
+    let closed = |members: usize| -> String {
+        std::iter::once("todo".to_string())
+            .chain((1..members).map(|at| format!("m{at:03}")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rules = |count: usize, members: usize| -> String {
+        (0..count)
+            .map(|at| {
+                format!(
+                    "  r{at:02}: {{ one_of: {{ status: {{ values: [{}] }} }} }}\n",
+                    closed(members)
+                )
+            })
+            .collect()
+    };
+    let document = |elements: usize| -> Vec<u8> {
+        let values: Vec<String> = (0..elements).map(|at| format!("x{at:03}")).collect();
+        format!("---\nstatus: [{}]\n---\n# A task\n", values.join(", ")).into_bytes()
+    };
+    let variants = [
+        ("one element", 1, 1, 1),
+        ("many elements", 32, 1, 1),
+        ("a large closed set", 1, 128, 1),
+        ("many rules", 1, 1, 24),
+    ];
+    let mut first: Option<i64> = None;
+    for (label, elements, members, cited) in variants {
+        let root = sandbox.work_dir().join(label.replace(' ', "-"));
+        let schema = format!("version: 1\nrules:\n{}", rules(cited, members));
+        let rows = finding_rows(&root, document(elements), &schema);
+        assert_eq!(
+            rows.len(),
+            elements,
+            "{label}: one finding per offending element"
+        );
+        for (bytes, rule_set_rules) in &rows {
+            assert_eq!(
+                *rule_set_rules, cited as i64,
+                "{label}: a finding cites a set of other than its {cited} rules"
+            );
+            let expected = *first.get_or_insert(*bytes);
+            assert_eq!(
+                *bytes, expected,
+                "{label}: a finding's row holds {bytes} bytes where one judging one element \
+                 against one member under one rule holds {expected}"
+            );
+        }
+    }
+}
+
+/// Derive `document` at `tasks/a.md` under `schema` in a vault under `root`,
+/// and read each `field/not-one-of` row the store holds: the bytes of the
+/// row's own columns, and how many rules the set it cites holds.
+fn finding_rows(root: &Path, document: Vec<u8>, schema: &str) -> Vec<(i64, i64)> {
+    let vault = root.join("vault");
+    std::fs::create_dir_all(vault.join("tasks")).expect("creating the vault");
+    std::fs::write(vault.join("tasks/a.md"), document).expect("writing the document");
+    std::fs::create_dir_all(vault.join(".norn")).expect("creating the schema directory");
+    std::fs::write(vault.join(".norn/schema.yaml"), schema).expect("writing the vault schema");
+    let vault = attach::Vault::adopt(root);
+    {
+        let host = vault.host();
+        drop(attach::attach_and_wait(&host, vault.name()));
+    }
+    let norn_db::Attempt::Connected(connection) =
+        norn_db::connect(&vault.database()).expect("connecting to the store")
+    else {
+        panic!("the store is unreadable");
+    };
+    let mut read = connection
+        .prepare(
+            "SELECT length(CAST(f.kind AS BLOB)) + length(CAST(f.severity AS BLOB))
+                  + length(CAST(f.path AS BLOB)) + length(CAST(f.target AS BLOB))
+                  + length(CAST(f.message AS BLOB)) + length(CAST(f.detail AS BLOB))
+                  + length(CAST(f.rule_set AS BLOB)) + length(CAST(f.value_head AS BLOB))
+                  + length(CAST(f.value_hash AS BLOB)),
+                    json_array_length(s.rules)
+             FROM findings AS f JOIN rule_sets AS s ON s.id = f.rule_set
+             WHERE f.kind = 'field/not-one-of' ORDER BY f.id",
+        )
+        .expect("measuring the finding rows");
+    read.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("reading the finding rows")
+        .collect::<Result<Vec<(i64, i64)>, _>>()
+        .expect("a finding row")
+}
+
 /// Write `files` and `schema` into a vault under `root`, attach a real host to
 /// derive it from zero, and read every derived row the store holds.
 fn derive(root: &Path, files: Vec<(&'static str, Vec<u8>)>, schema: &str) -> DerivedRows {

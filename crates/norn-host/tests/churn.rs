@@ -86,7 +86,8 @@ use norn_testkit::wait::{Convergence, Observed, wait_until};
 
 use norn_wire::{FindingKind, TrustState, VaultName, WarmingPhase};
 use tree::{
-    Census, REPLACEMENT_SCHEMA, census, declared_folding, derived_hashes, ground, identity,
+    Census, REPLACEMENT_SCHEMA, RULED_SCHEMA, census, declared_folding, derived_hashes, ground,
+    identity,
 };
 
 /// The profile every case churns over.
@@ -390,6 +391,15 @@ fn a_burst_converges_on_the_last_bytes_written() {
 /// away, the recovery gives one back, and the two read-bound crossings move the
 /// frontmatter projection of rows that stand throughout.
 ///
+/// **Rule findings cross with them.** The vault is attached under
+/// [`RULED_SCHEMA`], whose rules judge the family's tasks: the opening mints
+/// rule findings, the changing phase changes one task's, clears the other's
+/// and mints a third task's, each in its document's own changeset, and the
+/// store the watcher settled is judged against a build from zero before the
+/// schema is replaced. The replacement's rules then mint, keep and clear
+/// findings across the same tasks through the re-pin, and the store is judged
+/// against a build from zero again.
+///
 /// **The crossings are judged before the schema is replaced, and the phases are
 /// separate for that reason.** What converges a crossing is the increment a
 /// watcher report drives; what converges a replaced declaration is a re-pin,
@@ -418,8 +428,67 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     let sandbox = sandbox("churn-validity");
     let ground = ground(&sandbox.work_dir());
     let workload = Family::ValidityTransitions.workload(&ground);
-    let churned = attach_and_churn(sandbox, workload.opening(), When::Settled)
-        .then(workload.changing(), When::Settled);
+    let churned = attach_and_churn_declaring(
+        sandbox,
+        Some(RULED_SCHEMA),
+        workload.opening(),
+        When::Settled,
+    );
+    let owner = || ("rule_owner", None);
+    assert_eq!(
+        rule_findings(&churned),
+        rules_judged(&[
+            (
+                "changing.md",
+                FindingKind::Forbidden,
+                ("rule_scratch", Some("x"))
+            ),
+            (
+                "changing.md",
+                FindingKind::NotOneOf,
+                ("rule_status", Some("bogus"))
+            ),
+            ("changing.md", FindingKind::RequiredMissing, owner()),
+            ("clearing.md", FindingKind::RequiredMissing, owner()),
+            (
+                "clearing.md",
+                FindingKind::ShapeMismatch,
+                ("rule_status", Some("stalled"))
+            ),
+        ]),
+        "the opening's tasks were judged otherwise"
+    );
+    let mut churned = churned.then(workload.changing(), When::Settled);
+    assert_eq!(
+        rule_findings(&churned),
+        rules_judged(&[
+            (
+                "arriving.md",
+                FindingKind::NotOneOf,
+                ("rule_status", Some("bogus"))
+            ),
+            ("arriving.md", FindingKind::RequiredMissing, owner()),
+            (
+                "changing.md",
+                FindingKind::NotOneOf,
+                ("rule_status", Some("other"))
+            ),
+            (
+                "changing.md",
+                FindingKind::TooLong,
+                ("rule_title", Some("a title past eight"))
+            ),
+        ]),
+        "the changing phase's edits left the tasks judged otherwise"
+    );
+    // The edits converged through the increments a watcher report drives, so
+    // this is the incremental path's answer, judged before the re-pin below
+    // re-derives the whole vault.
+    churned.judge_beside(
+        &format!("{}, its rules judged", workload.changing().name()),
+        1,
+        "second-machine-ruled",
+    );
 
     // Everything the crossings are about, read off the store the watcher
     // reports settled — and the pin they settled under, which the replacement
@@ -528,7 +597,69 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     // it. Every finding here was discarded by the re-pin and derived again by
     // the heal that followed it, so an equivalence that holds is the pillar
     // having been refilled.
+    assert_eq!(
+        rule_findings(&churned),
+        rules_judged(&[
+            ("arriving.md", FindingKind::Misplaced, ("", None)),
+            (
+                "arriving.md",
+                FindingKind::NotOneOf,
+                ("rule_status", Some("bogus"))
+            ),
+            ("changing.md", FindingKind::Misplaced, ("", None)),
+            ("clearing.md", FindingKind::Misplaced, ("", None)),
+            (
+                "clearing.md",
+                FindingKind::NotOneOf,
+                ("rule_status", Some("done"))
+            ),
+        ]),
+        "the replaced rules judged the tasks otherwise"
+    );
     churned.judge(workload.changing().name(), 1);
+}
+
+/// A rule finding as the churn case states it: the task under `churn/rules/`
+/// it stands at, its kind, its field — empty for one about where the task
+/// stands — and the head of its value.
+type RuleFinding = (String, String, String, Option<String>);
+
+/// The rule findings the churned store holds over the family's tasks.
+fn rule_findings(churned: &Churned) -> BTreeSet<RuleFinding> {
+    let mut store = churned.vault.store();
+    StoreProjection::read(&mut store)
+        .expect("projecting the churned store")
+        .findings()
+        .iter()
+        .filter_map(|finding| {
+            let task = finding.path.strip_prefix("churn/rules/")?;
+            Some((
+                task.to_string(),
+                finding.kind.clone(),
+                finding.target.clone().unwrap_or_default(),
+                finding.value.as_ref().map(|(head, _, _)| head.clone()),
+            ))
+        })
+        .collect()
+}
+
+/// A rule finding as a case writes it: a task, a kind, and the field and value
+/// named.
+type Judged<'a> = (&'a str, FindingKind, (&'a str, Option<&'a str>));
+
+/// `findings` as [`rule_findings`] reads them.
+fn rules_judged(findings: &[Judged<'_>]) -> BTreeSet<RuleFinding> {
+    findings
+        .iter()
+        .map(|(task, kind, (field, value))| {
+            (
+                task.to_string(),
+                kind.as_str().to_string(),
+                field.to_string(),
+                value.map(str::to_string),
+            )
+        })
+        .collect()
 }
 
 /// **Family 5, first shape.** A synchronization client catching up after a
@@ -1499,10 +1630,25 @@ fn churn_the_vault_in(sandbox: Sandbox, workload: &churn::Phased) -> Churned {
 /// workload landing before anything attaches, and one landing while a heal
 /// runs.
 fn attach_and_churn(sandbox: Sandbox, script: &Script, when: When) -> Churned {
+    attach_and_churn_declaring(sandbox, None, script, when)
+}
+
+/// [`attach_and_churn`], with the generated vault's schema declaration
+/// replaced by `declaration` before anything attaches, where one is given.
+fn attach_and_churn_declaring(
+    sandbox: Sandbox,
+    declaration: Option<&[u8]>,
+    script: &Script,
+    when: When,
+) -> Churned {
     // Asked before the tree is generated and outside the vault, so the probe's
     // own file is never a change a host is asked to reconcile.
     let folding = declared_folding(&sandbox.work_dir());
     let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
+    if let Some(declaration) = declaration {
+        std::fs::write(vault.path().join(".norn/schema.yaml"), declaration)
+            .expect("writing the vault's declaration");
+    }
     let census = census(vault.path(), folding);
     let churned = Churned {
         sandbox,
@@ -1687,10 +1833,16 @@ impl Churned {
     /// The deaths the churn owes are asked for first, because that claim is
     /// about the churned store alone and the comparison below is about the pair.
     fn judge(&mut self, subject: &str, degraded: usize) {
+        self.judge_beside(subject, degraded, "second-machine");
+    }
+
+    /// [`Churned::judge`], against a build from zero made under the machine
+    /// directory `machine`, which a case judging more than once names afresh
+    /// each time: a second build into one directory would heal the store the
+    /// first left there rather than derive from zero.
+    fn judge_beside(&mut self, subject: &str, degraded: usize, machine: &str) {
         self.assert_the_deaths_were_recorded();
-        let second = self
-            .vault
-            .beside(&self.sandbox.work_dir().join("second-machine"));
+        let second = self.vault.beside(&self.sandbox.work_dir().join(machine));
         {
             let host = second.host();
             let lease = attach::attach_and_wait(&host, second.name());
