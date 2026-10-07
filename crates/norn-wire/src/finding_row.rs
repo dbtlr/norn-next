@@ -269,9 +269,9 @@ impl ValueHead {
     /// them, and its whole length.
     ///
     /// The wire hashes nothing ([`ContentHash`]), so the caller hands the hash
-    /// of the very text it hands here; the store's finding write is that
-    /// caller, and it hashes the value it is writing: the value of a finding
-    /// rule judgment in derivation filed.
+    /// of the very text it hands here. The store's one head construction is
+    /// that caller: it hashes the value it heads, and both a finding's write
+    /// and the write gate's violation take their head from it.
     pub fn of(full: &str, hash: ContentHash) -> Self {
         let mut cut = full.len().min(VALUE_HEAD_BYTES);
         while !full.is_char_boundary(cut) {

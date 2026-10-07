@@ -44,13 +44,10 @@ use std::path::Path;
 
 use norn_config::schema::FindingIdentity;
 use norn_store::HeldBlock;
-use norn_wire::{
-    CaseFold, DocumentPath, FindingKind, RefusedCheck, RuleSet, SchemaViolation, ValueHead,
-};
+use norn_wire::{CaseFold, DocumentPath, FindingKind, RefusedCheck, RuleSet, SchemaViolation};
 
 use crate::derivation::{Cause, Declared, PlannedFinding, plan_document};
 use crate::evidence::count_rule_work;
-use crate::planner::view::wire_hash;
 
 /// What the derivation concludes about one document's bytes: each violation,
 /// with what tells it from another and what the wire says of it.
@@ -176,7 +173,7 @@ pub(super) fn introduced(
                 violation.message,
             );
             if let Some(value) = violation.value {
-                wire = wire.with_value(value_head(&value));
+                wire = wire.with_value(norn_store::value_head(&value));
             }
             match citations.cite(violation.rules) {
                 Some(rule_set) => wire.citing(rule_set),
@@ -184,13 +181,6 @@ pub(super) fn introduced(
             }
         })
         .collect()
-}
-
-/// The head a violation carries of the offending value `full`, as the store's
-/// finding write keeps one: its bounded text, its length, and the SHA-256 of
-/// the whole of it.
-fn value_head(full: &str) -> ValueHead {
-    ValueHead::of(full, wire_hash(norn_fs::ContentHash::of(full.as_bytes())))
 }
 
 /// The rule sets one response's violations cite, each numbered once, from 1,

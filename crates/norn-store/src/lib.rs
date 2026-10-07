@@ -159,6 +159,7 @@ pub use find::{
     NESTED_ROW_CEILING, Nested, NestedRows, PageDirection,
 };
 pub use get::{DocumentText, GET_STATEMENTS, GetPlan, GetStatement, GetWork, Gotten, SectionAt};
+pub use hash::value_head;
 pub use health::resolution::{
     LinkChange, PathOverlay, PlanSide, ProbedLink, ResolutionWork, TargetNaming,
 };

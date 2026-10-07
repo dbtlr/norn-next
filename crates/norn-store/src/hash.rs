@@ -31,7 +31,11 @@ use sha2::{Digest, Sha256};
 /// The head a finding keeps of the offending value `full`: its first
 /// [`norn_wire::VALUE_HEAD_BYTES`] cut at a character boundary, its length,
 /// and the SHA-256 of the whole of it.
-pub(crate) fn value_head(full: &str) -> ValueHead {
+///
+/// **The one head construction.** The finding write takes its head here, and
+/// so does the write gate for a violation it refuses or lists, so a value's
+/// head on a refusal and on the finding a forced write files are one.
+pub fn value_head(full: &str) -> ValueHead {
     ValueHead::of(
         full,
         ContentHash::from_sha256(Sha256::digest(full.as_bytes()).into()),
