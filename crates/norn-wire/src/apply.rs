@@ -29,6 +29,7 @@ use crate::document::DocumentPath;
 use crate::plan::document::{PlanDocument, ResolvedPlan};
 use crate::plan::forecast::{FolderPath, Forecast};
 use crate::plan::outcome::SchemaViolation;
+use crate::read::validate::RuleSet;
 
 /// Whether a request previews a plan or applies it.
 ///
@@ -135,10 +136,13 @@ pub enum ApplyReport {
         folders_made: Vec<FolderPath>,
         /// The folders the plan's removals left empty, which it removed.
         folders_removed: Vec<FolderPath>,
-        /// Every schema violation a written result carries that the plan's
-        /// force let through. Empty for a plan that is not forced, and for a
-        /// forced plan whose every result is valid.
+        /// Every schema violation a written result introduces that the
+        /// plan's force let through. Empty for a plan that is not forced, and
+        /// for a forced plan that introduces no violation.
         forced: Vec<SchemaViolation>,
+        /// Every rule set the violations in `forced` cite, each once, in the
+        /// order of its identity; empty where none cites one.
+        rule_sets: Vec<RuleSet>,
     },
 }
 
@@ -164,16 +168,26 @@ impl ApplyReport {
             folders_made,
             folders_removed,
             forced: Vec::new(),
+            rule_sets: Vec::new(),
         }
     }
 
-    /// The report listing `violations` as those a forced plan lets through:
-    /// in a preview's forecast, or in the applied report itself.
+    /// The report listing `violations` as those a forced plan lets through,
+    /// citing `cited`: in a preview's forecast, or in the applied report
+    /// itself.
     #[must_use]
-    pub fn with_forced(mut self, violations: Vec<SchemaViolation>) -> Self {
+    pub fn with_forced(mut self, violations: Vec<SchemaViolation>, cited: Vec<RuleSet>) -> Self {
         match &mut self {
-            ApplyReport::Applied { forced, .. } => *forced = violations,
-            ApplyReport::Previewed { forecast, .. } => forecast.forced = violations,
+            ApplyReport::Applied {
+                forced, rule_sets, ..
+            } => {
+                *forced = violations;
+                *rule_sets = cited;
+            }
+            ApplyReport::Previewed { forecast, .. } => {
+                forecast.forced = violations;
+                forecast.rule_sets = cited;
+            }
         }
         self
     }

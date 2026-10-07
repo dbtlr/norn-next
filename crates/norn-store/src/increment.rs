@@ -92,7 +92,7 @@ pub enum Change {
     /// the place holds is a quarantine finding — its bytes are not a document —
     /// and when an act empties the place that finding is about nothing. Ending
     /// it in the act's own transaction is what keeps a read seeing the whole
-    /// state before the act or the whole state after it (ADR 0032), and what
+    /// state before the act or the whole state after it (ADR 0037), and what
     /// makes the store equal a build from zero over the emptied tree.
     ///
     /// **It takes the content findings only**

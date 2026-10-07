@@ -36,7 +36,7 @@
 //! and the preview answers the same plan where an apply would go on to stage it,
 //! or what an apply of it would end in otherwise — a vault the checks could
 //! not read included, which answers `vault/write-failed` with the plan, as
-//! the apply does. So what a caller previewed is what applies (ADR 0032),
+//! the apply does. So what a caller previewed is what applies (ADR 0037),
 //! and a plan an interruption left part-landed previews as itself rather
 //! than as its operations resolved afresh.
 //!
@@ -464,6 +464,17 @@ impl LinkIndex for PlanSnapshot<'_> {
             .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
     }
 
+    /// The frontmatter the snapshot holds for `holder`, read by its path
+    /// without its body. What the read costs is the snapshot's own
+    /// counters', as every read on it is.
+    fn held_frontmatter(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldFrontmatter>, PageRefused> {
+        self.reading(|snapshot| snapshot.held_frontmatter(&holder.into()))?
+            .map_err(|problem| page_refusal(PageRefusal::Store(problem)))
+    }
+
     /// Give an apply's handle back, closing its snapshot; a held snapshot is
     /// its read hold's, and stays.
     fn release(&self) {
@@ -518,6 +529,7 @@ pub(crate) fn fully_resolved(resolution: Resolution) -> Result<Resolution, Error
         ErrorDetail::plan_refused(
             resolution.plan,
             resolution.forecast,
+            Vec::new(),
             Vec::new(),
             resolution.unresolved,
             Vec::new(),

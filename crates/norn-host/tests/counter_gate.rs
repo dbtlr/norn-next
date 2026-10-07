@@ -738,6 +738,104 @@ fn judged_work(_: &attach::ServingHost) -> CounterSnapshot {
     unreachable!("a case that reads the host's account refuses to run without `induced-failure`")
 }
 
+/// How many documents the carried-move bar moves in one folder move.
+const CARRIED_MOVED: u64 = 3;
+
+/// **A carried move's re-judgment reads no other document, and follows the
+/// documents it moves.** Under [`RULE_SCHEMA`], whose `gated` rule reads
+/// where a document stands, a folder move carrying [`CARRIED_MOVED`] planted
+/// documents byte for byte is judged again at each destination from the
+/// store's projection: two judgments per moved document — where it stands
+/// and where it lands — beside the one the commit's derivation makes of each
+/// landed document, each evaluating the schema's three rules. The apply
+/// costs the same rule work, documents derived and every other logical rule
+/// count at `ambiguous` (300 documents) as at `realistic` (2000).
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn a_carried_moves_rejudgment_follows_the_documents_it_moves_at_both_scales() {
+    the_hosts_account_is_readable();
+    let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
+    let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+
+    let small_counters = one_carried_move("counter-gate-carried-ambiguous", &small);
+    let large_counters = one_carried_move("counter-gate-carried-realistic", &large);
+    for counters in [&small_counters, &large_counters] {
+        for (count, expected) in [
+            ("documents_derived", CARRIED_MOVED),
+            ("rule_rules_evaluated", 3 * 3 * CARRIED_MOVED),
+        ] {
+            assert_eq!(
+                counters.get(count),
+                expected,
+                "the carried move counted `{count}` as {}: {counters:?}",
+                counters.get(count)
+            );
+        }
+    }
+
+    SizeIndependencePair::new(
+        "judging a carried folder move again where its documents land",
+        ScaleObservation::new(&small, small_counters),
+        ScaleObservation::new(&large, large_counters),
+    )
+    .assert_size_independent();
+}
+
+/// Attach `profile` under [`RULE_SCHEMA`] with [`CARRIED_MOVED`] documents
+/// planted under `counter-gate/carried/`, then count what the host spends
+/// applying the folder's move to `counter-gate/landed/`: each document is
+/// misplaced by `gated` where it stands and where it lands alike, so the
+/// move introduces nothing and applies.
+fn one_carried_move(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), RULE_SCHEMA)
+        .expect("write the rule schema");
+    let folder = vault.path().join("counter-gate/carried");
+    std::fs::create_dir_all(&folder).expect("creating the carried folder");
+    for at in 0..CARRIED_MOVED {
+        std::fs::write(
+            folder.join(format!("moved-{at}.md")),
+            format!("# Moved {at}\n"),
+        )
+        .expect("planting a carried document");
+    }
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = judged_work(&host);
+    host.move_path(norn_wire::MoveParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Apply,
+        norn_wire::MoveSubject::folder(
+            norn_wire::FolderPath::new("counter-gate/carried").expect("a folder path"),
+            norn_wire::FolderPath::new("counter-gate/landed").expect("a folder path"),
+        ),
+    ))
+    .expect("the move is admitted")
+    .wait()
+    .expect("the carried move applies");
+    let spent = wait_until(
+        "the host to fold the carried move's rule work in",
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = before
+                .delta(&judged_work(&host))
+                .expect("two readings of one account");
+            if spent.get("documents_derived") >= CARRIED_MOVED {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!("the host's account reads {spent:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    record_the_counters(
+        &format!("a carried folder move judged again over `{}`", profile.name),
+        &spent,
+    );
+    spent
+}
+
 /// The probe every rule-parameter variant judges: its kind, eight keys a
 /// selector may name, a status the closed-set variants admit and a title, at
 /// `probe.md`.
@@ -809,9 +907,30 @@ fn judged_by_parameter(
     variants: &[(u64, String)],
     expected: impl Fn(&str, u64) -> u64,
 ) {
+    follows_the_parameter(
+        parameter,
+        varied,
+        variants.iter().map(|(value, rules)| {
+            (
+                *value,
+                judged_under(&format!("counter-gate-{parameter}-{value}"), rules),
+            )
+        }),
+        expected,
+    );
+}
+
+/// Hold that each of `spent` — a parameter value and what the one document
+/// its variant derives cost — moves `varied` to what `expected` says of its
+/// value and leaves every other rule count where the first variant left it.
+fn follows_the_parameter(
+    parameter: &str,
+    varied: &[&str],
+    spent: impl IntoIterator<Item = (u64, CounterSnapshot)>,
+    expected: impl Fn(&str, u64) -> u64,
+) {
     let mut first: Option<Vec<(String, u64)>> = None;
-    for (value, rules) in variants {
-        let spent = judged_under(&format!("counter-gate-{parameter}-{value}"), rules);
+    for (value, spent) in spent {
         record_the_counters(&format!("judged with {parameter} {value}"), &spent);
         assert_eq!(
             spent.get("documents_derived"),
@@ -821,7 +940,7 @@ fn judged_by_parameter(
         for count in varied {
             assert_eq!(
                 spent.get(count),
-                expected(count, *value),
+                expected(count, value),
                 "{parameter} {value} moved `{count}` to {}: {spent:?}",
                 spent.get(count)
             );
@@ -1016,6 +1135,148 @@ fn the_logical_rule_counters_follow_each_declared_parameter() {
             // rule, by name, refuses it before the second is asked.
             _ => "a/**".len() as u64,
         },
+    );
+}
+
+/// What creating `content` at `at` under the schema rules `rules` paid: a
+/// fresh host attached over a vault holding no document, then the one `new`
+/// applied, counted from just before it until the job landing it has folded
+/// its rule work in — the defaults fixpoint its planning ran, the applier's
+/// judgment of the composed result and the commit's derivation of it.
+fn created_under(label: &str, rules: &str, at: &str, content: &str) -> CounterSnapshot {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let root = sandbox.work_dir().join("created");
+    let tree = root.join("vault");
+    std::fs::create_dir_all(tree.join(".norn")).expect("creating the vault");
+    std::fs::write(
+        tree.join(".norn/schema.yaml"),
+        format!("version: 1\nrules:\n{rules}"),
+    )
+    .expect("writing the schema");
+    let vault = attach::Vault::adopt(&root);
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let before = judged_work(&host);
+    host.new_document(norn_wire::NewParams::new(
+        VaultAddress::name(vault.name().clone()),
+        norn_wire::ApplyMode::Apply,
+        norn_wire::DocumentPath::new(at).expect("a document path"),
+        content,
+    ))
+    .expect("the creation is admitted")
+    .wait()
+    .expect("the creation applies");
+    wait_until(
+        &format!("the host to fold the creation's rule work in under `{label}`"),
+        attach::state_budget(DERIVATION_LIMIT),
+        || {
+            let spent = before
+                .delta(&judged_work(&host))
+                .expect("two readings of one account");
+            if spent.get("documents_derived") > 0 {
+                Observed::Met(spent)
+            } else {
+                Observed::pending(format!("the host's account reads {spent:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
+}
+
+/// **The defaults fixpoint is counted by the logical rule counters, and each
+/// of its parameters moves only its own count.** One document is created
+/// under schemas differing in one parameter at a time, each by a fresh host
+/// over an empty vault, every variant writing the same fields and values:
+///
+/// - **defaulted fields D**: one rule requiring eight fields, D of them with
+///   a default and the rest sent by the caller, fills D fields;
+/// - **capture count C**: eight rules on one `match.path` capture, each
+///   defaulting its own field, C of them from the capture and the rest to
+///   the same value written out, bind the path C times.
+///
+/// The rounds — one filling, one finding nothing to fill — the rules
+/// evaluated and selected doing so, and every count of the judgment and
+/// derivation of the created document stay where the parameter's first value
+/// left them.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn the_defaults_fixpoint_counters_follow_each_declared_parameter() {
+    the_hosts_account_is_readable();
+    let defaulted: Vec<(u64, String, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|defaults| {
+            let required: String = (1..=8u64)
+                .map(|at| {
+                    if at <= defaults {
+                        format!("      k{at}: {{ default: v }}\n")
+                    } else {
+                        format!("      k{at}:\n")
+                    }
+                })
+                .collect();
+            let sent: String = (defaults + 1..=8).map(|at| format!("k{at}: v\n")).collect();
+            let content = if sent.is_empty() {
+                "# Created\n".to_string()
+            } else {
+                format!("---\n{sent}---\n# Created\n")
+            };
+            (
+                defaults,
+                format!("  r:\n    required:\n{required}"),
+                content,
+            )
+        })
+        .collect();
+    follows_the_parameter(
+        "defaulted-fields",
+        &["rule_defaults_filled"],
+        defaulted.iter().map(|(value, rules, content)| {
+            (
+                *value,
+                created_under(
+                    &format!("counter-gate-defaulted-fields-{value}"),
+                    rules,
+                    "created.md",
+                    content,
+                ),
+            )
+        }),
+        |_, defaults| defaults,
+    );
+
+    let captured: Vec<(u64, String)> = [2u64, 4, 8]
+        .into_iter()
+        .map(|captures| {
+            let rules: String = (1..=8u64)
+                .map(|at| {
+                    let default = if at <= captures {
+                        "'{{path.area}}'"
+                    } else {
+                        "x"
+                    };
+                    format!(
+                        "  r{at}: {{ match: {{ path: 'p/<area>/**' }}, required: {{ f{at}: {{ default: {default} }} }} }}\n"
+                    )
+                })
+                .collect();
+            (captures, rules)
+        })
+        .collect();
+    follows_the_parameter(
+        "captures-bound",
+        &["rule_captures_bound"],
+        captured.iter().map(|(value, rules)| {
+            (
+                *value,
+                created_under(
+                    &format!("counter-gate-captures-bound-{value}"),
+                    rules,
+                    "p/x/created.md",
+                    "# Created\n",
+                ),
+            )
+        }),
+        |_, captures| captures,
     );
 }
 

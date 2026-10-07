@@ -142,11 +142,14 @@
 //! [`CombinedConstraint::admits_path`], and files each finding the judgment
 //! concludes in the document's own changeset, citing its rules and naming its
 //! offending value, so a rule is a term of
-//! [`VaultSchema::rederives_documents`]. **Dormant carriers beyond that:**
-//! the write gate that judges a plan's documents by the same judgment lands
-//! with NORN-359, and so does the fixpoint's wiring into `new` and inbox
-//! capture; repair's declared fixes land at Layer 5B (NORN-351). Until the
-//! gate lands, a plan's schema check leaves the rule breaches out. A rule's
+//! [`VaultSchema::rederives_documents`]. **The write gate judges a plan's
+//! documents by the same judgment**: `norn-host`'s applier runs the
+//! derivation on each composed result and refuses each violation whose
+//! identity ([`FindingIdentity`]) no document it was composed from held.
+//! Every creation — `new` by a creation rule, inbox capture and `new` at a
+//! bare path — takes the defaults fixpoint at planning. **A dormant carrier
+//! beyond that:** repair's declared fixes land at Layer 5B (NORN-351). A
+//! rule's
 //! declaration reaches `norn-host` too: it reads each rule's accessors into
 //! the content model the store holds, which `describe`'s rule facet reports
 //! as the schema writes it and a `validate` naming a rule is checked against.
@@ -154,9 +157,10 @@
 //! **A path selector makes a carried move's judgment necessary.** A rule's
 //! `match.path`, `exclude.path` and `allowed_paths` conclude about a document
 //! from where it stands, so the same bytes can be valid at one path and in
-//! breach at another; the host applier's skip of a document a move carries
-//! byte for byte (`norn-host`'s `applier::stage`) is sound only while no write
-//! judges a rule.
+//! breach at another; the host applier judges a document a move carries byte
+//! for byte again at its destination wherever the schema states such a rule
+//! ([`VaultSchema::reads_document_paths`]), from the store's projection of its
+//! frontmatter.
 //!
 //! [ADR 0035]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md
 //! [ADR 0036]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0036-a-repair-fix-is-declared-on-the-constraint-it-serves.md
@@ -175,7 +179,7 @@ use norn_wire::{AuthoredValue, Captures, CaseFold, Severity, ValueMap, fold_tag}
 
 pub use combined::{CombinedConstraint, FieldConstraint, OneOfIntersection, RulesConflict};
 pub use defaults::{DefaultCandidate, DefaultsConflict, RuleDefaultsRefusal};
-pub use judge::{Breach, Judgment, RuleFinding, RuleWork};
+pub use judge::{Breach, FindingIdentity, Judgment, RuleFinding, RuleWork};
 pub use placement::PLACEMENT_CEILING;
 
 pub(super) use checks::check_rules;
@@ -190,10 +194,10 @@ use super::{FieldType, Pattern, Shape, TypedValue, VaultSchema};
 /// selects, and the fixes it declares.
 ///
 /// Schema read's own checks read it, rule judgment reads it as a constraint
-/// ([`VaultSchema::judge`]), and `norn-host` reads its accessors into the
-/// declaration `describe`'s rule facet reports. **A dormant carrier** beyond
-/// that: the write gate (NORN-359) and repair's declared fixes (NORN-351) read
-/// it as a constraint, and neither is built.
+/// ([`VaultSchema::judge`]) for derivation and the write gate alike, and
+/// `norn-host` reads its accessors into the declaration `describe`'s rule
+/// facet reports. **A dormant carrier** beyond that: repair's declared fixes
+/// (NORN-351) read it as a constraint, and are not built.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rule {
     name: String,
@@ -394,18 +398,29 @@ impl RuleDefault {
     }
 
     /// The default filled at `at`, each `{{path.<name>}}` from `captures`:
-    /// what the rule's match bound.
+    /// what the rule's match bound. `at` may be `None` for a default reading
+    /// no clock token; one reading the clock refuses it as
+    /// [`FillError::NoClock`].
     ///
     /// Read by the defaults fixpoint here. Repair's declared fix fills one
     /// default the same way at Layer 5B (NORN-351), which is not built.
-    pub fn fill(&self, at: LocalTimestamp, captures: Captures) -> Result<AuthoredValue, FillError> {
+    pub fn fill(
+        &self,
+        at: Option<LocalTimestamp>,
+        captures: Captures,
+    ) -> Result<AuthoredValue, FillError> {
         self.value
-            .fill(&TemplateValues::new(BTreeMap::new(), at).with_captures(captures))
+            .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
     }
 
     /// Whether the default reads a path capture.
     fn reads_captures(&self) -> bool {
         templates(&self.value).any(|template| template.path_captures().next().is_some())
+    }
+
+    /// Whether the default reads the clock, so filling it needs a reading.
+    fn reads_clock(&self) -> bool {
+        templates(&self.value).any(Template::reads_clock)
     }
 }
 
@@ -706,6 +721,19 @@ impl VaultSchema {
         self.rules.values()
     }
 
+    /// Whether some rule reads where a document stands: a `match.path`, an
+    /// `exclude.path` or `allowed_paths`. Where none does, one frontmatter is
+    /// judged alike at every path ([`VaultSchema::judge`]), so the write gate
+    /// judges a document a move carries byte for byte again only where this
+    /// holds.
+    pub fn reads_document_paths(&self) -> bool {
+        self.rules.values().any(|rule| {
+            rule.selector.path.is_some()
+                || !rule.selector.exclude.is_empty()
+                || rule.allowed_paths.is_some()
+        })
+    }
+
     /// The rule called `name`, if the schema declares one.
     ///
     /// Its consumer is not built: repair (Layer 5B, NORN-351), which reads
@@ -736,8 +764,8 @@ impl VaultSchema {
     /// Whether `rule` selects the document at `path` holding `frontmatter`.
     ///
     /// The defaults fixpoint and rule judgment select by the same reading
-    /// ([`VaultSchema::judge`]). The write gate (NORN-359), which selects a
-    /// planned document's rules through it, is not built.
+    /// ([`VaultSchema::judge`]), and the write gate selects a planned
+    /// document's rules through that judgment.
     ///
     /// `case` says how the path globs' literal letters compare with the
     /// path's: the store's recorded path order names it

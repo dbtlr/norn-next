@@ -363,8 +363,14 @@ fn a_source_folder_gone_before_staging_stops_the_plan() {
             TreeView::open(&fixture.vault, &fixture.exclusions, &fixture.schema).expect("a vault");
         let declared = crate::production::pinned_declaration(&mut fixture.store).expect("a schema");
         let links = fixture.links();
-        let checked = super::super::stage::check(&plan, &view, &declared, &links.index())
-            .expect("the plan checks");
+        let checked = super::super::stage::check(
+            &plan,
+            &view,
+            &declared,
+            &links.index(),
+            &mut super::super::schema::Citations::default(),
+        )
+        .expect("the plan checks");
         std::fs::remove_dir_all(&folder).expect("the folder goes");
         let ground = super::super::place::Ground {
             vault: &fixture.vault,

@@ -653,6 +653,12 @@ pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
 /// and with the length of the sandbox's path, so another checkout's readings
 /// land near these ranges rather than inside them.
 ///
+/// Since NORN-359 the size child attaches under a schema whose one rule reads
+/// every document's path, so each of these moves is judged again where it
+/// lands, from the store's projection of the moved document's frontmatter:
+/// re-read on 2026-10-07 over three children, differences of **-34 to 636
+/// bytes**, as before.
+///
 /// The allowance is **64 KiB**, headroom equal to one chunk of the streamed
 /// hash: a preview that held one more such buffer for the large document
 /// than for the small one fits it, and one holding even one whole copy of the
@@ -680,6 +686,51 @@ pub const PLAN_PAIR_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 40 * 1024;
 /// readings above are of the shared child, and no negative control has been
 /// read there.
 pub const PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 64 * 1024;
+
+/// How many more bytes of heap previewing the carried move of a document
+/// whose frontmatter block holds 12 KiB may raise above the move of one whose
+/// block holds 64 bytes, their bodies alike, judged again where each lands.
+///
+/// **The bar that a carried move's re-judgment holds its document's
+/// frontmatter projection and no more.** The size child attaches under a
+/// schema whose one rule reads every document's path, so a move carrying a
+/// document byte for byte is judged again at its destination (ADR 0037),
+/// from the store's projection of the moved document's frontmatter, which
+/// the index vouches for. The pair's two documents share their body; one
+/// carries a block of about 560 one-character fields filling 12 KiB, the
+/// other a block of 64 bytes. What the preview holds for the large one above
+/// the small is the projection's text, its value tree, the written-value map
+/// the rule judge reads and the judge's elements, at once: a cost of the
+/// block, never of the body or of the vault.
+///
+/// Observed on x86_64-linux-glibc locally on 2026-10-07, over six size
+/// children across two runs of the lane: the small preview read 71,903 to
+/// 72,139 bytes and the large one 361,152 to 361,166, differences of
+/// **289,027 to 289,249 bytes**, about 24 times the block's bytes, or 515
+/// bytes for each of its fields. A block of the same 12 KiB written as one
+/// long field read 72,139 against 71,463, **676 bytes**: its projection
+/// stands under the preview's own high-water, the 64 KiB chunk the streamed
+/// hash reads, so the pair is planted with the many-field block, whose value
+/// tree is the largest a block of that size makes.
+///
+/// The allowance is **384 KiB**, 32 times the large block's bytes, a third
+/// above the reading: the judgment holding one more copy of the value tree
+/// for the large document fits it, and a preview holding any copy of a
+/// document body the pair's 4 MiB documents carry fails it ten times over,
+/// which [`PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`] bars on its
+/// own under the same schema.
+///
+/// **What it does not bar.** A carried move the index does not vouch for,
+/// which reads the file whole once at the plan's hash for its links and its
+/// frontmatter alike, the declared limit; and a folder move, whose
+/// re-judgment holds one moved document's projection at a time and costs the
+/// moved documents times the projection's size in rule work, which the
+/// logical rule counters count. No negative control has been read.
+///
+/// **Platform scope: the Linux measurement lane.** The per-PR `memory
+/// invariant` job on `ubuntu-latest` x86_64-glibc is where this gates; no
+/// hosted reading stands beside the local ones yet.
+pub const PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES: u64 = 384 * 1024;
 
 /// How many more bytes of heap applying the move of a 4 MiB document may
 /// raise above the move of a 4 KiB one than the live host's derivation of the

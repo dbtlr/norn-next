@@ -5,7 +5,7 @@
 //!
 //! **One computation, two callers.** The planner records the set a plan
 //! resolves to, and the applier computes it again, after its intake, from the
-//! resolved plan alone and refuses on any difference (ADR 0032): an entry the
+//! resolved plan alone and refuses on any difference (ADR 0037): an entry the
 //! plan records that the set computed again does not hold, or holds with
 //! other values, and an entry the set computed again holds that the plan
 //! does not record. Both compute it here, from the same inputs — the plan's
@@ -168,6 +168,26 @@ pub(crate) trait LinkIndex {
     /// ([`vouched`]).
     fn held_links(&self, holder: &DocumentPath) -> Result<Option<HeldLinks>, Self::Error>;
 
+    /// The frontmatter block the index holds for the document at `holder`,
+    /// beside the content hash of the bytes it derived it from; `None` where
+    /// it holds no document at that spelling.
+    ///
+    /// **What a carried document is judged again by.** A document a move
+    /// carries byte for byte is judged at its destination under the schema
+    /// rules that read where a document stands, and its block is read here,
+    /// vouched for by the hash ([`vouched_block`]), so the move holds the
+    /// store's projection and no copy of the document.
+    ///
+    /// An index answering for no store vouches for no block, and the applier
+    /// reads the file instead: the default.
+    fn held_frontmatter(
+        &self,
+        holder: &DocumentPath,
+    ) -> Result<Option<norn_store::HeldFrontmatter>, Self::Error> {
+        let _ = holder;
+        Ok(None)
+    }
+
     /// Say the index will not be read again for the plan at hand, so a handle
     /// it holds for that plan alone may be given back. A later read may take
     /// another.
@@ -257,6 +277,26 @@ pub(crate) fn vouched<I: LinkIndex + ?Sized>(
         .held_links(from)?
         .filter(|held| held.content_hash == hash.hex())
         .map(|held| held.links))
+}
+
+/// **The one guard on a carried document's frontmatter**: what the block of
+/// the document at `from`, standing at `state`, came to, read through
+/// `index` without its body, or `None` where the index cannot vouch for it —
+/// the hash its row records is not `state`'s, or it holds no document there.
+/// The caller then reads the file whole at that state, as [`vouched`]'s does
+/// for the links.
+pub(crate) fn vouched_block<I: LinkIndex + ?Sized>(
+    from: &DocumentPath,
+    state: &FileState,
+    index: &I,
+) -> Result<Option<norn_store::HeldBlock>, I::Error> {
+    let Some(hash) = state.hash() else {
+        return Ok(None);
+    };
+    Ok(index
+        .held_frontmatter(from)?
+        .filter(|held| held.content_hash == hash.hex())
+        .map(|held| held.block))
 }
 
 /// The source of every document `composition` carries whose links `known`

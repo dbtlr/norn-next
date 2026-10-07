@@ -5,7 +5,9 @@
 //! path, one clock reading and the schema, so a case hands each over and
 //! needs no directory and no clock.
 
-use norn_config::schema::{CaseFold, LocalTimestamp, RuleDefaultsRefusal, VaultSchema};
+use norn_config::schema::{
+    CaseFold, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, RuleWork, VaultSchema,
+};
 use norn_wire::{AuthoredValue, ValueMap};
 
 /// The one clock reading every case fills from.
@@ -31,9 +33,29 @@ fn fill(
     path: &str,
     entries: &[(&str, AuthoredValue)],
 ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
-    VaultSchema::parse(schema)
+    fill_counted(schema, path, entries).0
+}
+
+/// [`fill`], beside the work the fixpoint tallied.
+fn fill_counted(
+    schema: &[u8],
+    path: &str,
+    entries: &[(&str, AuthoredValue)],
+) -> (
+    Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal>,
+    RuleWork,
+) {
+    let mut work = RuleWork::default();
+    let filled = VaultSchema::parse(schema)
         .expect("a schema with rule defaults")
-        .fill_rule_defaults(&frontmatter(entries), path, at(), CaseFold::Exact)
+        .fill_rule_defaults(
+            &frontmatter(entries),
+            path,
+            &mut || Ok(at()),
+            CaseFold::Exact,
+            &mut work,
+        );
+    (filled, work)
 }
 
 fn filled(entries: &[(&str, AuthoredValue)]) -> Vec<(String, AuthoredValue)> {
@@ -218,23 +240,22 @@ rules:
     );
 }
 
-/// **A required field is missing where it is absent or null, and met by an
-/// empty string or an empty list.**
+/// **Only an absent field is filled**: a field the frontmatter holds is its
+/// caller's, null included — a caller omits a key to take its default and
+/// sends null to ask for no value — and an empty string or an empty list
+/// meets the requirement.
 #[test]
-fn a_required_field_is_missing_where_absent_or_null() {
+fn only_an_absent_field_is_filled_and_a_held_null_stands() {
     let schema = b"version: 1\nrules:\n  every: { required: { status: { default: todo } } }\n";
-    for missing in [vec![], vec![("status", AuthoredValue::Null)]] {
+    assert_eq!(
+        fill(schema, "a.md", &[]),
+        Ok(filled(&[("status", text("todo"))]))
+    );
+    for held in [AuthoredValue::Null, text(""), AuthoredValue::list([])] {
         assert_eq!(
-            fill(schema, "a.md", &missing),
-            Ok(filled(&[("status", text("todo"))])),
-            "{missing:?}"
-        );
-    }
-    for met in [text(""), AuthoredValue::list([])] {
-        assert_eq!(
-            fill(schema, "a.md", &[("status", met.clone())]),
+            fill(schema, "a.md", &[("status", held.clone())]),
             Ok(Vec::new()),
-            "{met:?}"
+            "{held:?}"
         );
     }
 }
@@ -293,6 +314,59 @@ rules:
     );
 }
 
+/// Two rules selecting every path, one defaulting `created` from the clock
+/// and one to a fixed literal.
+const CLOCK_AGAINST_LITERAL: &[u8] = b"version: 1
+rules:
+  stamped: { required: { created: { default: '{{now}}' } } }
+  pinned: { required: { created: { default: '2020-01-01' } } }
+";
+
+/// **A clock default disagreeing with a literal is a conflict**: comparing
+/// the two needs the reading, so the clock is read and the refusal names the
+/// field and both candidates.
+#[test]
+fn a_clock_default_disagreeing_with_a_literal_refuses_as_a_conflict_naming_both() {
+    let refusal = fill(CLOCK_AGAINST_LITERAL, "notes/a.md", &[]).expect_err("a conflict");
+    assert_eq!(
+        conflicts(&refusal),
+        conflict(
+            "created",
+            &[
+                (text("2020-01-01"), &["pinned"]),
+                (text("2026-10-06T09:30:15+02:00"), &["stamped"]),
+            ]
+        )
+    );
+}
+
+/// **A clock default that must be compared needs the reading**: where the
+/// clock gives none, the defaults refuse naming the clock, even though the
+/// field would otherwise have been a conflict, and the clock is asked once.
+#[test]
+fn an_unreadable_clock_refuses_a_clock_default_it_must_compare_naming_the_clock() {
+    let mut calls = 0;
+    let refusal = VaultSchema::parse(CLOCK_AGAINST_LITERAL)
+        .expect("a schema with rule defaults")
+        .fill_rule_defaults(
+            &frontmatter(&[]),
+            "notes/a.md",
+            &mut || {
+                calls += 1;
+                Err(NotALocalTimestamp)
+            },
+            CaseFold::Exact,
+            &mut RuleWork::default(),
+        )
+        .expect_err("no clock reading");
+    assert_eq!(
+        refusal,
+        RuleDefaultsRefusal::NoClockReading(NotALocalTimestamp)
+    );
+    assert!(refusal.to_string().contains("clock"), "{refusal}");
+    assert_eq!(calls, 1);
+}
+
 /// **Every default fills from the one clock reading handed in**, and each
 /// capture from its own rule's binding of the created path.
 #[test]
@@ -321,4 +395,36 @@ rules:
             ("project", text("[[norn]]")),
         ]))
     );
+}
+
+/// **The fixpoint tallies its work as logical rule counts**: every rule
+/// evaluated in each round and at the settled re-check, the rules each
+/// selected, the rounds, the fields filled and each capture-reading rule's
+/// binding of the path, bound once. Here `kind` filled in the first round
+/// brings in the rule defaulting `area` in the second, and the third fills
+/// nothing.
+#[test]
+fn the_fixpoint_tallies_its_rounds_fills_and_captures() {
+    let schema = b"version: 1
+rules:
+  every: { required: { kind: { default: note } } }
+  notes: { match: { frontmatter: { kind: note } }, required: { area: { default: general } } }
+  places: { match: { path: '<place>/**' }, required: { place: { default: '{{path.place}}' } } }
+";
+    let (filled_now, work) = fill_counted(schema, "home/a.md", &[]);
+    assert_eq!(
+        filled_now,
+        Ok(filled(&[
+            ("kind", text("note")),
+            ("place", text("home")),
+            ("area", text("general")),
+        ]))
+    );
+    assert_eq!(work.defaults_rounds, 3);
+    assert_eq!(work.defaults_filled, 3);
+    assert_eq!(work.captures_bound, 1);
+    // Three rules in each of three rounds and at the re-check.
+    assert_eq!(work.rules_evaluated, 12);
+    // `every` and `places` in the first round, all three after.
+    assert_eq!(work.rules_selected, 2 + 3 + 3 + 3);
 }

@@ -343,6 +343,9 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
             "PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
                 always_authored(baselines::PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
             }
+            "PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES" => {
+                always_authored(baselines::PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+            }
             "PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES" => {
                 always_authored(baselines::PLAN_MOVE_APPLY_OVER_DERIVATION_HEAP_ALLOWANCE_BYTES)
             }

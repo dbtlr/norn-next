@@ -46,7 +46,7 @@
 //!   otherwise land as a silent no-op. An edit that rewrites what its
 //!   document already holds — a field set to the value it holds, a body or a
 //!   section replaced by itself — resolves to a transition whose after-state
-//!   is its before-state, which lands found (ADR 0032's landed rule).
+//!   is its before-state, which lands found (ADR 0037's landed rule).
 //! - [`cascade`] — each link cascade: once every operation acts, the links
 //!   that would stop naming a moved document, that name a document a delete
 //!   removes rewriting them, or that name a wikilink rewrite's `old`, read
@@ -94,7 +94,7 @@
 //! stands, under the before-state it held. Content its role's parser refuses
 //! does not resolve. A control file is no link's candidate and holds no link
 //! the vault reads, and a plan writing one beside a document operation is a
-//! fault in its shape (ADR 0032: a plan that changes a vault control file
+//! fault in its shape (ADR 0037: a plan that changes a vault control file
 //! changes nothing else).
 //!
 //! **A file is its identity.** Every name an operation carries is read
@@ -102,7 +102,7 @@
 //! [`view::VaultView`] exposes under the case behavior the root proved: two
 //! spellings of one file compose as one target, held at the spelling the
 //! tree lists. On a root that folds case a destination differing from its
-//! source only in case names the source itself (ADR 0032), so a case-only
+//! source only in case names the source itself (ADR 0037), so a case-only
 //! rename plans as a move — the old spelling from present to absent and the
 //! new one from absent to present — which the applier publishes as
 //! `norn-fs`'s respell. The name it arrives at is the one it vacates, so it
@@ -126,7 +126,7 @@
 //! the hash streamed from the file, and read from the file itself otherwise
 //! ([`resolve`]), so no plan rests on a fact the files contradict.
 //!
-//! **A create publishes before any removal.** ADR 0032 publishes creates
+//! **A create publishes before any removal.** ADR 0037 publishes creates
 //! first and removals last, so a name a removal of this plan vacates still
 //! stands when a create publishes: a create beneath a document the plan
 //! removes, or at a folder the plan empties, does not resolve, while a move
@@ -134,7 +134,7 @@
 //! after it and resolves.
 //!
 //! **What the planner leaves to the applier.** Whether a composed result
-//! passes the vault schema, and whether a forced plan lets a violation
+//! introduces a schema violation, and whether a forced plan lets one
 //! through, is checked while every target is staged, as the architecture's
 //! apply seam places it, and a preview answers from the applier's own
 //! judgment of the plan it resolves.

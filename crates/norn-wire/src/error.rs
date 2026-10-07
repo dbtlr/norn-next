@@ -75,6 +75,7 @@ use crate::plan::outcome::{
     InterruptionCause, PlanFault, RefusedCheck, SchemaViolation, UnresolvedOperation,
 };
 use crate::plan::root::RootIdentity;
+use crate::read::validate::RuleSet;
 use crate::reading::Rung;
 use crate::reload::{ControlFile, ReloadFailure};
 use crate::target::ResolutionTarget;
@@ -823,6 +824,11 @@ pub enum ErrorDetail {
         forecast: Forecast,
         /// Each check that refused.
         checks: Vec<RefusedCheck>,
+        /// Every rule set the schema violations among `checks` cite, each
+        /// once, in the order of its identity; empty where none cites one.
+        /// The forecast's own `rule_sets` resolve its violations under the
+        /// same identities.
+        rule_sets: Vec<RuleSet>,
         /// Each operation the fresh plan leaves out for the caller to dispose
         /// of, and why.
         unresolved: Vec<UnresolvedOperation>,
@@ -853,10 +859,13 @@ pub enum ErrorDetail {
         landed: Vec<DocumentPath>,
         /// What stopped publication.
         cause: InterruptionCause,
-        /// Every schema violation a landed target carries that the plan's
+        /// Every schema violation a landed target introduces that the plan's
         /// force let through. Empty for a plan that is not forced, and for a
-        /// forced plan whose every landed result is valid.
+        /// forced plan whose landed results introduce no violation.
         forced: Vec<SchemaViolation>,
+        /// Every rule set the violations in `forced` cite, each once, in the
+        /// order of its identity; empty where none cites one.
+        rule_sets: Vec<RuleSet>,
     },
     /// The detail of `vault/write-failed`: the plan, confirmed targets, and
     /// the failure that stopped this attempt before it published a target.
@@ -1098,12 +1107,14 @@ impl ErrorDetail {
     }
 
     /// The detail of `vault/plan-refused`, for the fresh `plan` and its
-    /// `forecast`, the `checks` that refused, the `unresolved` operations,
-    /// and the original plan's targets already `landed`.
+    /// `forecast`, the `checks` that refused and the `rule_sets` their schema
+    /// violations cite, the `unresolved` operations, and the original plan's
+    /// targets already `landed`.
     pub const fn plan_refused(
         plan: ResolvedPlan,
         forecast: Forecast,
         checks: Vec<RefusedCheck>,
+        rule_sets: Vec<RuleSet>,
         unresolved: Vec<UnresolvedOperation>,
         landed: Vec<DocumentPath>,
     ) -> Self {
@@ -1111,6 +1122,7 @@ impl ErrorDetail {
             plan,
             forecast,
             checks,
+            rule_sets,
             unresolved,
             landed,
         }
@@ -1124,18 +1136,20 @@ impl ErrorDetail {
 
     /// The detail of `vault/plan-interrupted`, for the `plan`, the targets
     /// `landed`, the `cause` that stopped it, and the violations its force let
-    /// through in what landed, `forced`.
+    /// through in what landed, `forced`, which cite `rule_sets`.
     pub const fn plan_interrupted(
         plan: ResolvedPlan,
         landed: Vec<DocumentPath>,
         cause: InterruptionCause,
         forced: Vec<SchemaViolation>,
+        rule_sets: Vec<RuleSet>,
     ) -> Self {
         ErrorDetail::PlanInterrupted {
             plan,
             landed,
             cause,
             forced,
+            rule_sets,
         }
     }
 
@@ -1496,6 +1510,7 @@ mod tests {
                 vec![RefusedCheck::name_taken(a_path())],
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             ),
             ReasonCode::VaultRootChanged => ErrorDetail::root_changed(
                 RootIdentity::from_device_and_inode(1, 2),
@@ -1505,6 +1520,7 @@ mod tests {
                 a_plan(),
                 vec![a_path()],
                 InterruptionCause::io_failure("the disk is full"),
+                Vec::new(),
                 Vec::new(),
             ),
             ReasonCode::VaultWriteFailed => {

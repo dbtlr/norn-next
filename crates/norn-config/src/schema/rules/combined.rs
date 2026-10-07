@@ -48,8 +48,8 @@ impl VaultSchema {
     ///
     /// Read at schema read by the statically unavoidable conflict check, and
     /// by rule judgment ([`VaultSchema::judge`]) for the rules selecting each
-    /// document. The write gate (NORN-359) reads it through that judgment,
-    /// and is not built.
+    /// document, which names each finding's combined constraint by value for
+    /// the write gate to compare ([`super::FindingIdentity`]).
     pub fn combined<'s>(&'s self, rules: &[&'s Rule]) -> CombinedConstraint<'s> {
         let mut rules = rules.to_vec();
         rules.sort_by(|left, right| left.name.cmp(&right.name));
@@ -255,6 +255,12 @@ impl<'s> OneOfIntersection<'s> {
     /// writes it, in the order of their equality keys.
     pub fn members(&self) -> impl Iterator<Item = &'s str> + '_ {
         self.members.values().copied()
+    }
+
+    /// The equality key of each value in every closed set: what a write gate
+    /// compares two intersections by ([`super::FindingIdentity`]).
+    pub(super) fn keys(&self) -> BTreeSet<TypedValue> {
+        self.members.keys().cloned().collect()
     }
 
     /// Whether the value whose equality key is `key` is in every closed set

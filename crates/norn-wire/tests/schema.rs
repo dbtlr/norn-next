@@ -3532,6 +3532,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "folders_made",
             "folders_removed",
             "forced",
+            "rule_sets",
         ]
         .into_iter()
         .collect()
@@ -3560,6 +3561,7 @@ fn an_apply_report_advertises_its_outcome_tag() {
             "folders_made",
             "folders_removed",
             "forced",
+            "rule_sets",
             "links",
             "left_behind"
         ]
@@ -3632,10 +3634,20 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
             "no_longer_resolves",
             "requires_unresolved",
             "has_backlinks",
-            "ambiguous_target"
+            "ambiguous_target",
+            "defaults_conflict",
+            "ambiguous_capture"
         ])
     );
     let reasons = schema_of::<UnresolvedReason>();
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "defaults_conflict")),
+        ["kind", "fields"].into_iter().collect()
+    );
+    assert_eq!(
+        property_names(branch(&reasons, "kind", "ambiguous_capture")),
+        ["kind", "rule", "field", "bindings"].into_iter().collect()
+    );
     assert_eq!(
         branch(&reasons, "kind", "ambiguous_target")["properties"]["candidates"]["$ref"].as_str(),
         Some("#/$defs/CandidateHead"),
@@ -3688,12 +3700,20 @@ fn the_apply_details_advertise_the_typed_facts_they_carry() {
     for (code, fields) in [
         (
             "vault/plan-refused",
-            vec!["code", "plan", "forecast", "checks", "unresolved", "landed"],
+            vec![
+                "code",
+                "plan",
+                "forecast",
+                "checks",
+                "rule_sets",
+                "unresolved",
+                "landed",
+            ],
         ),
         ("vault/root-changed", vec!["code", "expected", "found"]),
         (
             "vault/plan-interrupted",
-            vec!["code", "plan", "landed", "cause", "forced"],
+            vec!["code", "plan", "landed", "cause", "forced", "rule_sets"],
         ),
         (
             "vault/write-failed",
@@ -3786,11 +3806,14 @@ fn an_expected_value_advertises_its_state_tag() {
 
 /// **A forced violation and a refused one advertise one shape.** The forecast
 /// and the applied report list the violation type, and the schema-violation
-/// check carries that type's four fields beside its tag.
+/// check carries that type's six fields beside its tag; every answer listing
+/// violations carries the rule sets they cite beside them.
 #[test]
 fn a_forced_violation_advertises_the_shape_a_refusal_carries() {
     let violation = schema_of::<SchemaViolation>();
-    let fields: BTreeSet<&str> = ["path", "kind", "target", "message"].into_iter().collect();
+    let fields: BTreeSet<&str> = ["path", "kind", "target", "message", "value", "rule_set"]
+        .into_iter()
+        .collect();
     assert_eq!(property_names(&violation), fields);
     let checks = schema_of::<RefusedCheck>();
     let check = branch(&checks, "check", "schema_violation");
@@ -3811,6 +3834,24 @@ fn a_forced_violation_advertises_the_shape_a_refusal_carries() {
             .as_str(),
         Some("#/$defs/SchemaViolation")
     );
+    assert_eq!(
+        violation["properties"]["value"]["anyOf"][0]["$ref"].as_str(),
+        Some("#/$defs/ValueHead"),
+        "{violation}"
+    );
+    let details = schema_of::<ErrorDetail>();
+    for answer in [
+        schema_of::<Forecast>(),
+        branch(&schema_of::<ApplyReport>(), "outcome", "applied").clone(),
+        branch(&details, "code", "vault/plan-refused").clone(),
+        branch(&details, "code", "vault/plan-interrupted").clone(),
+    ] {
+        assert_eq!(
+            answer["properties"]["rule_sets"]["items"]["$ref"].as_str(),
+            Some("#/$defs/RuleSet"),
+            "{answer}"
+        );
+    }
 }
 
 /// **A write request advertises the whole of what it carries and admits no

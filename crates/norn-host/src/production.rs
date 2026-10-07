@@ -2456,7 +2456,7 @@ pub(crate) struct PlanEffect {
 ///
 /// **One changeset, whatever the plan's size.** An apply's changeset is what
 /// makes a read see the whole state before it or the whole state after it
-/// (ADR 0032), so this scope never flushes early: the bound a heal chunks by
+/// (ADR 0037), so this scope never flushes early: the bound a heal chunks by
 /// does not apply, and what the changeset holds is one entry per effect.
 ///
 /// **The derivation is the heal's own.** A document the plan left present is
@@ -3828,6 +3828,7 @@ impl<'s> Pending<'s> {
             severity,
             rules,
             value,
+            identity: _,
         } = planned;
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());

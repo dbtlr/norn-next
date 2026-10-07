@@ -28,7 +28,7 @@ impl Fixture {
     /// `operations` planned as an apply job plans them: each folder move and
     /// `where` target expanded first, on the store as it stands, every
     /// operation resolving.
-    fn expanded(&self, operations: Vec<Operation>) -> Resolution {
+    pub(super) fn expanded(&self, operations: Vec<Operation>) -> Resolution {
         let view = TreeView::open(&self.vault, &self.exclusions, &SchemaPlace::default())
             .expect("a vault");
         let links = self.links();

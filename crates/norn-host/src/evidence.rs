@@ -247,17 +247,18 @@ pub struct EvidenceReading {
     pub apply_vm_steps: u64,
     /// Steps those statements took walking a table or an index end to end.
     pub apply_full_scan_steps: u64,
-    /// What judging the documents the jobs derived against the vault
-    /// schema's field declarations and rules paid, as the judge tallies it
+    /// What judging the documents the jobs derived and the results their
+    /// plans composed against the vault schema's field declarations and
+    /// rules paid, and filling the rule defaults of the documents their
+    /// plans create, as the judge and the defaults fixpoint tally it
     /// ([`RuleWork`]): the logical counts of rule work, which no statement
-    /// counter sees because judgment runs in this process and reads no
-    /// database.
+    /// counter sees because both run in this process and read no database.
     ///
-    /// **Tallied where a document's bytes reach derivation**, beside
-    /// [`EvidenceReading::documents_derived`], and folded with it when the job
-    /// ends. A judgment reads the one document and the schema, so every count
-    /// here is the sum over the documents derived of what each one's
-    /// judgment paid.
+    /// **Tallied where the work is done** — a document's bytes reaching
+    /// derivation, beside [`EvidenceReading::documents_derived`], the
+    /// applier's schema check, and a creation's defaults at planning — and
+    /// folded when the job ends. Each reads the one document and the schema,
+    /// so every count here is the sum of what each one paid.
     pub rule_work: RuleWork,
 }
 
@@ -373,6 +374,13 @@ fn rule_work_since(later: RuleWork, earlier: RuleWork) -> RuleWork {
             .placement_verdicts_reused
             .saturating_sub(earlier.placement_verdicts_reused),
         findings: later.findings.saturating_sub(earlier.findings),
+        defaults_rounds: later
+            .defaults_rounds
+            .saturating_sub(earlier.defaults_rounds),
+        defaults_filled: later
+            .defaults_filled
+            .saturating_sub(earlier.defaults_filled),
+        captures_bound: later.captures_bound.saturating_sub(earlier.captures_bound),
     }
 }
 
@@ -833,6 +841,9 @@ mod tests {
             placement_weight: 13,
             placement_verdicts_reused: 1,
             findings: 2,
+            defaults_rounds: 3,
+            defaults_filled: 2,
+            captures_bound: 1,
         };
         let evidence = Arc::new(JobEvidence::default());
         count_rule_work(judged);

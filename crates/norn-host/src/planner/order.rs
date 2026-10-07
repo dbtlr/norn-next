@@ -20,7 +20,7 @@ use super::view::{Entry, VaultView};
 /// the document before it there, and a move away from a name or its removal
 /// runs after the arrival of the document it vacates, pairing the name's
 /// occupants and its vacaters in plan order (see `vacating_requirements`).
-/// ADR 0032 lets a move's destination be absent at planning or vacated by
+/// ADR 0037 lets a move's destination be absent at planning or vacated by
 /// another operation of the same plan, which the move then requires, and a
 /// create over a vacated name is the same act. The second kind is read
 /// against what the vault holds at planning, by identity, so it is the vault
@@ -35,7 +35,7 @@ pub(crate) struct Dependencies {
 ///
 /// **A requirement already met is no requirement.** `met` names operations an
 /// earlier apply of this plan already landed, which a refresh drops before it
-/// re-resolves what remains (ADR 0032); a requirement on one of them is
+/// re-resolves what remains (ADR 0037); a requirement on one of them is
 /// satisfied rather than unknown, and orders nothing.
 ///
 /// Faults are looked for in the order [`PlanFault`] lists them: an identifier
@@ -173,7 +173,7 @@ fn explicit_requirements(
 /// stands.
 ///
 /// **A move onto its own identity is no occupant and no vacater.** On a root
-/// that folds case a case-only rename's destination is its source (ADR 0032):
+/// that folds case a case-only rename's destination is its source (ADR 0037):
 /// the name it arrives at is the one it vacates, so the document standing
 /// there is the one it moves, and no other operation has to vacate it first.
 /// An operation vacating that name later in the plan — a removal, a move on,

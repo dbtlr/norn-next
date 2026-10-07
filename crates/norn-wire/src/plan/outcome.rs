@@ -25,18 +25,26 @@
 //!
 //! **A schema violation is spelled in the finding vocabulary.** What a plan
 //! introduces is what a finding over the result would be filed under, so a
-//! refused check carries the finding kind, the subject inside the document and
-//! the message a finding would, rather than a second vocabulary for the same
-//! facts.
+//! refused check carries the finding kind, the subject inside the document,
+//! the offending value's head, the rules it cites and the message a finding
+//! would, rather than a second vocabulary for the same facts. **A violation
+//! cites its rules by set, as a finding row does**: one number,
+//! [`SchemaViolation::rule_set`], resolving against the
+//! [`RuleSet`](crate::RuleSet)s every response carrying violations carries
+//! beside them, each set once. The combined constraint that tells two
+//! violations apart is the gate's to compare, and stays off the wire.
+
+use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::document::DocumentPath;
 use crate::finding::FindingKind;
-use crate::finding_row::CandidateHead;
+use crate::finding_row::{CandidateHead, ValueHead};
 use crate::plan::document::{FileState, PlanCondition};
 use crate::plan::operation::{Operation, OperationId};
+use crate::plan::value::AuthoredValue;
 
 /// One check that refused an apply before anything was published.
 ///
@@ -71,8 +79,9 @@ pub enum RefusedCheck {
         /// it.
         condition: PlanCondition,
     },
-    /// A target's result would violate the vault schema where the plan writes,
-    /// or where no violation stood before the plan.
+    /// A target's result would carry a schema violation that did not stand
+    /// before the plan: one whose kind, field, offending value or combined
+    /// constraint no document the result was composed from carried.
     #[non_exhaustive]
     SchemaViolation {
         /// The violation.
@@ -104,17 +113,9 @@ impl RefusedCheck {
         RefusedCheck::ConditionUnrecorded { condition }
     }
 
-    /// The result at `path` would be filed under `kind`, about `target`,
-    /// described by `message`.
-    pub fn schema_violation(
-        path: DocumentPath,
-        kind: FindingKind,
-        target: Option<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        RefusedCheck::SchemaViolation {
-            violation: SchemaViolation::new(path, kind, target, message),
-        }
+    /// A result would carry `violation`, which did not stand before the plan.
+    pub const fn violation(violation: SchemaViolation) -> Self {
+        RefusedCheck::SchemaViolation { violation }
     }
 
     /// Something stands at `path`, where a create would publish.
@@ -127,7 +128,7 @@ impl RefusedCheck {
 /// one a forced plan lets through.
 ///
 /// On the wire a violation is an object:
-/// `{"path":"notes/a.md","kind":"document/undeclared-tag","target":"draft","message":"…"}`.
+/// `{"path":"notes/a.md","kind":"field/not-one-of","target":"status","message":"…","value":{"text":"someday",…},"rule_set":1}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SchemaViolation {
@@ -141,11 +142,23 @@ pub struct SchemaViolation {
     pub target: Option<String>,
     /// The violation in words, for a person reading a report.
     pub message: String,
+    /// The offending value the violation names, as its bounded head, as a
+    /// finding row carries it, and `null` for a violation about no value — a
+    /// missing field, a misplaced document, a null — and for every kind but
+    /// the schema rules' and the field declarations'.
+    pub value: Option<ValueHead>,
+    /// The set of schema rules the violation cites, by an identity resolving
+    /// against the rule sets of the response carrying it, and `null` for a
+    /// violation citing no rule: a type or shape mismatch, and every kind but
+    /// the schema rules'. The identity is the response's own, so it is not
+    /// stable across responses; within one response it names one set
+    /// wherever it stands.
+    pub rule_set: Option<u64>,
 }
 
 impl SchemaViolation {
     /// The result at `path` would be filed under `kind`, about `target`,
-    /// described by `message`.
+    /// described by `message`, naming no value and citing no rule.
     pub fn new(
         path: DocumentPath,
         kind: FindingKind,
@@ -157,7 +170,24 @@ impl SchemaViolation {
             kind,
             target,
             message: message.into(),
+            value: None,
+            rule_set: None,
         }
+    }
+
+    /// The same violation, naming the offending value `value`.
+    #[must_use]
+    pub fn with_value(mut self, value: ValueHead) -> Self {
+        self.value = Some(value);
+        self
+    }
+
+    /// The same violation, citing the rule set `rule_set` of the response
+    /// carrying it.
+    #[must_use]
+    pub const fn citing(mut self, rule_set: u64) -> Self {
+        self.rule_set = Some(rule_set);
+        self
     }
 }
 
@@ -212,6 +242,73 @@ pub enum UnresolvedReason {
         /// order, and how many there were.
         candidates: CandidateHead,
     },
+    /// It creates a document, and the schema rules matching it default a
+    /// required field it is created without in ways that disagree: in one
+    /// round of the defaults, or once they settle, where a default a later
+    /// round brought into scope differs from a value filled earlier. Nothing
+    /// is picked, since a value picked from several could bring in rules of
+    /// its own.
+    #[non_exhaustive]
+    DefaultsConflict {
+        /// Each conflicting field, in key order.
+        fields: Vec<ConflictingDefault>,
+    },
+    /// It creates a document, and a rule default reads a capture the rule's
+    /// `match.path` binds several ways in the created document's path.
+    #[non_exhaustive]
+    AmbiguousCapture {
+        /// The rule whose default reads the capture.
+        rule: String,
+        /// The field the default is for.
+        field: String,
+        /// Two of the bindings, each a capture's name to the segment it took.
+        bindings: [BTreeMap<String, String>; 2],
+    },
+}
+
+/// One field rule defaults disagree on, and every value proposed for it.
+///
+/// On the wire a conflict is an object:
+/// `{"field":"status","candidates":[{"value":"todo","rules":["wide"]},…]}`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ConflictingDefault {
+    /// The field.
+    pub field: String,
+    /// Every value proposed for it, in the order first proposed.
+    pub candidates: Vec<DefaultCandidate>,
+}
+
+impl ConflictingDefault {
+    /// The field `field`, proposed each of `candidates`.
+    pub fn new(field: impl Into<String>, candidates: Vec<DefaultCandidate>) -> Self {
+        ConflictingDefault {
+            field: field.into(),
+            candidates,
+        }
+    }
+}
+
+/// One value proposed for a field, and the rules proposing it.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DefaultCandidate {
+    /// The value, filled.
+    pub value: AuthoredValue,
+    /// Every rule proposing it, in byte order, each once. A value already
+    /// filled that a later rule's default disagrees with names the rules that
+    /// proposed it when it was filled.
+    pub rules: Vec<String>,
+}
+
+impl DefaultCandidate {
+    /// `value`, proposed by `rules`, named in byte order, each once.
+    pub fn new(value: AuthoredValue, rules: impl IntoIterator<Item = String>) -> Self {
+        let mut rules: Vec<String> = rules.into_iter().collect();
+        rules.sort_unstable();
+        rules.dedup();
+        DefaultCandidate { value, rules }
+    }
 }
 
 /// Which end of an operation's link rewrite an ambiguous target is: what
@@ -257,6 +354,26 @@ impl UnresolvedReason {
     /// `candidates` heads.
     pub const fn ambiguous_target(end: AmbiguousEnd, candidates: CandidateHead) -> Self {
         UnresolvedReason::AmbiguousTarget { end, candidates }
+    }
+
+    /// The document the operation creates takes rule defaults that disagree
+    /// on each of `fields`.
+    pub const fn defaults_conflict(fields: Vec<ConflictingDefault>) -> Self {
+        UnresolvedReason::DefaultsConflict { fields }
+    }
+
+    /// A default the rule `rule` states for `field` reads a capture its
+    /// `match.path` binds several ways, two of which are `bindings`.
+    pub fn ambiguous_capture(
+        rule: impl Into<String>,
+        field: impl Into<String>,
+        bindings: [BTreeMap<String, String>; 2],
+    ) -> Self {
+        UnresolvedReason::AmbiguousCapture {
+            rule: rule.into(),
+            field: field.into(),
+            bindings,
+        }
     }
 }
 

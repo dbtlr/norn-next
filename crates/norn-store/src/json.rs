@@ -299,14 +299,100 @@ pub(crate) fn projected_fields(
         };
         entries
     } else {
-        reader.value()?;
+        reader.value::<norn_wire::FieldValue>()?;
         std::collections::BTreeMap::new()
     };
-    reader.skip_space();
-    if reader.at != text.len() {
-        return Err(reader.damaged("text after the value"));
-    }
+    reader.finish()?;
     Ok(fields)
+}
+
+/// The value tree a canonical projection holds, each value as the shape it
+/// was written from: a string as a string, a number with a fraction as a
+/// float and one without as an integer, a boolean, a null, and the
+/// containers, a map's entries in key order.
+///
+/// **The reader of the text [`canonical_json`] writes, typed.** Projecting
+/// the value this returns writes the text it was read from, so what judges a
+/// document's frontmatter from its projection — the write gate re-judging a
+/// document a move carries without reading its bytes — reads the values a
+/// parse of the document would hand it, save the order of a map's keys,
+/// which the projection does not keep, and a non-finite float, which it
+/// writes as null. Text that is not such a projection is damage, as for
+/// the field reader the store hydrates rows by.
+pub fn frontmatter_of_projection(text: &str) -> Result<FrontmatterValue, crate::StoreError> {
+    let mut reader = ProjectionReader {
+        text,
+        at: 0,
+        depth: 0,
+    };
+    let value = reader.value()?;
+    reader.finish()?;
+    Ok(value)
+}
+
+/// A tree [`ProjectionReader`] builds: the shapes a projection's text holds,
+/// as one reading of them keeps each.
+trait Projected: Sized {
+    fn map(entries: std::collections::BTreeMap<String, Self>) -> Self;
+    fn sequence(items: Vec<Self>) -> Self;
+    fn string(text: String) -> Self;
+    fn boolean(flag: bool) -> Self;
+    fn null() -> Self;
+    /// The number the projection spelled `digits`, or `None` where no value
+    /// of this tree is spelled so.
+    fn number(digits: &str) -> Option<Self>;
+}
+
+/// The wire's reading: every scalar the text the field pillar's raw column
+/// holds for it.
+impl Projected for norn_wire::FieldValue {
+    fn map(entries: std::collections::BTreeMap<String, Self>) -> Self {
+        norn_wire::FieldValue::map(entries)
+    }
+    fn sequence(items: Vec<Self>) -> Self {
+        norn_wire::FieldValue::sequence(items)
+    }
+    fn string(text: String) -> Self {
+        norn_wire::FieldValue::scalar(text)
+    }
+    fn boolean(flag: bool) -> Self {
+        norn_wire::FieldValue::scalar(if flag { "true" } else { "false" })
+    }
+    fn null() -> Self {
+        norn_wire::FieldValue::null()
+    }
+    fn number(digits: &str) -> Option<Self> {
+        Some(norn_wire::FieldValue::scalar(digits))
+    }
+}
+
+/// The typed reading: each value as the shape the projection was written
+/// from.
+impl Projected for FrontmatterValue {
+    fn map(entries: std::collections::BTreeMap<String, Self>) -> Self {
+        FrontmatterValue::Map(entries.into_iter().collect())
+    }
+    fn sequence(items: Vec<Self>) -> Self {
+        FrontmatterValue::Sequence(items)
+    }
+    fn string(text: String) -> Self {
+        FrontmatterValue::String(text)
+    }
+    fn boolean(flag: bool) -> Self {
+        FrontmatterValue::Bool(flag)
+    }
+    fn null() -> Self {
+        FrontmatterValue::Null
+    }
+    /// An integer is written without a fraction and a float always with one
+    /// ([`canonical_json`]), so the fraction is what tells the two apart.
+    fn number(digits: &str) -> Option<Self> {
+        if digits.contains('.') {
+            digits.parse().ok().map(FrontmatterValue::Float)
+        } else {
+            digits.parse().ok().map(FrontmatterValue::Int)
+        }
+    }
 }
 
 /// A cursor over one projection's text.
@@ -325,6 +411,15 @@ impl ProjectionReader<'_> {
         while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
             self.at += 1;
         }
+    }
+
+    /// Refuse any text after the one value read.
+    fn finish(&mut self) -> Result<(), crate::StoreError> {
+        self.skip_space();
+        if self.at != self.text.len() {
+            return Err(self.damaged("text after the value"));
+        }
+        Ok(())
     }
 
     fn damaged(&self, problem: &str) -> crate::StoreError {
@@ -346,9 +441,7 @@ impl ProjectionReader<'_> {
         }
     }
 
-    fn value(&mut self) -> Result<norn_wire::FieldValue, crate::StoreError> {
-        use norn_wire::FieldValue;
-
+    fn value<T: Projected>(&mut self) -> Result<T, crate::StoreError> {
         self.skip_space();
         match self.peek() {
             Some(b'{') => self.nested(|reader| {
@@ -357,7 +450,7 @@ impl ProjectionReader<'_> {
                 reader.skip_space();
                 if reader.peek() == Some(b'}') {
                     reader.at += 1;
-                    return Ok(FieldValue::map(entries));
+                    return Ok(T::map(entries));
                 }
                 loop {
                     reader.skip_space();
@@ -371,7 +464,7 @@ impl ProjectionReader<'_> {
                         Some(b',') => reader.at += 1,
                         Some(b'}') => {
                             reader.at += 1;
-                            return Ok(FieldValue::map(entries));
+                            return Ok(T::map(entries));
                         }
                         _ => return Err(reader.damaged("expected `,` or `}`")),
                     }
@@ -383,7 +476,7 @@ impl ProjectionReader<'_> {
                 reader.skip_space();
                 if reader.peek() == Some(b']') {
                     reader.at += 1;
-                    return Ok(FieldValue::sequence(items));
+                    return Ok(T::sequence(items));
                 }
                 loop {
                     items.push(reader.value()?);
@@ -392,20 +485,21 @@ impl ProjectionReader<'_> {
                         Some(b',') => reader.at += 1,
                         Some(b']') => {
                             reader.at += 1;
-                            return Ok(FieldValue::sequence(items));
+                            return Ok(T::sequence(items));
                         }
                         _ => return Err(reader.damaged("expected `,` or `]`")),
                     }
                 }
             }),
-            Some(b'"') => Ok(FieldValue::scalar(self.string()?)),
-            Some(b'n') => self.word("null").map(|()| FieldValue::null()),
-            Some(b't') => self.word("true").map(|()| FieldValue::scalar("true")),
-            Some(b'f') => self.word("false").map(|()| FieldValue::scalar("false")),
+            Some(b'"') => Ok(T::string(self.string()?)),
+            Some(b'n') => self.word("null").map(|()| T::null()),
+            Some(b't') => self.word("true").map(|()| T::boolean(true)),
+            Some(b'f') => self.word("false").map(|()| T::boolean(false)),
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.at;
                 self.number()?;
-                Ok(FieldValue::scalar(&self.text[start..self.at]))
+                T::number(&self.text[start..self.at])
+                    .ok_or_else(|| self.damaged("a number no value is spelled as"))
             }
             _ => Err(self.damaged("expected a value")),
         }
@@ -448,10 +542,10 @@ impl ProjectionReader<'_> {
 
     /// Read one container one level deeper, refusing past the projection's
     /// bound.
-    fn nested(
+    fn nested<T>(
         &mut self,
-        read: impl FnOnce(&mut Self) -> Result<norn_wire::FieldValue, crate::StoreError>,
-    ) -> Result<norn_wire::FieldValue, crate::StoreError> {
+        read: impl FnOnce(&mut Self) -> Result<T, crate::StoreError>,
+    ) -> Result<T, crate::StoreError> {
         self.depth += 1;
         if self.depth > MAX_FRONTMATTER_DEPTH {
             return Err(self.damaged("nesting past the projection's bound"));
@@ -538,6 +632,48 @@ mod tests {
 
     fn string(text: &str) -> FrontmatterValue {
         FrontmatterValue::String(text.to_string())
+    }
+
+    /// **What the projection writes, the typed reader reads back as the value
+    /// it was written from**, save a map's key order: a string holding digits
+    /// stays a string, an integral float a float, an integer an integer, and
+    /// the containers and nulls as they were — so projecting it again writes
+    /// the same text.
+    #[test]
+    fn a_projection_reads_back_typed_as_the_value_it_was_written_from() {
+        let value = FrontmatterValue::Map(vec![
+            ("count".to_string(), FrontmatterValue::Int(-3)),
+            ("digits".to_string(), string("1")),
+            ("done".to_string(), FrontmatterValue::Bool(true)),
+            ("gone".to_string(), FrontmatterValue::Null),
+            (
+                "nested".to_string(),
+                FrontmatterValue::Sequence(vec![
+                    FrontmatterValue::Map(vec![
+                        ("b".to_string(), FrontmatterValue::Float(2.0)),
+                        ("a".to_string(), string("x\n\u{1}𝄞")),
+                    ]),
+                    FrontmatterValue::Sequence(Vec::new()),
+                ]),
+            ),
+            ("ratio".to_string(), FrontmatterValue::Float(0.25)),
+        ]);
+        let text = canonical_json(&value).expect("a projection");
+        let read = frontmatter_of_projection(&text).expect("the projection reads");
+        let FrontmatterValue::Map(entries) = &read else {
+            panic!("a map: {read:?}");
+        };
+        assert_eq!(entries[1], ("digits".to_string(), string("1")));
+        assert_eq!(entries[0], ("count".to_string(), FrontmatterValue::Int(-3)));
+        assert_eq!(canonical_json(&read).expect("a projection"), text);
+        assert!(frontmatter_of_projection("{\"a\":1} x").is_err());
+        assert_eq!(
+            frontmatter_of_projection("[1.0,2]").expect("a list reads"),
+            FrontmatterValue::Sequence(vec![
+                FrontmatterValue::Float(1.0),
+                FrontmatterValue::Int(2)
+            ])
+        );
     }
 
     /// **What the projection writes, the reader reads back as the wire's

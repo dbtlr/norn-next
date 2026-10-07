@@ -143,6 +143,13 @@ impl Template {
         self.tokens().next().is_some()
     }
 
+    /// Whether a token of the template reads the clock: `{{now}}`,
+    /// `{{date}}` or `{{time}}`.
+    pub fn reads_clock(&self) -> bool {
+        self.tokens()
+            .any(|token| matches!(token.slot, Slot::Now | Slot::Date | Slot::Time))
+    }
+
     /// How many `{{seq}}` tokens the template holds.
     pub fn seq_count(&self) -> usize {
         self.tokens()
@@ -188,9 +195,9 @@ impl Token {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| FillError::MissingVariable { name: name.clone() })?,
-            Slot::Now => values.at.rfc3339(),
-            Slot::Date => values.at.date(),
-            Slot::Time => values.at.time(),
+            Slot::Now => values.clock()?.rfc3339(),
+            Slot::Date => values.clock()?.date(),
+            Slot::Time => values.clock()?.time(),
             Slot::Path(name) => values
                 .captures
                 .get(name)
@@ -404,7 +411,7 @@ impl std::error::Error for NotALocalTimestamp {}
 #[derive(Clone, Debug)]
 pub struct TemplateValues {
     variables: BTreeMap<String, String>,
-    at: LocalTimestamp,
+    at: Option<LocalTimestamp>,
     seq: Option<u64>,
     captures: Captures,
 }
@@ -412,12 +419,23 @@ pub struct TemplateValues {
 impl TemplateValues {
     /// `variables` by name, read at `at`, with no sequence number.
     pub fn new(variables: BTreeMap<String, String>, at: LocalTimestamp) -> Self {
+        TemplateValues::reading(variables, Some(at))
+    }
+
+    /// `variables` by name, read at `at` — `None` for values a template
+    /// reading no clock token is filled from — with no sequence number.
+    pub(crate) fn reading(variables: BTreeMap<String, String>, at: Option<LocalTimestamp>) -> Self {
         TemplateValues {
             variables,
             at,
             seq: None,
             captures: Captures::default(),
         }
+    }
+
+    /// The clock reading, or why a clock token cannot fill.
+    fn clock(&self) -> Result<&LocalTimestamp, FillError> {
+        self.at.as_ref().ok_or(FillError::NoClock)
     }
 
     /// The same values, with `captures` the path segments a rule's match
@@ -452,6 +470,10 @@ pub enum FillError {
     },
     /// `{{seq}}` is filled with no sequence number supplied.
     NoSeq,
+    /// `{{now}}`, `{{date}}` or `{{time}}` is filled with no clock reading
+    /// supplied. A clock reading is supplied wherever a template reading
+    /// the clock is filled, so this is a caller that did not supply one.
+    NoClock,
     /// A token reads a path capture no value is supplied for. A schema read
     /// already holds every capture a rule's template reads to one its own
     /// `match.path` binds, so this is a caller that did not supply the
@@ -503,6 +525,9 @@ impl fmt::Display for FillError {
                 write!(formatter, "no value is supplied for the variable `{name}`")
             }
             FillError::NoSeq => formatter.write_str("`{{seq}}` is filled with no sequence number"),
+            FillError::NoClock => {
+                formatter.write_str("a clock token is filled with no clock reading")
+            }
             FillError::MissingCapture { name } => {
                 write!(
                     formatter,

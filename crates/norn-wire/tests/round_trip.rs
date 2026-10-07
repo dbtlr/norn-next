@@ -18,36 +18,36 @@ use norn_wire::{
     AppliedTarget, ApplyMode, ApplyParams, ApplyReport, AttachMode, Attention, AuthorCondition,
     AuthoredPlan, AuthoredValue, Backlinks, BlockRow, BodyText, CANDIDATE_HEAD, Candidate,
     CandidateHead, ChangesetOutcome, Collection, CollectionPage, CollectionSelector, Column,
-    ComparedBy, ContainerKind, ContentHash, ControlFile, ControlFileFailure, CountParams, Cursor,
-    CursorKey, CursorOrderChanged, DeleteParams, DescribeParams, Direction, Directory,
-    DoctorRegistryParams, DoctorRegistryReport, DocumentEdit, DocumentPath, DocumentRow, Drift,
-    EditParams, ElsewhereNamesDocuments, EngineHealth, EngineSection, EngineStatus, ErrorDetail,
-    ErrorEnvelope, ExpectedField, Facet, FacetKind, FieldChange, FieldShape, FieldType, FieldValue,
-    FilePath, FileState, FindParams, FindReport, FindingKind, FindingRow, FindingScope,
-    Fingerprints, FolderPath, Forecast, Freshness, GetParams, GetReport, GroupKey, HeadingRow,
-    Hint, Hit, IllegalContentHash, IllegalOperationId, IllegalRuleSet, IllegalValueHead,
-    InitParams, InitReport, InterruptionCause, KindTally, LadderDeclaration, LinkAddress,
-    LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite, LinkRow, ListParams, ListReport,
-    MaintainerIdentity, MalformedLadder, MigrateParams, MigrateReport, MigrationRefusal,
-    ModelIdentity, MoveParams, MoveSubject, Moved, NameSet, NewParams, NewSubject, NoProblems,
-    NoRetrievalRung, NonFiniteScore, NotReady, Operation, OperationId, OperationKind,
-    OperationsTag, Page, PagedRows, PathProblem, PathRuleKind, PlanCondition, PlanDocument,
-    PlanFault, PollBackend, Predicate, Provenance, Published, ReadFailure, ReasonCode,
-    RefusedCheck, RegisterParams, RegisterReport, Registration, RegistryProblem, RegistrySanity,
-    ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport, ReloadStage, RequestBound,
-    RequestPart, RequestScope, ResolutionTarget, ResolveParams, ResolveReport, ResolvedPlan,
-    ResolvedTag, Resolves, RewriteWikilinkParams, RollUp, RootIdentity, RuleAllowedPaths,
-    RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch, RuleSet, Rung, RungReport,
-    RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource, SchemaViolation, Score,
-    SearchParams, SearchReport, SetParams, Severity, SidecarRevision, SkippedFinding, Snapshot,
-    Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource, TagStance, Tally,
-    TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing, UnknownFindingKind,
-    UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb, UnregisterParams,
-    UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied, UntrustedReason,
-    VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap, Variables, VaultAddress,
-    VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot, VaultSetParams, VaultSetReport,
-    VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget, is_refused_character,
-    is_refused_segment, leaf_stem,
+    ComparedBy, ConflictingDefault, ContainerKind, ContentHash, ControlFile, ControlFileFailure,
+    CountParams, Cursor, CursorKey, CursorOrderChanged, DefaultCandidate, DeleteParams,
+    DescribeParams, Direction, Directory, DoctorRegistryParams, DoctorRegistryReport, DocumentEdit,
+    DocumentPath, DocumentRow, Drift, EditParams, ElsewhereNamesDocuments, EngineHealth,
+    EngineSection, EngineStatus, ErrorDetail, ErrorEnvelope, ExpectedField, Facet, FacetKind,
+    FieldChange, FieldShape, FieldType, FieldValue, FilePath, FileState, FindParams, FindReport,
+    FindingKind, FindingRow, FindingScope, Fingerprints, FolderPath, Forecast, Freshness,
+    GetParams, GetReport, GroupKey, HeadingRow, Hint, Hit, IllegalContentHash, IllegalOperationId,
+    IllegalRuleSet, IllegalValueHead, InitParams, InitReport, InterruptionCause, KindTally,
+    LadderDeclaration, LinkAddress, LinkAdvisory, LinkFamily, LinkHealth, LinkKey, LinkRewrite,
+    LinkRow, ListParams, ListReport, MaintainerIdentity, MalformedLadder, MigrateParams,
+    MigrateReport, MigrationRefusal, ModelIdentity, MoveParams, MoveSubject, Moved, NameSet,
+    NewParams, NewSubject, NoProblems, NoRetrievalRung, NonFiniteScore, NotReady, Operation,
+    OperationId, OperationKind, OperationsTag, Page, PagedRows, PathProblem, PathRuleKind,
+    PlanCondition, PlanDocument, PlanFault, PollBackend, Predicate, Provenance, Published,
+    ReadFailure, ReasonCode, RefusedCheck, RegisterParams, RegisterReport, Registration,
+    RegistryProblem, RegistrySanity, ReloadFailure, ReloadOutcome, ReloadParams, ReloadReport,
+    ReloadStage, RequestBound, RequestPart, RequestScope, ResolutionTarget, ResolveParams,
+    ResolveReport, ResolvedPlan, ResolvedTag, Resolves, RewriteWikilinkParams, RollUp,
+    RootIdentity, RuleAllowedPaths, RuleClosedSet, RuleExclude, RuleForbiddenFix, RuleMatch,
+    RuleSet, Rung, RungReport, RungSelection, RungSet, RungSkipReason, SchemaRule, SchemaSource,
+    SchemaViolation, Score, SearchParams, SearchReport, SetParams, Severity, SidecarRevision,
+    SkippedFinding, Snapshot, Sort, SortKey, Span, StatusParams, StatusReport, TagRow, TagSource,
+    TagStance, Tally, TargetResult, TotalBelowHead, Transition, TrustState, UnknownAddressing,
+    UnknownFindingKind, UnknownPollBackend, UnknownRequestScope, UnknownSeverity, UnknownVerb,
+    UnregisterParams, UnregisterReport, UnresolvedOperation, UnresolvedReason, Unsatisfied,
+    UntrustedReason, VALUE_HEAD_BYTES, ValidateParams, ValidateReport, ValueHead, ValueMap,
+    Variables, VaultAddress, VaultAnswer, VaultChange, VaultName, VaultReplace, VaultRoot,
+    VaultSetParams, VaultSetReport, VaultStatus, Verb, WarmingPhase, WatcherLossCause, WriteTarget,
+    is_refused_character, is_refused_segment, leaf_stem,
 };
 use serde::de::value::{Error as ValueError, F64Deserializer};
 use serde::de::{DeserializeOwned, IntoDeserializer};
@@ -8450,6 +8450,19 @@ fn a_forecast() -> Forecast {
     )
 }
 
+/// A violation of a schema rule: it names its value's head and cites the
+/// rule set [`rule_set_three`].
+fn a_rule_violation() -> SchemaViolation {
+    SchemaViolation::new(
+        path("notes/a.md"),
+        FindingKind::NotOneOf,
+        Some("status".to_string()),
+        "a field holds a value outside the values its rules allow",
+    )
+    .with_value(ValueHead::of("someday", value_hash()))
+    .citing(3)
+}
+
 /// Every check a refused apply names.
 fn refused_checks() -> Vec<RefusedCheck> {
     vec![
@@ -8464,18 +8477,19 @@ fn refused_checks() -> Vec<RefusedCheck> {
             Resolves::one(path("notes/a.md")),
             Resolves::several(),
         )),
-        RefusedCheck::schema_violation(
+        RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::UndeclaredTag,
             Some("draft".to_string()),
             "the tag `draft` is not declared",
-        ),
-        RefusedCheck::schema_violation(
+        )),
+        RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::FrontmatterUnreadable,
             None,
             "the frontmatter does not parse",
-        ),
+        )),
+        RefusedCheck::violation(a_rule_violation()),
         RefusedCheck::name_taken(path("notes/new.md")),
     ]
 }
@@ -8502,7 +8516,62 @@ fn unresolved_reasons() -> Vec<UnresolvedReason> {
             AmbiguousEnd::Target,
             CandidateHead::new([Candidate::new(path("notes/b.md"), "notes/b")], 3).expect("a head"),
         ),
+        UnresolvedReason::defaults_conflict(vec![ConflictingDefault::new(
+            "status",
+            vec![
+                DefaultCandidate::new(AuthoredValue::string("todo"), ["tasks".to_string()]),
+                DefaultCandidate::new(
+                    AuthoredValue::string("done"),
+                    ["done-tasks".to_string(), "closed".to_string()],
+                ),
+            ],
+        )]),
+        UnresolvedReason::ambiguous_capture(
+            "projects",
+            "project",
+            [
+                BTreeMap::from([("p".to_string(), "a".to_string())]),
+                BTreeMap::from([("p".to_string(), "b".to_string())]),
+            ],
+        ),
     ]
+}
+
+/// **A defaults refusal is spelled structurally**: a conflict names each
+/// field and every candidate with its value and the rules proposing it, in
+/// byte order, and an ambiguous capture names the rule, the field and two of
+/// the bindings.
+#[test]
+fn a_defaults_refusal_names_its_fields_candidates_and_bindings() {
+    assert_eq!(
+        wire(&UnresolvedReason::defaults_conflict(vec![
+            ConflictingDefault::new(
+                "status",
+                vec![
+                    DefaultCandidate::new(AuthoredValue::string("todo"), ["wide".to_string()]),
+                    DefaultCandidate::new(
+                        AuthoredValue::string("done"),
+                        ["tasks".to_string(), "closed".to_string()],
+                    ),
+                ],
+            )
+        ])),
+        concat!(
+            r#"{"kind":"defaults_conflict","fields":[{"field":"status","candidates":["#,
+            r#"{"value":"todo","rules":["wide"]},{"value":"done","rules":["closed","tasks"]}]}]}"#
+        )
+    );
+    assert_eq!(
+        wire(&UnresolvedReason::ambiguous_capture(
+            "projects",
+            "project",
+            [
+                BTreeMap::from([("p".to_string(), "a".to_string())]),
+                BTreeMap::from([("p".to_string(), "b".to_string())]),
+            ],
+        )),
+        r#"{"kind":"ambiguous_capture","rule":"projects","field":"project","bindings":[{"p":"a"},{"p":"b"}]}"#
+    );
 }
 
 /// Every advice a forecast gives about one link.
@@ -8592,8 +8661,9 @@ fn apply_details() -> Vec<ErrorDetail> {
     let mut details = vec![
         ErrorDetail::plan_refused(
             a_bare_resolved_plan(),
-            a_forecast(),
+            a_forecast().with_forced(vec![a_rule_violation()], vec![rule_set_three()]),
             refused_checks(),
+            vec![rule_set_three()],
             unresolved_reasons()
                 .into_iter()
                 .map(|reason| {
@@ -8620,7 +8690,8 @@ fn apply_details() -> Vec<ErrorDetail> {
             a_resolved_plan(),
             vec![path("notes/a.md")],
             cause,
-            Vec::new(),
+            vec![a_rule_violation()],
+            vec![rule_set_three()],
         )
     }));
     details.extend(plan_faults().into_iter().map(ErrorDetail::plan_invalid));
@@ -8785,7 +8856,7 @@ fn a_folder_path_is_the_string_it_renders_as_and_is_relative() {
 fn a_forecast_names_what_the_plan_beside_it_does_not_carry() {
     assert_eq!(
         wire(&a_forecast()),
-        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[],"links":[],"left_behind":[]}"#
+        r#"{"drifted":["notes/a.md"],"folders_made":["archive"],"folders_removed":["notes/old"],"forced":[],"rule_sets":[],"links":[],"left_behind":[]}"#
     );
     let previewed = wire(&ApplyReport::previewed(a_resolved_plan(), a_forecast()));
     for transition in &a_resolved_plan().transitions {
@@ -8952,7 +9023,7 @@ fn an_apply_report_is_an_object_tagged_outcome() {
             concat!(
                 r#"{{"outcome":"applied","plan":{},"changeset":"committed","#,
                 r#""targets":[{{"path":"notes/a.md","result":"wrote"}},{{"path":"archive/new.md","result":"found"}}],"#,
-                r#""folders_made":["archive"],"folders_removed":["notes/old"],"forced":[]}}"#
+                r#""folders_made":["archive"],"folders_removed":["notes/old"],"forced":[],"rule_sets":[]}}"#
             ),
             resolved_plan_json()
         )
@@ -8994,6 +9065,7 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
             path("notes/a.md"),
             FileState::present(content_hash(0x0f)),
         )],
+        Vec::new(),
         vec![UnresolvedOperation::new(
             Operation::new(OperationKind::str_replace(
                 path("notes/a.md"),
@@ -9009,8 +9081,8 @@ fn a_refused_plan_carries_the_fresh_plan_and_why() {
         format!(
             concat!(
                 r#"{{"code":"vault/plan-refused","message":"the plan drifted","detail":{{"code":"vault/plan-refused","#,
-                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[],"links":[],"left_behind":[]}},"#,
-                r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"#,
+                r#""plan":{plan},"forecast":{{"drifted":[],"folders_made":[],"folders_removed":[],"forced":[],"rule_sets":[],"links":[],"left_behind":[]}},"#,
+                r#""checks":[{{"check":"drifted","path":"notes/a.md","holds":{{"state":"present","hash":"{f}"}}}}],"rule_sets":[],"#,
                 r#""unresolved":[{{"operation":{{"kind":"str_replace","fields":{{"path":"notes/a.md","old_str":"draft","new_str":"final"}}}},"#,
                 r#""reason":{{"kind":"no_longer_resolves","detail":"the text `draft` no longer occurs"}}}}],"landed":["notes/completed.md"]}}}}"#
             ),
@@ -9037,15 +9109,26 @@ fn the_apply_reasons_are_tagged_objects() {
         )
     );
     assert_eq!(
-        wire(&RefusedCheck::schema_violation(
+        wire(&RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::UndeclaredTag,
             Some("draft".to_string()),
             "the tag `draft` is not declared"
-        )),
+        ))),
         concat!(
             r#"{"check":"schema_violation","path":"notes/a.md","kind":"document/undeclared-tag","#,
-            r#""target":"draft","message":"the tag `draft` is not declared"}"#
+            r#""target":"draft","message":"the tag `draft` is not declared","value":null,"rule_set":null}"#
+        )
+    );
+    assert_eq!(
+        wire(&RefusedCheck::violation(a_rule_violation())),
+        format!(
+            concat!(
+                r#"{{"check":"schema_violation","path":"notes/a.md","kind":"field/not-one-of","#,
+                r#""target":"status","message":"a field holds a value outside the values its rules allow","#,
+                r#""value":{{"text":"someday","byte_length":7,"hash":"{}"}},"rule_set":3}}"#
+            ),
+            wire(&value_hash()).trim_matches('"')
         )
     );
     assert_eq!(
@@ -9104,11 +9187,12 @@ fn the_apply_outcomes_carry_what_a_caller_sends_again() {
             vec![path("notes/b.md")],
             InterruptionCause::name_taken(path("notes/new.md")),
             Vec::new(),
+            Vec::new(),
         )),
         format!(
             concat!(
                 r#"{{"code":"vault/plan-interrupted","plan":{plan},"landed":["notes/b.md"],"#,
-                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}},"forced":[]}}"#
+                r#""cause":{{"kind":"name_taken","path":"notes/new.md"}},"forced":[],"rule_sets":[]}}"#
             ),
             plan = plan
         )
@@ -9254,11 +9338,13 @@ fn a_resolved_plan_in_any_answer_is_sent_back_verbatim() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         ),
         ErrorDetail::plan_interrupted(
             plan.clone(),
             vec![path("notes/a.md")],
             InterruptionCause::io_failure("the disk is full"),
+            Vec::new(),
             Vec::new(),
         ),
         ErrorDetail::write_failed(plan.clone(), "the disk is full", Vec::new()),
@@ -10186,7 +10272,7 @@ fn a_cascade_where_planning_writes_none_is_a_fault() {
 }
 
 /// **A plan that changes a vault control file changes nothing else** (ADR
-/// 0032). An authored plan and a resolved plan alike name each control-file
+/// 0037). An authored plan and a resolved plan alike name each control-file
 /// write that stands beside an operation on documents; a plan of control-file
 /// writes alone, and a plan of document operations alone, carry no fault.
 #[test]
@@ -10293,34 +10379,26 @@ fn an_authored_expanded_operation_carrying_an_id_or_a_requirement_is_a_fault() {
 /// **A force is loud, in the shape a refusal carries.** The forecast, the
 /// applied report and an interruption list every violation a force let
 /// through, each exactly the object a schema-violation check is without its
-/// `check` tag.
+/// `check` tag, and each carries the rule sets its violations cite beside
+/// them.
 #[test]
 fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
-    let violation = SchemaViolation::new(
-        path("notes/a.md"),
-        FindingKind::UndeclaredTag,
-        Some("draft".to_string()),
-        "the tag `draft` is not declared",
-    );
-    let refused = serde_json::to_value(RefusedCheck::schema_violation(
-        path("notes/a.md"),
-        FindingKind::UndeclaredTag,
-        Some("draft".to_string()),
-        "the tag `draft` is not declared",
-    ))
-    .expect("a check as JSON");
+    let violation = a_rule_violation();
+    let refused =
+        serde_json::to_value(RefusedCheck::violation(violation.clone())).expect("a check as JSON");
     let mut without_tag = refused.as_object().expect("an object").clone();
     without_tag.remove("check");
     assert_eq!(
         serde_json::to_value(&violation).expect("a violation as JSON"),
         serde_json::Value::Object(without_tag)
     );
-    let forecast = a_forecast().with_forced(vec![violation.clone()]);
+    let forecast = a_forecast().with_forced(vec![violation.clone()], vec![rule_set_three()]);
     round_trip(&forecast);
     let forced_json = wire(&vec![violation.clone()]);
+    let cited_json = wire(&vec![rule_set_three()]);
     assert!(
         wire(&forecast).ends_with(&format!(
-            r#""forced":{forced_json},"links":[],"left_behind":[]}}"#
+            r#""forced":{forced_json},"rule_sets":{cited_json},"links":[],"left_behind":[]}}"#
         )),
         "{}",
         wire(&forecast)
@@ -10332,10 +10410,12 @@ fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
         Vec::new(),
         Vec::new(),
     )
-    .with_forced(vec![violation.clone()]);
+    .with_forced(vec![violation.clone()], vec![rule_set_three()]);
     round_trip(&applied);
     assert!(
-        wire(&applied).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        wire(&applied).ends_with(&format!(
+            r#""forced":{forced_json},"rule_sets":{cited_json}}}"#
+        )),
         "{}",
         wire(&applied)
     );
@@ -10344,15 +10424,18 @@ fn a_forced_violation_is_listed_in_the_shape_a_refusal_carries() {
         vec![path("notes/a.md")],
         InterruptionCause::io_failure("the disk is full"),
         vec![violation.clone()],
+        vec![rule_set_three()],
     );
     round_trip(&interrupted);
     assert!(
-        wire(&interrupted).ends_with(&format!(r#""forced":{forced_json}}}"#)),
+        wire(&interrupted).ends_with(&format!(
+            r#""forced":{forced_json},"rule_sets":{cited_json}}}"#
+        )),
         "{}",
         wire(&interrupted)
     );
-    let previewed =
-        ApplyReport::previewed(a_bare_resolved_plan(), a_forecast()).with_forced(vec![violation]);
+    let previewed = ApplyReport::previewed(a_bare_resolved_plan(), a_forecast())
+        .with_forced(vec![violation], vec![rule_set_three()]);
     assert_eq!(
         previewed,
         ApplyReport::previewed(a_bare_resolved_plan(), forecast)

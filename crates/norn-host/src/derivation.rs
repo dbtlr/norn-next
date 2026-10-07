@@ -43,13 +43,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_config::schema::{
-    Breach, FieldType, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape, TypedValue,
-    UndeclaredTags, VaultSchema,
+    Breach, FieldType, FindingIdentity, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape,
+    TypedValue, UndeclaredTags, VaultSchema,
 };
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
-    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, LinkAnchor,
-    LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource, TypedOrder,
+    DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, HeldBlock,
+    LinkAnchor, LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource,
+    TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{
@@ -803,6 +804,13 @@ pub(crate) struct PlannedFinding {
     /// canonical JSON. `None` for every other cause and for a breach naming
     /// no value.
     pub(crate) value: Option<String>,
+    /// What tells a rule breach from another as the write gate compares a
+    /// plan's result with what stood before it: its kind, field, offending
+    /// value and combined constraint, the last by value
+    /// ([`norn_config::schema::FindingIdentity`]). `None` for every other
+    /// cause, which the gate tells apart by its kind and target. Never
+    /// filed: the store keys a finding by its kind, field and value.
+    pub(crate) identity: Option<FindingIdentity>,
 }
 
 impl PlannedFinding {
@@ -817,6 +825,7 @@ impl PlannedFinding {
             severity: cause.severity(),
             rules: BTreeSet::new(),
             value: None,
+            identity: None,
         }
     }
 }
@@ -962,6 +971,71 @@ fn plan_rule_judgment(
     (findings, work)
 }
 
+/// Judge the document at `subject` whose frontmatter block came to `block`
+/// against the vault schema's field declarations and rules, as
+/// [`plan_document`] judges one from its bytes: the rule findings it files,
+/// and the work that cost. A block nothing read is judged against nothing,
+/// as there.
+///
+/// **What the write gate judges a carried document by.** A document a move
+/// carries byte for byte is judged again at its destination, since a rule's
+/// path selectors and allowed paths read where it stands, and the gate reads
+/// its block from the store's projection where the index vouches for it
+/// ([`norn_store::Snapshot::held_frontmatter`]) and from its bytes
+/// ([`frontmatter_block`]) where it does not, so this is the one judgment
+/// either reading meets. Every other finding a document's bytes conclude is
+/// a function of its bytes alone, the same wherever it stands.
+pub(crate) fn judge_block(
+    subject: &DocumentPath,
+    block: &HeldBlock,
+    declared: &Declared,
+    case: CaseFold,
+) -> (Vec<PlannedFinding>, RuleWork) {
+    let frontmatter = match block {
+        HeldBlock::Read(value) => Some(value),
+        HeldBlock::None => None,
+        HeldBlock::Unread => return (Vec::new(), RuleWork::default()),
+    };
+    plan_rule_judgment(
+        Path::new(subject.as_str()),
+        subject,
+        frontmatter,
+        declared.schema(),
+        case,
+    )
+}
+
+/// What the frontmatter block of the document `bytes` spell came to, read as
+/// a derivation reads it ([`map_document`]); `None` where the bytes decode as
+/// no document.
+pub(crate) fn frontmatter_block(bytes: &[u8]) -> Option<HeldBlock> {
+    let source = document_source(bytes).ok()?;
+    let document = parsed(source);
+    Some(if document.frontmatter_refusal().is_some() {
+        HeldBlock::Unread
+    } else {
+        match document.frontmatter() {
+            Some(value) => HeldBlock::Read(map_value(value)),
+            None => HeldBlock::None,
+        }
+    })
+}
+
+/// The fields the frontmatter of the document `bytes` spell writes, as a
+/// written value holds them and rule judgment reads them: none where it
+/// carries no block, and `None` where its fields cannot be read — the bytes
+/// decode as no document, its block is one nothing read, or the block's top
+/// level is no map. What `new` at a bare path takes as the caller's values
+/// beneath which the rule defaults fill.
+pub(crate) fn written_fields(bytes: &[u8]) -> Option<ValueMap> {
+    match frontmatter_block(bytes)? {
+        // An empty block reads as null: it holds no field.
+        HeldBlock::None | HeldBlock::Read(FrontmatterValue::Null) => Some(ValueMap::default()),
+        HeldBlock::Read(value @ FrontmatterValue::Map(_)) => Some(authored_fields(Some(&value))),
+        HeldBlock::Read(_) | HeldBlock::Unread => None,
+    }
+}
+
 /// The planned finding a rule judgment's `finding` is filed as.
 fn rule_finding(path: &Path, subject: &DocumentPath, finding: RuleFinding) -> PlannedFinding {
     PlannedFinding {
@@ -972,6 +1046,7 @@ fn rule_finding(path: &Path, subject: &DocumentPath, finding: RuleFinding) -> Pl
         severity: finding.severity(),
         rules: finding.rules().iter().cloned().collect(),
         value: finding.value().and_then(stored_spelling),
+        identity: Some(finding.identity().clone()),
     }
 }
 

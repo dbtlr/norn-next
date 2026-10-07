@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use norn_fs::{PathNormalizer, Refusal, ShadowHome, Staging};
-use norn_store::LinkFact;
+use norn_store::{HeldBlock, LinkFact};
 use norn_wire::{
     DocumentPath, FileState, LinkAdvisory, OperationKind, PlanCondition, PlanFault, RefusedCheck,
     ResolvedPlan, SchemaViolation, Transition,
@@ -20,14 +20,16 @@ use super::observe::{
 };
 use super::place::{Ground, Landing};
 use super::recompose::{Recomposed, disagreement, recompose};
-use super::schema;
+use super::schema::{self, Citations};
 use super::shape::shape_disagrees;
 use crate::derivation::Declared;
-use crate::derivation::document_links;
+use crate::derivation::{document_links, frontmatter_block};
 use crate::planner::compose::{After, Composition};
 use crate::planner::control::role_at;
 use crate::planner::lineage::Lineage;
-use crate::planner::links::{Holding, LinkIndex, Target, change_set, entry_key, vouched};
+use crate::planner::links::{
+    Holding, LinkIndex, Target, change_set, entry_key, vouched, vouched_block,
+};
 use crate::planner::view::{Body, Entry, TreeView, VaultView, wire_hash};
 use crate::refusal::PageRefused;
 
@@ -53,7 +55,7 @@ pub(super) struct StagedPlan {
 ///
 /// **Plain data.** The unit names the plan's transitions by index, and the
 /// kernel's record names the target, its root, its transition's hashes and
-/// its shadow; neither holds a handle or a byte of content (ADR 0032).
+/// its shadow; neither holds a handle or a byte of content (ADR 0037).
 #[derive(Debug)]
 pub(super) struct StagedTarget {
     pub(super) unit: Unit,
@@ -71,7 +73,7 @@ pub(super) enum Held {
 }
 
 /// When a publication runs: creates first, then replaces (a respell among
-/// them), then removals (ADR 0032).
+/// them), then removals (ADR 0037).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum Phase {
     Create,
@@ -178,8 +180,9 @@ pub(super) fn check_and_stage(
     view: &TreeView,
     declared: &Declared,
     links: Links<'_>,
+    citations: &mut Citations,
 ) -> Result<StagedPlan, Stop> {
-    let checked = check(plan, view, declared, links).map_err(Stop::from)?;
+    let checked = check(plan, view, declared, links, citations).map_err(Stop::from)?;
     stage(ground, shadows, plan, view.normalizer(), checked)
 }
 
@@ -240,8 +243,10 @@ pub(super) enum Written {
 /// operations, run again from the before-states, are exactly the plan's
 /// transitions ([`recompose`]); the plan's resolution change set, computed
 /// again from those results through `links` ([`link_checks`]), is exactly the
-/// one it records; and every result passes the vault schema, or, for a forced
-/// plan, has each violation it introduces listed rather than refused. A plan
+/// one it records; and every result introduces no schema violation, or, for a
+/// forced plan, has each violation it introduces listed rather than refused,
+/// each citing its rules through `citations`, the numbering of the response
+/// this judgment answers in. A plan
 /// whose shape, target places, recorded decoding or
 /// recomposition fail is not what its operations do: its own
 /// shape is wrong, and it stops as [`PlanFault::TransitionsDisagree`] naming
@@ -260,6 +265,7 @@ pub(super) fn check<V: VaultView>(
     view: &V,
     declared: &Declared,
     links: Links<'_>,
+    citations: &mut Citations,
 ) -> Result<Checked, Unfit>
 where
     V::Error: std::fmt::Display,
@@ -331,16 +337,17 @@ where
     let skipped = std::mem::take(&mut composition.skipped);
     let kept = std::mem::take(&mut composition.kept);
     drop(composition);
-    let copied = copied_links(plan, &units, &contents, &states, view, links)?;
+    let judges_place = declared.schema().reads_document_paths();
+    let carried = carried_readings(plan, &units, &contents, &states, view, links, judges_place)?;
     let mut after: Vec<Option<Holding<'_>>> = vec![None; plan.transitions.len()];
-    for ((unit, content), links) in units.iter().zip(&contents).zip(&copied) {
+    for ((unit, content), reading) in units.iter().zip(&contents).zip(&carried) {
         let written = match unit {
             Unit::One(index) => *index,
             Unit::Respell { new, .. } => *new,
         };
-        after[written] = match (content, links) {
+        after[written] = match (content, reading) {
             (Some(Written::Bytes(bytes)), _) => Some(Holding::Bytes(bytes)),
-            (Some(Written::Copy { .. }), Some(links)) => Some(Holding::Links(links)),
+            (Some(Written::Copy { .. }), Some(reading)) => Some(Holding::Links(&reading.links)),
             _ => None,
         };
     }
@@ -397,18 +404,11 @@ where
         normalizer,
         declared,
     };
-    let violations = schema.violations(&units, &contents);
+    let violations = schema.violations(&units, &contents, &carried, citations);
     let forced = if plan.force {
         violations
     } else {
-        checks.extend(violations.into_iter().map(|violation| {
-            RefusedCheck::schema_violation(
-                violation.path,
-                violation.kind,
-                violation.target,
-                violation.message,
-            )
-        }));
+        checks.extend(violations.into_iter().map(RefusedCheck::violation));
         Vec::new()
     };
     if !checks.is_empty() {
@@ -541,7 +541,7 @@ pub(super) fn drifted_checks(plan: &ResolvedPlan, states: &[TargetState]) -> Vec
 /// set holds that it does not record is unrecorded. A content condition is
 /// not an entry, and is judged on its own.
 ///
-/// **The set is exact** (ADR 0032): a link whose resolution the vault outside
+/// **The set is exact** (ADR 0037): a link whose resolution the vault outside
 /// the plan moved since planning — a document created or removed there that
 /// a recorded link now names, or a new link to a document the plan moves —
 /// refuses the plan, and the refusal's fresh plan records the set as it
@@ -580,35 +580,47 @@ fn link_checks(recorded: &[PlanCondition], recomputed: &[PlanCondition]) -> Vec<
     checks
 }
 
-/// The links each written target of `units` that publishes a copy holds
-/// after the plan, by position, read without its body; `None` for every
-/// other target.
+/// What the check reads of a document a move carries byte for byte: the
+/// links it holds, and — where a schema rule reads where a document stands —
+/// what its frontmatter block came to, which the schema check judges at the
+/// place it leaves and the place it lands ([`Judging::violations`]).
+struct CarriedReading {
+    links: Vec<LinkFact>,
+    /// `None` where no rule reads a document's place, or where the carried
+    /// bytes decode as no document, which is judged alike wherever it
+    /// stands.
+    block: Option<HeldBlock>,
+}
+
+/// What each written target a move carries byte for byte holds, by unit: its
+/// links, and its frontmatter block where `judges_place` says a rule reads
+/// where a document stands; `None` for every other unit.
 ///
-/// **Read where planning read them** ([`vouched`]): the index's links of the
-/// copy's source, where it holds them at the hash the copy publishes — or of
-/// the target, where a re-sent plan's copy already landed and the index took
-/// it in there. Where the index holds neither at that hash — it lags the
-/// file, as planning may have met it, or has half taken in a landing — the
-/// file standing at that hash is read whole, one copy, and its links read
-/// from its bytes, as planning reads them where its index lags: a check
-/// never refuses a plan for what its index has not yet seen, so a re-sent
-/// plan finishes (ADR 0032). A file no longer at that hash is drift.
-fn copied_links<V: VaultView>(
+/// **The index first, the file once.** The links and the block are read from
+/// the store's index where it vouches for them — derived from the very bytes
+/// the plan carries, by hash ([`vouched`], [`vouched_block`]) — at the
+/// source's spelling or, for a re-sent plan, the destination's. Where it
+/// does not vouch for both, the file is read whole once at the plan's hash,
+/// and both are read from those bytes: the one copy a move the index lags
+/// holds, a declared limit. A carried move the index vouches for holds no
+/// copy of its document, only the projection of its frontmatter.
+fn carried_readings<V: VaultView>(
     plan: &ResolvedPlan,
     units: &[Unit],
     contents: &[Option<Written>],
     states: &[TargetState],
     view: &V,
     links: Links<'_>,
-) -> Result<Vec<Option<Vec<LinkFact>>>, Unfit>
+    judges_place: bool,
+) -> Result<Vec<Option<CarriedReading>>, Unfit>
 where
     V::Error: std::fmt::Display,
 {
     let index_of = transition_index(plan, view.normalizer());
-    let mut copied = Vec::with_capacity(units.len());
+    let mut carried = Vec::with_capacity(units.len());
     for (unit, content) in units.iter().zip(contents) {
         let Some(Written::Copy { source, state }) = content else {
-            copied.push(None);
+            carried.push(None);
             continue;
         };
         let written = &plan.transitions[match unit {
@@ -616,33 +628,46 @@ where
             Unit::Respell { new, .. } => *new,
         }]
         .path;
+        let wants_block = judges_place && state.is_document();
         let mut held = None;
+        let mut block = None;
         for at in [source, written] {
             if held.is_none() {
                 held = vouched(at, state, links).map_err(Unfit::Unread)?;
+                if held.is_some() && wants_block {
+                    block = vouched_block(at, state, links).map_err(Unfit::Unread)?;
+                }
             }
         }
-        if held.is_none() {
-            // The source where this apply still sees it at that hash, else
-            // the target the copy landed at.
-            let seen = identity(view.normalizer(), source.as_str())
-                .and_then(|file| index_of.get(&file))
-                .is_some_and(|&index| matches!(states[index], TargetState::AtBefore(Some(_))));
-            let at = if seen { source } else { written };
-            held = Some(read_links(at, state, view)?);
-        }
-        copied.push(held);
+        let reading = match held {
+            Some(links) if block.is_some() || !wants_block => CarriedReading { links, block },
+            _ => {
+                // The source where this apply still sees it at that hash,
+                // else the target the copy landed at.
+                let seen = identity(view.normalizer(), source.as_str())
+                    .and_then(|file| index_of.get(&file))
+                    .is_some_and(|&index| matches!(states[index], TargetState::AtBefore(Some(_))));
+                let at = if seen { source } else { written };
+                let (links, read) = read_carried(at, state, view)?;
+                CarriedReading {
+                    links,
+                    block: read.filter(|_| wants_block),
+                }
+            }
+        };
+        carried.push(Some(reading));
     }
-    Ok(copied)
+    Ok(carried)
 }
 
-/// The links the document at `at` holds, read from its bytes whole where it
-/// stands at `state`; drift where it holds anything else.
-fn read_links<V: VaultView>(
+/// The links and the frontmatter block of the document at `at`, read from
+/// its bytes whole where it stands at `state`; drift where it holds anything
+/// else. The block is `None` where the bytes decode as no document.
+fn read_carried<V: VaultView>(
     at: &DocumentPath,
     state: &FileState,
     view: &V,
-) -> Result<Vec<LinkFact>, Unfit>
+) -> Result<(Vec<LinkFact>, Option<HeldBlock>), Unfit>
 where
     V::Error: std::fmt::Display,
 {
@@ -658,7 +683,9 @@ where
             at: spelled,
             hash,
             body: Body::Held(bytes),
-        } if spelled == *at && state.hash() == Some(&hash) => Ok(document_links(&bytes)),
+        } if spelled == *at && state.hash() == Some(&hash) => {
+            Ok((document_links(&bytes), frontmatter_block(&bytes)))
+        }
         Entry::Document {
             at: spelled,
             hash,
@@ -747,34 +774,55 @@ impl Judging<'_> {
     ///
     /// **Each result is judged against the document its content came from**:
     /// its own before-state where it is edited in place, the moved document's
-    /// where a move carried it, and nothing where an operation wrote it.
+    /// where a move carried it, and nothing where an operation wrote it. A
+    /// result refuses each violation whose identity no such document carried
+    /// ([`schema::introduced`]), and no other, whatever fields the plan
+    /// writes into it.
     ///
-    /// **The fields written into a result** are those the plan's frontmatter
-    /// kinds write at its path, or at the path its content came from, since
-    /// an operation composes on the document before or after a move carries
-    /// it.
-    ///
-    /// **A carried document is not judged again.** Its bytes are the moved
-    /// document's own, unchanged, and the vault schema concludes about a
-    /// document from its path only through the path grammar
-    /// (`crate::derivation::map_document`'s `document_path`), which the
-    /// destination already passes as a document path; its tags rules are
-    /// vault-wide, and no write judges a schema rule yet. So what the moved
-    /// document violates at its destination is what it violated where it
-    /// stood, and the violations it introduces are none by construction. The
-    /// schema rules' path selectors and allowed paths make this judgment
-    /// necessary again — the same bytes can violate a rule at one path and not
-    /// another — and the write gate that judges rules (NORN-359) judges a
-    /// carried move at its destination.
-    fn violations(&self, units: &[Unit], contents: &[Option<Written>]) -> Vec<SchemaViolation> {
+    /// **A carried document is judged again at its destination, on its
+    /// frontmatter alone** — against the schema rules and the field
+    /// declarations, though a declaration's type or shape finding cannot
+    /// change with the path. Its bytes are the moved document's own,
+    /// unchanged, and every finding they conclude but a rule's is a function
+    /// of the bytes, the same wherever they stand. A rule's `match.path`,
+    /// `exclude.path` and `allowed_paths` read where a document stands, so the
+    /// same bytes can breach a rule at one place and not another: where the
+    /// schema states such a rule, the carried document's frontmatter block
+    /// ([`CarriedReading`]) is judged at the place it leaves and the place it
+    /// lands ([`crate::derivation::judge_block`]), and each violation whose
+    /// identity the destination introduces refuses, a changed combined
+    /// constraint included. Where no rule reads a place, nothing is judged
+    /// again.
+    fn violations(
+        &self,
+        units: &[Unit],
+        contents: &[Option<Written>],
+        carried: &[Option<CarriedReading>],
+        citations: &mut Citations,
+    ) -> Vec<SchemaViolation> {
         let index_of = transition_index(self.plan, self.normalizer);
-        let written_fields = schema::written_fields(self.plan, self.normalizer);
         let case = crate::stored_path_order(self.normalizer.case_sensitivity()).glob_case();
-        let no_field = BTreeSet::new();
         let mut checks = Vec::new();
-        for (unit, content) in units.iter().zip(contents) {
-            let Some(Written::Bytes(after)) = content else {
-                continue;
+        for ((unit, content), reading) in units.iter().zip(contents).zip(carried) {
+            let after = match content {
+                Some(Written::Bytes(after)) => after,
+                Some(Written::Copy { source, .. }) => {
+                    let written = match *unit {
+                        Unit::One(index) | Unit::Respell { new: index, .. } => index,
+                    };
+                    if !matches!(self.states[written], TargetState::AtBefore(_)) {
+                        continue;
+                    }
+                    if let Some(block) = reading.as_ref().and_then(|reading| reading.block.as_ref())
+                    {
+                        let path = &self.plan.transitions[written].path;
+                        let before = schema::judge_block(source, block, self.declared, case);
+                        let after = schema::judge_block(path, block, self.declared, case);
+                        checks.extend(schema::introduced(path, after, &[before], citations));
+                    }
+                    continue;
+                }
+                None => continue,
             };
             let (source, written) = match *unit {
                 Unit::One(index) => (index, index),
@@ -795,12 +843,6 @@ impl Judging<'_> {
             let drawn_from = source
                 .as_ref()
                 .and_then(|source| index_of.get(source).copied());
-            let fields: BTreeSet<String> = [file.as_ref(), source.as_ref()]
-                .into_iter()
-                .flatten()
-                .flat_map(|file| written_fields.get(file).unwrap_or(&no_field))
-                .cloned()
-                .collect();
             let before: Vec<schema::Judged> = drawn_from
                 .and_then(|index| match &self.states[index] {
                     TargetState::AtBefore(Some(Body::Held(bytes))) => Some(schema::judge(
@@ -814,7 +856,7 @@ impl Judging<'_> {
                 .into_iter()
                 .collect();
             let after = schema::judge(path, after, self.declared, case);
-            checks.extend(schema::introduced(path, &after, &before, &fields));
+            checks.extend(schema::introduced(path, after, &before, citations));
         }
         checks
     }

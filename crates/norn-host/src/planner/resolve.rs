@@ -61,7 +61,7 @@ impl<E> PlanningFailure<E> {
 ///
 /// **`met` is what a refresh already landed.** A refused apply's fresh plan
 /// drops every operation whose targets all hold their after-states and
-/// re-resolves the rest (ADR 0032), so an operation that remains may require
+/// re-resolves the rest (ADR 0037), so an operation that remains may require
 /// one that was dropped. `met` names those: a requirement on one is
 /// satisfied, orders nothing, and is left off the operation the resolved plan
 /// carries, so the fresh plan is a whole plan that can be sent back as it is.
@@ -98,7 +98,7 @@ pub(crate) fn resolve_leaving_out<V: VaultView, I: LinkIndex + ?Sized>(
     // an operation arriving with one is no operation its caller authored: a
     // refusal's refresh hands planning its operations without the cascades
     // they carried, and nothing else may hand planning one. A plan that
-    // writes a control file changes nothing else (ADR 0032), so one beside a
+    // writes a control file changes nothing else (ADR 0037), so one beside a
     // document operation is refused before anything is read.
     if let Some(fault) = authored
         .misplaced_cascades()
@@ -359,7 +359,7 @@ fn read_carried_links<V: VaultView, I: LinkIndex + ?Sized>(
 /// it stands rather than as a before-state.
 ///
 /// **A condition is judged as the vault stands at the plan's after-state**
-/// (ADR 0032): on a file the plan writes, against the before-state the plan
+/// (ADR 0037): on a file the plan writes, against the before-state the plan
 /// reads there, which it checks; on a file it does not write, against the file
 /// as it stands now, which the plan does not change.
 fn failures<V: VaultView>(
@@ -1149,7 +1149,7 @@ mod tests {
     }
 
     /// **A plan that changes a vault control file changes nothing else**
-    /// (ADR 0032): a control-file write beside a document operation refuses
+    /// (ADR 0037): a control-file write beside a document operation refuses
     /// the plan as a fault in its shape, naming the control-file write.
     #[test]
     fn a_control_file_write_beside_a_document_operation_refuses_the_plan() {

@@ -1,6 +1,6 @@
 //! The defaults fixpoint ([`VaultSchema::fill_rule_defaults`]): the rule
 //! defaults a created document takes for the required fields its caller and
-//! its creation rule left missing.
+//! its creation rule left out.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -8,8 +8,8 @@ use std::fmt;
 use norn_wire::{AuthoredValue, Binding, Captures, CaseFold, ValueMap};
 
 use super::super::VaultSchema;
-use super::super::template::LocalTimestamp;
-use super::{Rule, RuleDefault, is_missing, named, value_in};
+use super::super::template::{LocalTimestamp, NotALocalTimestamp};
+use super::{Rule, RuleDefault, RuleWork, named, value_in};
 
 /// One value proposed for a field, and the rules proposing it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +67,9 @@ pub enum RuleDefaultsRefusal {
         /// Two of the bindings.
         bindings: Box<[Captures; 2]>,
     },
+    /// A clock-reading default was proposed or had to be compared, and the
+    /// clock gives no reading a default can fill.
+    NoClockReading(NotALocalTimestamp),
 }
 
 impl fmt::Display for RuleDefaultsRefusal {
@@ -112,6 +115,10 @@ impl fmt::Display for RuleDefaultsRefusal {
                     spelled(&bindings[1])
                 )
             }
+            RuleDefaultsRefusal::NoClockReading(unread) => write!(
+                formatter,
+                "the clock cannot be read as a local time the rule defaults can fill: {unread}"
+            ),
         }
     }
 }
@@ -124,9 +131,18 @@ impl VaultSchema {
     /// the order filled; or why they do not settle ([ADR 0035]). See
     /// [`VaultSchema::selects`] for `case`.
     ///
+    /// **Only an absent field is filled.** A key `frontmatter` holds is its
+    /// caller's — the creation's caller or its creation rule — null
+    /// included: a caller omits a key to take its default and sends null to
+    /// ask for no value, which the write gate then judges, a required field
+    /// held null refusing as missing. A caller that wants a null field
+    /// filled, as repair would, leaves the key out: a null and an absent key
+    /// select alike, and judge alike except for `forbidden`, which a null
+    /// breaches by the key's presence.
+    ///
     /// Each **round** matches rules against the frontmatter composed so far
-    /// and fills every required field still missing — absent or null — whose
-    /// selecting rules' defaults all agree as filled values. **Two filled
+    /// and fills every required field still absent whose selecting rules'
+    /// defaults all agree as filled values. **Two filled
     /// values agree only where they are one written value**: `1` and `1.0`
     /// are an integer and a float, which write different bytes into the
     /// document, so they disagree though a `number` field compares them
@@ -146,28 +162,46 @@ impl VaultSchema {
     /// could bring in rules whose own defaults then disagree, a conflict the
     /// document never had. A conflict names each conflicting field and every
     /// candidate value with the rules proposing it. The caller's values and
-    /// its creation rule's are never judged again and never overwritten; a
-    /// null is no value, so a field either writes as null is missing and
-    /// filled. A required field nothing defaults stays missing, which is the
-    /// write gate's to refuse, not this.
+    /// its creation rule's are never judged again and never overwritten. A
+    /// required field nothing defaults stays missing, which is the write
+    /// gate's to refuse, not this.
     ///
-    /// **One clock reading, `at`, fills every default**, and each
-    /// `{{path.<name>}}` reads what its own rule's `match.path` bound in
-    /// `path`. A default read from a capture the match binds several ways is
-    /// refused, naming two of the bindings.
+    /// **One clock reading serves every default**: `clock` is read the first
+    /// time a default reading `{{now}}`, `{{date}}` or `{{time}}` is proposed
+    /// for a field, or is compared with a filled value at the settled
+    /// re-check, and at most once. It is read before the field is known to
+    /// conflict, because deciding whether a clock default agrees with another
+    /// default needs the reading: `2026-10-07` can equal `{{date}}`. A
+    /// creation where no clock-reading default is proposed or compared never
+    /// reads the clock. A clock giving no reading refuses the defaults naming
+    /// the clock — even where the field would otherwise have been a conflict.
+    /// Each `{{path.<name>}}` reads
+    /// what its own rule's `match.path` bound in `path`. A default read from
+    /// a capture the match binds several ways is refused, naming two of the
+    /// bindings.
     ///
-    /// **A dormant carrier.** Its consumer is `new` and inbox capture, which
-    /// take the fixpoint with NORN-359; the current call graph reaches it
-    /// from no write, because no write fills rule defaults yet.
+    /// **Its work is tallied in `work`** ([`RuleWork`]), refused or not:
+    /// every rule evaluated in each round and at the re-check, with the
+    /// selector terms, bytes and glob characters doing so read, the rules
+    /// each selected, the rounds, the fields filled and the path bindings
+    /// taken. A round matches every rule once, so the rules evaluated are
+    /// the rule count times one more than the rounds.
+    ///
+    /// **Its consumer is every creation**: `new` by a creation rule, inbox
+    /// capture and `new` at a bare path, which `norn-host`'s planner fills
+    /// from it, its refusals answered as structured unresolved reasons.
     ///
     /// [ADR 0035]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md
     pub fn fill_rule_defaults(
         &self,
         frontmatter: &ValueMap,
         path: &str,
-        at: LocalTimestamp,
+        clock: &mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
         case: CaseFold,
+        work: &mut RuleWork,
     ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
+        let mut at = Reading { clock, read: None };
+        let at = &mut at;
         let mut composed: Vec<(String, AuthoredValue)> = frontmatter.entries().to_vec();
         let mut filled: Vec<(String, AuthoredValue)> = Vec::new();
         let mut bindings: BTreeMap<&str, Captures> = BTreeMap::new();
@@ -182,20 +216,22 @@ impl VaultSchema {
         let mut rounds = 0;
         loop {
             rounds += 1;
+            work.defaults_rounds += 1;
             debug_assert!(rounds <= defaulted + 1, "the rounds outran their bound");
             let mut proposed: BTreeMap<&str, Vec<DefaultCandidate>> = BTreeMap::new();
             for rule in self.rules.values() {
-                if !self.selects_in(rule, path, &composed, case) {
+                if !self.selects_counted(rule, path, &composed, case, work) {
                     continue;
                 }
+                work.rules_selected += 1;
                 for (field, default) in &rule.required {
                     let Some(default) = default else {
                         continue;
                     };
-                    if !is_missing(value_in(&composed, field)) {
+                    if value_in(&composed, field).is_some() {
                         continue;
                     }
-                    let value = fill(rule, field, default, path, at, case, &mut bindings)?;
+                    let value = fill(rule, field, default, path, at, case, &mut bindings, work)?;
                     propose(proposed.entry(field).or_default(), value, &rule.name);
                 }
             }
@@ -208,11 +244,9 @@ impl VaultSchema {
             }
             for (field, mut candidates) in proposed {
                 let value = candidates.remove(0).value;
-                match composed.iter_mut().find(|(held, _)| held == field) {
-                    Some((_, held)) => *held = value.clone(),
-                    None => composed.push((field.to_string(), value.clone())),
-                }
+                composed.push((field.to_string(), value.clone()));
                 filled.push((field.to_string(), value));
+                work.defaults_filled += 1;
             }
         }
 
@@ -220,9 +254,10 @@ impl VaultSchema {
         // every rule matching it.
         let mut judged: BTreeMap<&str, Vec<DefaultCandidate>> = BTreeMap::new();
         for rule in self.rules.values() {
-            if !self.selects_in(rule, path, &composed, case) {
+            if !self.selects_counted(rule, path, &composed, case, work) {
                 continue;
             }
+            work.rules_selected += 1;
             for (field, value) in &filled {
                 let Some(Some(default)) = rule.required.get(field) else {
                     continue;
@@ -233,7 +268,7 @@ impl VaultSchema {
                         rules: Vec::new(),
                     }]
                 });
-                let proposal = fill(rule, field, default, path, at, case, &mut bindings)?;
+                let proposal = fill(rule, field, default, path, at, case, &mut bindings, work)?;
                 propose(candidates, proposal, &rule.name);
             }
         }
@@ -245,21 +280,52 @@ impl VaultSchema {
     }
 }
 
-/// `default` filled at `at`, its captures read from what `rule`'s match binds
-/// in `path`, each rule's binding found once.
+/// The clock a fixpoint fills its defaults from, read the first time a
+/// clock-reading default is proposed for a field or compared with a filled
+/// value, and kept from then on.
+struct Reading<'c> {
+    clock: &'c mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
+    read: Option<LocalTimestamp>,
+}
+
+impl Reading<'_> {
+    /// The one reading, taken now where none is yet.
+    fn taken(&mut self) -> Result<LocalTimestamp, RuleDefaultsRefusal> {
+        match self.read {
+            Some(at) => Ok(at),
+            None => {
+                let at = (self.clock)().map_err(RuleDefaultsRefusal::NoClockReading)?;
+                self.read = Some(at);
+                Ok(at)
+            }
+        }
+    }
+}
+
+/// `default` filled from `at` where it reads the clock, its captures read
+/// from what `rule`'s match binds in `path`, each rule's binding found once
+/// and tallied in `work`.
+#[allow(clippy::too_many_arguments)] // One fill's whole context: splitting it would only rename the arguments.
 fn fill<'s>(
     rule: &'s Rule,
     field: &str,
     default: &RuleDefault,
     path: &str,
-    at: LocalTimestamp,
+    at: &mut Reading<'_>,
     case: CaseFold,
     bindings: &mut BTreeMap<&'s str, Captures>,
+    work: &mut RuleWork,
 ) -> Result<AuthoredValue, RuleDefaultsRefusal> {
+    let at = if default.reads_clock() {
+        Some(at.taken()?)
+    } else {
+        None
+    };
     let captures = if default.reads_captures() {
         match bindings.get(rule.name.as_str()) {
             Some(captures) => captures.clone(),
             None => {
+                work.captures_bound += 1;
                 let captures = match rule
                     .selector
                     .path

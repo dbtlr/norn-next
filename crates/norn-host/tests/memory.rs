@@ -721,6 +721,30 @@ const PLAN_RELINKED_TARGET: &str = "memory-plan-relink-target.md";
 const PLAN_DERIVED_LARGE: &str = "memory-plan-derived-large/memory-plan-derived.md";
 const PLAN_DERIVED_SMALL: &str = "memory-plan-derived-small/memory-plan-derived.md";
 
+/// Where the documents of the frontmatter pair stand before their moves and
+/// where each is moved to: the same body under a frontmatter block of
+/// [`PLAN_FRONTMATTER_SMALL_BYTES`] and of [`PLAN_FRONTMATTER_LARGE_BYTES`].
+/// Each of the large document's paths is the length of the small one's.
+const PLAN_FM_LARGE_FROM: &str = "memory-plan-fm-large/memory-plan-fm.md";
+const PLAN_FM_LARGE_TO: &str = "memory-plan-fm-large-moved/memory-plan-fm.md";
+const PLAN_FM_SMALL_FROM: &str = "memory-plan-fm-small/memory-plan-fm.md";
+const PLAN_FM_SMALL_TO: &str = "memory-plan-fm-small-moved/memory-plan-fm.md";
+
+/// How many bytes the frontmatter block of the large and the small document
+/// of the frontmatter pair holds: the large one near the bound the text
+/// layer reads a block to (`norn_text::FRONTMATTER_MAX_BYTES`, 16 KiB).
+const PLAN_FRONTMATTER_LARGE_BYTES: usize = 12 * 1024;
+const PLAN_FRONTMATTER_SMALL_BYTES: usize = 64;
+
+/// The vault schema the size child is attached under: one rule reading every
+/// document's path and breached by none, so every carried move the child
+/// previews is judged again where it lands, from the store's projection of
+/// the moved document's frontmatter.
+const SIZE_SCHEMA: &str = "version: 1
+rules:
+  everywhere: { match: { path: '**' }, forbidden: { memory_plan_never: } }
+";
+
 /// What each planned write of the planning child writes, as the apply
 /// answers its targets: the set's matches, the hub with its in-links' rewrites
 /// and its new place, and the deleted document.
@@ -746,9 +770,11 @@ const SIZE_WRITES: [(&str, usize); 4] = [
 ];
 
 /// The heap stretches the size child measures.
-const SIZE_STRETCHES: [&str; 8] = [
+const SIZE_STRETCHES: [&str; 10] = [
     "move-preview-small",
     "move-preview-large",
+    "frontmatter-move-preview-small",
+    "frontmatter-move-preview-large",
     "relink-preview-small",
     "relink-preview-large",
     "move-apply-small",
@@ -758,7 +784,7 @@ const SIZE_STRETCHES: [&str; 8] = [
 ];
 
 /// How many documents [`plant_size_subjects`] plants.
-const SIZE_PLANTED: usize = 2 + 4;
+const SIZE_PLANTED: usize = 2 + 4 + 2;
 
 /// One kind of planning child: the case it re-executes, the subjects planted
 /// before it attaches, the writes it lands, the heap stretches it measures,
@@ -830,8 +856,18 @@ fn plant_plan_subjects(vault: &attach::Vault) {
 /// document the relinking pair moves, each beside the one it links to.
 fn plant_size_subjects(vault: &attach::Vault) {
     let plant = |at: &str, content: &[u8]| plant(vault, at, content);
+    std::fs::write(vault.path().join(".norn/schema.yaml"), SIZE_SCHEMA)
+        .expect("writing the size child's schema");
     plant(PLAN_LARGE_FROM, &unlinked_body(PLAN_LARGE_BODY_BYTES));
     plant(PLAN_SMALL_FROM, &unlinked_body(PLAN_SMALL_BODY_BYTES));
+    plant(
+        PLAN_FM_LARGE_FROM,
+        &fronted_body(PLAN_FRONTMATTER_LARGE_BYTES),
+    );
+    plant(
+        PLAN_FM_SMALL_FROM,
+        &fronted_body(PLAN_FRONTMATTER_SMALL_BYTES),
+    );
     for (from, bytes) in [
         (PLAN_RELINK_LARGE_FROM, PLAN_LARGE_BODY_BYTES),
         (PLAN_RELINK_SMALL_FROM, PLAN_SMALL_BODY_BYTES),
@@ -842,6 +878,22 @@ fn plant_size_subjects(vault: &attach::Vault) {
             .expect("a relinking document's folder");
         plant(&format!("{folder}/{PLAN_RELINKED_TARGET}"), b"linked\n");
     }
+}
+
+/// A document whose frontmatter block holds `bytes` bytes, fences included,
+/// in fields of one short value each, above one short body line naming no
+/// link: a block of many fields, so its projection's value tree is as large
+/// as a block of that size makes one.
+fn fronted_body(bytes: usize) -> Vec<u8> {
+    let mut block = String::from("---\n");
+    let mut field = 0;
+    while block.len() + "memory_plan_f00000: v\n---\n".len() <= bytes {
+        block.push_str(&format!("memory_plan_f{field:05}: v\n"));
+        field += 1;
+    }
+    block.push_str("---\n");
+    block.push_str("a plain line of body text\n");
+    block.into_bytes()
 }
 
 /// A document of exactly `bytes` bytes whose body opens with a relative
@@ -1029,6 +1081,60 @@ fn previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_on
         reading.heap("move-preview-small"),
         reading.heap("move-preview-large"),
         baselines::PLAN_MOVE_PREVIEW_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES,
+    );
+}
+
+/// **Previewing a carried move judged again where it lands holds its
+/// document's frontmatter projection and no more**, as a difference in heap
+/// bytes between previewing the move of a document whose frontmatter block
+/// is large and of one whose block is small, their bodies alike.
+///
+/// The size child attaches under [`SIZE_SCHEMA`], whose one rule reads every
+/// document's path, so every move it previews is judged again at its
+/// destination from the store's projection of the moved document's
+/// frontmatter, which the index vouches for. Right after the byte-identical
+/// pair it previews the move of a document with a frontmatter block of
+/// [`PLAN_FRONTMATTER_SMALL_BYTES`] and of one of
+/// [`PLAN_FRONTMATTER_LARGE_BYTES`], each under its own mark on a settled
+/// heap. A preview holding the projection, its value tree and the judged
+/// frontmatter at once reads a few times the block's difference more for the
+/// large document, as
+/// [`PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES`](baselines::PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES)
+/// records; [`previewing_a_move_holds_no_more_heap_for_a_large_document_than_for_a_small_one`]
+/// holds, under the same schema, that the judgment holds no copy of the
+/// body.
+#[test]
+#[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
+fn previewing_a_carried_move_holds_its_frontmatter_projection_and_no_more() {
+    let reading = plan_child("size-frontmatter-preview", "realistic", &SIZING);
+    let small = reading.heap("frontmatter-move-preview-small");
+    let large = reading.heap("frontmatter-move-preview-large");
+    let growth = large.saturating_sub(small);
+    let allowance = baselines::PLAN_MOVE_FRONTMATTER_SIZE_HEAP_GROWTH_ALLOWANCE_BYTES;
+    baselines::record(
+        "heap previewing a carried move judged again raised above its mark, a large \
+         frontmatter block against a small one",
+        &[
+            ("small, 64-byte block (bytes)", small.to_string()),
+            ("large, 12 KiB block (bytes)", large.to_string()),
+            (
+                "large minus small (bytes)",
+                (i128::from(large) - i128::from(small)).to_string(),
+            ),
+            ("allowance (bytes)", allowance.to_string()),
+        ],
+    );
+    assert!(
+        small > 0 && large > 0,
+        "a frontmatter stretch reported no heap reading above its mark, so the pair compares \
+         nothing"
+    );
+    assert!(
+        baselines::fits(growth, allowance),
+        "previewing the carried move of a document with a {PLAN_FRONTMATTER_LARGE_BYTES}-byte \
+         frontmatter block held {growth} bytes more heap than one with a \
+         {PLAN_FRONTMATTER_SMALL_BYTES}-byte block, past the {allowance} byte allowance: the large \
+         held {large} bytes and the small {small}",
     );
 }
 
@@ -1402,6 +1508,10 @@ fn size_and_report(root: &Path) {
     heaps.push(("move-preview-small", reading));
     let (move_large, reading) = previewed_move("move-large", PLAN_LARGE_FROM, PLAN_LARGE_TO);
     heaps.push(("move-preview-large", reading));
+    let (_, reading) = previewed_move("frontmatter-small", PLAN_FM_SMALL_FROM, PLAN_FM_SMALL_TO);
+    heaps.push(("frontmatter-move-preview-small", reading));
+    let (_, reading) = previewed_move("frontmatter-large", PLAN_FM_LARGE_FROM, PLAN_FM_LARGE_TO);
+    heaps.push(("frontmatter-move-preview-large", reading));
     let (relink_small, reading) =
         previewed_move("relink-small", PLAN_RELINK_SMALL_FROM, PLAN_RELINK_SMALL_TO);
     heaps.push(("relink-preview-small", reading));

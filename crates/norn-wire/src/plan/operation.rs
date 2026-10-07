@@ -47,7 +47,7 @@
 //! where it is absent and replacing it where it stands. It names no path:
 //! where each role lives is the planner's to say, so a plan cannot aim a
 //! control-file write at a document or a document kind at a control file.
-//! A plan carrying one changes no document (ADR 0032), which
+//! A plan carrying one changes no document (ADR 0037), which
 //! [`AuthoredPlan::control_files_beside_documents`] and
 //! [`ResolvedPlan::control_files_beside_documents`] judge.
 //!
@@ -230,8 +230,10 @@ impl JsonSchema for OperationId {
 )]
 #[schemars(transform = flattened_targets)]
 pub enum OperationKind {
-    /// Create a document that does not exist yet, holding exactly this
-    /// content.
+    /// Create a document that does not exist yet, holding this content: as
+    /// authored, the schema rules' defaults for each required field its own
+    /// frontmatter leaves missing set into it at planning, every other byte
+    /// kept; in a resolved plan, exactly this content.
     CreateDocument {
         /// Where the document is created. Nothing may stand there.
         path: DocumentPath,

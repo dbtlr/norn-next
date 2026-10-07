@@ -641,11 +641,11 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-write-kernel-foreign-writer-inside-a-publication",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "a foreign writer acting inside a publication meets the outcome ADR 0032 names: \
+        states: "a foreign writer acting inside a publication meets the outcome ADR 0037 names: \
                  drift for an edit or a removal of a replace's or a remove's target, a taken name \
                  for a create, and a landing another writer made for a removal of a remove's target",
         carrier: "crates/norn-fs/tests/lockdown.rs::\
-                  a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0032_names",
+                  a_foreign_writer_inside_a_publication_meets_the_outcome_adr_0037_names",
         feature: None,
     },
     Case {

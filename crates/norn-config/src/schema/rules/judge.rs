@@ -54,7 +54,8 @@
 //! equality key — an element not reading as its declared type, a list, a map
 //! — is told apart by its spelling: a scalar by the text its field row holds,
 //! so `1` and `"1"` are one, and a list or a map by its structure, map
-//! entries in key order.
+//! entries in key order. So is the whole value a forbidden field, a shape
+//! mismatch or a conflict names.
 //!
 //! **An empty combined constraint is one conflict per field, in place of the
 //! findings it makes unanswerable.** A field one rule requires and another
@@ -149,6 +150,68 @@ pub struct RuleFinding {
     value: Option<AuthoredValue>,
     rules: Vec<String>,
     severity: Severity,
+    identity: FindingIdentity,
+}
+
+/// What tells one violation from another, as the write gate compares a
+/// plan's result with what stood before it ([ADR 0037]): the constraint kind,
+/// the field, the offending value by its equality key, and the combined
+/// constraint breached, **compared by value, never by the rules stating it**.
+///
+/// **The offending value is what the finding names.** A closed set, a length
+/// limit and a type judge each element, so each offending element is its own
+/// identity, told apart as one finding is from another. A forbidden field, a
+/// shape mismatch and a conflict over a field are one finding per field, and
+/// the whole value each names is its offending value, told apart by its
+/// spelling as a value with no equality key is: a write swapping one value
+/// for another on such a field introduces a violation. A null names no
+/// value, so a forbidden field gone from a value to null, or from null to a
+/// value, is another identity too.
+///
+/// The combined constraint is the one the finding's kind breaches on its
+/// field: for a closed set, the intersection's members by equality key; for a
+/// length limit, the smallest limit; for a missing or a forbidden field, that
+/// the field is required or forbidden; for a conflict over a field, which of
+/// its constraints leave it nothing to hold; for a placement, the allowed
+/// paths of each rule stating them, each rule's globs as a set; and for a
+/// type or shape mismatch, the field's declaration, which no rule states.
+/// So a second rule stating a constraint the document already breaches
+/// leaves the finding one identity though it now cites both rules, and a
+/// value outside `[todo]` and outside `[done]` breaches two constraints.
+///
+/// [ADR 0037]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0037-a-plan-refuses-exactly-the-violations-it-introduces.md
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindingIdentity {
+    breach: Breach,
+    field: Option<String>,
+    value: Option<Identity>,
+    constraint: Constraint,
+}
+
+/// The combined constraint a finding breaches, by value. See
+/// [`FindingIdentity`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Constraint {
+    /// The field's declared type or shape, which states no rule.
+    Declaration,
+    /// Some rule requires the field.
+    Required,
+    /// Some rule forbids the field.
+    Forbidden,
+    /// The values every closed set over the field admits, by equality key.
+    OneOf(BTreeSet<TypedValue>),
+    /// The smallest length limit stated on the field.
+    MaxLength(u64),
+    /// Which of the field's constraints leave it nothing to hold: required
+    /// and forbidden at once, and closed sets sharing no member, with
+    /// whether a rule requires the field beside them.
+    Conflict {
+        required_and_forbidden: bool,
+        empty_closed_set: bool,
+        required: bool,
+    },
+    /// Each placement rule's allowed paths, as a set of globs.
+    Placement(BTreeSet<BTreeSet<String>>),
 }
 
 impl RuleFinding {
@@ -183,6 +246,13 @@ impl RuleFinding {
     /// The highest severity of the rules cited, or a warning where none is.
     pub fn severity(&self) -> Severity {
         self.severity
+    }
+
+    /// What tells this violation from another: its kind, field, offending
+    /// value and combined constraint, the last by value. See
+    /// [`FindingIdentity`].
+    pub fn identity(&self) -> &FindingIdentity {
+        &self.identity
     }
 }
 
@@ -259,14 +329,19 @@ impl Breach {
     }
 }
 
-/// What judging one document paid: the logical counts of rule work, which no
-/// statement counter sees.
+/// What judging one document, or filling one created document's rule
+/// defaults, paid: the logical counts of rule work, which no statement
+/// counter sees.
 ///
 /// Every count but the placement counts is a function of the one document
-/// judged and the schema, so a judgment's work is the same however many
+/// judged or created and the schema, so its work is the same however many
 /// documents the vault holds. The placement counts depend on the verdicts the
 /// parsed schema had memoized before the judgment: a set of placement rules
-/// is walked once per parsed schema, by the first judgment that asks.
+/// is walked once per parsed schema, by the first judgment that asks. The
+/// defaults fixpoint ([`VaultSchema::fill_rule_defaults`]) tallies the rules
+/// it evaluates and selects, the selector terms, bytes and glob characters
+/// it reads doing so, and its own three counts; a judgment leaves those
+/// three at zero.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuleWork {
     /// Rules whose selector was evaluated: every rule, once per judgment.
@@ -303,6 +378,15 @@ pub struct RuleWork {
     pub placement_verdicts_reused: u64,
     /// Findings the judgment minted.
     pub findings: u64,
+    /// Rounds the defaults fixpoint ran, the last, which fills nothing,
+    /// included.
+    pub defaults_rounds: u64,
+    /// Fields the defaults fixpoint filled.
+    pub defaults_filled: u64,
+    /// Path bindings the defaults fixpoint took: each rule whose default
+    /// reads a capture binding its `match.path` against the created path,
+    /// once.
+    pub captures_bound: u64,
 }
 
 impl RuleWork {
@@ -319,10 +403,13 @@ impl RuleWork {
         placement_weight: 0,
         placement_verdicts_reused: 0,
         findings: 0,
+        defaults_rounds: 0,
+        defaults_filled: 0,
+        captures_bound: 0,
     };
 
     /// Every count by name, in declaration order.
-    pub fn counts(self) -> [(&'static str, u64); 11] {
+    pub fn counts(self) -> [(&'static str, u64); 14] {
         [
             ("rules_evaluated", self.rules_evaluated),
             ("selector_terms", self.selector_terms),
@@ -335,6 +422,9 @@ impl RuleWork {
             ("placement_weight", self.placement_weight),
             ("placement_verdicts_reused", self.placement_verdicts_reused),
             ("findings", self.findings),
+            ("defaults_rounds", self.defaults_rounds),
+            ("defaults_filled", self.defaults_filled),
+            ("captures_bound", self.captures_bound),
         ]
     }
 
@@ -354,6 +444,9 @@ impl RuleWork {
             placement_verdicts_reused: self.placement_verdicts_reused
                 + other.placement_verdicts_reused,
             findings: self.findings + other.findings,
+            defaults_rounds: self.defaults_rounds + other.defaults_rounds,
+            defaults_filled: self.defaults_filled + other.defaults_filled,
+            captures_bound: self.captures_bound + other.captures_bound,
         }
     }
 }
@@ -469,7 +562,7 @@ struct Held<'v> {
 /// are one, and a list or a map by its structure, map entries in key order,
 /// so two spellings of one map are one. One finding stands per field, kind
 /// and identity.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Identity {
     Key(TypedValue),
     Text(String),
@@ -479,10 +572,20 @@ enum Identity {
 impl Identity {
     /// The identity of `value`, read as `element`.
     fn of(value: &AuthoredValue, element: &Element) -> Self {
-        match (&element.key, &element.text) {
-            (Some(key), _) => Identity::Key(key.clone()),
-            (None, Some(text)) => Identity::Text(text.clone()),
-            (None, None) => Identity::Structure(normal_form(value)),
+        match &element.key {
+            Some(key) => Identity::Key(key.clone()),
+            None => Identity::spelled(value),
+        }
+    }
+
+    /// The identity of `value` by its spelling, as a value with no equality
+    /// key is told apart: a scalar by the text its field row holds, and a
+    /// list or a map by its structure. A whole value a forbidden field, a
+    /// shape mismatch or a conflict names is told apart this way.
+    fn spelled(value: &AuthoredValue) -> Self {
+        match value.scalar_text() {
+            Some(text) => Identity::Text(text),
+            None => Identity::Structure(normal_form(value)),
         }
     }
 }
@@ -567,7 +670,12 @@ impl VaultSchema {
         }
         let elements = match read_shape(shape, value) {
             ShapeReading::WrongShape => {
-                findings.push(mismatch(Breach::ShapeMismatch, field, value.clone()));
+                findings.push(mismatch(
+                    Breach::ShapeMismatch,
+                    field,
+                    value.clone(),
+                    Identity::spelled(value),
+                ));
                 return Vec::new();
             }
             ShapeReading::Elements(elements) => elements,
@@ -585,8 +693,13 @@ impl VaultSchema {
                 work.constraints_judged += 1;
                 if !element.reads_as_type() {
                     if !mismatched.contains(&identity) {
-                        mismatched.push(identity);
-                        findings.push(mismatch(Breach::TypeMismatch, field, value.clone()));
+                        mismatched.push(identity.clone());
+                        findings.push(mismatch(
+                            Breach::TypeMismatch,
+                            field,
+                            value.clone(),
+                            identity,
+                        ));
                     }
                     continue;
                 }
@@ -627,7 +740,24 @@ impl VaultSchema {
         } else {
             Breach::DocumentRulesConflict
         };
-        findings.push(cited(breach, None, None, placed));
+        let allowed = placed
+            .iter()
+            .filter_map(|rule| rule.allowed_paths.as_ref())
+            .map(|allowed| {
+                allowed
+                    .paths
+                    .iter()
+                    .map(|glob| glob.as_str().to_string())
+                    .collect()
+            })
+            .collect();
+        findings.push(cited(
+            breach,
+            None,
+            None,
+            Constraint::Placement(allowed),
+            placed,
+        ));
     }
 }
 
@@ -715,10 +845,25 @@ fn judge_conflict(
         .chain(constraint.one_of().into_iter().flat_map(|set| set.rules()))
         .filter(|rule| conflicting.contains(rule.name()))
         .collect();
+    let in_conflict = |rule: &Rule| conflicting.contains(rule.name());
+    let required = constraint.required_by().any(in_conflict);
+    let forbidden = constraint.forbidden_by().any(in_conflict);
+    let closed = constraint
+        .one_of()
+        .into_iter()
+        .flat_map(|set| set.rules())
+        .any(in_conflict);
     findings.push(cited(
         Breach::FieldRulesConflict,
         Some(field.name),
-        field.value.cloned(),
+        field
+            .value
+            .map(|value| (value.clone(), Identity::spelled(value))),
+        Constraint::Conflict {
+            required_and_forbidden: required && forbidden,
+            empty_closed_set: closed,
+            required,
+        },
         rules,
     ));
 }
@@ -737,6 +882,7 @@ fn judge_presence(
                 Breach::RequiredMissing,
                 Some(field.name),
                 None,
+                Constraint::Required,
                 constraint.required_by().collect(),
             ));
         }
@@ -747,7 +893,8 @@ fn judge_presence(
             findings.push(cited(
                 Breach::Forbidden,
                 Some(field.name),
-                Some(value.clone()),
+                Some((value.clone(), Identity::spelled(value))),
+                Constraint::Forbidden,
                 constraint.forbidden_by().collect(),
             ));
         }
@@ -772,7 +919,8 @@ fn judge_closed_set(
             findings.push(cited(
                 Breach::NotOneOf,
                 Some(field.name),
-                Some(held.value.clone()),
+                Some((held.value.clone(), held.identity.clone())),
+                Constraint::OneOf(set.keys()),
                 set.rules().collect(),
             ));
         }
@@ -802,42 +950,61 @@ fn judge_length(
             findings.push(cited(
                 Breach::TooLong,
                 Some(field.name),
-                Some(held.value.clone()),
+                Some((held.value.clone(), held.identity.clone())),
+                Constraint::MaxLength(limit),
                 field.constraint.max_length_by().collect(),
             ));
         }
     }
 }
 
-/// A finding citing `rules`, at the highest of their severities, naming
-/// `value` unless it is null: a null is no value to name.
+/// A finding breaching `constraint`, citing `rules`, at the highest of their
+/// severities, naming `value` with its identity unless it is null: a null is
+/// no value to name, and its finding's identity names none.
 fn cited(
     breach: Breach,
     field: Option<&str>,
-    value: Option<AuthoredValue>,
+    value: Option<(AuthoredValue, Identity)>,
+    constraint: Constraint,
     rules: Vec<&Rule>,
 ) -> RuleFinding {
     let names: BTreeSet<&str> = rules.iter().map(|rule| rule.name()).collect();
+    let (value, identity) = match value {
+        Some((value, identity)) if value != AuthoredValue::Null => (Some(value), Some(identity)),
+        _ => (None, None),
+    };
     RuleFinding {
         breach,
         field: field.map(str::to_string),
-        value: value.filter(|value| *value != AuthoredValue::Null),
+        value,
         severity: rules.iter().fold(Severity::Warning, |severity, rule| {
             higher(severity, rule.severity())
         }),
         rules: names.into_iter().map(str::to_string).collect(),
+        identity: FindingIdentity {
+            breach,
+            field: field.map(str::to_string),
+            value: identity,
+            constraint,
+        },
     }
 }
 
-/// A type or shape mismatch: judged against the field declarations, which
-/// state no rule and no severity.
-fn mismatch(breach: Breach, field: &str, value: AuthoredValue) -> RuleFinding {
+/// A type or shape mismatch of `value`, told apart by `identity`: judged
+/// against the field declarations, which state no rule and no severity.
+fn mismatch(breach: Breach, field: &str, value: AuthoredValue, identity: Identity) -> RuleFinding {
     RuleFinding {
         breach,
         field: Some(field.to_string()),
         value: Some(value),
         rules: Vec::new(),
         severity: Severity::Warning,
+        identity: FindingIdentity {
+            breach,
+            field: Some(field.to_string()),
+            value: Some(identity),
+            constraint: Constraint::Declaration,
+        },
     }
 }
 

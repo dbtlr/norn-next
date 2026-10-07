@@ -435,7 +435,8 @@ impl Snapshot {
             | ReadStatement::Search(_)
             | ReadStatement::Get(_)
             | ReadStatement::Resolution(_)
-            | ReadStatement::HeldLinks(_) => (false, 0),
+            | ReadStatement::HeldLinks(_)
+            | ReadStatement::HeldFrontmatter(_) => (false, 0),
         };
         self.run_statement(record, section, |row| {
             let mut group: Vec<Option<String>> = Vec::with_capacity(width);
