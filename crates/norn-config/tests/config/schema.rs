@@ -416,6 +416,21 @@ fn no_malformed_schema_panics() {
         b"version: 1\npaths: []\n",
         b"version: true\n",
         b"version: 1\nfields:\n  title: text\n",
+        b"version: 1\nrules: []\n",
+        b"version: 1\nrules:\n  r: 4\n",
+        b"version: 1\nrules:\n  r: { severity: fatal }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '' } }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '<a>/<a>/**' } }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '<' } }\n",
+        b"version: 1\nrules:\n  r: { match: { frontmatter: { kind: [[], {}] } } }\n",
+        b"version: 1\nrules:\n  r: { required: { a: { default: '{{seq' } } }\n",
+        b"version: 1\nrules:\n  r: { required: { a: { default: '{{path.nope}}' } } }\n",
+        b"version: 1\nrules:\n  r: { one_of: { s: { values: 3 } } }\n",
+        b"version: 1\nrules:\n  r: { one_of: { s: { values: [], synonyms: { a: b } } } }\n",
+        b"version: 1\nrules:\n  r: { max_length: { t: -1 } }\n",
+        b"version: 1\nrules:\n  r: { forbidden: { x: { rename_to: 5 } } }\n",
+        b"version: 1\nrules:\n  r: { allowed_paths: { paths: [], route: 'x/' } }\n",
+        b"version: 1\nrules:\n  r: { allowed_paths: { paths: ['**'], route: '{{path.p}}/' } }\n",
     ] {
         // An empty file is a valid schema with no declarations; the rest refuse.
         let _ = VaultSchema::parse(bytes);

@@ -967,7 +967,8 @@ fn a_write_refuses_an_element_violation_it_introduces_and_not_one_standing() {
 
 /// A vault schema whose rules a write can breach in every per-element and
 /// whole-document way: a closed list field with a length limit, a field an
-/// area requires and a field another area forbids.
+/// area requires, a field another area forbids, and a field two rules close
+/// over sets sharing no member, which no rule requires, so the schema loads.
 const AGREEMENT_SCHEMA: &str = "version: 1
 fields:
   status: { type: text, shape: list }
@@ -975,6 +976,8 @@ rules:
   states: { one_of: { status: { values: [todo, done], synonyms: { complete: done } } }, max_length: { status: 4 } }
   tasks: { match: { path: 'tasks/**' }, required: { status: } }
   notes: { match: { path: 'notes/**' }, forbidden: { owner: } }
+  early: { one_of: { phase: { values: [draft] } } }
+  late: { one_of: { phase: { values: [final] } } }
 ";
 
 /// A schema finding by its identity: kind, field and offending value.
@@ -1021,9 +1024,12 @@ fn identities_at(
 /// **The write gate and the validator agree** (ADR 0037): a write previews
 /// as refused exactly when forcing it leaves its document under a finding it
 /// did not stand under, and the refusal names exactly those findings — so a
-/// write the gate admits is never flagged by the validator, across setting,
-/// pushing and popping a list's elements, moving into a required area, and
-/// creating or removing what an area requires or forbids.
+/// write the gate admits leaves no finding the validator did not already
+/// report, across setting, pushing and popping a list's elements, moving into
+/// a required area, removing what an area requires, creating what lacks or
+/// holds what an area requires or forbids, and writing a field whose closed
+/// sets share no member, which is refused as that conflict rather than as a
+/// value outside an empty set.
 #[test]
 fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_report() {
     let (_sandbox, vault) = a_vault("host-applies-gate-agreement");
@@ -1040,7 +1046,7 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
     let target = |at: &str| norn_wire::WriteTarget::path(path(at));
     let text = norn_wire::AuthoredValue::string;
     let moved = "tasks/apply-subject.md";
-    let writes: Vec<(&str, &str, &str, OperationKind, bool)> = vec![
+    let writes: Vec<(&str, &str, &str, OperationKind, &[FindingKind])> = vec![
         (
             "a set leaving a standing element",
             SUBJECT,
@@ -1050,42 +1056,42 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
                 "status",
                 norn_wire::AuthoredValue::List(vec![text("done"), text("bogus")]),
             ),
-            false,
+            &[],
         ),
         (
             "a push of an element outside the set and past the limit",
             SUBJECT,
             SUBJECT,
             OperationKind::push_frontmatter(target(SUBJECT), "status", text("wrong")),
-            true,
+            &[FindingKind::NotOneOf, FindingKind::TooLong],
         ),
         (
             "a pop of that element",
             SUBJECT,
             SUBJECT,
             OperationKind::pop_frontmatter(target(SUBJECT), "status", text("wrong")),
-            false,
+            &[],
         ),
         (
             "a move into the area requiring the field it holds",
             SUBJECT,
             moved,
             OperationKind::move_document(path(SUBJECT), path(moved)),
-            false,
+            &[],
         ),
         (
             "a removal of the field the area requires",
             moved,
             moved,
             OperationKind::remove_frontmatter(target(moved), "status"),
-            true,
+            &[FindingKind::RequiredMissing],
         ),
         (
             "a create lacking the field its area requires",
             "tasks/bare.md",
             "tasks/bare.md",
             OperationKind::create_document(path("tasks/bare.md"), "# Bare\n"),
-            true,
+            &[FindingKind::RequiredMissing],
         ),
         (
             "a create holding the field its area forbids",
@@ -1095,11 +1101,18 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
                 path("notes/owned.md"),
                 "---\nowner: me\n---\n# Owned\n",
             ),
-            true,
+            &[FindingKind::Forbidden],
+        ),
+        (
+            "a set of a field whose closed sets share no member",
+            "notes/owned.md",
+            "notes/owned.md",
+            OperationKind::set_frontmatter(target("notes/owned.md"), "phase", text("draft")),
+            &[FindingKind::FieldRulesConflict],
         ),
     ];
 
-    for (write, from, to, operation, refuses) in writes {
+    for (write, from, to, operation, refused_as) in writes {
         let plan = |force| {
             PlanDocument::operations(
                 AuthoredPlan::new(
@@ -1141,7 +1154,9 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
         let introduced: BTreeSet<Identity> = after.difference(&before).cloned().collect();
 
         assert_eq!(refused, introduced, "{write}");
-        assert_eq!(!refused.is_empty(), refuses, "{write}");
+        let kinds: BTreeSet<&str> = refused.iter().map(|(kind, _, _)| *kind).collect();
+        let expected: BTreeSet<&str> = refused_as.iter().map(FindingKind::as_str).collect();
+        assert_eq!(kinds, expected, "{write}");
     }
 }
 
