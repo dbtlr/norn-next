@@ -7,7 +7,7 @@ use norn_wire::{
     SchemaViolation, WriteTarget,
 };
 
-use super::{Fixture, applied, creating, editing, path, refused, refused_for};
+use super::{Fixture, applied, creating, editing, path, refused_for};
 use crate::applier::ApplyOutcome;
 
 /// A set of `field` in `at` to `value`.
@@ -292,19 +292,51 @@ fn a_link_a_plan_breaks_does_not_gate_it() {
 
 /// A refusal's fresh plan of a forced plan forecasts its violations under
 /// the identities the refusal's own checks would cite them by: one numbering
-/// per response.
+/// per response, and no violation the response carries cites a set its
+/// table does not hold, however the numbering left gaps.
 #[test]
 fn a_refusal_cites_its_checks_and_its_forecast_under_one_numbering() {
     let mut fixture = Fixture::with_schema(TASKS, &[("a.md", "---\ntitle: A\ntype: task\n---\n")]);
     let mut plan = fixture.plan(vec![setting("a.md", "status", text("someday"))]);
     plan.force = true;
     fixture.foreign("a.md", "---\ntitle: A\ntype: task\nnote: foreign\n---\n");
-    let refusal = refused(fixture.apply(plan));
-    let forced: Vec<&SchemaViolation> = refusal.forecast.forced.iter().collect();
+    let envelope = fixture
+        .apply(plan)
+        .into_wire()
+        .expect("a refusal is answered")
+        .expect_err("a refusal");
+    let ErrorDetail::PlanRefused {
+        checks,
+        rule_sets,
+        forecast,
+        ..
+    } = envelope.detail()
+    else {
+        panic!("a refusal: {envelope:?}");
+    };
+    let forced: Vec<&SchemaViolation> = forecast.forced.iter().collect();
     assert_eq!(
-        cited(&forced, &refusal.forecast.rule_sets),
+        cited(&forced, &forecast.rule_sets),
         [vec!["tasks".to_string()]]
     );
+    let held = |id: u64, table: &[RuleSet]| table.iter().any(|set| set.id == id);
+    for check in checks {
+        if let RefusedCheck::SchemaViolation { violation, .. } = check {
+            assert!(
+                violation.rule_set.is_none_or(|id| held(id, rule_sets)),
+                "{violation:?} cites a set absent from {rule_sets:?}"
+            );
+        }
+    }
+    for violation in &forecast.forced {
+        assert!(
+            violation
+                .rule_set
+                .is_none_or(|id| held(id, &forecast.rule_sets)),
+            "{violation:?} cites a set absent from {:?}",
+            forecast.rule_sets
+        );
+    }
 }
 
 /// A schema with a field declared single, a rule forbidding `scratch`, and

@@ -1693,6 +1693,61 @@ rules:
         assert_eq!(content, sent);
     }
 
+    /// **A caller block a `set` cannot edit refuses the create only where a
+    /// default would fill**: a default is set into the caller's block by the
+    /// one composition a `set` writes a field by, so a flow-style block
+    /// missing `area` is left unresolved naming why, while one missing
+    /// nothing is created exactly as sent.
+    #[test]
+    fn a_caller_block_a_set_cannot_edit_refuses_only_where_a_default_would_fill() {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(LAYERED),
+            vec![Operation::new(create(
+                "notes/x.md",
+                "---\n{kind: note}\n---\nBody.\n",
+            ))],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("one operation left: {:?}", resolution.unresolved);
+        };
+        let UnresolvedReason::NoLongerResolves { detail, .. } = &left.reason else {
+            panic!("a create that no longer resolves: {:?}", left.reason);
+        };
+        assert!(
+            detail.starts_with("a rule default cannot be set into the document"),
+            "{detail}"
+        );
+        let sent = "---\n{kind: note, area: home}\n---\nBody.\n";
+        let (_, content) = layered(vec![Operation::new(create("notes/y.md", sent))]);
+        assert_eq!(content, sent);
+    }
+
+    /// **A capture whose body opens a fence takes its defaults in the empty
+    /// block the body is set under**: the body stays body, after the block
+    /// the defaults fill.
+    #[test]
+    fn a_capture_body_opening_a_fence_takes_its_defaults_in_the_block_above_it() {
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &schema(LAYERED),
+            vec![by_rule(
+                None,
+                &[],
+                fields(vec![]),
+                Some("---\nkind: task\n---\nBody\n"),
+            )],
+            Ok(reading()),
+            &Cell::new(0),
+        );
+        assert_eq!(
+            the_create(&resolution).1,
+            "---\nkind: note\narea: general\n---\n---\nkind: task\n---\nBody\n"
+        );
+    }
+
     /// A schema whose vault-wide rule defaults `kind: task` and
     /// `status: todo` while a rule on `kind: task` defaults `status: done`,
     /// and whose two `area` rules default `area` apart in one round.
