@@ -1441,3 +1441,22 @@ fn a_folder_move_judges_each_document_it_carries_where_it_lands() {
         ]
     );
 }
+
+/// **A carried document whose frontmatter block does not read is judged
+/// against nothing where it lands**: its fields are unknown rather than
+/// absent, so a move bringing it under a rule requiring `owner` introduces
+/// no missing field, and applies.
+#[test]
+fn a_carried_document_whose_block_does_not_read_is_judged_against_nothing_where_it_lands() {
+    let mut fixture = Fixture::with_schema(
+        "version: 1
+rules:
+  kept: { match: { path: 'kept/**' }, exclude: { path: ['kept/drafts/**'] }, required: { owner: } }
+",
+        &[("kept/drafts/e.md", "---\nowner: [unclosed\n---\n# E\n")],
+    );
+    let landed =
+        applied(fixture.apply(fixture.plan(vec![moving("kept/drafts/e.md", "kept/e.md")])));
+    assert!(landed.forced.is_empty());
+    fixture.assert_store_is_a_build_from_zero();
+}

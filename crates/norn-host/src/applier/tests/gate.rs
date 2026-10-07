@@ -437,3 +437,145 @@ fn a_write_leaving_each_whole_value_unchanged_applies() {
     assert!(landed.forced.is_empty());
     fixture.assert_store_is_a_build_from_zero();
 }
+
+/// **An interrupted forced plan's response carries the rule sets its
+/// violations cite**: a forced create missing the required `title` lands,
+/// another writer then changes the edit's target, and the interruption
+/// lists the create's violation beside the set naming `every`.
+#[test]
+fn an_interrupted_forced_plan_carries_the_rule_sets_its_violations_cite() {
+    let mut fixture = Fixture::with_schema(TASKS, &[("e.md", "---\ntitle: E\n---\ndraft\n")]);
+    let mut plan = fixture.plan(vec![
+        creating("n.md", "---\ntype: note\n---\n"),
+        editing("e.md", "draft", "final"),
+    ]);
+    plan.force = true;
+    let links = fixture.links();
+    let anchor = fixture.vault.clone();
+    let publishing = || {
+        std::fs::write(anchor.join("e.md"), "---\ntitle: E\n---\nforeign\n")
+            .expect("another writer changes the edit's target");
+        true
+    };
+    let applier = crate::applier::Applier {
+        anchor: &fixture.vault,
+        root: fixture.root,
+        exclusions: &fixture.exclusions,
+        schema: &fixture.schema,
+        shadows: &fixture.shadows,
+        own_writes: &fixture.recorded,
+        publishing: &publishing,
+        links: &links.index(),
+    };
+    let envelope = applier
+        .apply(plan, &std::cell::RefCell::new(&mut fixture.store))
+        .into_wire()
+        .expect("an interruption is answered")
+        .expect_err("the apply stops after its create");
+    let ErrorDetail::PlanInterrupted {
+        landed,
+        forced,
+        rule_sets,
+        ..
+    } = envelope.detail()
+    else {
+        panic!("an interruption: {envelope:?}");
+    };
+    assert_eq!(*landed, vec![path("n.md")]);
+    assert_eq!(
+        forced.iter().map(summary).collect::<Vec<_>>(),
+        [violation(
+            "n.md",
+            FindingKind::RequiredMissing,
+            "title",
+            None
+        )]
+    );
+    assert_eq!(
+        cited(&forced.iter().collect::<Vec<_>>(), rule_sets),
+        [vec!["every".to_string()]]
+    );
+}
+
+/// **Distinct citation sets get distinct identities, each in the table**: a
+/// forced create missing `owner`, which one rule requires, and `title`,
+/// which another does, lists each violation citing its own set, and every
+/// set a violation cites stands in the response's table.
+#[test]
+fn distinct_citation_sets_get_distinct_identities_each_in_the_table() {
+    let mut fixture = Fixture::with_schema(
+        "version: 1
+rules:
+  owners: { required: { owner: } }
+  titles: { required: { title: } }
+",
+        &[],
+    );
+    let mut plan = fixture.plan(vec![creating("a.md", "Body.\n")]);
+    plan.force = true;
+    let (_, forecast) = fixture
+        .preview(plan.clone())
+        .expect("the forced plan previews");
+    let ids: Vec<Option<u64>> = forecast
+        .forced
+        .iter()
+        .map(|violation| violation.rule_set)
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(
+        cited(
+            &forecast.forced.iter().collect::<Vec<_>>(),
+            &forecast.rule_sets
+        ),
+        [vec!["owners".to_string()], vec!["titles".to_string()]]
+    );
+    let landed = applied(fixture.apply(plan));
+    assert_eq!(landed.forced, forecast.forced);
+}
+
+/// **A forced create holding a forbidden value lists it with its value's
+/// head**, on the preview's forecast and the applied report alike.
+#[test]
+fn a_forced_forbidden_create_carries_its_value_head_in_forecast_and_report() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[]);
+    let mut plan = fixture.plan(vec![creating("a.md", "---\nscratch: b\n---\n")]);
+    plan.force = true;
+    let expected = [violation(
+        "a.md",
+        FindingKind::Forbidden,
+        "scratch",
+        Some("b"),
+    )];
+    let (_, forecast) = fixture
+        .preview(plan.clone())
+        .expect("the forced plan previews");
+    assert_eq!(
+        forecast.forced.iter().map(summary).collect::<Vec<_>>(),
+        expected
+    );
+    let report = ApplyOutcome::Applied(applied(fixture.apply(plan)))
+        .into_wire()
+        .expect("an applied plan is answered")
+        .expect("an applied plan is a report");
+    let norn_wire::ApplyReport::Applied { forced, .. } = report else {
+        panic!("an applied report: {report:?}");
+    };
+    assert_eq!(forced.iter().map(summary).collect::<Vec<_>>(), expected);
+}
+
+/// **An undeclared tag respelled in another case introduces nothing**: the
+/// tag's identity is its fold, so `[stray]` set to `[STRAY]` keeps the
+/// violation that stood.
+#[test]
+fn an_undeclared_tag_respelled_in_another_case_introduces_nothing() {
+    let mut fixture =
+        Fixture::with_schema(super::TAG_SCHEMA, &[("a.md", "---\ntags: [stray]\n---\n")]);
+    let landed =
+        applied(fixture.apply(fixture.plan(vec![setting("a.md", "tags", list(&["STRAY"]))])));
+    assert!(landed.forced.is_empty());
+    assert_eq!(
+        fixture.read("a.md").as_deref(),
+        Some("---\ntags: [STRAY]\n---\n")
+    );
+}
