@@ -13,6 +13,7 @@
 
 mod attach;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use norn_testkit::process::Sandbox;
@@ -962,6 +963,184 @@ fn a_write_refuses_an_element_violation_it_introduces_and_not_one_standing() {
         std::fs::read_to_string(vault.path().join(SUBJECT)).unwrap(),
         written
     );
+}
+
+/// A vault schema whose rules a write can breach in every per-element and
+/// whole-document way: a closed list field with a length limit, a field an
+/// area requires and a field another area forbids.
+const AGREEMENT_SCHEMA: &str = "version: 1
+fields:
+  status: { type: text, shape: list }
+rules:
+  states: { one_of: { status: { values: [todo, done], synonyms: { complete: done } } }, max_length: { status: 4 } }
+  tasks: { match: { path: 'tasks/**' }, required: { status: } }
+  notes: { match: { path: 'notes/**' }, forbidden: { owner: } }
+";
+
+/// A schema finding by its identity: kind, field and offending value.
+type Identity = (&'static str, Option<String>, Option<String>);
+
+/// The identities of the findings standing at `path`, every page read.
+fn identities_at(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    path: &str,
+) -> BTreeSet<Identity> {
+    let mut identities = BTreeSet::new();
+    let mut after = None;
+    loop {
+        let mut params = norn_wire::ValidateParams::new(VaultAddress::name(vault.name().clone()));
+        if let Some(cursor) = after.take() {
+            params = params.with_after(cursor);
+        }
+        let answered = host.validate(&params).expect("a served vault answers a validate");
+        let norn_wire::ValidateReport::Findings { page, .. } = answered.answer.report else {
+            panic!("a validate answered {:?}", answered.answer.report);
+        };
+        identities.extend(
+            page.rows
+                .iter()
+                .filter(|row| row.path.as_str() == path)
+                .map(|row| {
+                    (
+                        row.kind.as_str(),
+                        row.target.clone(),
+                        row.value.as_ref().map(|head| head.text().to_string()),
+                    )
+                }),
+        );
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return identities,
+        }
+    }
+}
+
+/// **The write gate and the validator agree** (ADR 0037): a write previews
+/// as refused exactly when forcing it leaves its document under a finding it
+/// did not stand under, and the refusal names exactly those findings — so a
+/// write the gate admits is never flagged by the validator, across setting,
+/// pushing and popping a list's elements, moving into a required area, and
+/// creating or removing what an area requires or forbids.
+#[test]
+fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_report() {
+    let (_sandbox, vault) = a_vault("host-applies-gate-agreement");
+    std::fs::write(vault.path().join(".norn/schema.yaml"), AGREEMENT_SCHEMA)
+        .expect("write the schema");
+    std::fs::write(
+        vault.path().join(SUBJECT),
+        "---\nstatus: [complete, bogus]\n---\n# Subject\n",
+    )
+    .expect("write the subject");
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let path = |path: &str| DocumentPath::new(path).expect("a document path");
+    let target = |at: &str| norn_wire::WriteTarget::path(path(at));
+    let text = norn_wire::AuthoredValue::string;
+    let moved = "tasks/apply-subject.md";
+    let writes: Vec<(&str, &str, &str, OperationKind, bool)> = vec![
+        (
+            "a set leaving a standing element",
+            SUBJECT,
+            SUBJECT,
+            OperationKind::set_frontmatter(
+                target(SUBJECT),
+                "status",
+                norn_wire::AuthoredValue::List(vec![text("done"), text("bogus")]),
+            ),
+            false,
+        ),
+        (
+            "a push of an element outside the set and past the limit",
+            SUBJECT,
+            SUBJECT,
+            OperationKind::push_frontmatter(target(SUBJECT), "status", text("wrong")),
+            true,
+        ),
+        (
+            "a pop of that element",
+            SUBJECT,
+            SUBJECT,
+            OperationKind::pop_frontmatter(target(SUBJECT), "status", text("wrong")),
+            false,
+        ),
+        (
+            "a move into the area requiring the field it holds",
+            SUBJECT,
+            moved,
+            OperationKind::move_document(path(SUBJECT), path(moved)),
+            false,
+        ),
+        (
+            "a removal of the field the area requires",
+            moved,
+            moved,
+            OperationKind::remove_frontmatter(target(moved), "status"),
+            true,
+        ),
+        (
+            "a create lacking the field its area requires",
+            "tasks/bare.md",
+            "tasks/bare.md",
+            OperationKind::create_document(path("tasks/bare.md"), "# Bare\n"),
+            true,
+        ),
+        (
+            "a create holding the field its area forbids",
+            "notes/owned.md",
+            "notes/owned.md",
+            OperationKind::create_document(
+                path("notes/owned.md"),
+                "---\nowner: me\n---\n# Owned\n",
+            ),
+            true,
+        ),
+    ];
+
+    for (write, from, to, operation, refuses) in writes {
+        let plan = |force| {
+            PlanDocument::operations(
+                AuthoredPlan::new(
+                    VaultAddress::name(vault.name().clone()),
+                    vec![Operation::new(operation.clone())],
+                )
+                .with_force(force),
+            )
+        };
+        let before = identities_at(&host, &vault, from);
+        let refused: BTreeSet<Identity> =
+            match host.apply(ApplyParams::new(ApplyMode::Preview, plan(false)))
+                .expect("the request is answered")
+                .wait()
+            {
+                Ok(_) => BTreeSet::new(),
+                Err(error) => {
+                    let ErrorDetail::PlanRefused { checks, .. } = error.detail() else {
+                        panic!("{write}: the preview answered {:?}", error.detail());
+                    };
+                    checks
+                        .iter()
+                        .map(|check| match check {
+                            RefusedCheck::SchemaViolation { violation, .. } => (
+                                violation.kind.as_str(),
+                                violation.target.clone(),
+                                violation.value.as_ref().map(|head| head.text().to_string()),
+                            ),
+                            other => panic!("{write}: a schema check: {other:?}"),
+                        })
+                        .collect()
+                }
+            };
+        host.apply(ApplyParams::new(ApplyMode::Apply, plan(true)))
+            .expect("the apply is admitted")
+            .wait()
+            .unwrap_or_else(|error| panic!("{write}: the forced write applies: {error:?}"));
+        let after = identities_at(&host, &vault, to);
+        let introduced: BTreeSet<Identity> = after.difference(&before).cloned().collect();
+
+        assert_eq!(refused, introduced, "{write}");
+        assert_eq!(!refused.is_empty(), refuses, "{write}");
+    }
 }
 
 /// The document holding a link to the subject by its stem, written beside it.
