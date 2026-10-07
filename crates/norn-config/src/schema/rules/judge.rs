@@ -329,14 +329,19 @@ impl Breach {
     }
 }
 
-/// What judging one document paid: the logical counts of rule work, which no
-/// statement counter sees.
+/// What judging one document, or filling one created document's rule
+/// defaults, paid: the logical counts of rule work, which no statement
+/// counter sees.
 ///
 /// Every count but the placement counts is a function of the one document
-/// judged and the schema, so a judgment's work is the same however many
+/// judged or created and the schema, so its work is the same however many
 /// documents the vault holds. The placement counts depend on the verdicts the
 /// parsed schema had memoized before the judgment: a set of placement rules
-/// is walked once per parsed schema, by the first judgment that asks.
+/// is walked once per parsed schema, by the first judgment that asks. The
+/// defaults fixpoint ([`VaultSchema::fill_rule_defaults`]) tallies the rules
+/// it evaluates and selects, the selector terms, bytes and glob characters
+/// it reads doing so, and its own three counts; a judgment leaves those
+/// three at zero.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuleWork {
     /// Rules whose selector was evaluated: every rule, once per judgment.
@@ -373,6 +378,15 @@ pub struct RuleWork {
     pub placement_verdicts_reused: u64,
     /// Findings the judgment minted.
     pub findings: u64,
+    /// Rounds the defaults fixpoint ran, the last, which fills nothing,
+    /// included.
+    pub defaults_rounds: u64,
+    /// Fields the defaults fixpoint filled.
+    pub defaults_filled: u64,
+    /// Path bindings the defaults fixpoint took: each rule whose default
+    /// reads a capture binding its `match.path` against the created path,
+    /// once.
+    pub captures_bound: u64,
 }
 
 impl RuleWork {
@@ -389,10 +403,13 @@ impl RuleWork {
         placement_weight: 0,
         placement_verdicts_reused: 0,
         findings: 0,
+        defaults_rounds: 0,
+        defaults_filled: 0,
+        captures_bound: 0,
     };
 
     /// Every count by name, in declaration order.
-    pub fn counts(self) -> [(&'static str, u64); 11] {
+    pub fn counts(self) -> [(&'static str, u64); 14] {
         [
             ("rules_evaluated", self.rules_evaluated),
             ("selector_terms", self.selector_terms),
@@ -405,6 +422,9 @@ impl RuleWork {
             ("placement_weight", self.placement_weight),
             ("placement_verdicts_reused", self.placement_verdicts_reused),
             ("findings", self.findings),
+            ("defaults_rounds", self.defaults_rounds),
+            ("defaults_filled", self.defaults_filled),
+            ("captures_bound", self.captures_bound),
         ]
     }
 
@@ -424,6 +444,9 @@ impl RuleWork {
             placement_verdicts_reused: self.placement_verdicts_reused
                 + other.placement_verdicts_reused,
             findings: self.findings + other.findings,
+            defaults_rounds: self.defaults_rounds + other.defaults_rounds,
+            defaults_filled: self.defaults_filled + other.defaults_filled,
+            captures_bound: self.captures_bound + other.captures_bound,
         }
     }
 }

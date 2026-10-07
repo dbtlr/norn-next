@@ -5,7 +5,7 @@
 //! path, one clock reading and the schema, so a case hands each over and
 //! needs no directory and no clock.
 
-use norn_config::schema::{CaseFold, LocalTimestamp, RuleDefaultsRefusal, VaultSchema};
+use norn_config::schema::{CaseFold, LocalTimestamp, RuleDefaultsRefusal, RuleWork, VaultSchema};
 use norn_wire::{AuthoredValue, ValueMap};
 
 /// The one clock reading every case fills from.
@@ -31,14 +31,29 @@ fn fill(
     path: &str,
     entries: &[(&str, AuthoredValue)],
 ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
-    VaultSchema::parse(schema)
+    fill_counted(schema, path, entries).0
+}
+
+/// [`fill`], beside the work the fixpoint tallied.
+fn fill_counted(
+    schema: &[u8],
+    path: &str,
+    entries: &[(&str, AuthoredValue)],
+) -> (
+    Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal>,
+    RuleWork,
+) {
+    let mut work = RuleWork::default();
+    let filled = VaultSchema::parse(schema)
         .expect("a schema with rule defaults")
         .fill_rule_defaults(
             &frontmatter(entries),
             path,
             &mut || Ok(at()),
             CaseFold::Exact,
-        )
+            &mut work,
+        );
+    (filled, work)
 }
 
 fn filled(entries: &[(&str, AuthoredValue)]) -> Vec<(String, AuthoredValue)> {
@@ -325,4 +340,36 @@ rules:
             ("project", text("[[norn]]")),
         ]))
     );
+}
+
+/// **The fixpoint tallies its work as logical rule counts**: every rule
+/// evaluated in each round and at the settled re-check, the rules each
+/// selected, the rounds, the fields filled and each capture-reading rule's
+/// binding of the path, bound once. Here `kind` filled in the first round
+/// brings in the rule defaulting `area` in the second, and the third fills
+/// nothing.
+#[test]
+fn the_fixpoint_tallies_its_rounds_fills_and_captures() {
+    let schema = b"version: 1
+rules:
+  every: { required: { kind: { default: note } } }
+  notes: { match: { frontmatter: { kind: note } }, required: { area: { default: general } } }
+  places: { match: { path: '<place>/**' }, required: { place: { default: '{{path.place}}' } } }
+";
+    let (filled_now, work) = fill_counted(schema, "home/a.md", &[]);
+    assert_eq!(
+        filled_now,
+        Ok(filled(&[
+            ("kind", text("note")),
+            ("place", text("home")),
+            ("area", text("general")),
+        ]))
+    );
+    assert_eq!(work.defaults_rounds, 3);
+    assert_eq!(work.defaults_filled, 3);
+    assert_eq!(work.captures_bound, 1);
+    // Three rules in each of three rounds and at the re-check.
+    assert_eq!(work.rules_evaluated, 12);
+    // `every` and `places` in the first round, all three after.
+    assert_eq!(work.rules_selected, 2 + 3 + 3 + 3);
 }

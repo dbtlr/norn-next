@@ -9,7 +9,7 @@ use norn_wire::{AuthoredValue, Binding, Captures, CaseFold, ValueMap};
 
 use super::super::VaultSchema;
 use super::super::template::{LocalTimestamp, NotALocalTimestamp};
-use super::{Rule, RuleDefault, named, value_in};
+use super::{Rule, RuleDefault, RuleWork, named, value_in};
 
 /// One value proposed for a field, and the rules proposing it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +174,13 @@ impl VaultSchema {
     /// a capture the match binds several ways is refused, naming two of the
     /// bindings.
     ///
+    /// **Its work is tallied in `work`** ([`RuleWork`]), refused or not:
+    /// every rule evaluated in each round and at the re-check, with the
+    /// selector terms, bytes and glob characters doing so read, the rules
+    /// each selected, the rounds, the fields filled and the path bindings
+    /// taken. A round matches every rule once, so the rules evaluated are
+    /// the rule count times one more than the rounds.
+    ///
     /// **Its consumer is every creation**: `new` by a creation rule, inbox
     /// capture and `new` at a bare path, which `norn-host`'s planner fills
     /// from it, its refusals answered as structured unresolved reasons.
@@ -185,6 +192,7 @@ impl VaultSchema {
         path: &str,
         clock: &mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
         case: CaseFold,
+        work: &mut RuleWork,
     ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
         let mut at = Reading { clock, read: None };
         let at = &mut at;
@@ -202,12 +210,14 @@ impl VaultSchema {
         let mut rounds = 0;
         loop {
             rounds += 1;
+            work.defaults_rounds += 1;
             debug_assert!(rounds <= defaulted + 1, "the rounds outran their bound");
             let mut proposed: BTreeMap<&str, Vec<DefaultCandidate>> = BTreeMap::new();
             for rule in self.rules.values() {
-                if !self.selects_in(rule, path, &composed, case) {
+                if !self.selects_counted(rule, path, &composed, case, work) {
                     continue;
                 }
+                work.rules_selected += 1;
                 for (field, default) in &rule.required {
                     let Some(default) = default else {
                         continue;
@@ -215,7 +225,7 @@ impl VaultSchema {
                     if value_in(&composed, field).is_some() {
                         continue;
                     }
-                    let value = fill(rule, field, default, path, at, case, &mut bindings)?;
+                    let value = fill(rule, field, default, path, at, case, &mut bindings, work)?;
                     propose(proposed.entry(field).or_default(), value, &rule.name);
                 }
             }
@@ -230,6 +240,7 @@ impl VaultSchema {
                 let value = candidates.remove(0).value;
                 composed.push((field.to_string(), value.clone()));
                 filled.push((field.to_string(), value));
+                work.defaults_filled += 1;
             }
         }
 
@@ -237,9 +248,10 @@ impl VaultSchema {
         // every rule matching it.
         let mut judged: BTreeMap<&str, Vec<DefaultCandidate>> = BTreeMap::new();
         for rule in self.rules.values() {
-            if !self.selects_in(rule, path, &composed, case) {
+            if !self.selects_counted(rule, path, &composed, case, work) {
                 continue;
             }
+            work.rules_selected += 1;
             for (field, value) in &filled {
                 let Some(Some(default)) = rule.required.get(field) else {
                     continue;
@@ -250,7 +262,7 @@ impl VaultSchema {
                         rules: Vec::new(),
                     }]
                 });
-                let proposal = fill(rule, field, default, path, at, case, &mut bindings)?;
+                let proposal = fill(rule, field, default, path, at, case, &mut bindings, work)?;
                 propose(candidates, proposal, &rule.name);
             }
         }
@@ -284,7 +296,9 @@ impl Reading<'_> {
 }
 
 /// `default` filled from `at` where it reads the clock, its captures read
-/// from what `rule`'s match binds in `path`, each rule's binding found once.
+/// from what `rule`'s match binds in `path`, each rule's binding found once
+/// and tallied in `work`.
+#[allow(clippy::too_many_arguments)] // One fill's whole context: splitting it would only rename the arguments.
 fn fill<'s>(
     rule: &'s Rule,
     field: &str,
@@ -293,6 +307,7 @@ fn fill<'s>(
     at: &mut Reading<'_>,
     case: CaseFold,
     bindings: &mut BTreeMap<&'s str, Captures>,
+    work: &mut RuleWork,
 ) -> Result<AuthoredValue, RuleDefaultsRefusal> {
     let at = if default.reads_clock() {
         Some(at.taken()?)
@@ -303,6 +318,7 @@ fn fill<'s>(
         match bindings.get(rule.name.as_str()) {
             Some(captures) => captures.clone(),
             None => {
+                work.captures_bound += 1;
                 let captures = match rule
                     .selector
                     .path

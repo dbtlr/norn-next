@@ -118,8 +118,8 @@ use std::ops::ControlFlow;
 use std::path::Path;
 
 use norn_config::schema::{
-    CaseFold, CreationRule, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, SeqSlot,
-    Target, TemplateValues, VaultSchema,
+    CaseFold, CreationRule, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, RuleWork,
+    SeqSlot, Target, TemplateValues, VaultSchema,
 };
 use norn_text::{LineEnding, Mapping, opens_frontmatter, render_document};
 use norn_wire::{
@@ -210,7 +210,8 @@ fn states_rule_defaults(schema: &VaultSchema) -> bool {
 /// the rule defaults fill each required field its own frontmatter leaves out
 /// ([`VaultSchema::fill_rule_defaults`]), `clock` read only where a default
 /// that fills reads it; `None` where none fills; or why it takes none. A key
-/// the frontmatter holds null stands.
+/// the frontmatter holds null stands. What the fixpoint paid is tallied on
+/// the logical rule counters, refused or not.
 ///
 /// **The caller's frontmatter is its values, and every byte it sent stays.**
 /// Each filled field is set into the document through the one composition a
@@ -230,9 +231,10 @@ fn defaulted(
     let Some(fields) = crate::derivation::written_fields(content.as_bytes()) else {
         return Ok(None);
     };
-    let filled = schema
-        .fill_rule_defaults(&fields, path.as_str(), clock, case)
-        .map_err(refused_defaults)?;
+    let mut work = RuleWork::default();
+    let filled = schema.fill_rule_defaults(&fields, path.as_str(), clock, case, &mut work);
+    crate::evidence::count_rule_work(work);
+    let filled = filled.map_err(refused_defaults)?;
     if filled.is_empty() {
         return Ok(None);
     }
@@ -1656,6 +1658,29 @@ rules:
         );
         let (_, bare) = layered(vec![Operation::new(create("notes/y.md", "Body.\n"))]);
         assert_eq!(bare, "---\nkind: note\narea: general\n---\nBody.\n");
+    }
+
+    /// **A creation's defaults fixpoint reaches the logical rule counters**
+    /// of the job planning it: a capture sending no field fills `kind` in
+    /// the first round and `area` in the second, the third filling nothing,
+    /// each round and the re-check evaluating the schema's three rules.
+    #[test]
+    fn a_creations_defaults_fixpoint_reaches_the_logical_rule_counters() {
+        let evidence = std::sync::Arc::new(crate::evidence::JobEvidence::default());
+        {
+            let _job = evidence.attributing();
+            layered(vec![capture_with(vec![])]);
+        }
+        let work = evidence.read().rule_work;
+        assert_eq!(
+            (
+                work.defaults_rounds,
+                work.defaults_filled,
+                work.rules_evaluated
+            ),
+            (3, 2, 12),
+            "{work:?}"
+        );
     }
 
     /// **`new` at a bare path whose frontmatter does not read fills
