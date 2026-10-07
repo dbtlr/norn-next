@@ -3265,9 +3265,11 @@ Four contracts inside that flow carry weight:
   composed result is judged by the derivation's own judgment and refuses each violation
   whose identity — kind, field, offending value and combined constraint — no document it was
   composed from held, every schema finding whatever its severity, a link's health never. A
-  carried result is judged again at its destination by its schema rules alone, where some
-  rule's `match.path`, `exclude.path` or `allowed_paths` reads where a document stands: its
-  bytes are the document's own, so every other finding is the same wherever they stand, but
+  carried result is judged again at its destination on its frontmatter — against the schema
+  rules and the field declarations, though a declaration's finding cannot change with the
+  path — where some rule's `match.path`, `exclude.path` or `allowed_paths` reads where a
+  document stands: its bytes are the document's own, so every other finding is the same
+  wherever they stand, but
   the same bytes can breach a rule at one place and not another, and a combined constraint
   that changes under a held value is a violation the move introduces. It is judged from the
   store's projection of its frontmatter where the index vouches for it and from its bytes,

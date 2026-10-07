@@ -600,7 +600,7 @@ struct CarriedReading {
 /// the store's index where it vouches for them — derived from the very bytes
 /// the plan carries, by hash ([`vouched`], [`vouched_block`]) — at the
 /// source's spelling or, for a re-sent plan, the destination's. Where it
-/// vouches for either not, the file is read whole once at the plan's hash,
+/// does not vouch for both, the file is read whole once at the plan's hash,
 /// and both are read from those bytes: the one copy a move the index lags
 /// holds, a declared limit. A carried move the index vouches for holds no
 /// copy of its document, only the projection of its frontmatter.
@@ -779,8 +779,10 @@ impl Judging<'_> {
     /// ([`schema::introduced`]), and no other, whatever fields the plan
     /// writes into it.
     ///
-    /// **A carried document is judged again at its destination, by its
-    /// schema rules alone.** Its bytes are the moved document's own,
+    /// **A carried document is judged again at its destination, on its
+    /// frontmatter alone** — against the schema rules and the field
+    /// declarations, though a declaration's type or shape finding cannot
+    /// change with the path. Its bytes are the moved document's own,
     /// unchanged, and every finding they conclude but a rule's is a function
     /// of the bytes, the same wherever they stand. A rule's `match.path`,
     /// `exclude.path` and `allowed_paths` read where a document stands, so the

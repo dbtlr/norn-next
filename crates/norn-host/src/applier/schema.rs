@@ -74,8 +74,8 @@ struct Violation {
 enum Identity {
     /// A schema rule's or a field declaration's finding.
     Rule(FindingIdentity),
-    /// An undeclared tag, under the tag fold.
-    Tag(String),
+    /// A tag's violation: its kind, and the tag under the tag fold.
+    Tag(FindingKind, String),
     /// A violation about the whole document.
     Document(FindingKind),
 }
@@ -87,7 +87,7 @@ impl Violation {
         let identity = match (&finding.identity, finding.cause, &finding.target) {
             (Some(identity), _, _) => Identity::Rule(identity.clone()),
             (None, Cause::TagBreach(_), Some(tag)) => {
-                Identity::Tag(norn_wire::fold_tag(tag).to_string())
+                Identity::Tag(kind, norn_wire::fold_tag(tag).to_string())
             }
             _ => Identity::Document(kind),
         };
@@ -127,10 +127,11 @@ pub(super) fn judge(
     }
 }
 
-/// Judge the frontmatter block `block` as the document at `path`'s, by the
-/// schema rules alone ([`judge_block`](crate::derivation::judge_block)): what
-/// a document a move carries byte for byte is judged by at the place it
-/// leaves and the place it lands. What the judgment paid is tallied as the
+/// Judge the frontmatter block `block` as the document at `path`'s, against
+/// the schema rules and the field declarations alone
+/// ([`judge_block`](crate::derivation::judge_block)): what a document a move
+/// carries byte for byte is judged by at the place it leaves and the place
+/// it lands, where only a rule's findings can change. What the judgment paid is tallied as the
 /// derivation's is.
 pub(super) fn judge_block(
     path: &DocumentPath,
