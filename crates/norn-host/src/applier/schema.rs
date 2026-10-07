@@ -22,8 +22,10 @@
 //! offending value it names and the combined constraint it breaches:
 //!
 //! - a schema rule's or a field declaration's finding is the identity the
-//!   rule judge mints for it ([`FindingIdentity`]), its value by its equality
-//!   key and its combined constraint by value, never by the rules stating it;
+//!   rule judge mints for it ([`FindingIdentity`]): an element by its
+//!   equality key, the whole value a forbidden field, a shape mismatch or a
+//!   conflict names by its spelling, and its combined constraint by value,
+//!   never by the rules stating it;
 //! - an undeclared tag is its kind and the tag under the tag fold, wherever
 //!   the document writes it, in frontmatter or body;
 //! - every other kind is about the whole document — its path, its bytes, its

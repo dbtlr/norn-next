@@ -2504,8 +2504,10 @@ the smallest length limit, that the field is required or forbidden, the constrai
 conflict, each placement rule's allowed paths as a set — and never by the rules stating
 it, so a second rule stating a constraint a document already breaches leaves the finding
 one identity though it cites both. A forbidden field, a shape mismatch and a conflict over
-a field are one finding per field whatever it holds, so the whole value each names is its
-payload and no part of its identity.
+a field are one finding per field, and the whole value each names is its offending value,
+told apart by its spelling: a write swapping one such value for another introduces a
+violation, and a forbidden field gone from a value to null is another identity, since a null
+names no value.
 
 **A tag is compared under the tag fold.** Two tag names are one tag when their folds are
 equal. The fold lowercases each character alone, with no locale, where its lowercase is exactly

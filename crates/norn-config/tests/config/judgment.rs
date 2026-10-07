@@ -1296,12 +1296,14 @@ rules:
     assert_ne!(placed("task"), placed("note"));
 }
 
-/// **A whole-value finding is one per field whatever the field holds**: a
-/// forbidden field, a shape mismatch and a conflict over a field name the
-/// value they judge as payload, so another value under the same field is the
-/// same identity.
+/// **A whole-value finding is told apart by the whole value it names**: a
+/// forbidden field, a shape mismatch and a conflict over a field are one
+/// finding per field, and another value under the same field is another
+/// identity — a forbidden field gone from a value to null among them, since
+/// a null names no value. The same value, its map entries written in another
+/// order, is the same identity.
 #[test]
-fn a_whole_value_finding_keeps_its_identity_whatever_the_field_holds() {
+fn a_whole_value_finding_is_another_identity_for_another_value() {
     let schema = schema(
         "version: 1
 fields:
@@ -1312,34 +1314,40 @@ rules:
   never: { match: { frontmatter: { kind: x } }, forbidden: { owner: } }
 ",
     );
-    assert_eq!(
+    let forbidden = |value: AuthoredValue| {
         identity_of(
             &schema,
             "a.md",
-            &[("scratch", text("a")), ("owner", text("o"))],
-            Breach::Forbidden
-        ),
-        identity_of(
-            &schema,
-            "a.md",
-            &[("scratch", AuthoredValue::Null), ("owner", text("o"))],
-            Breach::Forbidden
+            &[("scratch", value), ("owner", text("o"))],
+            Breach::Forbidden,
         )
-    );
-    assert_eq!(
-        identity_of(
-            &schema,
-            "a.md",
-            &[("tags", text("a")), ("owner", text("o"))],
-            Breach::ShapeMismatch
-        ),
-        identity_of(
-            &schema,
-            "a.md",
-            &[("tags", text("b")), ("owner", text("o"))],
-            Breach::ShapeMismatch
+    };
+    assert_ne!(forbidden(text("a")), forbidden(text("b")));
+    assert_ne!(forbidden(text("a")), forbidden(AuthoredValue::Null));
+    assert_eq!(forbidden(text("a")), forbidden(text("a")));
+    let map = |entries: &[(&str, &str)]| {
+        AuthoredValue::Map(
+            ValueMap::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), text(value))),
+            )
+            .expect("each key once"),
         )
+    };
+    assert_eq!(
+        forbidden(map(&[("x", "1"), ("y", "2")])),
+        forbidden(map(&[("y", "2"), ("x", "1")]))
     );
+    let misshaped = |value: &str| {
+        identity_of(
+            &schema,
+            "a.md",
+            &[("tags", text(value)), ("owner", text("o"))],
+            Breach::ShapeMismatch,
+        )
+    };
+    assert_ne!(misshaped("a"), misshaped("b"));
     let conflicted = |owner: &str| {
         identity_of(
             &schema,
@@ -1352,7 +1360,8 @@ rules:
             Breach::FieldRulesConflict,
         )
     };
-    assert_eq!(conflicted("ana"), conflicted("bo"));
+    assert_ne!(conflicted("ana"), conflicted("bo"));
+    assert_eq!(conflicted("ana"), conflicted("ana"));
 }
 
 /// **A schema reads where a document stands only through a rule's

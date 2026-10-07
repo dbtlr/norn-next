@@ -306,3 +306,134 @@ fn a_refusal_cites_its_checks_and_its_forecast_under_one_numbering() {
         [vec!["tasks".to_string()]]
     );
 }
+
+/// A schema with a field declared single, a rule forbidding `scratch`, and
+/// two rules requiring and forbidding `owner` at once on a document of area
+/// `y` and kind `x`.
+const WHOLE_VALUES: &str = "version: 1
+fields:
+  rank: { type: number, shape: single }
+rules:
+  bans: { forbidden: { scratch: } }
+  needs: { match: { frontmatter: { area: y } }, required: { owner: } }
+  never: { match: { frontmatter: { kind: x } }, forbidden: { owner: } }
+";
+
+/// A document standing in every whole-value violation [`WHOLE_VALUES`]
+/// states: a forbidden `scratch: a`, a misshaped `rank: [1, 2]` and a
+/// conflicted `owner: ana`.
+const STANDING_WHOLE_VALUES: &str =
+    "---\ntitle: A\nscratch: a\nrank: [1, 2]\narea: y\nkind: x\nowner: ana\n---\n";
+
+/// **Setting another value over a standing forbidden value refuses**: the
+/// whole value a forbidden field holds is part of its identity, so `b` over
+/// `a` introduces a violation, and so does null over `a`, which names no
+/// value.
+#[test]
+fn setting_another_value_over_a_standing_forbidden_value_refuses() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[("a.md", STANDING_WHOLE_VALUES)]);
+    let checks =
+        refused_for(fixture.apply(fixture.plan(vec![setting("a.md", "scratch", text("b"))])));
+    assert_eq!(
+        violations(&checks),
+        [violation(
+            "a.md",
+            FindingKind::Forbidden,
+            "scratch",
+            Some("b")
+        )]
+    );
+    let checks = refused_for(fixture.apply(fixture.plan(vec![setting(
+        "a.md",
+        "scratch",
+        AuthoredValue::Null,
+    )])));
+    assert_eq!(
+        violations(&checks),
+        [violation("a.md", FindingKind::Forbidden, "scratch", None)]
+    );
+    assert_eq!(fixture.read("a.md").as_deref(), Some(STANDING_WHOLE_VALUES));
+}
+
+/// **Swapping a misshaped list for another refuses**: a shape mismatch is
+/// told apart by the whole value it names.
+#[test]
+fn swapping_a_misshaped_list_for_another_refuses() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[("a.md", STANDING_WHOLE_VALUES)]);
+    let checks =
+        refused_for(fixture.apply(fixture.plan(vec![setting("a.md", "rank", list(&["3", "4"]))])));
+    assert_eq!(
+        violations(&checks),
+        [violation(
+            "a.md",
+            FindingKind::ShapeMismatch,
+            "rank",
+            Some("[\"3\",\"4\"]")
+        )]
+    );
+}
+
+/// **Swapping a conflicted field's value refuses**: a conflict over a field
+/// is told apart by the whole value the field holds.
+#[test]
+fn swapping_a_conflicted_fields_value_refuses() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[("a.md", STANDING_WHOLE_VALUES)]);
+    let checks =
+        refused_for(fixture.apply(fixture.plan(vec![setting("a.md", "owner", text("bo"))])));
+    assert_eq!(
+        violations(&checks),
+        [violation(
+            "a.md",
+            FindingKind::FieldRulesConflict,
+            "owner",
+            Some("bo")
+        )]
+    );
+}
+
+/// **A forced whole-value swap lists each violation with its value's
+/// head**, on the preview's forecast and the applied report alike.
+#[test]
+fn a_forced_whole_value_swap_lists_each_with_its_value_head() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[("a.md", STANDING_WHOLE_VALUES)]);
+    let mut plan = fixture.plan(vec![
+        setting("a.md", "scratch", text("b")),
+        setting("a.md", "rank", list(&["3", "4"])),
+        setting("a.md", "owner", text("bo")),
+    ]);
+    plan.force = true;
+    let expected = [
+        violation("a.md", FindingKind::FieldRulesConflict, "owner", Some("bo")),
+        violation(
+            "a.md",
+            FindingKind::ShapeMismatch,
+            "rank",
+            Some("[\"3\",\"4\"]"),
+        ),
+        violation("a.md", FindingKind::Forbidden, "scratch", Some("b")),
+    ];
+    let (_, forecast) = fixture
+        .preview(plan.clone())
+        .expect("the forced plan previews");
+    assert_eq!(
+        forecast.forced.iter().map(summary).collect::<Vec<_>>(),
+        expected
+    );
+    let landed = applied(fixture.apply(plan));
+    assert_eq!(
+        landed.forced.iter().map(summary).collect::<Vec<_>>(),
+        expected
+    );
+    fixture.assert_store_is_a_build_from_zero();
+}
+
+/// **A write leaving each whole value as it stood applies**: every standing
+/// whole-value violation keeps its identity, so a write elsewhere in the
+/// document introduces none.
+#[test]
+fn a_write_leaving_each_whole_value_unchanged_applies() {
+    let mut fixture = Fixture::with_schema(WHOLE_VALUES, &[("a.md", STANDING_WHOLE_VALUES)]);
+    let landed = applied(fixture.apply(fixture.plan(vec![setting("a.md", "title", text("B"))])));
+    assert!(landed.forced.is_empty());
+    fixture.assert_store_is_a_build_from_zero();
+}
