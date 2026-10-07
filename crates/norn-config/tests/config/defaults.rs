@@ -218,23 +218,22 @@ rules:
     );
 }
 
-/// **A required field is missing where it is absent or null, and met by an
-/// empty string or an empty list.**
+/// **Only an absent field is filled**: a field the frontmatter holds is its
+/// caller's, null included — a caller omits a key to take its default and
+/// sends null to ask for no value — and an empty string or an empty list
+/// meets the requirement.
 #[test]
-fn a_required_field_is_missing_where_absent_or_null() {
+fn only_an_absent_field_is_filled_and_a_held_null_stands() {
     let schema = b"version: 1\nrules:\n  every: { required: { status: { default: todo } } }\n";
-    for missing in [vec![], vec![("status", AuthoredValue::Null)]] {
+    assert_eq!(
+        fill(schema, "a.md", &[]),
+        Ok(filled(&[("status", text("todo"))]))
+    );
+    for held in [AuthoredValue::Null, text(""), AuthoredValue::list([])] {
         assert_eq!(
-            fill(schema, "a.md", &missing),
-            Ok(filled(&[("status", text("todo"))])),
-            "{missing:?}"
-        );
-    }
-    for met in [text(""), AuthoredValue::list([])] {
-        assert_eq!(
-            fill(schema, "a.md", &[("status", met.clone())]),
+            fill(schema, "a.md", &[("status", held.clone())]),
             Ok(Vec::new()),
-            "{met:?}"
+            "{held:?}"
         );
     }
 }

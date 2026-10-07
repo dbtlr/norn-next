@@ -2764,13 +2764,16 @@ one following in the caller's order, none filled as a template — then the call
 the rule's body template filled, else nothing; the inbox has no frontmatter defaults and no
 body template. **Then the rule defaults** ([ADR
 0035](decisions/0035-a-schema-rule-selects-documents-by-their-frontmatter.md)): the schema
-rules matching the document so far fill each required field still missing, re-matched to a
-fixpoint, so a default that brings a rule into scope brings its defaults too; once settled,
+rules matching the document so far fill each required field no earlier layer wrote,
+re-matched to a fixpoint, so a default that brings a rule into scope brings its defaults too; once settled,
 each filled field is judged again against every rule matching the final frontmatter and path.
 Any disagreement, in a round or at that re-check, leaves the creation unresolved naming each
 conflicting field and every candidate value with the rules proposing it, and a default read
 from a path capture its rule binds several ways leaves it unresolved naming two bindings. The
-caller's values and the creation rule's are never judged again or overwritten. A capture takes
+caller's values and the creation rule's are never judged again or overwritten, and a key
+either sends is theirs, null included: **omit a key to take its default; send null to ask for
+no value**, which the write gate judges, a required field held null refusing as missing, and
+no caller line is rewritten. A capture takes
 the same chain beneath the caller's fields, and so does a document created at a path: its own
 frontmatter is the caller's values, each filled field is set into it by the one composition a
 `set` writes a field by — at the end of its block, or in a new block where it carries none, a

@@ -1,6 +1,6 @@
 //! The defaults fixpoint ([`VaultSchema::fill_rule_defaults`]): the rule
 //! defaults a created document takes for the required fields its caller and
-//! its creation rule left missing.
+//! its creation rule left out.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -9,7 +9,7 @@ use norn_wire::{AuthoredValue, Binding, Captures, CaseFold, ValueMap};
 
 use super::super::VaultSchema;
 use super::super::template::LocalTimestamp;
-use super::{Rule, RuleDefault, is_missing, named, value_in};
+use super::{Rule, RuleDefault, named, value_in};
 
 /// One value proposed for a field, and the rules proposing it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,9 +124,17 @@ impl VaultSchema {
     /// the order filled; or why they do not settle ([ADR 0035]). See
     /// [`VaultSchema::selects`] for `case`.
     ///
+    /// **Only an absent field is filled.** A key `frontmatter` holds is its
+    /// caller's — the creation's caller or its creation rule — null
+    /// included: a caller omits a key to take its default and sends null to
+    /// ask for no value, which the write gate then judges, a required field
+    /// held null refusing as missing. A caller that wants a null field
+    /// filled, as repair would, leaves the key out: a null and an absent key
+    /// select and judge alike.
+    ///
     /// Each **round** matches rules against the frontmatter composed so far
-    /// and fills every required field still missing — absent or null — whose
-    /// selecting rules' defaults all agree as filled values. **Two filled
+    /// and fills every required field still absent whose selecting rules'
+    /// defaults all agree as filled values. **Two filled
     /// values agree only where they are one written value**: `1` and `1.0`
     /// are an integer and a float, which write different bytes into the
     /// document, so they disagree though a `number` field compares them
@@ -146,10 +154,9 @@ impl VaultSchema {
     /// could bring in rules whose own defaults then disagree, a conflict the
     /// document never had. A conflict names each conflicting field and every
     /// candidate value with the rules proposing it. The caller's values and
-    /// its creation rule's are never judged again and never overwritten; a
-    /// null is no value, so a field either writes as null is missing and
-    /// filled. A required field nothing defaults stays missing, which is the
-    /// write gate's to refuse, not this.
+    /// its creation rule's are never judged again and never overwritten. A
+    /// required field nothing defaults stays missing, which is the write
+    /// gate's to refuse, not this.
     ///
     /// **One clock reading, `at`, fills every default**, and each
     /// `{{path.<name>}}` reads what its own rule's `match.path` bound in
@@ -192,7 +199,7 @@ impl VaultSchema {
                     let Some(default) = default else {
                         continue;
                     };
-                    if !is_missing(value_in(&composed, field)) {
+                    if value_in(&composed, field).is_some() {
                         continue;
                     }
                     let value = fill(rule, field, default, path, at, case, &mut bindings)?;
@@ -208,10 +215,7 @@ impl VaultSchema {
             }
             for (field, mut candidates) in proposed {
                 let value = candidates.remove(0).value;
-                match composed.iter_mut().find(|(held, _)| held == field) {
-                    Some((_, held)) => *held = value.clone(),
-                    None => composed.push((field.to_string(), value.clone())),
-                }
+                composed.push((field.to_string(), value.clone()));
                 filled.push((field.to_string(), value));
             }
         }

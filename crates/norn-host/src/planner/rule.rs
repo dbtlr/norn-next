@@ -58,8 +58,11 @@
 //!
 //! **Then the rule defaults** ([`defaulted`]): the schema rules matching the
 //! document fill each required field its caller and its creation rule left
-//! missing, to a fixpoint ([`VaultSchema::fill_rule_defaults`]), each set into
-//! the composed document as a `set` writes a field. A document created at a
+//! out, to a fixpoint ([`VaultSchema::fill_rule_defaults`]), each set into
+//! the composed document as a `set` writes a field. A key either sends is
+//! theirs, null included: **omit a key to take its default; send null to ask
+//! for no value**, which the write gate judges — a required field held null
+//! refuses as missing — and no line the caller sent is rewritten. A document created at a
 //! path takes the same chain, its own frontmatter its caller's values. A
 //! disagreement leaves the creation unresolved as
 //! [`UnresolvedReason::DefaultsConflict`], naming each field and every
@@ -202,9 +205,9 @@ fn states_rule_defaults(schema: &VaultSchema) -> bool {
 }
 
 /// The text `content` — a document a caller creates at `path` — takes once
-/// the rule defaults fill each required field its own frontmatter leaves
-/// missing ([`VaultSchema::fill_rule_defaults`]), read at `at`; `None` where
-/// none fills; or why it takes none.
+/// the rule defaults fill each required field its own frontmatter leaves out
+/// ([`VaultSchema::fill_rule_defaults`]), read at `at`; `None` where none
+/// fills; or why it takes none. A key the frontmatter holds null stands.
 ///
 /// **The caller's frontmatter is its values, and every byte it sent stays.**
 /// Each filled field is set into the document through the one composition a

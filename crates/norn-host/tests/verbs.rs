@@ -998,6 +998,152 @@ fn new_refuses_a_missing_required_field_and_disagreeing_defaults() {
     assert!(!vault.path().join("notes/y.md").exists());
 }
 
+/// The one required-missing violation `params` is refused for, unforced, by
+/// preview and apply alike, naming its field; and the content its forced
+/// apply writes, listing that violation.
+fn a_held_null_refused_then_forced(
+    host: &attach::ServingHost,
+    vault: &attach::Vault,
+    params: impl Fn(ApplyMode) -> NewParams,
+    field: &str,
+) -> String {
+    for mode in [ApplyMode::Preview, ApplyMode::Apply] {
+        let refusal = refused(host.new_document(params(mode)));
+        let ErrorDetail::PlanRefused { checks, .. } = refusal.detail() else {
+            panic!("the refusal carries {:?}", refusal.detail());
+        };
+        let [RefusedCheck::SchemaViolation { violation, .. }] = checks.as_slice() else {
+            panic!("the create refused for {checks:?}");
+        };
+        assert_eq!(
+            (violation.kind, violation.target.as_deref()),
+            (FindingKind::RequiredMissing, Some(field))
+        );
+    }
+    let answered = host
+        .new_document(params(ApplyMode::Apply).with_force(true))
+        .expect("a forced create is admitted")
+        .wait()
+        .expect("a forced create applies");
+    let ApplyReport::Applied { plan, forced, .. } = answered.report else {
+        panic!("a forced create answered {:?}", answered.report);
+    };
+    let listed: Vec<(FindingKind, Option<&str>)> = forced
+        .iter()
+        .map(|violation| (violation.kind, violation.target.as_deref()))
+        .collect();
+    assert_eq!(listed, [(FindingKind::RequiredMissing, Some(field))]);
+    let (at, content) = the_create(&plan);
+    assert_eq!(read(vault, &at), content);
+    content
+}
+
+/// **`new --as` keeps a caller's null**: a null `priority` sent over the
+/// creation rule's `low` and a rule's `high` stands, so the create is
+/// refused as missing `priority`, and forced it writes the null and lists
+/// the violation; an omitted `owner` still takes its default.
+#[test]
+fn new_by_rule_keeps_a_callers_null_which_refuses_as_required_missing() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-null-by-rule", DEFAULTS_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let content = a_held_null_refused_then_forced(
+        &host,
+        &vault,
+        |mode| {
+            NewParams::for_subject(
+                address(&vault),
+                mode,
+                NewSubject::by_rule(
+                    "task",
+                    Variables::default(),
+                    fields(vec![("priority", AuthoredValue::Null)]),
+                    None,
+                ),
+            )
+        },
+        "priority",
+    );
+    assert_eq!(
+        content,
+        "---\nkind: task\npriority: ~\ntitle: A task\nowner: nobody\n---\n"
+    );
+}
+
+/// **Inbox capture keeps a caller's null**: a null `owner` on a task stands,
+/// so the capture is refused as missing `owner`, and forced it writes the
+/// null and lists the violation; the omitted `priority` still takes its
+/// default.
+#[test]
+fn a_capture_keeps_a_callers_null_which_refuses_as_required_missing() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-null-capture", DEFAULTS_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    let content = a_held_null_refused_then_forced(
+        &host,
+        &vault,
+        |mode| {
+            NewParams::for_subject(
+                address(&vault),
+                mode,
+                NewSubject::inbox(
+                    fields(vec![
+                        ("title", AuthoredValue::string("Call Sam")),
+                        ("kind", AuthoredValue::string("task")),
+                        ("owner", AuthoredValue::Null),
+                    ]),
+                    Some("Body.\n".to_string()),
+                ),
+            )
+        },
+        "owner",
+    );
+    assert_eq!(
+        content,
+        "---\ntitle: Call Sam\nkind: task\nowner: ~\npriority: high\n---\nBody.\n"
+    );
+}
+
+/// **`new` at a bare path keeps every spelling of a null, its line as
+/// sent**: `priority: ~`, `priority: ~  # later` and an empty `owner:` each
+/// stand, so the create is refused as missing that field, and forced it
+/// writes the document with that line untouched and lists the violation;
+/// each omitted field still takes its default.
+#[test]
+fn new_at_a_path_keeps_each_null_spelling_which_refuses_as_required_missing() {
+    let (_sandbox, vault, host) =
+        a_schema_vault("host-verbs-new-null-at-path", DEFAULTS_SCHEMA, &[]);
+    let _lease = attach::attach_and_wait(&host, vault.name());
+    for (at, sent, field, written) in [
+        (
+            "notes/a.md",
+            "---\ntitle: A\nkind: task\npriority: ~\n---\nBody.\n",
+            "priority",
+            "---\ntitle: A\nkind: task\npriority: ~\nowner: nobody\n---\nBody.\n",
+        ),
+        (
+            "notes/b.md",
+            "---\ntitle: B\nkind: task\npriority: ~  # later\n---\nBody.\n",
+            "priority",
+            "---\ntitle: B\nkind: task\npriority: ~  # later\nowner: nobody\n---\nBody.\n",
+        ),
+        (
+            "notes/c.md",
+            "---\ntitle: C\nkind: task\nowner:\n---\nBody.\n",
+            "owner",
+            "---\ntitle: C\nkind: task\nowner:\npriority: high\n---\nBody.\n",
+        ),
+    ] {
+        let content = a_held_null_refused_then_forced(
+            &host,
+            &vault,
+            |mode| NewParams::new(address(&vault), mode, path(at), sent),
+            field,
+        );
+        assert_eq!(content, written, "{sent:?}");
+    }
+}
+
 /// A capture of `body` with `fields`, applied over `vault`: where it landed
 /// and the bytes read back from there.
 fn captured(
