@@ -211,7 +211,8 @@ fn states_rule_defaults(schema: &VaultSchema) -> bool {
 /// The text `content` — a document a caller creates at `path` — takes once
 /// the rule defaults fill each required field its own frontmatter leaves out
 /// ([`VaultSchema::fill_rule_defaults`]), `clock` read only where a default
-/// that fills reads it; `None` where none fills; or why it takes none. A key
+/// reading it is proposed for a field or compared with a filled value;
+/// `None` where none fills; or why it takes none. A key
 /// the frontmatter holds null stands. What the fixpoint paid is tallied on
 /// the logical rule counters, refused or not.
 ///
@@ -1908,7 +1909,7 @@ rules:
         assert_eq!(
             reads.get(),
             0,
-            "a creation filling no default that reads the clock reads none"
+            "a creation proposing no default that reads the clock reads none"
         );
     }
 
@@ -1918,7 +1919,7 @@ rules:
     /// clock token, resolves without reading it; one a `{{now}}` default is
     /// proposed for is left unresolved naming the clock, read once.
     #[test]
-    fn a_bare_create_filling_no_clock_default_never_reads_the_clock() {
+    fn a_bare_create_proposing_no_clock_default_never_reads_the_clock() {
         let stamped = schema(
             b"version: 1
 rules:
