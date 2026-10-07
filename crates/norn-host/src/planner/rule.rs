@@ -31,11 +31,13 @@
 //!
 //! **One clock reading per plan.** The clock is read the first time a
 //! creation of the plan needs it — any creation by rule, whose target and
-//! templates may read it, and a rule default that will fill reading
-//! `{{now}}`, `{{date}}` or `{{time}}` — and never for a plan whose
-//! creations need none, so a document created at a path whose defaults fill
-//! no clock token never depends on the clock; every template and every
-//! default of the plan fills from that one reading. A clock outside the
+//! templates may read it, and any creation where a rule default reading
+//! `{{now}}`, `{{date}}` or `{{time}}` is proposed for a field or compared
+//! with a filled value, even one that then turns out to conflict — and never
+//! for a plan whose creations need none, so a document created at a path
+//! where no default reading a clock token is proposed or compared never
+//! depends on the clock; every template and every default of the plan fills
+//! from that one reading. A clock outside the
 //! years `{{date}}` can write leaves every creation of the plan that needs
 //! it unresolved, saying so.
 //!
@@ -1910,11 +1912,11 @@ rules:
         );
     }
 
-    /// **A creation reads the clock only for a default that will fill from
-    /// it**: under an unreadable clock, a document created at a path whose
-    /// defaults fill nothing, or fill only values reading no clock token,
-    /// resolves without reading it; one a `{{now}}` default would fill is
-    /// left unresolved naming the clock, read once.
+    /// **A creation reads the clock only for a default reading it that is
+    /// proposed or compared**: under an unreadable clock, a document created
+    /// at a path whose defaults propose nothing, or only values reading no
+    /// clock token, resolves without reading it; one a `{{now}}` default is
+    /// proposed for is left unresolved naming the clock, read once.
     #[test]
     fn a_bare_create_filling_no_clock_default_never_reads_the_clock() {
         let stamped = schema(

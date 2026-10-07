@@ -67,8 +67,8 @@ pub enum RuleDefaultsRefusal {
         /// Two of the bindings.
         bindings: Box<[Captures; 2]>,
     },
-    /// A default that would fill reads the clock, and the clock gives no
-    /// reading a default can fill.
+    /// A clock-reading default was proposed or had to be compared, and the
+    /// clock gives no reading a default can fill.
     NoClockReading(NotALocalTimestamp),
 }
 
@@ -137,7 +137,8 @@ impl VaultSchema {
     /// ask for no value, which the write gate then judges, a required field
     /// held null refusing as missing. A caller that wants a null field
     /// filled, as repair would, leaves the key out: a null and an absent key
-    /// select and judge alike.
+    /// select alike, and judge alike except for `forbidden`, which a null
+    /// breaches by the key's presence.
     ///
     /// Each **round** matches rules against the frontmatter composed so far
     /// and fills every required field still absent whose selecting rules'
@@ -165,11 +166,16 @@ impl VaultSchema {
     /// required field nothing defaults stays missing, which is the write
     /// gate's to refuse, not this.
     ///
-    /// **One clock reading fills every default**: `clock` is read the first
-    /// time a default that will fill reads `{{now}}`, `{{date}}` or
-    /// `{{time}}`, at most once, and never where none does — so a creation
-    /// filling no such default does not depend on the clock at all. A clock
-    /// giving no reading refuses the defaults. Each `{{path.<name>}}` reads
+    /// **One clock reading serves every default**: `clock` is read the first
+    /// time a default reading `{{now}}`, `{{date}}` or `{{time}}` is proposed
+    /// for a field, or is compared with a filled value at the settled
+    /// re-check, and at most once. It is read before the field is known to
+    /// conflict, because deciding whether a clock default agrees with another
+    /// default needs the reading: `2026-10-07` can equal `{{date}}`. A
+    /// creation where no clock-reading default is proposed or compared never
+    /// reads the clock. A clock giving no reading refuses the defaults naming
+    /// the clock — even where the field would otherwise have been a conflict.
+    /// Each `{{path.<name>}}` reads
     /// what its own rule's `match.path` bound in `path`. A default read from
     /// a capture the match binds several ways is refused, naming two of the
     /// bindings.
@@ -275,7 +281,8 @@ impl VaultSchema {
 }
 
 /// The clock a fixpoint fills its defaults from, read the first time a
-/// default reading it fills and kept from then on.
+/// clock-reading default is proposed for a field or compared with a filled
+/// value, and kept from then on.
 struct Reading<'c> {
     clock: &'c mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
     read: Option<LocalTimestamp>,

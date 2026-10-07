@@ -21,8 +21,8 @@ use norn_config::schema::{LocalTimestamp, NotALocalTimestamp};
 ///
 /// **Read once per plan**, and only by a plan whose creations need it: the
 /// planner's expansion of each creation (`crate::planner::rule`) reads it the
-/// first time a creation by rule, or a rule default that will fill reading a
-/// clock token, asks, and fills every template and default of the plan from
+/// first time a creation by rule, or a rule default reading a clock token that
+/// is proposed for a field or compared with a filled value, asks, and fills every template and default of the plan from
 /// that one reading.
 pub(crate) fn local_now() -> Result<LocalTimestamp, NotALocalTimestamp> {
     local_timestamp(Timestamp::now(), &TimeZone::system())

@@ -5,7 +5,9 @@
 //! path, one clock reading and the schema, so a case hands each over and
 //! needs no directory and no clock.
 
-use norn_config::schema::{CaseFold, LocalTimestamp, RuleDefaultsRefusal, RuleWork, VaultSchema};
+use norn_config::schema::{
+    CaseFold, LocalTimestamp, NotALocalTimestamp, RuleDefaultsRefusal, RuleWork, VaultSchema,
+};
 use norn_wire::{AuthoredValue, ValueMap};
 
 /// The one clock reading every case fills from.
@@ -310,6 +312,59 @@ rules:
         fill(plain, "red/blue/a.md", &[]),
         Ok(filled(&[("kind", text("note"))]))
     );
+}
+
+/// Two rules selecting every path, one defaulting `created` from the clock
+/// and one to a fixed literal.
+const CLOCK_AGAINST_LITERAL: &[u8] = b"version: 1
+rules:
+  stamped: { required: { created: { default: '{{now}}' } } }
+  pinned: { required: { created: { default: '2020-01-01' } } }
+";
+
+/// **A clock default disagreeing with a literal is a conflict**: comparing
+/// the two needs the reading, so the clock is read and the refusal names the
+/// field and both candidates.
+#[test]
+fn a_clock_default_disagreeing_with_a_literal_refuses_as_a_conflict_naming_both() {
+    let refusal = fill(CLOCK_AGAINST_LITERAL, "notes/a.md", &[]).expect_err("a conflict");
+    assert_eq!(
+        conflicts(&refusal),
+        conflict(
+            "created",
+            &[
+                (text("2020-01-01"), &["pinned"]),
+                (text("2026-10-06T09:30:15+02:00"), &["stamped"]),
+            ]
+        )
+    );
+}
+
+/// **A clock default that must be compared needs the reading**: where the
+/// clock gives none, the defaults refuse naming the clock, even though the
+/// field would otherwise have been a conflict, and the clock is asked once.
+#[test]
+fn an_unreadable_clock_refuses_a_clock_default_it_must_compare_naming_the_clock() {
+    let mut calls = 0;
+    let refusal = VaultSchema::parse(CLOCK_AGAINST_LITERAL)
+        .expect("a schema with rule defaults")
+        .fill_rule_defaults(
+            &frontmatter(&[]),
+            "notes/a.md",
+            &mut || {
+                calls += 1;
+                Err(NotALocalTimestamp)
+            },
+            CaseFold::Exact,
+            &mut RuleWork::default(),
+        )
+        .expect_err("no clock reading");
+    assert_eq!(
+        refusal,
+        RuleDefaultsRefusal::NoClockReading(NotALocalTimestamp)
+    );
+    assert!(refusal.to_string().contains("clock"), "{refusal}");
+    assert_eq!(calls, 1);
 }
 
 /// **Every default fills from the one clock reading handed in**, and each
