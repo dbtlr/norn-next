@@ -880,10 +880,6 @@ fn an_integer_past_its_type_is_refused_rather_than_wrapped() {
         b"version: 1\nrules:\n  r: { max_length: { title: 18446744073709551615 } }\n",
     )
     .expect("the largest limit");
-    let limits: Vec<(&str, u64)> = schema
-        .rule("r")
-        .expect("the rule")
-        .max_length()
-        .collect();
+    let limits: Vec<(&str, u64)> = schema.rule("r").expect("the rule").max_length().collect();
     assert_eq!(limits, [("title", u64::MAX)]);
 }

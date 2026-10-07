@@ -1323,6 +1323,10 @@ fn a_selectorless_rule_selects_every_document_and_a_path_only_rule_its_area() {
     assert_eq!(selected(&schema, "projects", &[]), ["every"]);
 }
 
+/// A document a case selects over — its path and frontmatter — and the rules
+/// expected to select it.
+type Selection<'a> = (&'a str, &'a [(&'a str, AuthoredValue)], &'a [&'a str]);
+
 /// **Every site that selects rules reads one matcher**: the rules judgment
 /// breaches a document under and the rules whose defaults the fixpoint fills
 /// are exactly the rules selection names, so a rule constrained only by
@@ -1349,7 +1353,7 @@ rules:
         _ => "owner",
     };
     let task = [("kind", AuthoredValue::string("task"))];
-    let cases: [(&str, &[(&str, AuthoredValue)], &[&str]); 6] = [
+    let cases: [Selection<'_>; 6] = [
         ("projects/norn/a.md", &[], &["area"]),
         ("projects/norn/archive/a.md", &[], &[]),
         ("notes/a.md", &[], &[]),

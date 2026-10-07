@@ -461,7 +461,14 @@ fn a_version_past_its_integer_type_is_refused_rather_than_wrapped_on_both_files(
         place_either(&scratch, which, &path, &format!("version = {}\n", i64::MAX));
         let error = read_either(which, dirs).expect_err("the largest version");
         assert!(
-            matches!(error, ConfigError::VersionAhead { found: i64::MAX, supported: 1, .. }),
+            matches!(
+                error,
+                ConfigError::VersionAhead {
+                    found: i64::MAX,
+                    supported: 1,
+                    ..
+                }
+            ),
             "{error}"
         );
 

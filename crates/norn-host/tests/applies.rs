@@ -993,7 +993,9 @@ fn identities_at(
         if let Some(cursor) = after.take() {
             params = params.with_after(cursor);
         }
-        let answered = host.validate(&params).expect("a served vault answers a validate");
+        let answered = host
+            .validate(&params)
+            .expect("a served vault answers a validate");
         let norn_wire::ValidateReport::Findings { page, .. } = answered.answer.report else {
             panic!("a validate answered {:?}", answered.answer.report);
         };
@@ -1108,29 +1110,29 @@ fn a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_repor
             )
         };
         let before = identities_at(&host, &vault, from);
-        let refused: BTreeSet<Identity> =
-            match host.apply(ApplyParams::new(ApplyMode::Preview, plan(false)))
-                .expect("the request is answered")
-                .wait()
-            {
-                Ok(_) => BTreeSet::new(),
-                Err(error) => {
-                    let ErrorDetail::PlanRefused { checks, .. } = error.detail() else {
-                        panic!("{write}: the preview answered {:?}", error.detail());
-                    };
-                    checks
-                        .iter()
-                        .map(|check| match check {
-                            RefusedCheck::SchemaViolation { violation, .. } => (
-                                violation.kind.as_str(),
-                                violation.target.clone(),
-                                violation.value.as_ref().map(|head| head.text().to_string()),
-                            ),
-                            other => panic!("{write}: a schema check: {other:?}"),
-                        })
-                        .collect()
-                }
-            };
+        let refused: BTreeSet<Identity> = match host
+            .apply(ApplyParams::new(ApplyMode::Preview, plan(false)))
+            .expect("the request is answered")
+            .wait()
+        {
+            Ok(_) => BTreeSet::new(),
+            Err(error) => {
+                let ErrorDetail::PlanRefused { checks, .. } = error.detail() else {
+                    panic!("{write}: the preview answered {:?}", error.detail());
+                };
+                checks
+                    .iter()
+                    .map(|check| match check {
+                        RefusedCheck::SchemaViolation { violation, .. } => (
+                            violation.kind.as_str(),
+                            violation.target.clone(),
+                            violation.value.as_ref().map(|head| head.text().to_string()),
+                        ),
+                        other => panic!("{write}: a schema check: {other:?}"),
+                    })
+                    .collect()
+            }
+        };
         host.apply(ApplyParams::new(ApplyMode::Apply, plan(true)))
             .expect("the apply is admitted")
             .wait()
