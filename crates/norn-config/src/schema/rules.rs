@@ -398,18 +398,29 @@ impl RuleDefault {
     }
 
     /// The default filled at `at`, each `{{path.<name>}}` from `captures`:
-    /// what the rule's match bound.
+    /// what the rule's match bound. `at` may be `None` for a default reading
+    /// no clock token; one reading the clock refuses it as
+    /// [`FillError::NoClock`].
     ///
     /// Read by the defaults fixpoint here. Repair's declared fix fills one
     /// default the same way at Layer 5B (NORN-351), which is not built.
-    pub fn fill(&self, at: LocalTimestamp, captures: Captures) -> Result<AuthoredValue, FillError> {
+    pub fn fill(
+        &self,
+        at: Option<LocalTimestamp>,
+        captures: Captures,
+    ) -> Result<AuthoredValue, FillError> {
         self.value
-            .fill(&TemplateValues::new(BTreeMap::new(), at).with_captures(captures))
+            .fill(&TemplateValues::reading(BTreeMap::new(), at).with_captures(captures))
     }
 
     /// Whether the default reads a path capture.
     fn reads_captures(&self) -> bool {
         templates(&self.value).any(|template| template.path_captures().next().is_some())
+    }
+
+    /// Whether the default reads the clock, so filling it needs a reading.
+    fn reads_clock(&self) -> bool {
+        templates(&self.value).any(Template::reads_clock)
     }
 }
 

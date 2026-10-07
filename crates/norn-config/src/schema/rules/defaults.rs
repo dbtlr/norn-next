@@ -8,7 +8,7 @@ use std::fmt;
 use norn_wire::{AuthoredValue, Binding, Captures, CaseFold, ValueMap};
 
 use super::super::VaultSchema;
-use super::super::template::LocalTimestamp;
+use super::super::template::{LocalTimestamp, NotALocalTimestamp};
 use super::{Rule, RuleDefault, named, value_in};
 
 /// One value proposed for a field, and the rules proposing it.
@@ -67,6 +67,9 @@ pub enum RuleDefaultsRefusal {
         /// Two of the bindings.
         bindings: Box<[Captures; 2]>,
     },
+    /// A default that would fill reads the clock, and the clock gives no
+    /// reading a default can fill.
+    NoClockReading(NotALocalTimestamp),
 }
 
 impl fmt::Display for RuleDefaultsRefusal {
@@ -112,6 +115,10 @@ impl fmt::Display for RuleDefaultsRefusal {
                     spelled(&bindings[1])
                 )
             }
+            RuleDefaultsRefusal::NoClockReading(unread) => write!(
+                formatter,
+                "the clock cannot be read as a local time the rule defaults can fill: {unread}"
+            ),
         }
     }
 }
@@ -158,10 +165,14 @@ impl VaultSchema {
     /// required field nothing defaults stays missing, which is the write
     /// gate's to refuse, not this.
     ///
-    /// **One clock reading, `at`, fills every default**, and each
-    /// `{{path.<name>}}` reads what its own rule's `match.path` bound in
-    /// `path`. A default read from a capture the match binds several ways is
-    /// refused, naming two of the bindings.
+    /// **One clock reading fills every default**: `clock` is read the first
+    /// time a default that will fill reads `{{now}}`, `{{date}}` or
+    /// `{{time}}`, at most once, and never where none does — so a creation
+    /// filling no such default does not depend on the clock at all. A clock
+    /// giving no reading refuses the defaults. Each `{{path.<name>}}` reads
+    /// what its own rule's `match.path` bound in `path`. A default read from
+    /// a capture the match binds several ways is refused, naming two of the
+    /// bindings.
     ///
     /// **Its consumer is every creation**: `new` by a creation rule, inbox
     /// capture and `new` at a bare path, which `norn-host`'s planner fills
@@ -172,9 +183,11 @@ impl VaultSchema {
         &self,
         frontmatter: &ValueMap,
         path: &str,
-        at: LocalTimestamp,
+        clock: &mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
         case: CaseFold,
     ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
+        let mut at = Reading { clock, read: None };
+        let at = &mut at;
         let mut composed: Vec<(String, AuthoredValue)> = frontmatter.entries().to_vec();
         let mut filled: Vec<(String, AuthoredValue)> = Vec::new();
         let mut bindings: BTreeMap<&str, Captures> = BTreeMap::new();
@@ -249,17 +262,43 @@ impl VaultSchema {
     }
 }
 
-/// `default` filled at `at`, its captures read from what `rule`'s match binds
-/// in `path`, each rule's binding found once.
+/// The clock a fixpoint fills its defaults from, read the first time a
+/// default reading it fills and kept from then on.
+struct Reading<'c> {
+    clock: &'c mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
+    read: Option<LocalTimestamp>,
+}
+
+impl Reading<'_> {
+    /// The one reading, taken now where none is yet.
+    fn taken(&mut self) -> Result<LocalTimestamp, RuleDefaultsRefusal> {
+        match self.read {
+            Some(at) => Ok(at),
+            None => {
+                let at = (self.clock)().map_err(RuleDefaultsRefusal::NoClockReading)?;
+                self.read = Some(at);
+                Ok(at)
+            }
+        }
+    }
+}
+
+/// `default` filled from `at` where it reads the clock, its captures read
+/// from what `rule`'s match binds in `path`, each rule's binding found once.
 fn fill<'s>(
     rule: &'s Rule,
     field: &str,
     default: &RuleDefault,
     path: &str,
-    at: LocalTimestamp,
+    at: &mut Reading<'_>,
     case: CaseFold,
     bindings: &mut BTreeMap<&'s str, Captures>,
 ) -> Result<AuthoredValue, RuleDefaultsRefusal> {
+    let at = if default.reads_clock() {
+        Some(at.taken()?)
+    } else {
+        None
+    };
     let captures = if default.reads_captures() {
         match bindings.get(rule.name.as_str()) {
             Some(captures) => captures.clone(),

@@ -2755,8 +2755,10 @@ writers landing identical bytes at one name land one document, the second report
 wrote. The rules are
 the pinned schema's, the declaration the plan ground carries and the applier's schema check
 judges the result under. The host's clock is read once per plan, the first time a creation
-may fill from it — any creation by rule, and a document created at a path where the schema
-states a rule default — and every template and default of the plan fills from that reading.
+needs it — any creation by rule, whose target and templates may read it, and a rule default
+that will fill reading `{{now}}`, `{{date}}` or `{{time}}` — and every template and default of
+the plan fills from that reading; a creation needing no reading never fails on an unreadable
+clock.
 The text is the rule's
 frontmatter defaults, each string scalar filled and every type and order kept, with the
 caller's typed fields laid over them — an overriding field keeping the default's place, a new

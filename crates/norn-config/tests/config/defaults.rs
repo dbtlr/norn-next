@@ -33,7 +33,12 @@ fn fill(
 ) -> Result<Vec<(String, AuthoredValue)>, RuleDefaultsRefusal> {
     VaultSchema::parse(schema)
         .expect("a schema with rule defaults")
-        .fill_rule_defaults(&frontmatter(entries), path, at(), CaseFold::Exact)
+        .fill_rule_defaults(
+            &frontmatter(entries),
+            path,
+            &mut || Ok(at()),
+            CaseFold::Exact,
+        )
 }
 
 fn filled(entries: &[(&str, AuthoredValue)]) -> Vec<(String, AuthoredValue)> {

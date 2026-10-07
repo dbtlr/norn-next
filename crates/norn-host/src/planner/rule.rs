@@ -30,12 +30,14 @@
 //! do not resolve.
 //!
 //! **One clock reading per plan.** The clock is read the first time a
-//! creation of the plan may fill from it — any creation by rule, and a
-//! document created at a path where the schema states a rule default — and
-//! never for a plan whose creations cannot; every template and every default
-//! of the plan fills from that one reading. A clock outside the years
-//! `{{date}}` can write leaves every such creation of the plan unresolved,
-//! saying so.
+//! creation of the plan needs it — any creation by rule, whose target and
+//! templates may read it, and a rule default that will fill reading
+//! `{{now}}`, `{{date}}` or `{{time}}` — and never for a plan whose
+//! creations need none, so a document created at a path whose defaults fill
+//! no clock token never depends on the clock; every template and every
+//! default of the plan fills from that one reading. A clock outside the
+//! years `{{date}}` can write leaves every creation of the plan that needs
+//! it unresolved, saying so.
 //!
 //! **What a caller supplies is judged against the rule.** Every variable the
 //! rule declares must be supplied, and none it does not declare may be: a
@@ -178,8 +180,8 @@ pub(crate) fn expand<V: VaultView>(
                 }
             }
             OperationKind::CreateDocument { path, content } if defaults => {
-                let at = *reading.get_or_insert_with(|| (rules.clock)());
-                match defaulted(path, content, rules.schema, at, case) {
+                let mut clock = || *reading.get_or_insert_with(|| (rules.clock)());
+                match defaulted(path, content, rules.schema, &mut clock, case) {
                     Ok(Some(filled)) => {
                         operations[position].kind =
                             OperationKind::create_document(path.clone(), filled);
@@ -206,8 +208,9 @@ fn states_rule_defaults(schema: &VaultSchema) -> bool {
 
 /// The text `content` — a document a caller creates at `path` — takes once
 /// the rule defaults fill each required field its own frontmatter leaves out
-/// ([`VaultSchema::fill_rule_defaults`]), read at `at`; `None` where none
-/// fills; or why it takes none. A key the frontmatter holds null stands.
+/// ([`VaultSchema::fill_rule_defaults`]), `clock` read only where a default
+/// that fills reads it; `None` where none fills; or why it takes none. A key
+/// the frontmatter holds null stands.
 ///
 /// **The caller's frontmatter is its values, and every byte it sent stays.**
 /// Each filled field is set into the document through the one composition a
@@ -221,20 +224,14 @@ fn defaulted(
     path: &DocumentPath,
     content: &str,
     schema: &VaultSchema,
-    at: Result<LocalTimestamp, NotALocalTimestamp>,
+    clock: &mut dyn FnMut() -> Result<LocalTimestamp, NotALocalTimestamp>,
     case: CaseFold,
 ) -> Result<Option<String>, UnresolvedReason> {
     let Some(fields) = crate::derivation::written_fields(content.as_bytes()) else {
         return Ok(None);
     };
-    let at = at.map_err(|_| {
-        UnresolvedReason::no_longer_resolves(format!(
-            "the host's clock cannot be read as a local time the rule defaults can fill: \
-             {NotALocalTimestamp}"
-        ))
-    })?;
     let filled = schema
-        .fill_rule_defaults(&fields, path.as_str(), at, case)
+        .fill_rule_defaults(&fields, path.as_str(), clock, case)
         .map_err(refused_defaults)?;
     if filled.is_empty() {
         return Ok(None);
@@ -289,6 +286,12 @@ fn refused_defaults(refusal: RuleDefaultsRefusal) -> UnresolvedReason {
                     .collect()
             };
             UnresolvedReason::ambiguous_capture(rule, field, [named(first), named(second)])
+        }
+        RuleDefaultsRefusal::NoClockReading(unread) => {
+            UnresolvedReason::no_longer_resolves(format!(
+                "the host's clock cannot be read as a local time the rule defaults can fill: \
+                 {unread}"
+            ))
         }
     }
 }
@@ -432,7 +435,7 @@ fn made<V: VaultView>(
         Ok(made) => made,
         Err(detail) => return Ok(Err(UnresolvedReason::no_longer_resolves(detail))),
     };
-    Ok(match defaulted(&path, &content, schema, at, case) {
+    Ok(match defaulted(&path, &content, schema, &mut || at, case) {
         Ok(Some(filled)) => Ok((path, filled)),
         Ok(None) => Ok((path, content)),
         Err(reason) => Err(reason),
@@ -1822,8 +1825,56 @@ rules:
         );
         assert_eq!(
             reads.get(),
-            1,
-            "a creation reads the clock once the schema states defaults"
+            0,
+            "a creation filling no default that reads the clock reads none"
         );
+    }
+
+    /// **A creation reads the clock only for a default that will fill from
+    /// it**: under an unreadable clock, a document created at a path whose
+    /// defaults fill nothing, or fill only values reading no clock token,
+    /// resolves without reading it; one a `{{now}}` default would fill is
+    /// left unresolved naming the clock, read once.
+    #[test]
+    fn a_bare_create_filling_no_clock_default_never_reads_the_clock() {
+        let stamped = schema(
+            b"version: 1
+rules:
+  every: { required: { kind: { default: note } } }
+  logs: { match: { frontmatter: { kind: log } }, required: { created: { default: '{{now}}' } } }
+",
+        );
+        for (sent, written) in [
+            ("---\nkind: mine\n---\nB\n", "---\nkind: mine\n---\nB\n"),
+            ("B\n", "---\nkind: note\n---\nB\n"),
+        ] {
+            let reads = Cell::new(0);
+            let resolution = planned_reading(
+                &MemoryVault::default(),
+                &stamped,
+                vec![Operation::new(create("x.md", sent))],
+                Err(NotALocalTimestamp),
+                &reads,
+            );
+            assert_eq!(the_create(&resolution).1, written, "{sent:?}");
+            assert_eq!(reads.get(), 0, "{sent:?}");
+        }
+        let reads = Cell::new(0);
+        let resolution = planned_reading(
+            &MemoryVault::default(),
+            &stamped,
+            vec![Operation::new(create("x.md", "---\nkind: log\n---\nB\n"))],
+            Err(NotALocalTimestamp),
+            &reads,
+        );
+        let [left] = resolution.unresolved.as_slice() else {
+            panic!("one operation left: {:?}", resolution.unresolved);
+        };
+        assert!(
+            format!("{:?}", left.reason).contains("clock"),
+            "{:?}",
+            left.reason
+        );
+        assert_eq!(reads.get(), 1);
     }
 }
