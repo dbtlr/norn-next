@@ -720,24 +720,24 @@ fn a_plan_refuses_the_schema_violations_it_introduces() {
         ],
     );
     let violation = |at: &str, tag: &str| {
-        norn_wire::RefusedCheck::schema_violation(
+        norn_wire::RefusedCheck::violation(norn_wire::SchemaViolation::new(
             path(at),
             norn_wire::FindingKind::UndeclaredTag,
             Some(tag.to_string()),
             String::new(),
-        )
+        ))
     };
     let without_message = |checks: Vec<norn_wire::RefusedCheck>| -> Vec<norn_wire::RefusedCheck> {
         checks
             .into_iter()
             .map(|check| match check {
                 norn_wire::RefusedCheck::SchemaViolation { violation, .. } => {
-                    norn_wire::RefusedCheck::schema_violation(
+                    norn_wire::RefusedCheck::violation(norn_wire::SchemaViolation::new(
                         violation.path,
                         violation.kind,
                         violation.target,
                         String::new(),
-                    )
+                    ))
                 }
                 other => other,
             })

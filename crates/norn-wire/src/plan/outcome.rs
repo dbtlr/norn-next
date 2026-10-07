@@ -113,19 +113,6 @@ impl RefusedCheck {
         RefusedCheck::ConditionUnrecorded { condition }
     }
 
-    /// The result at `path` would be filed under `kind`, about `target`,
-    /// described by `message`, naming no value and citing no rule.
-    pub fn schema_violation(
-        path: DocumentPath,
-        kind: FindingKind,
-        target: Option<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        RefusedCheck::SchemaViolation {
-            violation: SchemaViolation::new(path, kind, target, message),
-        }
-    }
-
     /// A result would carry `violation`, which did not stand before the plan.
     pub const fn violation(violation: SchemaViolation) -> Self {
         RefusedCheck::SchemaViolation { violation }

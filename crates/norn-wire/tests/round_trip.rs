@@ -8477,18 +8477,18 @@ fn refused_checks() -> Vec<RefusedCheck> {
             Resolves::one(path("notes/a.md")),
             Resolves::several(),
         )),
-        RefusedCheck::schema_violation(
+        RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::UndeclaredTag,
             Some("draft".to_string()),
             "the tag `draft` is not declared",
-        ),
-        RefusedCheck::schema_violation(
+        )),
+        RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::FrontmatterUnreadable,
             None,
             "the frontmatter does not parse",
-        ),
+        )),
         RefusedCheck::violation(a_rule_violation()),
         RefusedCheck::name_taken(path("notes/new.md")),
     ]
@@ -9109,12 +9109,12 @@ fn the_apply_reasons_are_tagged_objects() {
         )
     );
     assert_eq!(
-        wire(&RefusedCheck::schema_violation(
+        wire(&RefusedCheck::violation(SchemaViolation::new(
             path("notes/a.md"),
             FindingKind::UndeclaredTag,
             Some("draft".to_string()),
             "the tag `draft` is not declared"
-        )),
+        ))),
         concat!(
             r#"{"check":"schema_violation","path":"notes/a.md","kind":"document/undeclared-tag","#,
             r#""target":"draft","message":"the tag `draft` is not declared","value":null,"rule_set":null}"#
