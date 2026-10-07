@@ -3,8 +3,9 @@
 //!
 //! **A force bypasses this check and nothing else**, and it is loud: a forced
 //! plan's violations are listed, in the shape a refusal carries them in, on
-//! the forecast of its preview and on its applied report. A forced plan whose
-//! results are all valid lists nothing.
+//! the forecast of its preview and on its applied report. A forced plan that
+//! introduces no violation lists nothing, whatever violations stood before
+//! it and still stand.
 //!
 //! **The judge is the derivation's own.** What a finding over a document would
 //! be filed under is what [`plan_document`] concludes from its bytes under the

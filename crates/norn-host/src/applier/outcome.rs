@@ -84,7 +84,7 @@ pub(crate) struct Applied {
     /// The folders its removals left empty, which it removed.
     pub(crate) folders_removed: Vec<FolderPath>,
     /// Every schema violation its force let through: empty for a plan that
-    /// is not forced, and for a forced plan whose every result is valid.
+    /// is not forced, and for a forced plan that introduces no violation.
     pub(crate) forced: Vec<SchemaViolation>,
     /// The rule sets the response's violations cite.
     pub(crate) citations: Citations,

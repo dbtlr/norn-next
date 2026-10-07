@@ -859,9 +859,9 @@ pub enum ErrorDetail {
         landed: Vec<DocumentPath>,
         /// What stopped publication.
         cause: InterruptionCause,
-        /// Every schema violation a landed target carries that the plan's
+        /// Every schema violation a landed target introduces that the plan's
         /// force let through. Empty for a plan that is not forced, and for a
-        /// forced plan whose every landed result is valid.
+        /// forced plan whose landed results introduce no violation.
         forced: Vec<SchemaViolation>,
         /// Every rule set the violations in `forced` cite, each once, in the
         /// order of its identity; empty where none cites one.

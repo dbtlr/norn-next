@@ -136,9 +136,9 @@ pub enum ApplyReport {
         folders_made: Vec<FolderPath>,
         /// The folders the plan's removals left empty, which it removed.
         folders_removed: Vec<FolderPath>,
-        /// Every schema violation a written result carries that the plan's
-        /// force let through. Empty for a plan that is not forced, and for a
-        /// forced plan whose every result is valid.
+        /// Every schema violation a written result introduces that the
+        /// plan's force let through. Empty for a plan that is not forced, and
+        /// for a forced plan that introduces no violation.
         forced: Vec<SchemaViolation>,
         /// Every rule set the violations in `forced` cite, each once, in the
         /// order of its identity; empty where none cites one.

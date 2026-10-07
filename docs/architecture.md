@@ -3259,8 +3259,8 @@ record and `PendingApply`) and the apply job in `crates/norn-host/src/lifecycle.
 Four contracts inside that flow carry weight:
 
 - **Check and stage everything, then publish.** No target is published until every
-  target's state and every condition holds, every composed result passes the vault schema,
-  and every written target, a create included, is staged as a shadow. A refusal in that
+  target's state and every condition holds, no composed result introduces a schema
+  violation an unforced plan refuses, and every written target, a create included, is staged as a shadow. A refusal in that
   phase publishes nothing. A plan refuses exactly the schema violations it introduces: each
   composed result is judged by the derivation's own judgment and refuses each violation
   whose identity — kind, field, offending value and combined constraint — no document it was

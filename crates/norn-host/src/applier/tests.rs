@@ -3086,15 +3086,26 @@ fn a_forced_plan_previews_the_violation_it_lets_through_and_applies_the_same() {
     fixture.assert_store_is_a_build_from_zero();
 }
 
-/// **A forced plan whose results are all valid lists nothing.**
+/// **A forced plan introducing no violation lists nothing**, though a
+/// violation it does not introduce still stands in its result: `b.md`'s
+/// undeclared `legacy` stood before the plan wrote it.
 #[test]
-fn a_forced_plan_whose_results_are_valid_lists_nothing() {
-    let mut fixture = Fixture::with_schema(TAG_SCHEMA, &[("a.md", "---\ntags: []\n---\n")]);
-    let mut plan = fixture.plan(vec![Operation::new(OperationKind::push_frontmatter(
-        norn_wire::WriteTarget::path(path("a.md")),
-        "tags",
-        norn_wire::AuthoredValue::string("project"),
-    ))]);
+fn a_forced_plan_introducing_no_violation_lists_nothing() {
+    let mut fixture = Fixture::with_schema(
+        TAG_SCHEMA,
+        &[
+            ("a.md", "---\ntags: []\n---\n"),
+            ("b.md", "# B\n#legacy\nold\n"),
+        ],
+    );
+    let mut plan = fixture.plan(vec![
+        Operation::new(OperationKind::push_frontmatter(
+            norn_wire::WriteTarget::path(path("a.md")),
+            "tags",
+            norn_wire::AuthoredValue::string("project"),
+        )),
+        editing("b.md", "old", "new"),
+    ]);
     plan.force = true;
     let (_, forecast) = fixture.preview(plan.clone()).expect("the plan previews");
     assert!(forecast.forced.is_empty());

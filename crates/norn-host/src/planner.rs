@@ -134,7 +134,7 @@
 //! after it and resolves.
 //!
 //! **What the planner leaves to the applier.** Whether a composed result
-//! passes the vault schema, and whether a forced plan lets a violation
+//! introduces a schema violation, and whether a forced plan lets one
 //! through, is checked while every target is staged, as the architecture's
 //! apply seam places it, and a preview answers from the applier's own
 //! judgment of the plan it resolves.

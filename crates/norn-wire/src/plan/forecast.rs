@@ -278,9 +278,9 @@ pub struct Forecast {
     pub folders_made: Vec<FolderPath>,
     /// The folders the plan's removals leave empty, which it removes.
     pub folders_removed: Vec<FolderPath>,
-    /// Every schema violation a result carries that the plan's force lets
+    /// Every schema violation a result introduces that the plan's force lets
     /// through. Empty for a plan that is not forced, and for a forced plan
-    /// whose every result is valid.
+    /// that introduces no violation.
     pub forced: Vec<SchemaViolation>,
     /// Every rule set the violations in `forced` cite, each once, in the
     /// order of its identity; empty where none cites one.
