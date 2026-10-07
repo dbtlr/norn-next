@@ -855,3 +855,35 @@ fn the_undeclared_tag_stances_are_the_ones_the_wire_carries() {
         "the stances this crate reads are not the ones the wire carries"
     );
 }
+
+/// **An integer the schema states is read as written or refused, never
+/// wrapped.** `2^64 + 1` reduced to 64 bits is version 1, and `2^64 + 5` a
+/// limit of 5, so a reader that wrapped would read a schema nobody wrote; the
+/// largest limit the type holds reads as itself.
+#[test]
+fn an_integer_past_its_type_is_refused_rather_than_wrapped() {
+    for (bytes, at) in [
+        (&b"version: 18446744073709551617\n"[..], "version"),
+        (
+            b"version: 1\nrules:\n  r: { max_length: { title: 18446744073709551621 } }\n",
+            "rules.r.max_length.title",
+        ),
+    ] {
+        let error = VaultSchema::parse(bytes).expect_err("an integer past its type");
+        assert!(
+            matches!(&error, VaultSchemaError::NotYaml { message } if message.starts_with(at)),
+            "{error}"
+        );
+    }
+
+    let schema = VaultSchema::parse(
+        b"version: 1\nrules:\n  r: { max_length: { title: 18446744073709551615 } }\n",
+    )
+    .expect("the largest limit");
+    let limits: Vec<(&str, u64)> = schema
+        .rule("r")
+        .expect("the rule")
+        .max_length()
+        .collect();
+    assert_eq!(limits, [("title", u64::MAX)]);
+}

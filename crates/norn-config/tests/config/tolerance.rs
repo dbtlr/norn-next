@@ -435,3 +435,41 @@ fn link(target: &std::path::Path, at: &std::path::Path) {
 fn unlink(path: &std::path::Path) {
     std::fs::remove_file(path).expect("removing a link");
 }
+
+/// **A version is read as the integer written or refused, never wrapped.**
+/// `2^64 + 1` reduced to 64 bits is version 1, which this build reads, so a
+/// reader that wrapped would take a file no build wrote as its own; the
+/// largest and smallest versions the type holds are refused as themselves.
+#[test]
+fn a_version_past_its_integer_type_is_refused_rather_than_wrapped_on_both_files() {
+    let scratch = Scratch::new("wrapped");
+    let dirs = scratch.dirs();
+    for (which, path) in both_files(&scratch) {
+        let past = "version = 18446744073709551617\n";
+        place_either(&scratch, which, &path, past);
+        for error in [
+            read_either(which, dirs).expect_err("a version past the type"),
+            mutate_either(which, dirs).expect_err("a mutation of a version past the type"),
+        ] {
+            let ConfigError::Corrupt { reason, .. } = error else {
+                panic!("the {which} file's version past its type was refused as {error}");
+            };
+            assert!(reason.contains("18446744073709551617"), "{reason}");
+        }
+        assert_eq!(scratch.text_at(&path), past);
+
+        place_either(&scratch, which, &path, &format!("version = {}\n", i64::MAX));
+        let error = read_either(which, dirs).expect_err("the largest version");
+        assert!(
+            matches!(error, ConfigError::VersionAhead { found: i64::MAX, supported: 1, .. }),
+            "{error}"
+        );
+
+        place_either(&scratch, which, &path, &format!("version = {}\n", i64::MIN));
+        let error = read_either(which, dirs).expect_err("the smallest version");
+        let ConfigError::Corrupt { reason, .. } = error else {
+            panic!("the {which} file's smallest version was refused as {error}");
+        };
+        assert!(reason.contains(&i64::MIN.to_string()), "{reason}");
+    }
+}
