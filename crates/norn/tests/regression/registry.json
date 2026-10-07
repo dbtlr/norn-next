@@ -822,11 +822,25 @@
       "property": "Absence and unreadability are distinct outcomes: a configuration that is present but unusable refuses with a specific diagnostic rather than falling back to defaults. No configuration path blocks unboundedly, panics, or wraps on overflow; an unreadable parent directory is an error rather than an absence; a parsed version field is read or does not exist; and configuration diagnostics are deterministic and complete, naming every offender in a stable order.",
       "sources": ["NRN-493", "NRN-501", "NRN-475", "NRN-360", "NRN-351", "NRN-353", "NRN-438"],
       "binding": {
-        "status": "dormant",
-        "reason": "most of this property has a subject and a carrier: crates/norn-config/src/file.rs refuses a zero-byte file rather than reading it as empty, refuses a version ahead of this build, reports a stat failure rather than calling a dangling ancestor an absence, and refuses a mutation taken inside a mutation of the same file rather than blocking on itself. The completeness clause has no subject: naming every offender in a stable order is about a configuration that can hold many offenders at once, and no such vocabulary exists — crates/norn-wire/src/lib.rs spells trust states, refusals and finding kinds and no rule. The residue is the absent vault-rule vocabulary: no file is settled to declare a rule set, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
-        "grounds": [
-          { "present": "crates/norn-config/src/file.rs" },
-          { "present": "crates/norn-wire/src/lib.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-config/tests/config/tolerance.rs::a_zero_byte_file_is_refused_rather_than_read_as_empty",
+          "crates/norn-config/tests/config/tolerance.rs::a_dangling_symlink_refuses_rather_than_reading_as_absent",
+          "crates/norn-config/tests/config/tolerance.rs::a_dangling_ancestor_refuses_rather_than_reading_as_absent",
+          "crates/norn-config/tests/config/tolerance.rs::a_link_to_an_unsearchable_target_reports_the_stat_failure_rather_than_dangling",
+          "crates/norn-config/tests/config/tolerance.rs::a_dangling_ancestor_check_reports_the_stat_failure_rather_than_dangling",
+          "crates/norn-config/tests/config/tolerance.rs::a_version_ahead_of_this_build_is_refused_on_both_files",
+          "crates/norn-config/tests/config/tolerance.rs::a_version_past_its_integer_type_is_refused_rather_than_wrapped_on_both_files",
+          "crates/norn-config/tests/config/schema.rs::an_integer_past_its_type_is_refused_rather_than_wrapped",
+          "crates/norn-config/tests/config/schema.rs::an_absent_version_is_refused_because_the_grammar_is_unknown",
+          "crates/norn-config/tests/config/migration.rs::a_file_whose_version_cannot_be_read_is_refused_naming_why",
+          "crates/norn-config/tests/config/concurrency.rs::a_mutation_inside_a_mutation_of_the_same_file_is_refused",
+          "crates/norn-host/src/production.rs::an_attach_whose_schema_name_is_a_pipe_refuses_instead_of_waiting",
+          "crates/norn-config/tests/config/schema.rs::no_malformed_schema_panics",
+          "crates/norn-config/tests/config/schema.rs::a_pathological_pattern_matches_in_bounded_time",
+          "crates/norn-host/tests/reads.rs::counts_over_a_schema_no_recovery_can_read_answer_the_cause",
+          "crates/norn-config/tests/config/rules.rs::a_selectorless_rule_requiring_what_another_forbids_is_refused_naming_every_rule",
+          "crates/norn-config/tests/config/rules.rs::a_combined_constraint_reports_every_empty_part_naming_its_rules"
         ]
       }
     },
@@ -967,14 +981,29 @@
       "name": "unsatisfiable-config-is-rejected-at-load",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A configuration that cannot be satisfied is rejected at load, naming every contributing rule, rather than surfacing per write as a refusal listing no permitted value. Every rule-selection site reads one shared effective matcher — no site reads a raw path pattern, so a rule constrained only by its target is never treated as applying to every document — a configured repair never writes a value the validator immediately flags, and rule names used as selectors are unique.",
+      "property": "A rule conflict no document can escape is rejected at schema load, naming every contributing rule in name order: among rules that select together wherever any of them selects, a field required by one and forbidden by another or the same, closed sets sharing no member on a field some contributing rule requires, or placements sharing no document path. A conflict that depends on a document's values or path loads, and is that document's rules-conflict finding naming every contributing rule; a write over a conflicted field is refused as that conflict rather than as a value outside an empty set. Every rule-selection site reads one shared effective matcher — no site reads a raw path pattern, so a rule constrained only by where a document stands applies inside its area and nowhere else — and rule names used as selectors are unique.",
       "sources": ["NRN-494", "NRN-495", "NRN-59", "NRN-438", "norn-legacy engineering learnings"],
       "binding": {
-        "status": "dormant",
-        "reason": "there is no rule vocabulary to check for satisfiability: crates/norn-wire/src/lib.rs spells trust states, refusals and finding kinds and no rule, and the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a parsed rule set. Every clause names a rule — one shared effective matcher per selection site, a repair that never writes what the validator flags, unique rule names — so this case waits on the vocabulary rather than on a surface. The residue is the absent vault-rule vocabulary: no file is settled to declare a rule set, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
-        "grounds": [
-          { "present": "crates/norn-wire/src/lib.rs" },
-          { "present": "crates/norn-store/src/facts.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-config/tests/config/rules.rs::a_selectorless_rule_requiring_what_another_forbids_is_refused_naming_every_rule",
+          "crates/norn-config/tests/config/rules.rs::a_rule_requiring_and_forbidding_one_field_is_refused",
+          "crates/norn-config/tests/config/rules.rs::identical_selectors_after_normalization_conflict_as_one",
+          "crates/norn-config/tests/config/rules.rs::an_empty_one_of_intersection_refuses_only_on_a_required_field",
+          "crates/norn-config/tests/config/rules.rs::disjoint_allowed_paths_of_rules_selecting_together_are_refused",
+          "crates/norn-config/tests/config/rules.rs::allowed_paths_sharing_only_a_path_no_document_stands_at_are_refused",
+          "crates/norn-config/tests/config/rules.rs::a_rule_whose_allowed_paths_admit_no_document_path_is_refused_naming_it",
+          "crates/norn-config/tests/config/rules.rs::rules_with_different_selectors_do_not_conflict_at_read",
+          "crates/norn-config/tests/config/judgment.rs::a_field_required_and_forbidden_is_one_rules_conflict_instead_of_its_findings",
+          "crates/norn-config/tests/config/judgment.rs::an_empty_closed_set_on_a_required_field_is_a_conflict_whatever_it_holds",
+          "crates/norn-config/tests/config/judgment.rs::an_empty_closed_set_on_an_unrequired_field_is_a_conflict_only_where_a_value_stands",
+          "crates/norn-config/tests/config/judgment.rs::disjoint_allowed_paths_are_a_document_conflict_and_overlapping_ones_a_misplacement",
+          "crates/norn-config/tests/config/judgment.rs::a_rules_conflict_cites_only_the_rules_in_conflict",
+          "crates/norn-host/tests/derivation.rs::a_conflict_that_depends_on_a_document_is_its_finding_naming_every_rule",
+          "crates/norn-host/src/applier/tests/gate.rs::swapping_a_conflicted_fields_value_refuses",
+          "crates/norn-config/tests/config/rules.rs::a_selectorless_rule_selects_every_document_and_a_path_only_rule_its_area",
+          "crates/norn-config/tests/config/rules.rs::judgment_and_the_defaults_fixpoint_select_the_rules_selection_names",
+          "crates/norn-config/tests/config/rules.rs::two_rules_of_one_name_are_refused_naming_the_name"
         ]
       }
     },
@@ -1849,15 +1878,48 @@
       "name": "element-vs-collection-semantics-are-one-rule",
       "kind": "defect-class",
       "venue": 5,
-      "property": "One element-versus-collection semantics is shared by query, validate, mutate and repair. A value a write path accepts is never flagged by the validator; a finding a repair rule targets is always matchable by its compare-and-swap precondition; element-wise operations compare against elements rather than against a wrapped whole; and findings converge to one per path, field and value against the intersection of applicable constraints rather than one per co-applying rule.",
+      "property": "One element-versus-collection semantics is shared by query, validate and mutate. A list field's elements, never its wrapped whole, are what a find's equality part, a rule selector, a closed set and an element-wise write compare against; a write refuses exactly the element violations it introduces, so a value a write path accepts is never flagged by the validator; and findings converge to one per path, field, constraint kind and offending value against the intersection of applicable constraints rather than one per co-applying rule.",
+      "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
+      "binding": {
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/find.rs::an_equality_part_reads_a_value_of_the_wrong_declared_shape_as_no_value",
+          "crates/norn-host/src/derivation.rs::find_equality_reads_a_value_as_the_rule_selectors_do",
+          "crates/norn-host/src/derivation.rs::a_value_written_bare_and_inside_a_sequence_meet_one_part_alike",
+          "crates/norn-host/src/planner/compose.rs::a_pop_frontmatter_removes_every_equal_element",
+          "crates/norn-config/tests/config/judgment.rs::a_list_is_judged_element_by_element_and_a_repeated_element_is_one_finding",
+          "crates/norn-config/tests/config/judgment.rs::co_selecting_rules_mint_one_finding_citing_every_contributing_rule_at_the_highest_severity",
+          "crates/norn-host/tests/derivation.rs::a_list_value_is_judged_element_by_element_against_the_combined_constraint",
+          "crates/norn-host/src/applier/tests/gate.rs::a_written_field_refuses_only_the_element_violations_it_introduces",
+          "crates/norn-host/tests/applies.rs::a_write_refuses_an_element_violation_it_introduces_and_not_one_standing",
+          "crates/norn-host/tests/applies.rs::a_write_the_gate_admits_leaves_no_finding_the_validator_did_not_already_report"
+        ]
+      }
+    },
+    {
+      "name": "a-repair-fixes-a-list-by-its-elements",
+      "kind": "defect-class",
+      "venue": 5,
+      "property": "A finding a repair targets is always matchable by the compare-and-swap precondition the repair writes against it, and a repair's element fix compares against a list's elements rather than its wrapped whole: it rewrites every occurrence of the offending element and leaves every other element, a standing violation included, as it stood.",
       "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
       "binding": {
         "status": "dormant",
-        "reason": "the validate clause's subject landed: crates/norn-config/src/schema/rules.rs judges a document against the combined constraint of the rules selecting it, element by element, and derivation files one finding per path, field, constraint kind and offending value, held by crates/norn-host/tests/derivation.rs::a_list_value_is_judged_element_by_element_against_the_combined_constraint. The mutate clause's subject landed with the write gate: a plan refuses a write by the identity of each element violation it introduces, held by crates/norn-host/tests/applies.rs::a_write_refuses_an_element_violation_it_introduces_and_not_one_standing, and the validate and mutate clauses bind together at the Layer 5A regression closure (NORN-360). The repair clauses — a finding a repair targets is matchable by its compare-and-swap precondition, and an element fix compares against elements — bind at Layer 5B (NORN-351), with the repair planner, pre-committed as the module crates/norn-host/src/planner.rs::repair.",
+        "reason": "nothing repairs: no plan targets a finding or writes an element fix, so there is no precondition to match and no fix to compare. Split from element-vs-collection-semantics-are-one-rule, whose query, validate and mutate clauses are bound; this case binds at Layer 5B (NORN-351) with the repair planner, pre-committed as the module crates/norn-host/src/planner.rs::repair.",
         "grounds": [
-          { "present": "crates/norn-config/src/schema/rules.rs" },
-          { "symbol-present": "crates/norn-host/tests/derivation.rs::a_list_value_is_judged_element_by_element_against_the_combined_constraint" },
-          { "symbol-present": "crates/norn-host/tests/applies.rs::a_write_refuses_an_element_violation_it_introduces_and_not_one_standing" },
+          { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
+        ]
+      }
+    },
+    {
+      "name": "a-configured-repair-never-writes-what-the-validator-flags",
+      "kind": "defect-class",
+      "venue": 5,
+      "property": "No declared fix, rule default or route a repair applies writes a value the validator flags.",
+      "sources": ["NRN-494", "NRN-495", "NRN-59", "NRN-438", "norn-legacy engineering learnings"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing repairs: no declared fix, rule default or route is applied by a repair, so there is no repaired value to judge. Split from unsatisfiable-config-is-rejected-at-load, whose load, finding and selection clauses are bound; this case binds at the Layer 5 exit walk with a named test over every declared fix, default and route, its carrier the repair planner pre-committed as the module crates/norn-host/src/planner.rs::repair.",
+        "grounds": [
           { "symbol-absent": "crates/norn-host/src/planner.rs::repair" }
         ]
       }
