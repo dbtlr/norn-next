@@ -20,7 +20,8 @@ pub enum ReadFilter {
     /// A value row under the key equals the value under the reading: `(key,
     /// raw)` on `document_fields_raw`, `(key, typed)` on
     /// `document_fields_typed` against the value's typed sort key, or `(key,
-    /// folded)` on `document_fields_folded` against the tag the value names.
+    /// folded)` on `document_fields_folded` against the tag or link the value
+    /// names.
     /// A shaped reading counts a row only where its key's presence row, one
     /// primary-key seek, names the container the declared shape holds.
     Equal(FieldMatch),

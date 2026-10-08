@@ -1831,9 +1831,9 @@ fn a_pins_typed_value_clear_reads_only_the_rows_that_hold_one() {
 }
 
 /// **A pin's fold clear reads the fold index, never the table.** A pin clears
-/// the folds of every key the replaced schema declared `tags`, and a clear
-/// that read the pillar end to end would make every pin cost every field row
-/// the vault holds.
+/// the folds of every key the replaced schema declared `tags` or `link`, and a
+/// clear that read the pillar end to end would make every pin cost every field
+/// row the vault holds.
 ///
 /// The clear is stated over `folded IS NOT NULL AND key <> 'tags'`, which
 /// implies the fold index's own predicate, so the index holds every row it

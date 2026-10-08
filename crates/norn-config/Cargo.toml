@@ -7,17 +7,27 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# One workspace dependency in the allowlist (docs/architecture.md), and it is
-# the vocabulary. Nothing about vaults, stores, protocols or orchestration can
-# reach this crate, and nothing here can reach them — the registry file's
-# *shape* lives here and the registry's *semantics* live in `norn-host`, which
-# an edge in this direction would blur.
+# Two workspace dependencies in the allowlist (docs/architecture.md): the
+# vocabulary and the document syntax, both leaves. Nothing about vaults,
+# stores, protocols or orchestration can reach this crate, and nothing here can
+# reach them — the registry file's *shape* lives here and the registry's
+# *semantics* live in `norn-host`, which an edge in this direction would blur.
 #
 # `norn-wire` owns the grammars a registration is spelled in — the vault name,
 # the root, the schema source, and the watch backend — because each of them
 # crosses the client/host seam as well as being written into the registry file.
 # The edge points at the leaf everything else already points at: the vocabulary
-# reaches nothing, so this crate reaching it adds no reachability at all.
+# reaches nothing, so this crate reaching it adds nothing beneath it.
+#
+# `norn-text` is the one reader of link syntax (invariant 10): the `link` field
+# type reads a string as a wikilink through it, and compares two links by the
+# key it renders from the parsed link, so the schema never carries a second
+# grammar for `[[…]]`. The edge is to a leaf — `norn-text` reaches no workspace
+# crate — and `norn-config` still reaches nothing about vaults, stores,
+# protocols or orchestration. It does widen who may reach the document syntax:
+# under the allowlist, `norn-client` and `norn-serve`, neither built yet, reach
+# `norn-text` through this crate. No invariant forbids that, and the shipped
+# binary carries `norn-text` anyway through the host it composes.
 #
 # `toml` is the format every machine-local file is written in, and this crate
 # is the only reader and writer of them. The registry's tolerant reader is
@@ -39,6 +49,7 @@ publish.workspace = true
 # is written in rather than splitting it.
 [dependencies]
 libc = { workspace = true }
+norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }
 serde_yaml = { workspace = true }
 toml = { workspace = true }

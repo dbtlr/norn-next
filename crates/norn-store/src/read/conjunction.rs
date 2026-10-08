@@ -254,9 +254,10 @@ impl Snapshot {
                 }),
         };
         // How an equality, an inequality and a membership read a key's values
-        // ([`FieldMatch`]): a tag key under the tag fold, a key with a typed
-        // order by its typed value, any other key as written; and only the
-        // values standing in the container a declared shape holds.
+        // ([`FieldMatch`]): a tag key under the tag fold, a link key by its link
+        // key, a key with a typed order by its typed value, any other key as
+        // written; and only the values standing in the container a declared
+        // shape holds.
         let matched = |key: &str| FieldMatch {
             column: if declared.folds(key) {
                 MatchedColumn::Folded
@@ -268,13 +269,19 @@ impl Snapshot {
             shaped: declared.container(key).is_some(),
         };
         // A request's value as the reading compares it: the tag it names
-        // under a tag key, refused where the key's typed order cannot read
-        // it, as a typed key's value is; otherwise the place it takes in the
-        // key's order.
+        // under a tag key, or the link it is under a link key, refused where
+        // the key's typed order cannot read it or the text is no link, as a
+        // typed key's value is; otherwise the place it takes in the key's
+        // order.
         let matched_value = |key: &String, value: &String| match matched(key).column {
             MatchedColumn::Folded => {
                 compared(key, value)?;
-                Ok(fold_tag(value.strip_prefix('#').unwrap_or(value)))
+                declared
+                    .fold(key, value)
+                    .ok_or_else(|| PageRefusal::UnreadableBound {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
             }
             MatchedColumn::Raw | MatchedColumn::Typed => compared(key, value),
         };

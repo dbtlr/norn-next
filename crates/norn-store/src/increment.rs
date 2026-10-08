@@ -851,9 +851,9 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
     })
 }
 
-/// Refuse a document whose typed field values, or the folds of a key it
-/// declares a tag key, were derived under a schema the store does not pin,
-/// which is `pinned`.
+/// Refuse a document whose typed field values, or the folds of a key the
+/// schema declares `tags` or `link`, were derived under a schema the store
+/// does not pin, which is `pinned`.
 ///
 /// **The typed column holds only what the pinned schema derives.** A pin
 /// clears it in the pin's own transaction, and the walk refills it under the
@@ -862,12 +862,12 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
 /// read names. The pin is read in the transaction the rows are written in, so
 /// no pin can land between the comparison and the write.
 ///
-/// The folds of a key the schema declares `tags` are cleared by a pin with the
-/// typed column, so they answer to the same agreement. Rows carrying neither
-/// need none: raw text, presence, the raw marker and the tag carrier's fold
-/// are a function of the document alone, and a document derived under no
-/// declaration, or under a stale one that types none of its keys, writes the
-/// typed column as a pin leaves it — empty — for the walk to fill.
+/// The folds of a key the schema declares `tags` or `link` are cleared by a
+/// pin with the typed column, so they answer to the same agreement. Rows
+/// carrying neither need none: raw text, presence, the raw marker and the tag
+/// carrier's fold are a function of the document alone, and a document derived
+/// under no declaration, or under a stale one that types none of its keys,
+/// writes the typed column as a pin leaves it — empty — for the walk to fill.
 fn refuse_typed_values_the_pin_does_not_derive(
     pinned: Option<&str>,
     facts: &DocumentFacts,

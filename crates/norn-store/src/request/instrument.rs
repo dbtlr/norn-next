@@ -193,7 +193,7 @@ impl<'a> Request<'a> {
             // schema being replaced.
             ExplainedStatement::TypedValueDiscard => database.emitted_plan(&sql, []),
             // Nor does the fold clear: every fold it clears is a declared tag
-            // key's, derived under the schema being replaced.
+            // or link key's, derived under the schema being replaced.
             ExplainedStatement::FoldedValueDiscard => database.emitted_plan(&sql, []),
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
                 let cursor = explained_page_cursor(scope);
@@ -481,7 +481,7 @@ pub enum ExplainedStatement<'a> {
     /// typed values, in the pin's transaction.
     TypedValueDiscard,
     /// The clear [`Request::pin_vault_schema`] runs over the folds of the keys
-    /// a schema declares `tags`, in the pin's transaction.
+    /// a schema declares `tags` or `link`, in the pin's transaction.
     FoldedValueDiscard,
     /// [`Request::finding_subjects_without_rows_after`], which a walk pages its
     /// scope's unaccounted places through.

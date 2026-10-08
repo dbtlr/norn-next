@@ -64,7 +64,7 @@ use norn_wire::{FindingKind, LinkAddressKind};
 /// under.
 const PINNED: (DerivationVersion, &str) = (
     DerivationVersion::new(10),
-    "7f14cf6e26a1501853f721d14234a14a674e0ce6637148b5fae0698b5e9d162b",
+    "f8add6cc16a4f2464fbc85be2335152dad9f7ff6d3e7570fe29a8c58786249fb",
 );
 
 /// The vault schema the main corpus is derived under: a field of every
@@ -93,6 +93,14 @@ fields:
   kind:
     type: text
     shape: single
+  related:
+    type: link
+    shape: single
+  see_also:
+    type: link
+    shape: list
+  mentor:
+    type: link
 tags:
   declared: [project, area/norn, solo]
   undeclared: report
@@ -250,6 +258,14 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
         (
             ".hidden/Hidden Note.md",
             b"# Hidden\n\nA #hidden-tag.\n".to_vec(),
+        ),
+        // A field of each link shape: a list of links, one written with an
+        // alias and one with an anchor beside the same link bare, and a value
+        // that is no link; and a link with no shape declared.
+        (
+            "fields/linked.md",
+            b"---\nsee_also:\n  - \"[[Notes|The notes]]\"\n  - \"[[Notes]]\"\n  - \"[[Glossary#Repeated]]\"\n  - plain\nmentor: \"[[Notes#Setext|Setext]]\"\n---\n# Linked\n"
+                .to_vec(),
         ),
         // A link of each link-health kind: naming no document, naming the
         // two twins, and naming a document that holds neither the heading
@@ -1265,6 +1281,50 @@ fn assert_the_corpus_exercises_every_fact(rows: &DerivedRows) {
             FieldRow::Value { raw: Some(raw), folded: Some(folded), .. } if raw.starts_with('#') && !folded.starts_with('#')
         )),
         "no `#`-marked tag value folded without its marker is exercised"
+    );
+
+    // A link key's values hold the link each names with its alias dropped:
+    // `related`'s alias and anchor, and `see_also`'s two spellings of one
+    // link, whose value that is no link holds none.
+    let folds_under = |key: &str| -> Vec<(String, Option<String>)> {
+        rows_under(key)
+            .iter()
+            .filter_map(|row| match row {
+                FieldRow::Value {
+                    raw: Some(raw),
+                    folded,
+                    ..
+                } => Some((raw.clone(), folded.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        folds_under("related"),
+        [(
+            "[[Notes#Setext|see here]]".to_string(),
+            Some("[[Notes#Setext]]".to_string())
+        )],
+        "no link key's aliased and anchored value is exercised"
+    );
+    assert_eq!(
+        folds_under("see_also"),
+        [
+            ("[[Notes|The notes]]", Some("[[Notes]]")),
+            ("[[Notes]]", Some("[[Notes]]")),
+            ("[[Glossary#Repeated]]", Some("[[Glossary#Repeated]]")),
+            ("plain", None),
+        ]
+        .map(|(raw, folded)| (raw.to_string(), folded.map(str::to_string))),
+        "no link key's list is exercised with two spellings of one link and a value that is no link"
+    );
+    assert_eq!(
+        folds_under("mentor"),
+        [(
+            "[[Notes#Setext|Setext]]".to_string(),
+            Some("[[Notes#Setext]]".to_string())
+        )],
+        "no link key declared with no shape is exercised"
     );
 
     // A typed date records the spelling of its offset, and the corpus writes

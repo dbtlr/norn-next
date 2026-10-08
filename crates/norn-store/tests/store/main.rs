@@ -22,6 +22,7 @@ mod facts;
 mod fields;
 mod find;
 mod find_advisory;
+mod find_link_key;
 mod find_rows;
 mod get;
 mod health;

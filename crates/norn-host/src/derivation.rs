@@ -42,6 +42,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use norn_config::schema::typed::link_key;
 use norn_config::schema::{
     Breach, FieldType, FindingIdentity, ForbiddenFix, Offset, Rule, RuleFinding, RuleWork, Shape,
     TypedValue, UndeclaredTags, VaultSchema,
@@ -49,8 +50,8 @@ use norn_config::schema::{
 use norn_store::{
     AnchorReadings, BlockFact, Change, ContentModel, DerivationVersion, DiscardScope,
     DocumentFacts, DocumentPath, FieldDeclaration, FrontmatterValue, HeadingFact, HeldBlock,
-    LinkAnchor, LinkFact, LinkFamily, OffsetSpelling, Provenance, Span, TagFact, TagSource,
-    TypedOrder,
+    LinkAnchor, LinkFact, LinkFamily, LinkKey, OffsetSpelling, Provenance, Span, TagFact,
+    TagSource, TypedOrder,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{
@@ -1303,6 +1304,7 @@ fn schema_rule(rule: &Rule) -> SchemaRule {
 /// type that does not order as text, with the typed order `kind` reads a raw
 /// value into. A date's order is dated: beside each sort key it says whether
 /// the date stated an offset, which the store records beside the typed key.
+/// A link orders as text and carries the key the schema compares it by.
 fn field_declaration(kind: FieldType) -> FieldDeclaration {
     let order = || TypedOrder::new(move |raw| kind.read(raw).ok().map(|value| value.sort_key()));
     match kind {
@@ -1322,6 +1324,10 @@ fn field_declaration(kind: FieldType) -> FieldDeclaration {
             }
         })),
         FieldType::Tags => FieldDeclaration::tags(),
+        // The store compares a link by the key the schema reads it into and
+        // reads no link syntax itself, so the reading crosses as a closure,
+        // as a typed order does.
+        FieldType::Link => FieldDeclaration::link(LinkKey::new(link_key)),
     }
 }
 
@@ -2019,9 +2025,9 @@ rules:
 
     /// **Every field type is declared as the wire type spelled as it is, and
     /// carries a typed order exactly where it does not order as text.** One
-    /// field of each of the five types, each reported with its own type:
-    /// `number`, `boolean` and `date` read a raw value into a typed sort key,
-    /// and `text` and `tags` are ordered by their raw text.
+    /// field of each type, each reported with its own type: `number`,
+    /// `boolean` and `date` read a raw value into a typed sort key, and
+    /// `text`, `tags` and `link` are ordered by their raw text.
     #[test]
     fn every_field_type_is_declared_as_its_own_wire_type() {
         use norn_wire::{Facet, FacetKind};
@@ -2060,6 +2066,33 @@ rules:
                 "{kind:?}"
             );
         }
+    }
+
+    /// **A field declared `link` hands the store the schema's own key for a
+    /// link**: the alias dropped and nothing else, and none for a text that is
+    /// no link. The store reads no link syntax, so the closure the declaration
+    /// carries is the one reading, and a tag key beside it still folds as a tag.
+    #[test]
+    fn a_link_field_is_declared_with_the_schemas_key_for_a_link() {
+        let declared = Declared::pinned(
+            VaultSchema::parse(
+                b"version: 1\nfields:\n  project: { type: link }\n  labels: { type: tags }\n",
+            )
+            .expect("a schema declaring a link"),
+            "link-declared",
+        );
+        let model = declared.content_model();
+        assert_eq!(
+            model.fold("project", "[[alpha#Plan|The plan]]"),
+            Some("[[alpha#Plan]]".to_string())
+        );
+        assert_eq!(model.fold("project", "alpha"), None);
+        assert_eq!(model.fold("labels", "#Work"), Some("work".to_string()));
+        assert_eq!(model.fold("undeclared", "[[alpha]]"), None);
+        assert!(
+            model.typed_order("project").is_none(),
+            "a link orders as text"
+        );
     }
 
     /// **The two discard sides partition the causes.** The sides are read off
@@ -3082,6 +3115,62 @@ fields:
                 ("tags", "2024"),
                 ("code", "a"),
                 ("code", "A"),
+            ],
+        );
+    }
+
+    /// **A key declared `link` compares by the link with its alias dropped**,
+    /// as a rule's selector does: two aliases of one link are one value, an
+    /// anchor, a case and a target spelled another way are another, a text
+    /// that is no link equals nothing, and a value of the wrong declared
+    /// shape is no value.
+    #[test]
+    fn find_equality_on_a_link_key_reads_as_the_selectors_do() {
+        let documents: Vec<(&str, String)> = vec![
+            (
+                "bare.md",
+                "---\nproject: '[[alpha]]'\nrelated: ['[[alpha]]', plain]\n---\n".to_string(),
+            ),
+            (
+                "aliased.md",
+                "---\nproject: '[[alpha|Alpha]]'\nrelated: ['[[beta|B]]']\n---\n".to_string(),
+            ),
+            (
+                "anchored.md",
+                "---\nproject: '[[alpha#Plan|Plan]]'\nrelated: ['[[alpha#^b1]]']\n---\n"
+                    .to_string(),
+            ),
+            (
+                "cased.md",
+                "---\nproject: '[[Alpha]]'\nrelated: ['[[projects/alpha]]']\n---\n".to_string(),
+            ),
+            (
+                "plain.md",
+                "---\nproject: alpha\nrelated: alpha\n---\n".to_string(),
+            ),
+            (
+                "listed.md",
+                "---\nproject: ['[[alpha]]']\nrelated: '[[beta]]'\n---\n".to_string(),
+            ),
+            ("none.md", "# none\n".to_string()),
+        ];
+        assert_find_equality_reads_as_the_selectors_do(
+            "norn-host-link-equality",
+            "version: 1
+fields:
+  project: { type: link, shape: single }
+  related: { type: link, shape: list }
+",
+            &documents,
+            &[
+                ("project", "[[alpha]]"),
+                ("project", "[[alpha|Other]]"),
+                ("project", "[[alpha#Plan]]"),
+                ("project", "[[Alpha]]"),
+                ("related", "[[alpha]]"),
+                ("related", "[[beta|Beta]]"),
+                ("related", "[[alpha#^b1]]"),
+                ("related", "[[projects/alpha]]"),
             ],
         );
     }
