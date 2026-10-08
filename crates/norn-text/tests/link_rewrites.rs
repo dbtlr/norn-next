@@ -211,8 +211,8 @@ fn frontmatter_strings_that_fit_alone_but_not_together_keep_the_first() {
 /// The index holds every frontmatter wikilink, and places one only where the
 /// value's bytes carry it literally. A link inside a flow sequence, an escaped
 /// scalar or a nested map names no bytes to write its target over, so a
-/// rewrite reaching it leaves it as written and skips it as not written
-/// literally: rewriting it is a whole-value write of its field.
+/// rewrite reaching it leaves it as written and skips it as unplaced:
+/// rewriting it is a whole-value write of its field.
 #[test]
 fn an_unplaced_frontmatter_link_is_skipped_as_such() {
     let source =

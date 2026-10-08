@@ -266,9 +266,10 @@ fn a_block_at_the_bound_reads_inside_its_ceiling() {
 /// **The linearity invariant over the derive walk.** The parse is one of two
 /// places a block's keys are all resolved; the value walk
 /// [`Document::frontmatter_wikilinks`] runs is the other, and it is what
-/// derivation reads a block's wikilinks through. The arrangement is the one above — one block of `n` keys against
-/// four of `n / 4` — and the subject gives every key a string value, so the walk
-/// yields one text per field rather than skipping the fields it visits.
+/// derivation reads a block's wikilinks through. The arrangement is the one
+/// above — one block of `n` keys against four of `n / 4` — and the subject
+/// gives every key a string value, so the walk yields one text per field
+/// rather than skipping the fields it visits.
 #[test]
 #[ignore = "soak-lane case: a clock never gates a pull request"]
 fn deriving_every_field_text_stays_linear_in_field_count() {

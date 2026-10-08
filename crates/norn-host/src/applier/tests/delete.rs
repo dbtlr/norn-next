@@ -975,8 +975,7 @@ fn a_rewrite_to_naming_a_quarantined_file_is_unresolved() {
     }
 }
 
-/// **A frontmatter link not written literally is a backlink like any
-/// other**: a plain delete of the document a flow-sequence wikilink names is
+/// **An unplaced frontmatter link is a backlink like any other**: a plain delete of the document a flow-sequence wikilink names is
 /// unresolved naming its holder, a delete leaving links broken advises it,
 /// and a rewriting delete leaves it as written, skipped with its reason.
 #[test]

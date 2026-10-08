@@ -373,8 +373,8 @@ impl<'a> Document<'a> {
         &self.diagnostics
     }
 
-    /// Every string held in the frontmatter — scalar field values and the
-    /// string items of sequences — with the source bytes that produced each.
+    /// Every field's own strings — scalar field values and the string items
+    /// of sequences — with the source bytes that produced each.
     ///
     /// The ranges come from the field layer, so an escaped or line-continued
     /// value reports the bytes it was written as rather than nothing. A string

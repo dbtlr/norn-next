@@ -1088,11 +1088,11 @@ fn a_quarantined_holder_moved_respells_none_of_its_links() {
     );
 }
 
-/// **A backlink not written literally is left as written and says why**: a
-/// frontmatter wikilink in a flow sequence or a nested map is in the link
-/// graph, so a move of the document it names records its entry going from
-/// that document to none, and the forecast skips it as not written
-/// literally, because no bytes of its value are its text to respell.
+/// **An unplaced backlink is left as written and says why**: a frontmatter
+/// wikilink in a flow sequence or a nested map is in the link graph, so a
+/// move of the document it names records its entry going from that document
+/// to none, and the forecast skips it as unplaced, because no bytes of its
+/// value are its text to respell.
 #[test]
 fn an_unplaced_backlink_is_left_with_its_reason() {
     let holder = "---\nsee: [\"[[a]]\"]\nnested:\n  at: \"[[a]]\"\n---\nbody\n";

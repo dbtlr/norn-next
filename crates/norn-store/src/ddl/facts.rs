@@ -56,7 +56,8 @@
 //! frontmatter value whose bytes are not its text — a flow sequence item, an
 //! escaped or folded scalar, a nested value — or in a block whose fields the
 //! text layer cannot tell apart is a link like any other, and the text layer
-//! reports it with no position, so its span columns are `NULL`. Nothing about resolving or judging a link reads its span.
+//! reports it with no position, so its span columns are `NULL`. Nothing
+//! about resolving or judging a link reads its span.
 //!
 //! **A link names at most one place, and "no place" has one stored form.**
 //! `anchor` is a heading anchor as the text layer records it and `block_ref` a
