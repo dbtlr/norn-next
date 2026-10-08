@@ -538,6 +538,81 @@ rules:
     );
 }
 
+/// **A conflict that depends on a document is that document's finding,
+/// naming every rule in it.** Rules whose selectors differ read without
+/// refusal; a document they select together — one field required by two
+/// rules and forbidden by two, and three rules' places sharing none — derives
+/// a `field/rules-conflict` carrying the value it holds and a
+/// `document/rules-conflict`, each citing every rule in the conflict in name
+/// order, while a document selected by one side alone derives no finding.
+#[test]
+fn a_conflict_that_depends_on_a_document_is_its_finding_naming_every_rule() {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "document-conflict")
+        .expect("a sandbox");
+    let rows = derive(
+        &sandbox.work_dir().join("vault"),
+        vec![
+            (
+                "work/both.md",
+                b"---\ntype: task\nstage: done\nflag: on\nowner: me\n---\n# Both\n".to_vec(),
+            ),
+            (
+                "work/open.md",
+                b"---\ntype: task\nowner: me\n---\n# Open\n".to_vec(),
+            ),
+            (
+                "archive/closed.md",
+                b"---\nstage: done\n---\n# Closed\n".to_vec(),
+            ),
+        ],
+        "\
+version: 1
+rules:
+  open: { match: { frontmatter: { type: task } }, required: { owner: } }
+  closed: { match: { frontmatter: { stage: done } }, forbidden: { owner: } }
+  here: { match: { frontmatter: { type: task } }, allowed_paths: { paths: ['work/**'] } }
+  there: { match: { frontmatter: { stage: done } }, allowed_paths: { paths: ['archive/**'] } }
+  staffed: { match: { frontmatter: { flag: on } }, required: { owner: } }
+  sealed: { match: { frontmatter: { type: task, flag: on } }, forbidden: { owner: } }
+  yonder: { match: { frontmatter: { stage: done, flag: on } }, allowed_paths: { paths: ['elsewhere/**'] } }
+",
+    );
+    let mut findings: Vec<_> = rows
+        .projection()
+        .findings()
+        .iter()
+        .map(|finding| {
+            (
+                finding.path.as_str(),
+                finding.kind.as_str(),
+                finding.target.as_deref(),
+                finding.value.as_ref().map(|(head, _, _)| head.as_str()),
+                finding.rules.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    findings.sort();
+    assert_eq!(
+        findings,
+        [
+            (
+                "work/both.md",
+                FindingKind::DocumentRulesConflict.as_str(),
+                None,
+                None,
+                vec!["here", "there", "yonder"]
+            ),
+            (
+                "work/both.md",
+                FindingKind::FieldRulesConflict.as_str(),
+                Some("owner"),
+                Some("me"),
+                vec!["closed", "open", "sealed", "staffed"]
+            ),
+        ]
+    );
+}
+
 /// **A rule finding's bytes at rest grow with none of what it judged.** One
 /// document is derived by a real host under schemas varying one parameter at
 /// a time, and each `field/not-one-of` row's own bytes — kind, severity,

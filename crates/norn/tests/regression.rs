@@ -81,7 +81,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 117;
+const CASE_TOTAL: usize = 119;
 
 /// The whole registry's contract, as one value.
 ///
@@ -90,7 +90,7 @@ const CASE_TOTAL: usize = 117;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "d4ae81ec2af7dfb551d74ebeb042db5fe3d372404e2ba4b3b4994b0fdc793e7c";
+const CONTRACT_DIGEST: &str = "dcb9992bef3402dcdd485336098939515e2a6ee5da9381bc14c4150bd29f46f9";
 
 /// The cases carried by tests today, by name.
 ///
@@ -115,6 +115,7 @@ const BOUND_CASES: &[&str] = &[
     "created-documents-are-mutable",
     "derived-findings-are-materialized-and-maintained",
     "destructive-ordering-is-gated",
+    "element-vs-collection-semantics-are-one-rule",
     "encoding-prefix-transparency",
     "error-variant-matches-the-operation-reported",
     "every-filesystem-effect-is-planned-and-forecast",
@@ -140,11 +141,13 @@ const BOUND_CASES: &[&str] = &[
     "plan-level-atomicity-and-truthful-partial-reporting",
     "preconditions-come-from-plan-time",
     "predicate-filtering-in-sql-is-the-known-good-shape",
+    "present-but-unusable-config-refuses-loudly",
     "reads-are-not-blocked-by-writes",
     "resolved-path-gates-resolved-path-reports",
     "set-valued-answers-are-pushed-down",
     "text-search-is-indexed",
     "unknown-sort-or-projection-keys-never-silently-no-op",
+    "unsatisfiable-config-is-rejected-at-load",
     "vault-root-containment",
     "whole-vault-work-is-declared-and-triggered-deliberately",
     "write-through-the-composed-post-state",
@@ -156,7 +159,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is five classes rather than a bag:
+/// residue no subject reaches, and it is four classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -165,8 +168,6 @@ const BOUND_CASES: &[&str] = &[
 ///   reference names. The clauses beside it are carried by a module of an
 ///   integration target, which the grammar cites, so binding the case on those
 ///   alone would name carriers for a clause none of them asserts.
-/// - **An absent vault-rule vocabulary.** No file is settled to declare a rule
-///   set, so no name can be pre-committed as the carrier's.
 /// - **A guard with no settled home.** The scan or lint the case waits on has
 ///   no file decided on to hold it, and a symbol ground names a file.
 /// - **An unwired surface.** The binary is empty and the corpus activation list
@@ -192,10 +193,8 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "output-parity-cannot-certify-structure",
-    "present-but-unusable-config-refuses-loudly",
     "steps-report-their-own-outcome",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
-    "unsatisfiable-config-is-rejected-at-load",
     "vault-wide-work-is-a-declared-roster",
 ];
 

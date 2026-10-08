@@ -4,6 +4,8 @@
 //! Every case reads schema bytes a vault author could have written. The read
 //! is pure, so a case needs no directory and no clock.
 
+use std::collections::BTreeSet;
+
 use norn_config::schema::{
     CaseFold, CreationProblem, ElementProblem, FieldType, ForbiddenFix, GlobProblem,
     PLACEMENT_CEILING, RuleProblem, RuleWork, RulesConflict, Shape, TypedValue, VaultSchema,
@@ -1319,6 +1321,88 @@ fn a_selectorless_rule_selects_every_document_and_a_path_only_rule_its_area() {
         ["every"]
     );
     assert_eq!(selected(&schema, "projects", &[]), ["every"]);
+}
+
+/// A document a case selects over — its path and frontmatter — and the rules
+/// expected to select it.
+type Selection<'a> = (&'a str, &'a [(&'a str, AuthoredValue)], &'a [&'a str]);
+
+/// **Every site that selects rules reads one matcher**: the rules judgment
+/// breaches a document under and the rules whose defaults the fixpoint fills
+/// are exactly the rules selection names, so a rule constrained only by
+/// where a document stands applies inside its area and nowhere else. Two
+/// rules default `status` differently in areas that exclude each other, so
+/// the fixpoint's settled re-check, which compares each filled field against
+/// every rule matching the result, refuses wherever it selects a rule
+/// selection does not.
+#[test]
+fn judgment_and_the_defaults_fixpoint_select_the_rules_selection_names() {
+    let schema = VaultSchema::parse(
+        b"version: 1
+fields:
+  kind: { type: text, shape: single }
+rules:
+  area:
+    match: { path: 'projects/<project>/**' }
+    exclude: { path: ['projects/*/archive/**'] }
+    required: { status: { default: todo } }
+  elsewhere:
+    match: { path: '**' }
+    exclude: { path: ['projects/**'] }
+    required: { status: { default: done } }
+  kinded:
+    match: { frontmatter: { kind: task } }
+    required: { owner: { default: me } }
+",
+    )
+    .expect("path-only rules and a frontmatter-only rule");
+    let field_of = |rule: &str| match rule {
+        "kinded" => "owner",
+        _ => "status",
+    };
+    let task = [("kind", AuthoredValue::string("task"))];
+    let cases: [Selection<'_>; 6] = [
+        ("projects/norn/a.md", &[], &["area"]),
+        ("projects/norn/archive/a.md", &[], &[]),
+        ("notes/a.md", &[], &["elsewhere"]),
+        ("projects.md", &[], &["elsewhere"]),
+        ("notes/a.md", &task, &["elsewhere", "kinded"]),
+        ("projects/norn/a.md", &task, &["area", "kinded"]),
+    ];
+    for (path, entries, expected) in cases {
+        let selection = selected(&schema, path, entries);
+        assert_eq!(selection, expected, "selection at {path}");
+
+        let breached: BTreeSet<String> = schema
+            .judge(path, &frontmatter(entries), CaseFold::Exact)
+            .into_findings()
+            .into_iter()
+            .flat_map(|finding| finding.rules().to_vec())
+            .collect();
+        assert_eq!(
+            breached,
+            selection.iter().cloned().collect(),
+            "judgment at {path}"
+        );
+
+        let filled: BTreeSet<String> = schema
+            .fill_rule_defaults(
+                &frontmatter(entries),
+                path,
+                &mut || unreachable!("no default reads the clock"),
+                CaseFold::Exact,
+                &mut RuleWork::default(),
+            )
+            .expect("defaults that agree")
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect();
+        let fields_selected: BTreeSet<String> = selection
+            .iter()
+            .map(|rule| field_of(rule).to_string())
+            .collect();
+        assert_eq!(filled, fields_selected, "defaults at {path}");
+    }
 }
 
 /// **Each key compares as a find's equality part does**: a tag under the

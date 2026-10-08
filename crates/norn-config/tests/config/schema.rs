@@ -416,6 +416,22 @@ fn no_malformed_schema_panics() {
         b"version: 1\npaths: []\n",
         b"version: true\n",
         b"version: 1\nfields:\n  title: text\n",
+        b"version: 1\nrules: []\n",
+        b"version: 1\nrules:\n  r: 4\n",
+        b"version: 1\nrules:\n  r: { severity: fatal }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '' } }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '<a>/<a>/**' } }\n",
+        b"version: 1\nrules:\n  r: { match: { path: '<' } }\n",
+        b"version: 1\nrules:\n  r: { match: { frontmatter: { kind: [[], {}] } } }\n",
+        b"version: 1\nrules:\n  r: { required: { a: { default: '{{seq' } } }\n",
+        b"version: 1\nrules:\n  r: { required: { a: { default: '{{path.nope}}' } } }\n",
+        b"version: 1\nrules:\n  r: { one_of: { s: { values: 3 } } }\n",
+        b"version: 1\nrules:\n  r: { one_of: { s: { values: [], synonyms: { a: b } } } }\n",
+        b"version: 1\nrules:\n  r: { max_length: { t: -1 } }\n",
+        b"version: 1\nrules:\n  r: { forbidden: { x: { rename_to: 5 } } }\n",
+        b"version: 1\nrules:\n  r: { allowed_paths: { paths: [], route: 'x/' } }\n",
+        b"version: 1\nrules:\n  r: { allowed_paths: { paths: ['**'], route: '{{path.p}}/' } }\n",
+        b"version: 1\nrules:\n  r: { exclude: 5 }\n",
     ] {
         // An empty file is a valid schema with no declarations; the rest refuse.
         let _ = VaultSchema::parse(bytes);
@@ -854,4 +870,50 @@ fn the_undeclared_tag_stances_are_the_ones_the_wire_carries() {
         here, wire,
         "the stances this crate reads are not the ones the wire carries"
     );
+}
+
+/// **An integer the schema states is read as written or refused, never
+/// wrapped, saturated or truncated.** `2^64 + 1` reduced to 64 bits is version
+/// 1, and `2^64 + 5` a limit of 5, so a reader that wrapped would read a schema
+/// nobody wrote; a number written as a float — `1e30`, `4.5`, `1.0` — is not
+/// an integer and is refused rather than clamped or cut; the largest limit
+/// the type holds reads as itself.
+#[test]
+fn an_integer_past_its_type_is_refused_rather_than_wrapped() {
+    for (bytes, at) in [
+        (&b"version: 18446744073709551617\n"[..], "version"),
+        (
+            b"version: 1\nrules:\n  r: { max_length: { title: 18446744073709551621 } }\n",
+            "rules.r.max_length.title",
+        ),
+    ] {
+        let error = VaultSchema::parse(bytes).expect_err("an integer past its type");
+        assert!(
+            matches!(&error, VaultSchemaError::NotYaml { message } if message.starts_with(at)),
+            "{error}"
+        );
+    }
+
+    for version in [&b"version: 1.0\n"[..], b"version: 1e30\n"] {
+        let error = VaultSchema::parse(version).expect_err("a version written as a float");
+        assert!(
+            matches!(&error, VaultSchemaError::Version { detail } if detail.contains("an integer")),
+            "{error}"
+        );
+    }
+    for limit in ["1e30", "4.5"] {
+        let bytes = format!("version: 1\nrules:\n  r: {{ max_length: {{ title: {limit} }} }}\n");
+        let error = VaultSchema::parse(bytes.as_bytes()).expect_err("a limit written as a float");
+        assert!(
+            matches!(&error, VaultSchemaError::Section { at, .. } if at == "rules.r.max_length.title"),
+            "{error}"
+        );
+    }
+
+    let schema = VaultSchema::parse(
+        b"version: 1\nrules:\n  r: { max_length: { title: 18446744073709551615 } }\n",
+    )
+    .expect("the largest limit");
+    let limits: Vec<(&str, u64)> = schema.rule("r").expect("the rule").max_length().collect();
+    assert_eq!(limits, [("title", u64::MAX)]);
 }
