@@ -975,9 +975,10 @@ fn a_rewrite_to_naming_a_quarantined_file_is_unresolved() {
     }
 }
 
-/// **An unplaced frontmatter link is a backlink like any other**: a plain delete of the document a flow-sequence wikilink names is
-/// unresolved naming its holder, a delete leaving links broken advises it,
-/// and a rewriting delete leaves it as written, skipped with its reason.
+/// **An unplaced frontmatter link is a backlink like any other**: a plain
+/// delete of the document a flow-sequence wikilink names is unresolved naming
+/// its holder, a delete leaving links broken advises it, and a rewriting
+/// delete leaves it as written, skipped with its reason.
 #[test]
 fn an_unplaced_backlink_counts_for_every_delete() {
     let holder = "---\nsee: [\"[[a]]\"]\n---\nbody\n";
